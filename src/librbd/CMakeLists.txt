@@ -73,7 +73,6 @@ ceph_add_library(librbd SRCS
   librbd.cc OBJS
   $<TARGET_OBJECTS:osdc_rbd_objs>
   $<TARGET_OBJECTS:common_util_obj>
-  $<TARGET_OBJECTS:krbd_objs>
   $<TARGET_OBJECTS:parse_secret_objs>)
 ceph_link_libraries(librbd
   rbd_internal
