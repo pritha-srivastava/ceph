@@ -25,6 +25,15 @@ add_custom_target(civetweb_h
   "${CMAKE_BINARY_DIR}/src/include/civetweb"
   COMMENT "keep civetweb.h up-to-date")
 
+function(gperf_generate input output)
+  add_custom_command(
+    OUTPUT ${output}
+    COMMAND gperf ${input} > ${output}
+    DEPENDS ${input}
+    COMMENT "Generate ${output}"
+    )
+endfunction()
+
 set(rgw_a_srcs
   rgw_acl.cc
   rgw_acl_s3.cc
@@ -101,7 +110,16 @@ set(rgw_a_srcs
   rgw_website.cc
   rgw_xml.cc
   rgw_xml_enc.cc
-  rgw_torrent.cc)
+  rgw_torrent.cc
+  rgw_iam_policy.cc)
+
+gperf_generate(${CMAKE_SOURCE_DIR}/src/rgw/rgw_iam_policy_keywords.gperf
+  rgw_iam_policy_keywords.frag.cc)
+set_source_files_properties(rgw_iam_policy.cc PROPERTIES
+  OBJECT_DEPENDS ${CMAKE_BINARY_DIR}/src/rgw/rgw_iam_policy_keywords.frag.cc
+  COMPILE_FLAGS -I${CMAKE_BINARY_DIR}/src/rgw)
+
+  
 
 if (WITH_RADOSGW_FCGI_FRONTEND)
   list(APPEND rgw_a_srcs rgw_fcgi.cc)

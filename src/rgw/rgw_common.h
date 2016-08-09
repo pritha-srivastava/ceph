@@ -35,6 +35,12 @@ namespace ceph {
   class Formatter;
 }
 
+namespace rgw {
+namespace auth {
+class Completer;
+}
+}
+
 using ceph::crypto::MD5;
 
 

@@ -5,7 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-
 static void netmask_ipv4(const struct in_addr *addr,
 			 unsigned int prefix_len,
 			 struct in_addr *out) {
@@ -64,7 +63,6 @@ static void netmask_ipv6(const struct in6_addr *addr,
   if (prefix_len/8 < 15)
     memset(out->s6_addr+prefix_len/8+1, 0, 16-prefix_len/8-1);
 }
-
 
 const struct sockaddr *find_ipv6_in_subnet(const struct ifaddrs *addrs,
 					   const struct sockaddr_in6 *net,
