@@ -16,7 +16,6 @@
 
 #define RGW_USER_ANON_ID "anonymous"
 
-
 namespace rgw {
 namespace auth {
 
@@ -64,6 +63,11 @@ public:
   }
 
   virtual void to_str(std::ostream& out) const = 0;
+
+  /* Verify whether a given identity corresponds to an identity in the
+     provided set */
+  virtual bool is_identity(
+    const boost::container::flat_set<Principal>& ids) const = 0;
 };
 
 inline std::ostream& operator<<(std::ostream& out,
@@ -404,6 +408,9 @@ public:
   uint32_t get_perms_from_aclspec(const aclspec_t& aclspec) const override;
   bool is_admin_of(const rgw_user& uid) const override;
   bool is_owner_of(const rgw_user& uid) const override;
+  bool is_identity(
+    const boost::container::flat_set<Principal>& ids) const override;
+
   uint32_t get_perm_mask() const override { return info.perm_mask; }
   void to_str(std::ostream& out) const override;
   void load_acct_info(RGWUserInfo& user_info) const override; /* out */
@@ -449,6 +456,8 @@ public:
   uint32_t get_perms_from_aclspec(const aclspec_t& aclspec) const override;
   bool is_admin_of(const rgw_user& uid) const override;
   bool is_owner_of(const rgw_user& uid) const override;
+  bool is_identity(
+    const boost::container::flat_set<Principal>& ids) const override;
   uint32_t get_perm_mask() const override {
     return get_perm_mask(subuser, user_info);
   }
