@@ -1901,6 +1901,60 @@ public:
   virtual uint32_t op_mask() { return RGW_OP_TYPE_READ; }
 };
 
+class RGWPutBucketPolicy : public RGWOp {
+  std::string policy_text;
+public:
+  RGWPutBucketPolicy() = default;
+  void send_response() override;
+  int verify_permission() override;
+  uint32_t op_mask() override {
+    return RGW_OP_TYPE_WRITE;
+  }
+  void execute() override;
+  int get_params();
+  const std::string name() override {
+    return "put_bucket_policy";
+  }
+  RGWOpType get_type() override {
+    return RGW_OP_PUT_BUCKET_POLICY;
+  }
+};
+
+class RGWGetBucketPolicy : public RGWOp {
+  buffer::list policy;
+public:
+  RGWGetBucketPolicy() = default;
+  void send_response() override;
+  int verify_permission() override;
+  uint32_t op_mask() override {
+    return RGW_OP_TYPE_READ;
+  }
+  void execute() override;
+  const std::string name() override {
+    return "get_bucket_policy";
+  }
+  RGWOpType get_type() override {
+    return RGW_OP_GET_BUCKET_POLICY;
+  }
+};
+
+class RGWDeleteBucketPolicy : public RGWOp {
+public:
+  RGWDeleteBucketPolicy() = default;
+  void send_response() override;
+  int verify_permission() override;
+  uint32_t op_mask() override {
+    return RGW_OP_TYPE_WRITE;
+  }
+  void execute() override;
+  int get_params();
+  const std::string name() override {
+    return "delete_bucket_policy";
+  }
+  RGWOpType get_type() override {
+    return RGW_OP_DELETE_BUCKET_POLICY;
+  }
+};
 
 
 #endif /* CEPH_RGW_OP_H */
