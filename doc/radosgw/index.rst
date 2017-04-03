@@ -49,6 +49,7 @@ you may write data with one API and retrieve it with the other.
    OpenStack Keystone Integration <keystone>
    Multi-tenancy <multitenancy>
    Compression <compression>
+   Bucket Policy <bucketpolicy>
    Data Layout in RADOS <layout>
    Upgrade to Older Versions of Jewel <upgrade_to_jewel>
    troubleshooting
