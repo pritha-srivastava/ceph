@@ -211,6 +211,7 @@ protected:
   bool first_data;
   uint64_t cur_ofs;
   bufferlist waiting;
+  uint64_t action = 0;
 
   int init_common();
 public:
@@ -249,11 +250,13 @@ public:
   int verify_permission() override;
   void pre_exec() override;
   void execute() override;
-  int read_user_manifest_part(rgw_bucket& bucket,
-                              const rgw_bucket_dir_entry& ent,
-                              RGWAccessControlPolicy *bucket_policy,
-                              off_t start_ofs,
-                              off_t end_ofs);
+  int read_user_manifest_part(
+    rgw_bucket& bucket,
+    const rgw_bucket_dir_entry& ent,
+    RGWAccessControlPolicy * const bucket_acl,
+    const boost::optional<rgw::IAM::Policy>& bucket_policy,
+    const off_t start_ofs,
+    const off_t end_ofs);
   int handle_user_manifest(const char *prefix);
   int handle_slo_manifest(bufferlist& bl);
 
@@ -422,7 +425,8 @@ protected:
   parse_path(const boost::string_ref& path);
 
   bool handle_file_verify_permission(RGWBucketInfo& binfo,
-                                     std::map<std::string, ceph::bufferlist>& battrs,
+				     const rgw_obj& obj,
+				     std::map<std::string, ceph::bufferlist>& battrs,
                                      ACLOwner& bucket_owner /* out */);
   int handle_file(boost::string_ref path,
                   size_t size,
@@ -1662,6 +1666,7 @@ protected:
   rgw_bucket bucket;
   bool quiet;
   bool status_dumped;
+  bool acl_allowed = false;
 
 public:
   RGWDeleteMultiObj() {

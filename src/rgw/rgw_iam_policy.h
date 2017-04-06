@@ -226,6 +226,7 @@ struct MaskedIP {
   // output.
   unsigned int prefix;
 };
+
 inline bool operator ==(const MaskedIP& l, const MaskedIP& r) {
   auto shift = std::max((l.v6 ? 128 : 32) - l.prefix,
 			(r.v6 ? 128 : 32) - r.prefix);
