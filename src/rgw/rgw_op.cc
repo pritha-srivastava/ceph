@@ -245,7 +245,9 @@ optional<Policy> get_iam_policy_from_attr(
   const string& tenant) {
   auto i = attrs.find(RGW_ATTR_IAM_POLICY);
   if (i != attrs.end()) {
-    return Policy(cct, i->second.c_str(), tenant);
+    bufferlist policy_bl = i->second;
+    policy_bl.append('\0');
+    return Policy(cct, tenant, policy_bl.c_str());
   } else {
     return none;
   }
