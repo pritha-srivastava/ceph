@@ -43,7 +43,7 @@
 #include "rgw_rest_role.h"
 #include "rgw_crypt.h"
 #include "rgw_crypt_sanitize.h"
-
+#include "rgw_rest_user_policy.h"
 #include "include/assert.h"
 #include "rgw_role.h"
 #include "rgw_rest_sts.h"
@@ -2957,6 +2957,14 @@ RGWOp *RGWHandler_REST_Service_S3::op_post()
       return new RGWListRolePolicies;
     if (action.compare("DeleteRolePolicy") == 0)
       return new RGWDeleteRolePolicy;
+    if (action.compare("PutUserPolicy") == 0)
+      return new RGWPutUserPolicy;
+    if (action.compare("GetUserPolicy") == 0)
+      return new RGWGetUserPolicy;
+    if (action.compare("ListUserPolicies") == 0)
+      return new RGWListUserPolicies;
+    if (action.compare("DeleteUserPolicy") == 0)
+      return new RGWDeleteUserPolicy;
   }
   if (this->isSTSenabled) {
     RGWHandler_REST_STS sts_handler(auth_registry);
