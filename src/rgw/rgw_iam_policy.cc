@@ -205,6 +205,16 @@ ARN::ARN(const rgw_bucket& b, const string& o)
   resource.append(o);
 }
 
+ARN::ARN(const string& resource_name, const string& type, const string& tenant)
+  : partition(Partition::aws),
+    service(Service::iam),
+    region(),
+    account(tenant),
+    resource(type) {
+  resource.push_back('/');
+  resource.append(resource_name);
+}
+
 optional<ARN> ARN::parse(const string& s, bool wildcards) {
   static const char str_wild[] = "arn:([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)";
   static const regex rx_wild(str_wild,
