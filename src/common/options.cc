@@ -4498,7 +4498,7 @@ std::vector<Option> get_rgw_options() {
         "will be located in the path that is specified here. "),
 
     Option("rgw_enable_apis", Option::TYPE_STR, Option::LEVEL_ADVANCED)
-    .set_default("s3, s3website, swift, swift_auth, admin")
+    .set_default("s3, s3website, swift, swift_auth, admin, sts")
     .set_description("A list of set of RESTful APIs that rgw handles."),
 
     Option("rgw_cache_enabled", Option::TYPE_BOOL, Option::LEVEL_ADVANCED)
@@ -5679,7 +5679,6 @@ std::vector<Option> get_rgw_options() {
 			  "of RGW instances under heavy use. If you would like "
 			  "to turn off cache expiry, set this value to zero."),
 
-
     Option("rgw_inject_notify_timeout_probability", Option::TYPE_FLOAT,
 	   Option::LEVEL_DEV)
     .set_default(0)
@@ -5709,6 +5708,11 @@ std::vector<Option> get_rgw_options() {
 			  "value may cause some operations to take longer in "
 			  "exceptional cases and thus may, rarely, cause "
 			  "clients to time out."),
+
+      Option("rgw_sts_entry", Option::TYPE_STR, Option::LEVEL_ADVANCED)
+      .set_default("sts")
+      .set_description("STS URL prefix")
+      .set_long_description("URL path prefix for internal STS requests.")
   });
 }
 
