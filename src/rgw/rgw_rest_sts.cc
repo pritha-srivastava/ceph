@@ -44,7 +44,7 @@ int RGWREST_STS::verify_permission()
     return ret;
   }
   string policy = role.get_assume_role_policy();
-  bufferlist bl = bufferlist::static_from_string(policy);
+  buffer::list bl = buffer::list::static_from_string(policy);
 
   //Parse the policy
   //TODO - This step should be part of Role Creation
