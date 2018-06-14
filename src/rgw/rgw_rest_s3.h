@@ -699,6 +699,7 @@ public:
 
     using access_key_id_t = boost::string_view;
     using client_signature_t = boost::string_view;
+    using session_token_t = boost::string_view;
     using server_signature_t = basic_sstring<char, uint16_t, SIGNATURE_MAX_SIZE>;
     using string_to_sign_t = std::string;
 
@@ -720,6 +721,7 @@ public:
     struct auth_data_t {
       access_key_id_t access_key_id;
       client_signature_t client_signature;
+      session_token_t session_token;
       string_to_sign_t string_to_sign;
       signature_factory_t signature_factory;
       completer_factory_t completer_factory;
@@ -747,6 +749,7 @@ protected:
    * Replace these thing with a simple, dedicated structure. */
   virtual result_t authenticate(const boost::string_view& access_key_id,
                                 const boost::string_view& signature,
+                                const boost::string_view& session_token,
                                 const string_to_sign_t& string_to_sign,
                                 const signature_factory_t& signature_factory,
                                 const completer_factory_t& completer_factory,
@@ -822,6 +825,7 @@ protected:
 
   result_t authenticate(const boost::string_view& access_key_id,
                         const boost::string_view& signature,
+                        const boost::string_view& session_token,
                         const string_to_sign_t& string_to_sign,
                         const signature_factory_t&,
                         const completer_factory_t& completer_factory,
@@ -851,8 +855,14 @@ class LocalEngine : public AWSEngine {
   RGWRados* const store;
   const rgw::auth::LocalApplier::Factory* const apl_factory;
 
+  int decrypt_session_token(const boost::string_view& session_token,
+                            boost::string_view& secret_key,
+                            boost::string_view& role_id,
+                            boost::string_view& policy) const;
+  
   result_t authenticate(const boost::string_view& access_key_id,
                         const boost::string_view& signature,
+                        const boost::string_view& session_token,
                         const string_to_sign_t& string_to_sign,
                         const signature_factory_t& signature_factory,
                         const completer_factory_t& completer_factory,
@@ -911,9 +921,10 @@ public:
   aplptr_t create_apl_local(CephContext* const cct,
                             const req_state* const s,
                             const RGWUserInfo& user_info,
-                            const std::string& subuser) const override {
+                            const std::string& subuser,
+                            const boost::optional<vector<std::string> >& role_policies) const override {
       return aplptr_t(
-        new rgw::auth::LocalApplier(cct, user_info, subuser));
+        new rgw::auth::LocalApplier(cct, user_info, subuser, role_policies));
   }
 };
 

@@ -107,9 +107,10 @@ class AWSAuthStrategy : public rgw::auth::Strategy,
   aplptr_t create_apl_local(CephContext* const cct,
                             const req_state* const s,
                             const RGWUserInfo& user_info,
-                            const std::string& subuser) const override {
+                            const std::string& subuser,
+                            const boost::optional<vector<std::string> >& role_policies) const override {
     auto apl = rgw::auth::add_sysreq(cct, store, s,
-      rgw::auth::LocalApplier(cct, user_info, subuser));
+      rgw::auth::LocalApplier(cct, user_info, subuser, role_policies));
     /* TODO(rzarzynski): replace with static_ptr. */
     return aplptr_t(new decltype(apl)(std::move(apl)));
   }
@@ -382,6 +383,7 @@ int parse_credentials(const req_info& info,                     /* in */
                       boost::string_view& signedheaders,        /* out */
                       boost::string_view& signature,            /* out */
                       boost::string_view& date,                 /* out */
+                      boost::string_view& session_token,        /* out */
                       const bool using_qs);                     /* in */
 
 static inline std::string get_v4_canonical_uri(const req_info& info) {
