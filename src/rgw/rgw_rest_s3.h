@@ -27,6 +27,7 @@
 
 #include "rgw_auth.h"
 #include "rgw_auth_filters.h"
+#include "rgw_sts.h"
 
 struct rgw_http_error {
   int http_ret;
@@ -884,6 +885,45 @@ public:
   }
 };
 
+class STSEngine : public AWSEngine {
+  RGWRados* const store;
+  const rgw::auth::LocalApplier::Factory* const local_apl_factory;
+  const rgw::auth::RemoteApplier::Factory* const remote_apl_factory;
+
+  using acl_strategy_t = rgw::auth::RemoteApplier::acl_strategy_t;
+  using auth_info_t = rgw::auth::RemoteApplier::AuthInfo;
+
+  acl_strategy_t get_acl_strategy() const { return nullptr; };
+  auth_info_t get_creds_info(const STS::SessionToken& token) const noexcept;
+
+  int get_session_token(const boost::string_view& session_token,
+                        STS::SessionToken& token) const;
+
+  result_t authenticate(const boost::string_view& access_key_id,
+                        const boost::string_view& signature,
+                        const boost::string_view& session_token,
+                        const string_to_sign_t& string_to_sign,
+                        const signature_factory_t& signature_factory,
+                        const completer_factory_t& completer_factory,
+                        const req_state* s) const override;
+public:
+  STSEngine(CephContext* const cct,
+              RGWRados* const store,
+              const VersionAbstractor& ver_abstractor,
+              const rgw::auth::LocalApplier::Factory* const local_apl_factory,
+              const rgw::auth::RemoteApplier::Factory* const remote_apl_factory)
+    : AWSEngine(cct, ver_abstractor),
+      store(store),
+      local_apl_factory(local_apl_factory),
+      remote_apl_factory(remote_apl_factory) {
+  }
+
+  using AWSEngine::authenticate;
+
+  const char* get_name() const noexcept override {
+    return "rgw::auth::s3::STSEngine";
+  }
+};
 
 class S3AnonymousEngine : public rgw::auth::AnonymousEngine {
   bool is_applicable(const req_state* s) const noexcept override;

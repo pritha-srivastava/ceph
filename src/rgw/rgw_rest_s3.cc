@@ -47,6 +47,7 @@
 #include "rgw_rest_user_policy.h"
 #include "include/assert.h"
 #include "rgw_role.h"
+#include "rgw_sts.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
@@ -4123,7 +4124,6 @@ AWSBrowserUploadAbstractor::get_auth_data(const req_state* const s) const
   }
 }
 
-
 AWSEngine::result_t
 AWSEngine::authenticate(const req_state* const s) const
 {
@@ -4206,6 +4206,12 @@ rgw::auth::s3::LDAPEngine::authenticate(
   const completer_factory_t& completer_factory,
   const req_state* const s) const
 {
+  //If LDAP is enabled and the request has a session token, then LDAP shouldn't authenticate it.
+  if (s->info.args.exists("X-Amz-Security-Token") ||
+      s->info.env->exists("HTTP_X_AMZ_SECURITY_TOKEN")) {
+    return result_t::deny();
+  }
+
   /* boost filters and/or string_ref may throw on invalid input */
   rgw::RGWToken base64_token;
   try {
@@ -4247,92 +4253,6 @@ void rgw::auth::s3::LDAPEngine::shutdown() {
 }
 
 /* LocalEngine */
-int rgw::auth::s3::LocalEngine::decrypt_session_token(
-                                  const boost::string_view& session_token,
-                                  std::string& secret_key,
-                                  std::string& role_id,
-                                  std::string& policy) const {
-  string decodedSessionToken = rgw::from_base64(session_token);
-
-  auto* cryptohandler = cct->get_crypto_handler(CEPH_CRYPTO_AES);
-  if (! cryptohandler) {
-    return -EINVAL;
-  }
-  char secret_s[] = {
-    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-    0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-  };
-  buffer::ptr secret(secret_s, sizeof(secret_s));
-  int ret = 0;
-  if (ret = cryptohandler->validate_secret(secret); ret < 0) {
-    ldout(cct, 0) << "ERROR: Invalid secret key" << dendl;
-    return ret;
-  }
-  string error;
-  auto* keyhandler = cryptohandler->get_key_handler(secret, error);
-  if (! keyhandler) {
-    return -EINVAL;
-  }
-  error.clear();
-
-  string decrypted_str;
-  buffer::list en_input, dec_output;
-  en_input = buffer::list::static_from_string(decodedSessionToken);;
-  ret = keyhandler->decrypt(en_input, dec_output, &error);
-  if (ret < 0) {
-    ldout(cct, 0) << "ERROR: Decryption failed: " << error << dendl;
-    return -EPERM;
-  } else {
-    dec_output.append('\0');
-    decrypted_str = dec_output.c_str();
-  }
-
-  //Extract useful info (like expiration time, secret key) from the token
-  std::map<std::string, std::string> decoded_token_map;
-  boost::char_separator<char> sep("&");
-  boost::tokenizer<boost::char_separator<char>> tokens(decrypted_str, sep);
-  for (const auto& t : tokens) {
-    auto pos = t.find("=");
-    if (pos != string::npos) {
-      std::string key = t.substr(0, pos);
-      std::string value = t.substr(pos + 1, t.size() - 1);
-      decoded_token_map[key] = value;
-    }
-  }
-
-  //Check if the token has expired
-  if (decoded_token_map.find("expiration") != decoded_token_map.end()) {
-    std::string expiration = decoded_token_map["expiration"];
-    if (! expiration.empty()) {
-      boost::optional<real_clock::time_point> exp = ceph::from_iso_8601(expiration, false);
-      if (exp) {
-        real_clock::time_point now = real_clock::now();
-        if (now >= *exp) {
-          ldout(cct, 0) << "ERROR: Token expired" << dendl;
-          return -EPERM;
-        }
-      } else {
-        ldout(cct, 0) << "ERROR: Invalid expiration: " << expiration << dendl;
-        return -EPERM;
-      }
-    }
-  }
-
-  if (decoded_token_map.find("secret_access_key") != decoded_token_map.end()) {
-    secret_key = decoded_token_map["secret_access_key"];
-  }
-
-  if (decoded_token_map.find("roleId") != decoded_token_map.end()) {
-    role_id = decoded_token_map["roleId"];
-  }
-
-  if (decoded_token_map.find("policy") != decoded_token_map.end()) {
-    policy = decoded_token_map["policy"];
-  }
-
-  return 0;
-}
-
 rgw::auth::Engine::result_t
 rgw::auth::s3::LocalEngine::authenticate(
   const boost::string_view& _access_key_id,
@@ -4343,56 +4263,39 @@ rgw::auth::s3::LocalEngine::authenticate(
   const completer_factory_t& completer_factory,
   const req_state* const s) const
 {
-  std::string secret_key, role_id, policy;
-  RGWUserInfo user_info;
-  string subuser;
-  vector<string> role_policies;
-
-  if (! session_token.empty()) {
-    if (decrypt_session_token(session_token, secret_key, role_id, policy) < 0) {
-      return result_t::deny(-EPERM);
-    }
-    RGWRole role(s->cct, store, role_id);
-    if (role.get_by_id() < 0) {
-      return result_t::deny(-EPERM);
-    }
-    vector<string> role_policy_names = role.get_role_policy_names();
-    for (auto& policy_name : role_policy_names) {
-      string perm_policy;
-      if (int ret = role.get_role_policy(policy_name, perm_policy); ret == 0) {
-        role_policies.push_back(std::move(perm_policy));
-      }
-    }
-    role_policies.push_back(std::move(policy));
-  } else {
-    /* get the user info */
-    /* TODO(rzarzynski): we need to have string-view taking variant. */
-    const std::string access_key_id = _access_key_id.to_string();
-    if (rgw_get_user_info_by_access_key(store, access_key_id, user_info) < 0) {
-        ldout(cct, 5) << "error reading user info, uid=" << access_key_id
-                << " can't authenticate" << dendl;
-        return result_t::deny(-ERR_INVALID_ACCESS_KEY);
-    }
-    //TODO: Uncomment, when we have a migration plan in place.
-    /*else {
-      if (s->user->type != TYPE_RGW) {
-        ldout(cct, 10) << "ERROR: User id of type: " << s->user->type
-                       << " is present" << dendl;
-        throw -EPERM;
-      }
-    }*/
-
-    const auto iter = user_info.access_keys.find(access_key_id);
-    if (iter == std::end(user_info.access_keys)) {
-      ldout(cct, 0) << "ERROR: access key not encoded in user info" << dendl;
-      return result_t::deny(-EPERM);
-    }
-    const RGWAccessKey& k = iter->second;
-    secret_key = k.key;
-    subuser = k.subuser;
+  //If LocalAuth is enabled and the request has a session token, then LocalEngine shouldn't authenticate it.
+  if (s->info.args.exists("X-Amz-Security-Token") ||
+      s->info.env->exists("HTTP_X_AMZ_SECURITY_TOKEN")) {
+    return result_t::deny();
   }
+
+  /* get the user info */
+  RGWUserInfo user_info;
+  /* TODO(rzarzynski): we need to have string-view taking variant. */
+  const std::string access_key_id = _access_key_id.to_string();
+  if (rgw_get_user_info_by_access_key(store, access_key_id, user_info) < 0) {
+      ldout(cct, 5) << "error reading user info, uid=" << access_key_id
+              << " can't authenticate" << dendl;
+      return result_t::deny(-ERR_INVALID_ACCESS_KEY);
+  }
+  //TODO: Uncomment, when we have a migration plan in place.
+  /*else {
+    if (s->user->type != TYPE_RGW) {
+      ldout(cct, 10) << "ERROR: User id of type: " << s->user->type
+                     << " is present" << dendl;
+      throw -EPERM;
+    }
+  }*/
+
+  const auto iter = user_info.access_keys.find(access_key_id);
+  if (iter == std::end(user_info.access_keys)) {
+    ldout(cct, 0) << "ERROR: access key not encoded in user info" << dendl;
+    return result_t::deny(-EPERM);
+  }
+  const RGWAccessKey& k = iter->second;
+
   const VersionAbstractor::server_signature_t server_signature = \
-    signature_factory(cct, secret_key, string_to_sign);
+    signature_factory(cct, k.key, string_to_sign);
   auto compare = signature.compare(server_signature);
 
   ldout(cct, 15) << "string_to_sign="
@@ -4406,8 +4309,149 @@ rgw::auth::s3::LocalEngine::authenticate(
     return result_t::deny(-ERR_SIGNATURE_NO_MATCH);
   }
 
-  auto apl = apl_factory->create_apl_local(cct, s, user_info, subuser, role_policies);
-  return result_t::grant(std::move(apl), completer_factory(secret_key));
+  auto apl = apl_factory->create_apl_local(cct, s, user_info, k.subuser, boost::none);
+  return result_t::grant(std::move(apl), completer_factory(k.key));
+}
+
+rgw::auth::RemoteApplier::AuthInfo
+rgw::auth::s3::STSEngine::get_creds_info(const STS::SessionToken& token) const noexcept
+{
+  using acct_privilege_t = \
+    rgw::auth::RemoteApplier::AuthInfo::acct_privilege_t;
+
+  return rgw::auth::RemoteApplier::AuthInfo {
+    token.user,
+    token.acct_name,
+    token.perm_mask,
+    (token.is_admin) ? acct_privilege_t::IS_ADMIN_ACCT: acct_privilege_t::IS_PLAIN_ACCT,
+    token.acct_type
+  };
+}
+
+int
+rgw::auth::s3::STSEngine::get_session_token(const boost::string_view& session_token,
+                                            STS::SessionToken& token) const
+{
+  string decodedSessionToken = rgw::from_base64(session_token);
+
+  auto* cryptohandler = cct->get_crypto_handler(CEPH_CRYPTO_AES);
+  if (! cryptohandler) {
+    return -EINVAL;
+  }
+  string secret_s = cct->_conf->rgw_sts_key;
+  buffer::ptr secret(secret_s.c_str(), secret_s.length());
+  int ret = 0;
+  if (ret = cryptohandler->validate_secret(secret); ret < 0) {
+    ldout(cct, 0) << "ERROR: Invalid secret key" << dendl;
+    return -EINVAL;
+  }
+  string error;
+  auto* keyhandler = cryptohandler->get_key_handler(secret, error);
+  if (! keyhandler) {
+    return -EINVAL;
+  }
+  error.clear();
+
+  string decrypted_str;
+  buffer::list en_input, dec_output;
+  en_input = buffer::list::static_from_string(decodedSessionToken);
+
+  ret = keyhandler->decrypt(en_input, dec_output, &error);
+  if (ret < 0) {
+    ldout(cct, 0) << "ERROR: Decryption failed: " << error << dendl;
+    return -EPERM;
+  } else {
+    dec_output.append('\0');
+    auto iter = dec_output.cbegin();
+    decode(token, iter);
+  }
+  return 0;
+}
+
+rgw::auth::Engine::result_t
+rgw::auth::s3::STSEngine::authenticate(
+  const boost::string_view& _access_key_id,
+  const boost::string_view& signature,
+  const boost::string_view& session_token,
+  const string_to_sign_t& string_to_sign,
+  const signature_factory_t& signature_factory,
+  const completer_factory_t& completer_factory,
+  const req_state* const s) const
+{
+  STS::SessionToken token;
+  if (int ret = get_session_token(session_token, token); ret < 0) {
+    return result_t::deny(ret);
+  }
+  //Authentication
+  //Check if the token has expired
+  if (! token.expiration.empty()) {
+    std::string expiration = token.expiration;
+    if (! expiration.empty()) {
+      boost::optional<real_clock::time_point> exp = ceph::from_iso_8601(expiration, false);
+      if (exp) {
+        real_clock::time_point now = real_clock::now();
+        if (now >= *exp) {
+          ldout(cct, 0) << "ERROR: Token expired" << dendl;
+          return result_t::deny(-EPERM);
+        }
+      } else {
+        ldout(cct, 0) << "ERROR: Invalid expiration: " << expiration << dendl;
+        return result_t::deny(-EPERM);
+      }
+    }
+  }
+  //Check for signature mismatch
+  const VersionAbstractor::server_signature_t server_signature = \
+    signature_factory(cct, token.secret_access_key, string_to_sign);
+  auto compare = signature.compare(server_signature);
+
+  ldout(cct, 15) << "string_to_sign="
+                 << rgw::crypt_sanitize::log_content{string_to_sign}
+                 << dendl;
+  ldout(cct, 15) << "server signature=" << server_signature << dendl;
+  ldout(cct, 15) << "client signature=" << signature << dendl;
+  ldout(cct, 15) << "compare=" << compare << dendl;
+
+  if (compare != 0) {
+    return result_t::deny(-ERR_SIGNATURE_NO_MATCH);
+  }
+
+  // Get all the authorization info
+  RGWUserInfo user_info;
+  vector<string> role_policies;
+  if (! token.roleId.empty()) {
+    RGWRole role(s->cct, store, token.roleId);
+    if (role.get_by_id() < 0) {
+      return result_t::deny(-EPERM);
+    }
+    vector<string> role_policy_names = role.get_role_policy_names();
+    for (auto& policy_name : role_policy_names) {
+      string perm_policy;
+      if (int ret = role.get_role_policy(policy_name, perm_policy); ret == 0) {
+        role_policies.push_back(std::move(perm_policy));
+      }
+    }
+    role_policies.push_back(std::move(token.policy));
+  }
+  if (! token.user.empty()) {
+    // get user info
+    int ret = rgw_get_user_info_by_uid(store, token.user, user_info, NULL);
+    if (ret < 0) {
+      ldout(cct, 5) << "ERROR: failed reading user info: uid=" << token.user << dendl;
+      return result_t::deny(-EPERM);
+    }
+  }
+  if (token.acct_type == TYPE_RGW) {
+    string subuser;
+    auto apl = local_apl_factory->create_apl_local(cct, s, user_info, subuser, role_policies);
+    return result_t::grant(std::move(apl), completer_factory(token.secret_access_key));
+  } else if (token.acct_type == TYPE_KEYSTONE || token.acct_type == TYPE_LDAP) {
+    auto apl = remote_apl_factory->create_apl_remote(cct, s, get_acl_strategy(),
+                                            get_creds_info(token));
+    return result_t::grant(std::move(apl), completer_factory(boost::none));
+  }
+
+  return result_t::deny(-EPERM);
 }
 
 bool rgw::auth::s3::S3AnonymousEngine::is_applicable(

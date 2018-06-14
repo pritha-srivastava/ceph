@@ -427,6 +427,12 @@ rgw::auth::Engine::result_t EC2Engine::authenticate(
   /* Passthorugh only! */
   const req_state* s) const
 {
+  //If Keystone is enabled and the request has a session token, then Keystone shouldn't authenticate it.
+  if (s->info.args.exists("X-Amz-Security-Token") ||
+      s->info.env->exists("HTTP_X_AMZ_SECURITY_TOKEN")) {
+    return result_t::deny();
+  }
+
   /* This will be initialized on the first call to this method. In C++11 it's
    * also thread-safe. */
   static const struct RolesCacher {

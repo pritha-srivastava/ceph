@@ -1534,3 +1534,4 @@ OPTION(rgw_acl_grants_max_num, OPT_INT) // According to AWS S3(http://docs.aws.a
 
 OPTION(rgw_sts_entry, OPT_STR)
 OPTION(rgw_sts_key, OPT_STR)
+OPTION(rgw_s3_auth_use_sts, OPT_BOOL)  // should we try to use sts for s3?
