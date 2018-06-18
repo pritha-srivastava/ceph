@@ -4268,6 +4268,7 @@ int rgw::auth::s3::LocalEngine::decrypt_session_token(
   string decrypted_str;
   bufferlist en_input, dec_output;
   en_input.append(session_token.to_string());
+  ldout(cct, 0) << "Decrypt: sessionToken: " << session_token.to_string() << "length: " << en_input.length() << dendl;
   ret = keyhandler->decrypt(en_input, dec_output, &error);
   if (ret < 0) {
     ldout(cct, 0) << "ERROR: Decryption failed: " << error << dendl;

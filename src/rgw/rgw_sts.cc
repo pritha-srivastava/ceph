@@ -93,6 +93,8 @@ int Credentials::generateCredentials(CephContext* cct,
   encrypted_str = enc_output.c_str();
   sessionToken = enc_output.c_str();
 
+  ldout(cct, 0) << "sessionToken: " << sessionToken << "length: " << enc_output.length() << dendl;
+
   return ret;
 }
 
