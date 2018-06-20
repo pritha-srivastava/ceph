@@ -81,7 +81,7 @@ int Credentials::generateCredentials(CephContext* cct,
   // from the token itself for policy evaluation.
   string encrypted_str, input_str = "acess_key_id=" + accessKeyId + "&" +
                      "secret_access_key=" + secretAccessKey + "&" +
-                     "expiration=" + expiration + "policy=" + policy +
+                     "expiration=" + expiration + "&" + "policy=" + policy + "&"
                      "roleId=" + roleId;
   buffer::list input, enc_output;
   input.append(input_str);
@@ -89,11 +89,10 @@ int Credentials::generateCredentials(CephContext* cct,
     return ret;
   }
 
-  enc_output.append('\0');
-  encrypted_str = enc_output.c_str();
-  sessionToken = enc_output.c_str();
-
-  ldout(cct, 0) << "sessionToken: " << sessionToken << "length: " << enc_output.length() << dendl;
+  bufferlist encoded_op;
+  enc_output.encode_base64(encoded_op);
+  encoded_op.append('\0');
+  sessionToken = encoded_op.c_str();
 
   return ret;
 }
