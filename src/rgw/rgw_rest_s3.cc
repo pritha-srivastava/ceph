@@ -4244,6 +4244,8 @@ int rgw::auth::s3::LocalEngine::decrypt_session_token(
                                   boost::string_view& secret_key,
                                   boost::string_view& role_id,
                                   boost::string_view& policy) const {
+  string decodedSessionToken = rgw::from_base64(session_token);
+
   auto* cryptohandler = cct->get_crypto_handler(CEPH_CRYPTO_AES);
   if (! cryptohandler) {
     return -EINVAL;
@@ -4266,9 +4268,8 @@ int rgw::auth::s3::LocalEngine::decrypt_session_token(
   error.clear();
 
   string decrypted_str;
-  bufferlist en_input, dec_output;
-  en_input.append(session_token.to_string());
-  ldout(cct, 0) << "Decrypt: sessionToken: " << session_token.to_string() << "length: " << en_input.length() << dendl;
+  buffer::list en_input, dec_output;
+  en_input = buffer::list::static_from_string(decodedSessionToken);;
   ret = keyhandler->decrypt(en_input, dec_output, &error);
   if (ret < 0) {
     ldout(cct, 0) << "ERROR: Decryption failed: " << error << dendl;
@@ -4295,11 +4296,15 @@ int rgw::auth::s3::LocalEngine::decrypt_session_token(
   if (decoded_token_map.find("expiration") != decoded_token_map.end()) {
     std::string expiration = decoded_token_map["expiration"];
     if (! expiration.empty()) {
-      const time_t exp = atoll(expiration.c_str());
-      time_t now;
-      time(&now);
-
-      if (now >= exp) {
+      boost::optional<real_clock::time_point> exp = ceph::from_iso_8601(expiration, false);
+      if (exp) {
+        real_clock::time_point now = real_clock::now();
+        if (now >= *exp) {
+          ldout(cct, 0) << "ERROR: Token expired" << dendl;
+          return -EPERM;
+        }
+      } else {
+        ldout(cct, 0) << "ERROR: Invalid expiration: " << expiration << dendl;
         return -EPERM;
       }
     }
