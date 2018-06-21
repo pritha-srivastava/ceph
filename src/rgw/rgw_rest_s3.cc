@@ -4241,9 +4241,9 @@ void rgw::auth::s3::LDAPEngine::shutdown() {
 /* LocalEngine */
 int rgw::auth::s3::LocalEngine::decrypt_session_token(
                                   const boost::string_view& session_token,
-                                  boost::string_view& secret_key,
-                                  boost::string_view& role_id,
-                                  boost::string_view& policy) const {
+                                  std::string& secret_key,
+                                  std::string& role_id,
+                                  std::string& policy) const {
   string decodedSessionToken = rgw::from_base64(session_token);
 
   auto* cryptohandler = cct->get_crypto_handler(CEPH_CRYPTO_AES);
@@ -4335,7 +4335,7 @@ rgw::auth::s3::LocalEngine::authenticate(
   const completer_factory_t& completer_factory,
   const req_state* const s) const
 {
-  boost::string_view secret_key, role_id, policy;
+  std::string secret_key, role_id, policy;
   RGWUserInfo user_info;
   string subuser;
   vector<string> role_policies;
@@ -4344,7 +4344,7 @@ rgw::auth::s3::LocalEngine::authenticate(
     if (decrypt_session_token(session_token, secret_key, role_id, policy) < 0) {
       return result_t::deny(-EPERM);
     }
-    RGWRole role(s->cct, store, role_id.to_string());
+    RGWRole role(s->cct, store, role_id);
     vector<string> role_policy_names = role.get_role_policy_names();
     for (auto& policy_name : role_policy_names) {
       string perm_policy;
@@ -4352,7 +4352,7 @@ rgw::auth::s3::LocalEngine::authenticate(
         role_policies.push_back(std::move(perm_policy));
       }
     }
-    role_policies.push_back(std::move(policy.to_string()));
+    role_policies.push_back(std::move(policy));
   } else {
     /* get the user info */
     /* TODO(rzarzynski): we need to have string-view taking variant. */
@@ -4381,7 +4381,7 @@ rgw::auth::s3::LocalEngine::authenticate(
     subuser = k.subuser;
   }
   const VersionAbstractor::server_signature_t server_signature = \
-    signature_factory(cct, secret_key.to_string(), string_to_sign);
+    signature_factory(cct, secret_key, string_to_sign);
   auto compare = signature.compare(server_signature);
 
   ldout(cct, 15) << "string_to_sign="
@@ -4396,7 +4396,7 @@ rgw::auth::s3::LocalEngine::authenticate(
   }
 
   auto apl = apl_factory->create_apl_local(cct, s, user_info, subuser, role_policies);
-  return result_t::grant(std::move(apl), completer_factory(secret_key.to_string()));
+  return result_t::grant(std::move(apl), completer_factory(secret_key));
 }
 
 bool rgw::auth::s3::S3AnonymousEngine::is_applicable(

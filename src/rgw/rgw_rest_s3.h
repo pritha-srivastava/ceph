@@ -856,9 +856,9 @@ class LocalEngine : public AWSEngine {
   const rgw::auth::LocalApplier::Factory* const apl_factory;
 
   int decrypt_session_token(const boost::string_view& session_token,
-                            boost::string_view& secret_key,
-                            boost::string_view& role_id,
-                            boost::string_view& policy) const;
+                            std::string& secret_key,
+                            std::string& role_id,
+                            std::string& policy) const;
   
   result_t authenticate(const boost::string_view& access_key_id,
                         const boost::string_view& signature,
