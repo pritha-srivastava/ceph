@@ -23,10 +23,6 @@ int RGWRestRole::verify_permission()
     return -EACCES;
   }
 
-  if (int ret = check_caps(s->user->caps); ret == 0) {
-    return ret;
-  }
-
   string role_name = s->info.args.get("RoleName");
   RGWRole role(s->cct, store, role_name, s->user->user_id.tenant);
   if (op_ret = role.get(); op_ret < 0) {
@@ -34,6 +30,11 @@ int RGWRestRole::verify_permission()
       op_ret = -ERR_NO_ROLE_FOUND;
     }
     return op_ret;
+  }
+
+  if (int ret = check_caps(s->user->caps); ret == 0) {
+    _role = std::move(role);
+    return ret;
   }
 
   string resource_name = role.get_path() + role_name;
