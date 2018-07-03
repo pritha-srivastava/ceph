@@ -4353,6 +4353,9 @@ rgw::auth::s3::LocalEngine::authenticate(
       return result_t::deny(-EPERM);
     }
     RGWRole role(s->cct, store, role_id);
+    if (role.get_by_id() < 0) {
+      return result_t::deny(-EPERM);
+    }
     vector<string> role_policy_names = role.get_role_policy_names();
     for (auto& policy_name : role_policy_names) {
       string perm_policy;
