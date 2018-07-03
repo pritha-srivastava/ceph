@@ -378,6 +378,7 @@ const char** MDSDaemon::get_tracked_conf_keys() const
     "mds_inject_migrator_message_loss",
     "host",
     "fsid",
+    "mds_request_load_average_decay_rate",
     NULL
   };
   return KEYS;
