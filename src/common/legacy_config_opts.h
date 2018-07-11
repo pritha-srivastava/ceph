@@ -1533,3 +1533,4 @@ OPTION(rgw_reshard_thread_interval, OPT_U32) // maximum time between rounds of r
 OPTION(rgw_acl_grants_max_num, OPT_INT) // According to AWS S3(http://docs.aws.amazon.com/AmazonS3/latest/dev/acl-overview.html), An ACL can have up to 100 grants.
 
 OPTION(rgw_sts_entry, OPT_STR)
+OPTION(rgw_sts_max_session_duration, OPT_U64) // Max duration in seconds for which the session token is valid.

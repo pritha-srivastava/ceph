@@ -37,8 +37,8 @@ void Credentials::dump(Formatter *f) const
 
 int Credentials::generateCredentials(CephContext* cct,
                           const uint64_t& duration,
-                          const string& policy,
-                          const string& roleId)
+                          const boost::optional<string>& policy,
+                          const boost::optional<string>& roleId)
 {
   uuid_d accessKey, secretKey;
   char accessKeyId_str[MAX_ACCESS_KEY_LEN], secretAccessKey_str[MAX_SECRET_KEY_LEN];
@@ -81,8 +81,15 @@ int Credentials::generateCredentials(CephContext* cct,
   // from the token itself for policy evaluation.
   string encrypted_str, input_str = "acess_key_id=" + accessKeyId + "&" +
                      "secret_access_key=" + secretAccessKey + "&" +
-                     "expiration=" + expiration + "&" + "policy=" + policy + "&"
-                     "roleId=" + roleId;
+                     "expiration=" + expiration;
+  if (policy) {
+    input_str =  input_str + "&" + "policy=" + *policy;
+  }
+
+  if (roleId) {
+    input_str = input_str + "&" + "roleId=" + *roleId;
+  }
+
   buffer::list input, enc_output;
   input.append(input_str);
   if (ret = keyhandler->encrypt(input, enc_output, &error); ret < 0) {
@@ -276,6 +283,33 @@ AssumeRoleResponse STSService::assumeRole(AssumeRoleRequest& req)
   }
 
   return make_tuple(0, user, cred, packedPolicySize);
+}
+
+GetSessionTokenRequest::GetSessionTokenRequest(string& duration, string& serialNumber, string& tokenCode)
+{
+  if (duration.empty()) {
+    this->duration = DEFAULT_DURATION_IN_SECS;
+  } else {
+    this->duration = stoull(duration);
+  }
+  this->serialNumber = serialNumber;
+  this->tokenCode = tokenCode;
+}
+
+GetSessionTokenResponse STSService::getSessionToken(GetSessionTokenRequest& req)
+{
+  int ret;
+  Credentials cred;
+
+  //Generate Credentials
+  if (ret = cred.generateCredentials(cct,
+                                      req.getDuration(),
+                                      boost::none,
+                                      boost::none); ret < 0) {
+    return make_tuple(ret, cred);
+  }
+
+  return make_tuple(0, cred);
 }
 
 }

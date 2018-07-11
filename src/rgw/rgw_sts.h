@@ -44,6 +44,20 @@ public:
   int validate_input() const;
 };
 
+class GetSessionTokenRequest {
+protected:
+  static constexpr uint64_t MIN_DURATION_IN_SECS = 900;
+  static constexpr uint64_t DEFAULT_DURATION_IN_SECS = 3600;
+  uint64_t duration;
+  string serialNumber;
+  string tokenCode;
+
+public:
+  GetSessionTokenRequest(string& duration, string& serialNumber, string& tokenCode);
+
+  const uint64_t& getDuration() const { return duration; }
+  static const uint64_t& getMinDuration() { return MIN_DURATION_IN_SECS; }
+};
 
 class AssumedRoleUser {
   string arn;
@@ -69,8 +83,8 @@ class Credentials {
 public:
   int generateCredentials(CephContext* cct,
                           const uint64_t& duration,
-                          const string& policy,
-                          const string& roleId);
+                          const boost::optional<string>& policy,
+                          const boost::optional<string>& roleId);
   const string& getAccessKeyId() const { return accessKeyId; }
   const string& getExpiration() const { return expiration; }
   const string& getSecretAccessKey() const { return secretAccessKey; }
@@ -80,6 +94,7 @@ public:
 
 //AssumedRoleUser, Credentials, PackedpolicySize
 using AssumeRoleResponse = std::tuple<int, AssumedRoleUser, Credentials, uint64_t> ;
+using GetSessionTokenResponse = std::tuple<int, Credentials>;
 
 class STSService {
   CephContext* cct;
@@ -92,6 +107,7 @@ public:
   STSService(CephContext* _cct, RGWRados *_store, rgw_user _user_id) : cct(_cct), store(_store), user_id(_user_id) {}
   std::tuple<int, RGWRole> getRoleInfo(const string& arn);
   AssumeRoleResponse assumeRole(AssumeRoleRequest& req);
+  GetSessionTokenResponse getSessionToken(GetSessionTokenRequest& req);
 };
 }
 #endif /* CEPH_RGW_STS_H */

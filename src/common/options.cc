@@ -6163,7 +6163,12 @@ std::vector<Option> get_rgw_options() {
     Option("rgw_sts_entry", Option::TYPE_STR, Option::LEVEL_ADVANCED)
     .set_default("sts")
     .set_description("STS URL prefix")
-    .set_long_description("URL path prefix for internal STS requests.")
+    .set_long_description("URL path prefix for internal STS requests."),
+
+    Option("rgw_sts_max_session_duration", Option::TYPE_UINT, Option::LEVEL_ADVANCED)
+    .set_default("43200")
+    .set_description("Session token max duration")
+    .set_long_description("Max duration in seconds for which the session token is valid."),
 
   });
 }
