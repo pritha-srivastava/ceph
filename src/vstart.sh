@@ -492,6 +492,23 @@ $extra_conf
         rgw crypt s3 kms encryption keys = testkey-1=YmluCmJvb3N0CmJvb3N0LWJ1aWxkCmNlcGguY29uZgo= testkey-2=aWIKTWFrZWZpbGUKbWFuCm91dApzcmMKVGVzdGluZwo=
         rgw crypt require ssl = false
         rgw lc debug interval = 10
+	rgw sts key = abcdefghijklmnop
+	rgw s3 auth use sts = true
+	rgw keystone url = http://192.168.0.15/identity/
+        rgw keystone admin project = admin
+        rgw keystone admin tenant = admin
+	rgw keystone admin domain = default
+        rgw keystone api version = 3
+        rgw keystone implicit tenants = true
+        rgw keystone admin password = nova
+        rgw keystone admin user = admin
+        rgw keystone accepted roles = SwiftOperator,admin,_member_
+        rgw keystone token cache size = 500
+        rgw keystone revocation interval = 500
+        rgw keystone make new tenants = true
+        rgw s3 auth use keystone = false
+        rgw nss db path = /var/ceph/nss
+        rgw keystone verify ssl = false
 
 [mds]
 $DAEMONOPTS

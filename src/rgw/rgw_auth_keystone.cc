@@ -337,6 +337,7 @@ EC2Engine::get_from_keystone(const boost::string_view& access_key_id,
   /* set required headers for keystone request */
   validate.append_header("X-Auth-Token", admin_token);
   validate.append_header("Content-Type", "application/json");
+  ldout(cct, 2) << "s3 keystone: X-Auth-Token: " << admin_token << dendl;
 
   /* check if we want to verify keystone's ssl certs */
   validate.set_verify_ssl(cct->_conf->rgw_keystone_verify_ssl);
@@ -354,6 +355,8 @@ EC2Engine::get_from_keystone(const boost::string_view& access_key_id,
   std::stringstream os;
   credentials.flush(os);
   validate.set_post_data(os.str());
+  ldout(cct, 2) << "s3 keystone: token validation post data: "
+                  << os.str() << dendl;
   validate.set_send_length(os.str().length());
 
   /* send request */

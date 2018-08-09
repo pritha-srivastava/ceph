@@ -234,6 +234,7 @@ int Service::issue_admin_token_request(CephContext* const cct,
     std::stringstream ss;
     jf.flush(ss);
     token_req.set_post_data(ss.str());
+    ldout(cct, 0) << "Http post data: " << ss.str() << dendl;
     token_req.set_send_length(ss.str().length());
     token_url.append("v3/auth/tokens");
   } else {
@@ -243,10 +244,11 @@ int Service::issue_admin_token_request(CephContext* const cct,
   token_req.set_url(token_url);
 
   const int ret = token_req.process();
+  ldout(cct, 0) << "Http status: " << token_req.get_http_status() << dendl;
   if (ret < 0) {
     return ret;
   }
-
+  
   /* Detect rejection earlier than during the token parsing step. */
   if (token_req.get_http_status() ==
           RGWGetKeystoneAdminToken::HTTP_STATUS_UNAUTHORIZED) {
