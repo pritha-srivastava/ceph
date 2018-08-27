@@ -215,6 +215,11 @@ public:
       add_engine(Control::SUFFICIENT, anonymous_engine);
     }
 
+    /* STS Auth*/
+    if (! sts_engine.is_empty()) {
+      add_engine(Control::SUFFICIENT, sts_engine);
+    }
+
     auto auth_order = parse_auth_order(cct);
     engine_map_t engine_map;
     /* The external auth. */
@@ -226,11 +231,6 @@ public:
       engine_map.insert(std::make_pair("local", std::cref(local_engine)));
     }
     add_engines(auth_order, engine_map);
-
-    /* STS Auth*/
-    if (! sts_engine.is_empty()) {
-      add_engine(Control::SUFFICIENT, sts_engine);
-    }
   }
 
   const char* get_name() const noexcept override {
