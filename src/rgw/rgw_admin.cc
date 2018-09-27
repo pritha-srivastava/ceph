@@ -5898,7 +5898,7 @@ next:
       return ret;
     }
 
-    RGWBucketReshard br(store, bucket_info, attrs);
+    RGWBucketReshard br(store, bucket_info, attrs, nullptr /* no callback */);
 
 #define DEFAULT_RESHARD_MAX_ENTRIES 1000
     if (max_entries < 1) {
@@ -5984,7 +5984,6 @@ next:
     return 0;
   }
 
-
   if (opt_cmd == OPT_RESHARD_STATUS) {
     if (bucket_name.empty()) {
       cerr << "ERROR: bucket not specified" << std::endl;
@@ -6000,11 +5999,12 @@ next:
       return -ret;
     }
 
-    RGWBucketReshard br(store, bucket_info, attrs);
+    RGWBucketReshard br(store, bucket_info, attrs, nullptr /* no callback */);
     list<cls_rgw_bucket_instance_entry> status;
     int r = br.get_status(&status);
     if (r < 0) {
-      cerr << "ERROR: could not get resharding status for bucket " << bucket_name << std::endl;
+      cerr << "ERROR: could not get resharding status for bucket " <<
+	bucket_name << std::endl;
       return -r;
     }
 
@@ -6037,7 +6037,7 @@ next:
       return -ret;
     }
 
-    RGWBucketReshard br(store, bucket_info, attrs);
+    RGWBucketReshard br(store, bucket_info, attrs, nullptr /* no callback */);
     int ret = br.cancel();
     if (ret < 0) {
       if (ret == -EBUSY) {
