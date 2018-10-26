@@ -272,7 +272,7 @@ static optional<Policy> get_iam_policy_from_attr(CephContext* cct,
   }
 }
 
-static vector<Policy> get_iam_user_policy_from_attr(CephContext* cct,
+vector<Policy> get_iam_user_policy_from_attr(CephContext* cct,
                         RGWRados* store,
                         map<string, bufferlist>& attrs,
                         const string& tenant) {
@@ -1877,7 +1877,10 @@ int RGWGetObj::init_common()
 
 int RGWListBuckets::verify_permission()
 {
-  if (!verify_user_permission(s, ARN(), rgw::IAM::s3ListAllMyBuckets)) {
+  rgw::IAM::Partition partition = rgw::IAM::Partition::aws;
+  rgw::IAM::Service service = rgw::IAM::Service::s3;
+
+  if (!verify_user_permission(s, ARN(partition, service, "", s->user->user_id.tenant, "*"), rgw::IAM::s3ListAllMyBuckets)) {
     return -EACCES;
   }
 
@@ -2398,7 +2401,11 @@ int RGWCreateBucket::verify_permission()
     return -EACCES;
   }
 
-  if (!verify_user_permission(s, ARN(s->bucket), rgw::IAM::s3CreateBucket)) {
+  rgw_bucket bucket;
+  bucket.name = s->bucket_name;
+  bucket.tenant = s->bucket_tenant;
+  ARN arn = ARN(bucket);
+  if (!verify_user_permission(s, arn, rgw::IAM::s3CreateBucket)) {
     return -EACCES;
   }
 
