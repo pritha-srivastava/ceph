@@ -304,11 +304,10 @@ AssumeRoleResponse STSService::assumeRole(AssumeRoleRequest& req)
   }
 
   //Generate Credentials
-  //Role and Policy provide the authorization info, user id and
-  //applier info are not needed
-  ret = cred.generateCredentials(cct, req.getDuration(), req.getPolicy(),
-								 roleId, boost::none, nullptr);
-  if (ret < 0) {
+  //Role and Policy provide the authorization info, user id and applier info are not needed
+  if (ret = cred.generateCredentials(cct, req.getDuration(),
+                                      req.getPolicy(), roleId,
+                                      user_id, nullptr); ret < 0) {
     return make_tuple(ret, user, cred, packedPolicySize);
   }
 
