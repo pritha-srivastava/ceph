@@ -1,7 +1,7 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 #include <errno.h>
-#include <regex>
+#include <boost/regex.hpp>
 
 #include "common/errno.h"
 #include "common/Formatter.h"
@@ -63,8 +63,8 @@ bool RGWRestUserPolicy::validate_input()
     return false;
   }
 
-  std::regex regex_policy_name("[A-Za-z0-9:=,.@-]+");
-  if (! std::regex_match(policy_name, regex_policy_name)) {
+  boost::regex regex_policy_name("[A-Za-z0-9:=,.@-]+");
+  if (! boost::regex_match(policy_name, regex_policy_name)) {
     ldout(s->cct, 0) << "ERROR: Invalid chars in policy name " << dendl;
     return false;
   }

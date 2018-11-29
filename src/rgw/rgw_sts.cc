@@ -1,8 +1,8 @@
 #include <errno.h>
 #include <ctime>
-#include <regex>
 #include <boost/format.hpp>
 #include <boost/algorithm/string/replace.hpp>
+#include <boost/regex.hpp>
 
 #include "common/errno.h"
 #include "common/Formatter.h"
@@ -186,8 +186,8 @@ int AssumeRoleRequest::validate_input() const
       return -EINVAL;
     }
 
-    std::regex regex_externalId("[A-Za-z0-9_=,.@:/-]+");
-    if (! std::regex_match(externalId, regex_externalId)) {
+    boost::regex regex_externalId("[A-Za-z0-9_=,.@:/-]+");
+    if (! boost::regex_match(externalId, regex_externalId)) {
       return -EINVAL;
     }
   }
@@ -206,8 +206,8 @@ int AssumeRoleRequest::validate_input() const
       return -EINVAL;
     }
 
-    std::regex regex_roleSession("[A-Za-z0-9_=,.@-]+");
-    if (! std::regex_match(roleSessionName, regex_roleSession)) {
+    boost::regex regex_roleSession("[A-Za-z0-9_=,.@-]+");
+    if (! boost::regex_match(roleSessionName, regex_roleSession)) {
       return -EINVAL;
     }
   }
@@ -216,8 +216,8 @@ int AssumeRoleRequest::validate_input() const
       return -EINVAL;
     }
 
-    std::regex regex_serialNumber("[A-Za-z0-9_=/:,.@-]+");
-    if (! std::regex_match(serialNumber, regex_serialNumber)) {
+    boost::regex regex_serialNumber("[A-Za-z0-9_=/:,.@-]+");
+    if (! boost::regex_match(serialNumber, regex_serialNumber)) {
       return -EINVAL;
     }
   }
