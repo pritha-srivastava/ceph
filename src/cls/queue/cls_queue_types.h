@@ -6,16 +6,23 @@
 
 #include "rgw/rgw_basic_types.h"
 
+#define QUEUE_HEAD_SIZE 1024
+//Actual start offset of queue data
+#define QUEUE_START_OFFSET QUEUE_HEAD_SIZE
+
 struct cls_queue_head
 {
   uint64_t front{0};
   uint64_t tail{0};
   uint64_t size{0};
+  uint64_t last_entry_offset{0};
   bool is_empty{true};
+  bool has_urgent_data{false};
+  bufferlist bl_urgent_data;
 
   cls_queue_head() {
-    front += sizeof(cls_queue_head);
-    tail = front;
+    tail = front = QUEUE_START_OFFSET;
+    last_entry_offset = tail;
   }
 
   void encode(bufferlist& bl) const {
@@ -23,7 +30,10 @@ struct cls_queue_head
     encode(front, bl);
     encode(tail, bl);
     encode(size, bl);
+    encode(last_entry_offset, bl);
     encode(is_empty, bl);
+    encode(has_urgent_data, bl);
+    encode(bl_urgent_data, bl);
     ENCODE_FINISH(bl);
   }
 
@@ -32,7 +42,10 @@ struct cls_queue_head
     decode(front, bl);
     decode(tail, bl);
     decode(size, bl);
+    decode(last_entry_offset, bl);
     decode(is_empty, bl);
+    decode(has_urgent_data, bl);
+    decode(bl_urgent_data, bl);
     DECODE_FINISH(bl);
   }
 

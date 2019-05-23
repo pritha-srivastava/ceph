@@ -3,7 +3,7 @@
 
 #define QUEUE_CLASS "queue"
 
-#define CREATE_QUEUE "create_queue"
+#define GC_CREATE_QUEUE "create_queue"
 #define GET_QUEUE_SIZE "get_queue_size"
 #define GC_ENQUEUE "gc_enqueue"
 #define GC_DEQUEUE "gc_dequeue"
