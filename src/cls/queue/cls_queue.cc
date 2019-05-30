@@ -712,6 +712,39 @@ static int cls_queue_write_urgent_data(cls_method_context_t hctx, bufferlist *in
   return 0;
 }
 
+static int cls_queue_can_urgent_data_fit(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  bool can_fit = true;
+
+  // read the head
+  bufferlist bl_head;
+  int ret = cls_cxx_read2(hctx, 0, QUEUE_HEAD_SIZE, &bl_head, CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
+  if (ret < 0) {
+    return ret;
+  }
+  cls_queue_head head;
+  auto iter = bl_head.cbegin();
+  try {
+    decode(head, iter);
+  } catch (buffer::error& err) {
+    CLS_LOG(1, "ERROR: cls_queue_write_urgent_data: failed to decode entry %s\n", bl_head.c_str());
+    return -EINVAL;
+  }
+
+  head.has_urgent_data = true;
+  head.bl_urgent_data = *in;
+
+  bl_head.clear();
+  encode(head, bl_head);
+
+  if(bl_head.length() > QUEUE_HEAD_SIZE) {
+    can_fit = true;
+  }
+
+  encode(can_fit, *out);
+
+  return 0;
+}
 
 static int cls_gc_create_queue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
@@ -1048,27 +1081,7 @@ static int cls_gc_queue_update_entry(cls_method_context_t hctx, bufferlist *in, 
       return -EINVAL;
     }
   }
-#if 0
-  //Update or insert data in urgent data map
-  //cls_queue_write_urgent_data_op write_op;
-  auto it = urgent_data_map.find(op.info.tag);
-  if (it != urgent_data_map.end()) {
-    it->second = op.info.time;
-  } else {
-    urgent_data_map.insert({op.info.tag, op.info.time});
-    write_op.has_urgent_data = true;
-  }
 
-  //Write back urgent data
-  in->clear();
-  out->clear();
-  encode(urgent_data_map, write_op.bl_urgent_data);
-  encode(write_op, *in);
-  ret = cls_queue_write_urgent_data(hctx, in, out);
-  if (ret < 0) {
-    return ret;
-  }
-#endif
   bool is_last_entry = false;
   in->clear();
   out->clear();
@@ -1103,131 +1116,38 @@ static int cls_gc_queue_update_entry(cls_method_context_t hctx, bufferlist *in, 
     urgent_data_map.insert({op.info.tag, op.info.time});
     enqueue_op.has_urgent_data = true;
   }
+
   encode(urgent_data_map, enqueue_op.bl_urgent_data);
 
-  in->clear();
-  encode(enqueue_op, *in);
-  if (! is_last_entry) {
-    ret = cls_enqueue(hctx, in, out);
-    if (ret < 0) {
-      return ret;
-    }
-  } else {
-    ret = cls_queue_update_last_entry(hctx, in, out);
-    if (ret < 0) {
-      return ret;
+  out->clear();
+  bool can_fit = false;
+  ret = cls_queue_can_urgent_data_fit(hctx, &(enqueue_op.bl_urgent_data), out);
+  if (ret < 0) {
+     return ret;
+  }
+  iter = out->cbegin();
+  decode(can_fit, iter);
+  CLS_LOG(1, "INFO: Can urgent data fit: %d \n", can_fit);
+
+  if (can_fit) {
+    in->clear();
+    encode(enqueue_op, *in);
+    if (! is_last_entry) {
+      ret = cls_enqueue(hctx, in, out);
+      if (ret < 0) {
+        return ret;
+      }
+    } else {
+      ret = cls_queue_update_last_entry(hctx, in, out);
+      if (ret < 0) {
+        return ret;
+      }
     }
   }
-
+  // Else write urgent data to omap as xattrs
   return 0;
 }
-#if 0
-static int cls_gc_queue_update_entry(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
-{
-  int ret = 0;
-  auto in_iter = in->cbegin();
 
-  cls_gc_defer_entry_op op;
-  try {
-    decode(op, in_iter);
-  } catch (buffer::error& err) {
-    CLS_LOG(1, "ERROR: cls_gc_queue_update_entry(): failed to decode input\n");
-    return -EINVAL;
-  }
-
-  op.info.time = ceph::real_clock::now();
-  op.info.time += make_timespan(op.expiration_secs);
-
-  //Read urgent data
-  in->clear();
-  out->clear();
-  
-  ret = cls_queue_read_urgent_data(hctx, in, out);
-  
-  auto out_iter = out->cbegin();
-
-  cls_queue_urgent_data_ret op_ret;
-  try {
-    decode(op_ret, out_iter);
-  } catch (buffer::error& err) {
-    CLS_LOG(1, "ERROR: cls_queue_urgent_data_ret(): failed to decode ouput\n");
-    return -EINVAL;
-  }
-
-  auto bl_iter = op_ret.bl_urgent_data.cbegin();
-  std::unordered_map<string,ceph::real_time> urgent_data_map;
-  if (op_ret.has_urgent_data) {
-    try {
-      decode(urgent_data_map, bl_iter);
-    } catch (buffer::error& err) {
-      CLS_LOG(1, "ERROR: cls_queue_urgent_data_ret(): failed to decode urgent data map\n");
-      return -EINVAL;
-    }
-  }
-
-  //Update or insert data in urgent data map
-  cls_queue_write_urgent_data_op write_op;
-  auto it = urgent_data_map.find(op.info.tag);
-  if (it != urgent_data_map.end()) {
-    it->second = op.info.time;
-  } else {
-    urgent_data_map.insert({op.info.tag, op.info.time});
-    write_op.has_urgent_data = true;
-  }
-
-  //Write back urgent data
-  in->clear();
-  out->clear();
-  encode(urgent_data_map, write_op.bl_urgent_data);
-  encode(write_op, *in);
-  ret = cls_queue_write_urgent_data(hctx, in, out);
-  if (ret < 0) {
-    return ret;
-  }
-
-  bool is_last_entry = false;
-  in->clear();
-  out->clear();
-  ret = cls_queue_get_last_entry(hctx, in, out);
-  if (ret < 0) {
-    return ret;
-  }
-
-  cls_rgw_gc_obj_info info;
-  auto iter = out->cbegin();
-  try {
-    decode(info, iter);
-  } catch (buffer::error& err) {
-    CLS_LOG(1, "ERROR: cls_gc_queue_update_entry(): failed to decode entry\n");
-    return -EINVAL;
-  }
-
-  CLS_LOG(1, "INFO: tag of gc info is %s\n", info.tag.c_str());
-  if (info.tag == op.info.tag) {
-    is_last_entry = true;
-  }
-
-  cls_rgw_queue_data data;
-  encode(op.info, data.bl_data);
-  data.size_data = data.bl_data.length();
-  CLS_LOG(1, "INFO: cls_gc_update_entry: Data size is: %lu \n", data.size_data);
-  in->clear();
-  encode(data, *in);
-  if (! is_last_entry) {
-    ret = cls_enqueue(hctx, in, out);
-    if (ret < 0) {
-      return ret;
-    }
-  } else {
-    ret = cls_queue_update_last_entry(hctx, in, out);
-    if (ret < 0) {
-      return ret;
-    }
-  }
-
-  return 0;
-}
-#endif
 CLS_INIT(queue)
 {
   CLS_LOG(1, "Loaded queue class!");
