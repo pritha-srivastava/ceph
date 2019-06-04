@@ -273,7 +273,12 @@ static int cls_dequeue(cls_method_context_t hctx, bufferlist *in, bufferlist *ou
       if (ret < 0) {
         return ret;
       }
-      decode(data_size, bl_size);
+      try {
+        decode(data_size, bl_size);
+      } catch (buffer::error& err) {
+        CLS_LOG(1, "ERROR: cls_dequeue: failed to decode data size \n");
+        return -EINVAL;
+      }
       CLS_LOG(1, "INFO: cls_dequeue: Data size: %lu, front offset: %lu\n", data_size, head.front);
     }
     //Read data
@@ -881,13 +886,42 @@ static int cls_gc_queue_list(cls_method_context_t hctx, bufferlist *in, bufferli
     if (op_ret.data.size()) {
       for (auto it : op_ret.data) {
         cls_rgw_gc_obj_info info;
-        decode(info, it);
+        try {
+          decode(info, it);
+        } catch (buffer::error& err) {
+          CLS_LOG(1, "ERROR: cls_gc_queue_list(): failed to decode gc info\n");
+          return -EINVAL;
+        }
         //Check for info tag in urgent data map
         if (urgent_data_map.size() > 0) {
           auto found = urgent_data_map.find(info.tag);
-          if (found != urgent_data_map.end() && found->second > info.time) {
-            CLS_LOG(1, "INFO: cls_gc_queue_list(): tag found in urgent data: %s\n", info.tag.c_str());
-            continue;
+          if (found != urgent_data_map.end()) {
+            if (found->second > info.time) {
+              CLS_LOG(1, "INFO: cls_gc_queue_list(): tag found in urgent data: %s\n", info.tag.c_str());
+              continue;
+            }
+          }
+        } else {
+          //Search in xattrs
+          bufferlist bl_time;
+          int ret = cls_cxx_getxattr(hctx, info.tag.c_str(), &bl_time);
+          if (ret < 0 && (ret != -ENOENT && ret != -ENODATA)) {
+            CLS_LOG(0, "ERROR: %s(): cls_cxx_getxattrs() returned %d", __func__, ret);
+            return ret;
+          }
+          if (ret != -ENOENT && ret != -ENODATA) {
+            ceph::real_time expiration_time;
+            auto iter = bl_time.cbegin();
+            try {
+              decode(expiration_time, iter);
+            } catch (buffer::error& err) {
+              CLS_LOG(1, "ERROR: cls_gc_queue_list(): failed to decode expiration time\n");
+              return -EINVAL;
+            }
+            if (expiration_time > info.time) {
+              CLS_LOG(1, "INFO: cls_gc_queue_list(): tag found in xattrs: %s\n", info.tag.c_str());
+              continue;
+            }
           }
         }
         if (op.expired_only) {
@@ -975,16 +1009,27 @@ static int cls_gc_queue_remove(cls_method_context_t hctx, bufferlist *in, buffer
 
     if (op_ret.has_urgent_data && ! urgent_data_decoded) {
       auto iter_urgent_data = op_ret.bl_urgent_data.cbegin();
-      decode(urgent_data_map, iter_urgent_data);
+      try {
+        decode(urgent_data_map, iter_urgent_data);
+      } catch (buffer::error& err) {
+        CLS_LOG(1, "ERROR: cls_gc_queue_list(): failed to decode urgent data map\n");
+        return -EINVAL;
+      }
       urgent_data_decoded = true;
     }
     // If data is not empty
     if (op_ret.data.size()) {
       for (auto it : op_ret.data) {
         cls_rgw_gc_obj_info info;
-        decode(info, it);
+        try {
+          decode(info, it);
+        } catch (buffer::error& err) {
+          CLS_LOG(1, "ERROR: cls_gc_queue_remove(): failed to decode gc info\n");
+          return -EINVAL;
+        }
         CLS_LOG(1, "INFO: cls_gc_queue_remove(): entry: %s\n", info.tag.c_str());
         total_num_entries++;
+        //Search for tag in urgent data map
         if (urgent_data_map.size() > 0) {
           auto found = urgent_data_map.find(info.tag);
           if (found != urgent_data_map.end()) {
@@ -997,7 +1042,32 @@ static int cls_gc_queue_remove(cls_method_context_t hctx, bufferlist *in, buffer
             }
           }//end-if map end
         }//end-if urgent data
-          num_entries++;
+        else {
+          //Search in xattrs
+          ceph::real_time expiration_time;
+          bufferlist bl_time;
+          int ret = cls_cxx_getxattr(hctx, info.tag.c_str(), &bl_time);
+          if (ret < 0 && (ret != -ENOENT && ret != -ENODATA)) {
+            CLS_LOG(0, "ERROR: %s(): cls_cxx_getxattrs() returned %d", __func__, ret);
+            return ret;
+          }
+          if (ret != -ENOENT && ret != -ENODATA) {
+            auto iter = bl_time.cbegin();
+            try {
+              decode(expiration_time, iter);
+            } catch (buffer::error& err) {
+              CLS_LOG(1, "ERROR: cls_gc_queue_remove(): failed to decode expiration time\n");
+              return -EINVAL;
+            }
+            CLS_LOG(1, "INFO: cls_gc_queue_remove(): tag found in xattrs: %s\n", info.tag.c_str());
+            if (expiration_time > info.time) {
+              continue;
+            } else if (expiration_time == info.time) {
+              //remove from xattrs
+            }
+          }
+        }
+        num_entries++;
       }//end-for
       if (num_entries < op.num_entries) {
         list_op.max = (op.num_entries - num_entries);
@@ -1145,6 +1215,16 @@ static int cls_gc_queue_update_entry(cls_method_context_t hctx, bufferlist *in, 
     }
   }
   // Else write urgent data to omap as xattrs
+  else {
+    bufferlist bl_time;
+    encode(op.info.tag, bl_time);
+    ret = cls_cxx_setxattr(hctx, op.info.tag.c_str(), &bl_time);
+    CLS_LOG(20, "%s(): setting attr: %s", __func__, op.info.tag.c_str());
+    if (ret < 0) {
+      CLS_LOG(0, "ERROR: %s(): cls_cxx_setxattr (attr=%s) returned %d", __func__, op.info.tag.c_str(), ret);
+      return ret;
+    }
+  }
   return 0;
 }
 

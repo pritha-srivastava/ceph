@@ -498,6 +498,7 @@ TEST(cls_queue, gc_queue_ops6)
   ASSERT_EQ(1, list_info1.size());
 
 }
+
 /* must be last test! */
 TEST(cls_queue, finalize)
 {
