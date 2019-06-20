@@ -62,20 +62,20 @@ static bool cmp_objs(cls_rgw_obj& obj1, cls_rgw_obj& obj2)
          (obj1.key == obj2.key) &&
          (obj1.loc == obj2.loc);
 }
-
+#if 1
 TEST(cls_queue, gc_queue_ops1)
 {
   //Testing queue ops when data size is NOT a multiple of queue size
   string queue_name = "my-queue";
-  uint64_t queue_size = (1024 + 320), num_urgent_data_entries = 10;
+  uint64_t queue_size = 320, num_urgent_data_entries = 10;
   librados::ObjectWriteOperation op;
   cls_rgw_gc_create_queue(op, queue_name, queue_size, num_urgent_data_entries);
   ASSERT_EQ(0, ioctx.operate(queue_name, &op));
 
   uint64_t size = 0;
   int ret = cls_rgw_gc_get_queue_size(ioctx, queue_name, size);
-  std::cerr << "[          ] queue size = " << size << std::endl;
   ASSERT_EQ(0, ret);
+  ASSERT_EQ(queue_size, size);
 
   //Test Dequeue, when Queue is empty
   cls_rgw_gc_obj_info deq_info;
@@ -137,15 +137,15 @@ TEST(cls_queue, gc_queue_ops2)
 {
   //Testing queue ops when data size is a multiple of queue size
   string queue_name = "my-second-queue";
-  uint64_t queue_size = (1024 + 330), num_urgent_data_entries = 10;
+  uint64_t queue_size = 330, num_urgent_data_entries = 10;
   librados::ObjectWriteOperation op;
   cls_rgw_gc_create_queue(op, queue_name, queue_size, num_urgent_data_entries);
   ASSERT_EQ(0, ioctx.operate(queue_name, &op));
 
   uint64_t size = 0;
   int ret = cls_rgw_gc_get_queue_size(ioctx, queue_name, size);
-  std::cerr << "[          ] queue size = " << size << std::endl;
   ASSERT_EQ(0, ret);
+  ASSERT_EQ(size, queue_size);
 
   //Test enqueue
   for (int i = 0; i < 3; i++) {
@@ -202,15 +202,15 @@ TEST(cls_queue, gc_queue_ops3)
 {
   //Testing list queue
   string queue_name = "my-third-queue";
-  uint64_t queue_size = (1024 + 330), num_urgent_data_entries = 10;
+  uint64_t queue_size = 330, num_urgent_data_entries = 10;
   librados::ObjectWriteOperation op;
   cls_rgw_gc_create_queue(op, queue_name, queue_size, num_urgent_data_entries);
   ASSERT_EQ(0, ioctx.operate(queue_name, &op));
 
   uint64_t size = 0;
   int ret = cls_rgw_gc_get_queue_size(ioctx, queue_name, size);
-  std::cerr << "[          ] queue size = " << size << std::endl;
   ASSERT_EQ(0, ret);
+  ASSERT_EQ(size, queue_size);
 
   //Test list queue, when queue is empty
   list<cls_rgw_gc_obj_info> list_info;
@@ -281,22 +281,22 @@ TEST(cls_queue, gc_queue_ops4)
 {
   //Testing remove queue entries
   string queue_name = "my-fourth-queue";
-  uint64_t queue_size = (1024 + 495), num_urgent_data_entries = 10;
+  uint64_t queue_size = 495, num_urgent_data_entries = 10;
   librados::ObjectWriteOperation op;
   cls_rgw_gc_create_queue(op, queue_name, queue_size, num_urgent_data_entries);
   ASSERT_EQ(0, ioctx.operate(queue_name, &op));
 
   uint64_t size = 0;
   int ret = cls_rgw_gc_get_queue_size(ioctx, queue_name, size);
-  std::cerr << "[          ] queue size = " << size << std::endl;
   ASSERT_EQ(0, ret);
+  ASSERT_EQ(size, queue_size);
 
   //Test remove queue, when queue is empty
   librados::ObjectWriteOperation remove_op;
   string marker1;
   uint64_t num_entries = 2;
-  cls_rgw_gc_remove_queue(remove_op,  marker1, num_entries);
-  ASSERT_EQ(0, ioctx.operate(queue_name, &remove_op));
+  cls_rgw_gc_remove_queue(remove_op, marker1, num_entries);
+  ASSERT_EQ(-ENOENT, ioctx.operate(queue_name, &remove_op));
 
   cls_rgw_gc_obj_info defer_info;
 
@@ -327,7 +327,7 @@ TEST(cls_queue, gc_queue_ops4)
   ASSERT_EQ(0, ioctx.operate(queue_name, &defer_op));
 
   //Test list queue
-  list<cls_rgw_gc_obj_info> list_info1, list_info2, list_info3;
+  list<cls_rgw_gc_obj_info> list_info1, list_info2;
   string marker, next_marker;
   uint64_t max = 2;
   bool expired_only = false, truncated;
@@ -352,31 +352,33 @@ TEST(cls_queue, gc_queue_ops4)
   ASSERT_EQ(0, ioctx.operate(queue_name, &remove_op));
 
   //Test list queue again
-  cls_rgw_gc_list_queue(ioctx, queue_name, marker, max, expired_only, list_info1, &truncated, next_marker);
-  ASSERT_EQ(0, list_info1.size());
+  cls_rgw_gc_list_queue(ioctx, queue_name, marker, max, expired_only, list_info2, &truncated, next_marker);
+  ASSERT_EQ(0, list_info2.size());
 
 }
+
 
 TEST(cls_queue, gc_queue_ops5)
 {
   //Testing remove queue entries
   string queue_name = "my-fifth-queue";
-  uint64_t queue_size = (1024 + 495), num_urgent_data_entries = 10;
+  uint64_t queue_size = 495, num_urgent_data_entries = 10;
   librados::ObjectWriteOperation op;
   cls_rgw_gc_create_queue(op, queue_name, queue_size, num_urgent_data_entries);
   ASSERT_EQ(0, ioctx.operate(queue_name, &op));
 
   uint64_t size = 0;
   int ret = cls_rgw_gc_get_queue_size(ioctx, queue_name, size);
-  std::cerr << "[          ] queue size = " << size << std::endl;
   ASSERT_EQ(0, ret);
+  ASSERT_EQ(size, queue_size);
 
   //Test remove queue, when queue is empty
   librados::ObjectWriteOperation remove_op;
   string marker1;
   uint64_t num_entries = 2;
+
   cls_rgw_gc_remove_queue(remove_op,  marker1, num_entries);
-  ASSERT_EQ(0, ioctx.operate(queue_name, &remove_op));
+  ASSERT_EQ(-ENOENT, ioctx.operate(queue_name, &remove_op));
 
   cls_rgw_gc_obj_info defer_info;
 
@@ -406,7 +408,7 @@ TEST(cls_queue, gc_queue_ops5)
   ASSERT_EQ(0, ioctx.operate(queue_name, &defer_op));
 
   //Test list queue
-  list<cls_rgw_gc_obj_info> list_info1, list_info2, list_info3;
+  list<cls_rgw_gc_obj_info> list_info1, list_info2;
   string marker, next_marker;
   uint64_t max = 2;
   bool expired_only = false, truncated;
@@ -428,24 +430,25 @@ TEST(cls_queue, gc_queue_ops5)
   ASSERT_EQ(0, ioctx.operate(queue_name, &remove_op));
 
   //Test list queue again
-  cls_rgw_gc_list_queue(ioctx, queue_name, marker, max, expired_only, list_info1, &truncated, next_marker);
-  ASSERT_EQ(0, list_info1.size());
+  cls_rgw_gc_list_queue(ioctx, queue_name, marker, max, expired_only, list_info2, &truncated, next_marker);
+  ASSERT_EQ(0, list_info2.size());
 
 }
+#endif
 
 TEST(cls_queue, gc_queue_ops6)
 {
   //Testing remove queue entries
   string queue_name = "my-sixth-queue";
-  uint64_t queue_size = (1024 + 495), num_urgent_data_entries = 10;
+  uint64_t queue_size = 495, num_urgent_data_entries = 10;
   librados::ObjectWriteOperation op;
   cls_rgw_gc_create_queue(op, queue_name, queue_size, num_urgent_data_entries);
   ASSERT_EQ(0, ioctx.operate(queue_name, &op));
 
   uint64_t size = 0;
   int ret = cls_rgw_gc_get_queue_size(ioctx, queue_name, size);
-  std::cerr << "[          ] queue size = " << size << std::endl;
   ASSERT_EQ(0, ret);
+  ASSERT_EQ(size, queue_size);
 
   //Test enqueue
   for (int i = 0; i < 3; i++) {
@@ -470,7 +473,7 @@ TEST(cls_queue, gc_queue_ops6)
     ASSERT_EQ(0, ioctx.operate(queue_name, &op));
   }
   //Test list queue for expired entries only
-  list<cls_rgw_gc_obj_info> list_info1;
+  list<cls_rgw_gc_obj_info> list_info1, list_info2;
   string marker, next_marker, marker1;
   uint64_t max = 10;
   bool expired_only = true, truncated;
@@ -494,8 +497,8 @@ TEST(cls_queue, gc_queue_ops6)
 
   //Test list queue again for all entries
   expired_only = false;
-  cls_rgw_gc_list_queue(ioctx, queue_name, marker, max, expired_only, list_info1, &truncated, next_marker);
-  ASSERT_EQ(1, list_info1.size());
+  cls_rgw_gc_list_queue(ioctx, queue_name, marker, max, expired_only, list_info2, &truncated, next_marker);
+  ASSERT_EQ(1, list_info2.size());
 
 }
 
