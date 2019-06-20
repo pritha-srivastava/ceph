@@ -271,7 +271,6 @@ if (WITH_RADOSGW)
     queue/cls_queue_types.cc
     ${CMAKE_SOURCE_DIR}/src/common/ceph_json.cc)
   add_library(cls_queue SHARED ${cls_queue_srcs})
-  target_link_libraries(cls_queue json_spirit)
   set_target_properties(cls_queue PROPERTIES
     VERSION "1.0.0"
     SOVERSION "1"

@@ -75,7 +75,7 @@ int cls_rgw_gc_list_queue(IoCtx& io_ctx, string& oid, string& marker, uint32_t m
   op.expired_only = expired_only;
   encode(op, in);
 
-  int r = io_ctx.exec(oid, QUEUE_CLASS, GC_QUEUE_LIST, in, out);
+  int r = io_ctx.exec(oid, QUEUE_CLASS, GC_QUEUE_LIST_ENTRIES, in, out);
   if (r < 0)
     return r;
 
@@ -104,7 +104,7 @@ void cls_rgw_gc_remove_queue(ObjectWriteOperation& op, string& marker, uint32_t 
   rem_op.marker = marker;
   rem_op.num_entries = num_entries;
   encode(rem_op, in);
-  op.exec(QUEUE_CLASS, GC_QUEUE_REMOVE, in);
+  op.exec(QUEUE_CLASS, GC_QUEUE_REMOVE_ENTRIES, in);
 }
 
 void cls_rgw_gc_defer_entry_queue(ObjectWriteOperation& op, uint32_t expiration_secs, cls_rgw_gc_obj_info& info)
@@ -114,5 +114,5 @@ void cls_rgw_gc_defer_entry_queue(ObjectWriteOperation& op, uint32_t expiration_
   defer_op.expiration_secs = expiration_secs;
   defer_op.info = info;
   encode(defer_op, in);
-  op.exec(QUEUE_CLASS, GC_QUEUE_UPDATE, in);
+  op.exec(QUEUE_CLASS, GC_QUEUE_UPDATE_ENTRY, in);
 }

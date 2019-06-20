@@ -20,14 +20,3 @@ void cls_queue_head::generate_test_instances(list<cls_queue_head*>& ls)
   ls.push_back(new cls_queue_head);
   ls.push_back(new cls_queue_head);
 }
-
-void cls_rgw_queue_data::dump(Formatter *f) const
-{
-  f->dump_unsigned("size_data", size_data);
-}
-
-void cls_rgw_queue_data::generate_test_instances(list<cls_rgw_queue_data*>& ls)
-{
-  ls.push_back(new cls_rgw_queue_data);
-  ls.push_back(new cls_rgw_queue_data);
-}

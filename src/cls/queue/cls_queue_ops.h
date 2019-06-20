@@ -107,6 +107,7 @@ struct cls_queue_list_ret {
   bool is_truncated;
   uint64_t next_offset;
   vector<bufferlist> data;
+  vector<uint64_t> offsets;
   bool has_urgent_data;
   bufferlist bl_urgent_data;
 
@@ -117,6 +118,7 @@ struct cls_queue_list_ret {
     encode(is_truncated, bl);
     encode(next_offset, bl);
     encode(data, bl);
+    encode(offsets, bl);
     encode(has_urgent_data, bl);
     encode(bl_urgent_data, bl);
     ENCODE_FINISH(bl);
@@ -127,6 +129,7 @@ struct cls_queue_list_ret {
     decode(is_truncated, bl);
     decode(next_offset, bl);
     decode(data, bl);
+    decode(offsets, bl);
     decode(has_urgent_data, bl);
     decode(bl_urgent_data, bl);
     DECODE_FINISH(bl);
@@ -135,8 +138,8 @@ struct cls_queue_list_ret {
 WRITE_CLASS_ENCODER(cls_queue_list_ret)
 
 struct cls_queue_remove_op {
-  uint64_t num_entries;
   uint64_t start_offset;
+  uint64_t end_offset;
   bool has_urgent_data;
   bufferlist bl_urgent_data;
 
@@ -144,8 +147,8 @@ struct cls_queue_remove_op {
 
   void encode(bufferlist& bl) const {
     ENCODE_START(1, 1, bl);
-    encode(num_entries, bl);
     encode(start_offset, bl);
+    encode(end_offset, bl);
     encode(has_urgent_data, bl);
     encode(bl_urgent_data, bl);
     ENCODE_FINISH(bl);
@@ -153,8 +156,8 @@ struct cls_queue_remove_op {
 
   void decode(bufferlist::const_iterator& bl) {
     DECODE_START(1, bl);
-    decode(num_entries, bl);
     decode(start_offset, bl);
+    decode(end_offset, bl);
     decode(has_urgent_data, bl);
     decode(bl_urgent_data, bl);
     DECODE_FINISH(bl);
