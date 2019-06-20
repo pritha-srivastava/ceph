@@ -607,7 +607,27 @@ static int cls_queue_remove_entries(cls_method_context_t hctx, bufferlist *in, b
     return -EINVAL;
   }
 
-  head.front = op.end_offset + sizeof(uint64_t) + data_size;
+  //offset obtained by adding last entry's size
+  uint64_t end_offset = op.end_offset + sizeof(uint64_t) + data_size;
+
+  //Zero out the entries that have been removed, to reclaim storage space
+  if (end_offset > op.start_offset) {
+    ret = cls_cxx_write_zero(hctx, op.start_offset, (end_offset - op.start_offset));
+    if (ret < 0) {
+      return ret;
+    }
+  } else { //start offset > end offset
+    ret = cls_cxx_write_zero(hctx, op.start_offset, (head.size - op.start_offset));
+    if (ret < 0) {
+      return ret;
+    }
+    ret = cls_cxx_write_zero(hctx, QUEUE_START_OFFSET, (end_offset - QUEUE_START_OFFSET));
+    if (ret < 0) {
+      return ret;
+    }
+  }
+
+  head.front = end_offset;
 
   // Check if it is the end, then wrap around
   if (head.front == head.size) {
