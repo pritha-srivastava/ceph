@@ -49,25 +49,4 @@ struct cls_queue_head
 };
 WRITE_CLASS_ENCODER(cls_queue_head)
 
-struct cls_rgw_queue_data
-{
-  bufferlist bl_data;
-
-  cls_rgw_queue_data() {}
-
-  void encode(bufferlist& bl) const {
-    ENCODE_START(1, 1, bl);
-    encode(bl_data, bl);
-    ENCODE_FINISH(bl);
-  }
-
-  void decode(bufferlist::const_iterator& bl) {
-    DECODE_START(1, bl);
-    decode(bl_data, bl);
-    DECODE_FINISH(bl);
-  }
-};
-WRITE_CLASS_ENCODER(cls_rgw_queue_data)
-
-
 #endif
