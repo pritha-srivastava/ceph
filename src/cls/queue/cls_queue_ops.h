@@ -28,18 +28,21 @@ WRITE_CLASS_ENCODER(cls_gc_create_queue_op)
 
 struct cls_create_queue_op {
   cls_queue_head head;
+  uint64_t head_size{0};
 
   cls_create_queue_op() {}
 
   void encode(bufferlist& bl) const {
     ENCODE_START(1, 1, bl);
     encode(head, bl);
+    encode(head_size, bl);
     ENCODE_FINISH(bl);
   }
 
   void decode(bufferlist::const_iterator& bl) {
     DECODE_START(1, bl);
     decode(head, bl);
+    decode(head_size, bl);
     DECODE_FINISH(bl);
   }
 
