@@ -2,6 +2,7 @@
 #define CEPH_CLS_QUEUE_CONSTS_H
 
 #define QUEUE_CLASS "queue"
+#define RGW_QUEUE_CLASS "rgw_queue"
 
 #define CREATE_QUEUE "create_queue"
 #define GET_QUEUE_SIZE "get_queue_size"
