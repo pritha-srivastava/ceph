@@ -52,13 +52,15 @@ int cls_create_queue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
     CLS_LOG(0, "ERROR: %s(): cls_cxx_create returned %d", __func__, ret);
     return ret;
   }
+  
+  CLS_LOG(10, "INFO: cls_create_queue create queue of head size %lu", op.head_size);
   CLS_LOG(10, "INFO: cls_create_queue create queue of size %lu", op.head.size);
-  CLS_LOG(10, "INFO: cls_create_queue: Is urgent data present: %d\n", op.head.num_urgent_data_entries);
 
   uint64_t head_size = QUEUE_HEAD_SIZE_1K;
 
-  if (op.head.num_head_urgent_entries) {
-    if (! op.head_size) {
+  if (op.head.has_urgent_data) {
+    op.head.has_urgent_data = true;
+    if (op.head_size == 0) {
       head_size = QUEUE_HEAD_SIZE_4K;
       op.head.tail = op.head.front = QUEUE_START_OFFSET_4K;
       op.head.last_entry_offset = QUEUE_START_OFFSET_4K;
@@ -250,8 +252,7 @@ int cls_enqueue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
   head.is_empty = false;
 
   //Update urgent data if set
-  if (op.has_urgent_data) {
-    head.has_urgent_data = true;
+  if (op.bl_urgent_data.length() > 0) {
     head.bl_urgent_data = op.bl_urgent_data;
   }
 
@@ -456,8 +457,8 @@ int cls_queue_list_entries(cls_method_context_t hctx, bufferlist *in, bufferlist
   cls_queue_list_ret op_ret;
   CLS_LOG(1, "INFO: cls_queue_list_entries: Is urgent data present: %d\n", head.has_urgent_data);
   //Info related to urgent data
-  op_ret.has_urgent_data = head.has_urgent_data;
   op_ret.bl_urgent_data = head.bl_urgent_data;
+
   if ((head.front == head.tail) && head.is_empty) {
     op_ret.is_truncated = false;
     encode(op_ret, *out);
@@ -721,8 +722,9 @@ int cls_queue_remove_entries(cls_method_context_t hctx, bufferlist *in, bufferli
   }
 
   //Update urgent data map
-  head.bl_urgent_data = op.bl_urgent_data;
-  head.has_urgent_data = op.has_urgent_data;
+  if (op.bl_urgent_data.length() > 0) {
+    head.bl_urgent_data = op.bl_urgent_data;
+  }
 
   //Write head back
   bl_head.clear();
@@ -834,8 +836,7 @@ int cls_queue_update_last_entry(cls_method_context_t hctx, bufferlist *in, buffe
     return ret;
   }
 
-  if (op.has_urgent_data) {
-    head.has_urgent_data = true;
+  if (op.bl_urgent_data.length() > 0) {
     head.bl_urgent_data = op.bl_urgent_data;
   }
 
@@ -877,11 +878,9 @@ int cls_queue_read_urgent_data(cls_method_context_t hctx, bufferlist *in, buffer
   CLS_LOG(1, "INFO: cls_queue_read_urgent_data: tail offset %lu\n", head.tail);
 
   cls_queue_urgent_data_ret op_ret;
-  if(head.has_urgent_data) {
-    op_ret.has_urgent_data = true;
-    op_ret.bl_urgent_data = head.bl_urgent_data;
-  }
-
+  
+  op_ret.bl_urgent_data = head.bl_urgent_data;
+  
   encode(op_ret, *out);
 
   return 0;
@@ -923,7 +922,6 @@ int cls_queue_write_urgent_data(cls_method_context_t hctx, bufferlist *in, buffe
     return -EINVAL;
   }
   //Write urgent data
-  head.has_urgent_data = op.has_urgent_data;
   head.bl_urgent_data = op.bl_urgent_data;
 
   //Write head back
@@ -965,7 +963,6 @@ int cls_queue_can_urgent_data_fit(cls_method_context_t hctx, bufferlist *in, buf
     return -EINVAL;
   }
 
-  head.has_urgent_data = true;
   head.bl_urgent_data = *in;
 
   bl_head.clear();

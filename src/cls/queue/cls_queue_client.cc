@@ -3,6 +3,7 @@
 #include <errno.h>
 
 #include "cls/rgw/cls_rgw_ops.h"
+#include "cls/queue/cls_rgw_queue_ops.h"
 #include "cls/queue/cls_queue_const.h"
 #include "cls/queue/cls_queue_client.h"
 
