@@ -34,6 +34,45 @@ static int get_queue_head_size(cls_method_context_t hctx, uint64_t& head_size)
   return 0;
 }
 
+static int get_queue_head_and_size(cls_method_context_t hctx, cls_queue_head& head, uint64_t& head_size)
+{
+  //read head size
+  bufferlist bl_head_size;
+  int ret = cls_cxx_read(hctx, 0, sizeof(uint64_t), &bl_head_size);
+  if (ret < 0) {
+    CLS_LOG(0, "ERROR: get_queue_head_and_size: failed to read head\n");
+    return ret;
+  }
+  //decode head size
+  auto iter = bl_head_size.cbegin();
+  try {
+    decode(head_size, iter);
+  } catch (buffer::error& err) {
+    CLS_LOG(0, "ERROR: get_queue_head_and_size: failed to decode head size \n");
+    return -EINVAL;
+  }
+
+  CLS_LOG(10, "INFO: get_queue_head_and_size: head size is %lu\n", head_size);
+
+  // read the head
+  bufferlist bl_head;
+  ret = cls_cxx_read2(hctx, sizeof(uint64_t), (head_size - sizeof(uint64_t)), &bl_head, CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
+  if (ret < 0) {
+    return ret;
+  }
+
+  //decode head
+  iter = bl_head.cbegin();
+  try {
+    decode(head, iter);
+  } catch (buffer::error& err) {
+    CLS_LOG(1, "ERROR: get_queue_head_and_size: failed to decode head\n");
+    return -EINVAL;
+  }
+
+  return 0;
+}
+
 int cls_create_queue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
   auto in_iter = in->cbegin();
@@ -103,26 +142,12 @@ int cls_create_queue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 
 int cls_get_queue_size(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
-  //get head size
+  //get head and its size
   uint64_t head_size = 0;
-  int ret = get_queue_head_size(hctx, head_size);
-  if (ret < 0) {
-    return ret;
-  }
-
-  // read the head
   cls_queue_head head;
-  bufferlist bl_head;
-  ret = cls_cxx_read2(hctx, sizeof(uint64_t), (head_size - sizeof(uint64_t)), &bl_head, CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
+  int ret = get_queue_head_and_size(hctx, head, head_size);
   if (ret < 0) {
     return ret;
-  }
-
-  try {
-    decode(head, bl_head);
-  } catch (buffer::error& err) {
-    CLS_LOG(1, "ERROR: cls_get_queue_size: failed to decode entry\n");
-    return -EINVAL;
   }
 
   head.size -= head_size;
@@ -136,28 +161,12 @@ int cls_get_queue_size(cls_method_context_t hctx, bufferlist *in, bufferlist *ou
 
 int cls_enqueue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
-  //get head size
+  //get head and its size
   uint64_t head_size = 0;
-  int ret = get_queue_head_size(hctx, head_size);
-  if (ret < 0) {
-    return ret;
-  }
-
-  CLS_LOG(1, "INFO: cls_enqueue: Read Head of size: %lu\n", head_size);
-  // read the head
-  bufferlist bl_head;
-  ret = cls_cxx_read2(hctx, sizeof(uint64_t), (head_size - sizeof(uint64_t)), &bl_head, CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
-  if (ret < 0) {
-    return ret;
-  }
-
   cls_queue_head head;
-  auto iter = bl_head.cbegin();
-  try {
-    decode(head, iter);
-  } catch (buffer::error& err) {
-    CLS_LOG(1, "ERROR: cls_enqueue: failed to decode head\n");
-    return -EINVAL;
+  int ret = get_queue_head_and_size(hctx, head, head_size);
+  if (ret < 0) {
+    return ret;
   }
 
   if (head.front == head.tail && ! head.is_empty) {
@@ -165,7 +174,7 @@ int cls_enqueue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
     return -ENOSPC;
   }
 
-  iter = in->cbegin();
+  auto iter = in->cbegin();
   cls_enqueue_op op;
   try {
     decode(op, iter);
@@ -217,7 +226,7 @@ int cls_enqueue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
           if (ret < 0) {
             return ret;
           }
-          head.tail = bl.length();
+          head.tail += bl.length();
         }
         else {
           CLS_LOG(1, "ERROR: No space left in queue\n");
@@ -242,7 +251,6 @@ int cls_enqueue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
       }
     }
 
-    bl_head.clear();
     if (head.tail == head.size) {
       head.tail = head_size;
     }
@@ -256,6 +264,7 @@ int cls_enqueue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
     head.bl_urgent_data = op.bl_urgent_data;
   }
 
+  bufferlist bl_head;
   encode(head, bl_head);
   CLS_LOG(1, "INFO: cls_enqueue: Writing head of size: %u \n", bl_head.length());
   ret = cls_cxx_write2(hctx, sizeof(uint64_t), bl_head.length(), &bl_head, CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
@@ -269,27 +278,12 @@ int cls_enqueue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 
 int cls_dequeue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
-  //get head size
+  //get head and its size
   uint64_t head_size = 0;
-  int ret = get_queue_head_size(hctx, head_size);
-  if (ret < 0) {
-    return ret;
-  }
-
-  CLS_LOG(1, "INFO: cls_dequeue: Reading head of size: %lu\n", head_size);
-  // read the head
-  bufferlist bl_head;
-  ret = cls_cxx_read2(hctx, sizeof(uint64_t), (head_size - sizeof(uint64_t)), &bl_head, CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
-  if (ret < 0) {
-    return ret;
-  }
   cls_queue_head head;
-  auto iter = bl_head.cbegin();
-  try {
-    decode(head, iter);
-  } catch (buffer::error& err) {
-    CLS_LOG(1, "ERROR: cls_dequeue: failed to decode entry %s\n", bl_head.c_str());
-    return -EINVAL;
+  int ret = get_queue_head_and_size(hctx, head, head_size);
+  if (ret < 0) {
+    return ret;
   }
 
   if (head.front == head.tail && head.is_empty) {
@@ -306,7 +300,7 @@ int cls_dequeue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
     if (ret < 0) {
       return ret;
     }
-    iter = bl_size.cbegin();
+    auto iter = bl_size.cbegin();
     try {
       decode(data_size, iter);
     } catch (buffer::error& err) {
@@ -340,7 +334,7 @@ int cls_dequeue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
         return ret;
       }
       bl_size.claim_append(bl_rem_data_size);
-      iter = bl_size.cbegin();
+      auto iter = bl_size.cbegin();
       try {
         decode(data_size, iter);
       } catch (buffer::error& err) {
@@ -359,7 +353,7 @@ int cls_dequeue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
       if (ret < 0) {
         return ret;
       }
-      iter = bl_size.cbegin();
+      auto iter = bl_size.cbegin();
       try {
         decode(data_size, iter);
       } catch (buffer::error& err) {
@@ -411,7 +405,7 @@ int cls_dequeue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
     head.is_empty = true;
   }
   //Write head back
-  bl_head.clear();
+  bufferlist bl_head;
   encode(head, bl_head);
   CLS_LOG(1, "INFO: cls_enqueue: Writing head of size: %u and front offset is: %lu\n", bl_head.length(), head.front);
   ret = cls_cxx_write2(hctx, sizeof(uint64_t), bl_head.length(), &bl_head, CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
@@ -425,28 +419,12 @@ int cls_dequeue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 
 int cls_queue_list_entries(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
-  //get head size
+  //get head and its size
   uint64_t head_size = 0;
-  int ret = get_queue_head_size(hctx, head_size);
-  if (ret < 0) {
-    return ret;
-  }
-
-  CLS_LOG(1, "INFO: cls_queue_list_entries: Reading head at offset %lu\n", head_size);
-  uint64_t start_offset = 0;
-  // read the head
-  bufferlist bl_head;
-  ret = cls_cxx_read2(hctx, sizeof(uint64_t), (head_size - sizeof(uint64_t)), &bl_head, CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
-  if (ret < 0) {
-    return ret;
-  }
   cls_queue_head head;
-  auto iter = bl_head.cbegin();
-  try {
-    decode(head, iter);
-  } catch (buffer::error& err) {
-    CLS_LOG(1, "ERROR: cls_queue_list_entries: failed to decode entry %s\n", bl_head.c_str());
-    return -EINVAL;
+  int ret = get_queue_head_and_size(hctx, head, head_size);
+  if (ret < 0) {
+    return ret;
   }
 
   // If queue is empty, return from here
@@ -474,6 +452,8 @@ int cls_queue_list_entries(cls_method_context_t hctx, bufferlist *in, bufferlist
     CLS_LOG(1, "ERROR: cls_queue_list_entries(): failed to decode input data\n");
     return -EINVAL;
   }
+
+  uint64_t start_offset = 0;
   if (op.start_offset == 0) {
     start_offset = head.front;
   } else {
@@ -621,26 +601,12 @@ int cls_queue_list_entries(cls_method_context_t hctx, bufferlist *in, bufferlist
 
 int cls_queue_remove_entries(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
-  //get head size
+  //get head and its size
   uint64_t head_size = 0;
-  int ret = get_queue_head_size(hctx, head_size);
-  if (ret < 0) {
-    return ret;
-  }
-
-  // read the head
-  bufferlist bl_head;
-  ret = cls_cxx_read2(hctx, sizeof(uint64_t), (head_size - sizeof(uint64_t)), &bl_head, CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
-  if (ret < 0) {
-    return ret;
-  }
   cls_queue_head head;
-  auto iter = bl_head.cbegin();
-  try {
-    decode(head, iter);
-  } catch (buffer::error& err) {
-    CLS_LOG(1, "ERROR: cls_queue_remove_entries: failed to decode entry %s\n", bl_head.c_str());
-    return -EINVAL;
+  int ret = get_queue_head_and_size(hctx, head, head_size);
+  if (ret < 0) {
+    return ret;
   }
 
   if ((head.front == head.tail) && head.is_empty) {
@@ -648,16 +614,11 @@ int cls_queue_remove_entries(cls_method_context_t hctx, bufferlist *in, bufferli
   }
 
   auto in_iter = in->cbegin();
-
   cls_queue_remove_op op;
   try {
     decode(op, in_iter);
   } catch (buffer::error& err) {
     CLS_LOG(1, "ERROR: cls_queue_remove_entries: failed to decode input data\n");
-    return -EINVAL;
-  }
-
-  if (op.start_offset == op.end_offset) {
     return -EINVAL;
   }
 
@@ -678,7 +639,7 @@ int cls_queue_remove_entries(cls_method_context_t hctx, bufferlist *in, bufferli
   if (ret < 0) {
     return ret;
   }
-  iter = bl_size.cbegin();
+  auto iter = bl_size.cbegin();
   try {
     decode(data_size, iter);
   } catch (buffer::error& err) {
@@ -727,7 +688,7 @@ int cls_queue_remove_entries(cls_method_context_t hctx, bufferlist *in, bufferli
   }
 
   //Write head back
-  bl_head.clear();
+  bufferlist bl_head;
   encode(head, bl_head);
   CLS_LOG(1, "INFO: cls_queue_remove_entries: Writing head of size: %u and front offset is: %lu\n", bl_head.length(), head.front);
   ret = cls_cxx_write2(hctx, sizeof(uint64_t), bl_head.length(), &bl_head, CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
@@ -741,26 +702,12 @@ int cls_queue_remove_entries(cls_method_context_t hctx, bufferlist *in, bufferli
 
 int cls_queue_get_last_entry(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
-  //get head size
+  //get head and its size
   uint64_t head_size = 0;
-  int ret = get_queue_head_size(hctx, head_size);
-  if (ret < 0) {
-    return ret;
-  }
-
-  // read the head
-  bufferlist bl_head;
-  ret = cls_cxx_read2(hctx, sizeof(uint64_t), (head_size - sizeof(uint64_t)), &bl_head, CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
-  if (ret < 0) {
-    return ret;
-  }
   cls_queue_head head;
-  auto iter = bl_head.cbegin();
-  try {
-    decode(head, iter);
-  } catch (buffer::error& err) {
-    CLS_LOG(1, "ERROR: cls_queue_get_last_entry: failed to decode entry %s\n", bl_head.c_str());
-    return -EINVAL;
+  int ret = get_queue_head_and_size(hctx, head, head_size);
+  if (ret < 0) {
+    return ret;
   }
 
   uint64_t data_size = 0, last_entry_offset = head.last_entry_offset;
@@ -770,7 +717,7 @@ int cls_queue_get_last_entry(cls_method_context_t hctx, bufferlist *in, bufferli
   if (ret < 0) {
     return ret;
   }
-  iter = bl_size.cbegin();
+  auto iter = bl_size.cbegin();
   try {
     decode(data_size, iter);
   } catch (buffer::error& err) {
@@ -791,26 +738,12 @@ int cls_queue_get_last_entry(cls_method_context_t hctx, bufferlist *in, bufferli
 
 int cls_queue_update_last_entry(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
-  //get head size
+  //get head and its size
   uint64_t head_size = 0;
-  int ret = get_queue_head_size(hctx, head_size);
-  if (ret < 0) {
-    return ret;
-  }
-
-  // read the head
-  bufferlist bl_head;
-  ret = cls_cxx_read2(hctx, sizeof(uint64_t), (head_size - sizeof(uint64_t)), &bl_head, CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
-  if (ret < 0) {
-    return ret;
-  }
   cls_queue_head head;
-  auto iter = bl_head.cbegin();
-  try {
-    decode(head, iter);
-  } catch (buffer::error& err) {
-    CLS_LOG(1, "ERROR: cls_queue_update_last_entry: failed to decode entry %s\n", bl_head.c_str());
-    return -EINVAL;
+  int ret = get_queue_head_and_size(hctx, head, head_size);
+  if (ret < 0) {
+    return ret;
   }
 
   auto in_iter = in->cbegin();
@@ -840,7 +773,7 @@ int cls_queue_update_last_entry(cls_method_context_t hctx, bufferlist *in, buffe
     head.bl_urgent_data = op.bl_urgent_data;
   }
 
-  bl_head.clear();
+  bufferlist bl_head;
   encode(head, bl_head);
   CLS_LOG(1, "INFO: cls_queue_update_last_entry: Writing head of size: %u \n", bl_head.length());
   ret = cls_cxx_write2(hctx, sizeof(uint64_t), bl_head.length(), &bl_head, CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
@@ -853,26 +786,12 @@ int cls_queue_update_last_entry(cls_method_context_t hctx, bufferlist *in, buffe
 
 int cls_queue_read_urgent_data(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
-  //get head size
+  //get head and its size
   uint64_t head_size = 0;
-  int ret = get_queue_head_size(hctx, head_size);
-  if (ret < 0) {
-    return ret;
-  }
-
-  // read the head
-  bufferlist bl_head;
-  ret = cls_cxx_read2(hctx, sizeof(uint64_t), (head_size - sizeof(uint64_t)), &bl_head, CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
-  if (ret < 0) {
-    return ret;
-  }
   cls_queue_head head;
-  auto iter = bl_head.cbegin();
-  try {
-    decode(head, iter);
-  } catch (buffer::error& err) {
-    CLS_LOG(1, "ERROR: cls_queue_read_urgent_data: failed to decode entry %s\n", bl_head.c_str());
-    return -EINVAL;
+  int ret = get_queue_head_and_size(hctx, head, head_size);
+  if (ret < 0) {
+    return ret;
   }
 
   CLS_LOG(1, "INFO: cls_queue_read_urgent_data: tail offset %lu\n", head.tail);
@@ -888,26 +807,12 @@ int cls_queue_read_urgent_data(cls_method_context_t hctx, bufferlist *in, buffer
 
 int cls_queue_write_urgent_data(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
-  //get head size
+  //get head and its size
   uint64_t head_size = 0;
-  int ret = get_queue_head_size(hctx, head_size);
-  if (ret < 0) {
-    return ret;
-  }
-
-  // read the head
-  bufferlist bl_head;
-  ret = cls_cxx_read2(hctx, sizeof(uint64_t), (head_size - sizeof(uint64_t)), &bl_head, CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
-  if (ret < 0) {
-    return ret;
-  }
   cls_queue_head head;
-  auto iter = bl_head.cbegin();
-  try {
-    decode(head, iter);
-  } catch (buffer::error& err) {
-    CLS_LOG(1, "ERROR: cls_queue_write_urgent_data: failed to decode entry %s\n", bl_head.c_str());
-    return -EINVAL;
+  int ret = get_queue_head_and_size(hctx, head, head_size);
+  if (ret < 0) {
+    return ret;
   }
 
   CLS_LOG(1, "INFO: cls_queue_write_urgent_data: tail offset %lu\n", head.tail);
@@ -925,7 +830,7 @@ int cls_queue_write_urgent_data(cls_method_context_t hctx, bufferlist *in, buffe
   head.bl_urgent_data = op.bl_urgent_data;
 
   //Write head back
-  bl_head.clear();
+  bufferlist bl_head;
   encode(head, bl_head);
   CLS_LOG(1, "INFO: cls_queue_write_urgent_data: Writing head of size: %u\n", bl_head.length());
   ret = cls_cxx_write2(hctx, sizeof(uint64_t), bl_head.length(), &bl_head, CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
@@ -941,31 +846,17 @@ int cls_queue_can_urgent_data_fit(cls_method_context_t hctx, bufferlist *in, buf
 {
   bool can_fit = true;
 
-  //get head size
+  //get head and its size
   uint64_t head_size = 0;
-  int ret = get_queue_head_size(hctx, head_size);
-  if (ret < 0) {
-    return ret;
-  }
-
-  // read the head
-  bufferlist bl_head;
-  ret = cls_cxx_read2(hctx, sizeof(uint64_t), (head_size - sizeof(uint64_t)), &bl_head, CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
-  if (ret < 0) {
-    return ret;
-  }
   cls_queue_head head;
-  auto iter = bl_head.cbegin();
-  try {
-    decode(head, iter);
-  } catch (buffer::error& err) {
-    CLS_LOG(1, "ERROR: cls_queue_write_urgent_data: failed to decode entry %s\n", bl_head.c_str());
-    return -EINVAL;
+  int ret = get_queue_head_and_size(hctx, head, head_size);
+  if (ret < 0) {
+    return ret;
   }
 
   head.bl_urgent_data = *in;
 
-  bl_head.clear();
+  bufferlist bl_head;
   encode(head, bl_head);
 
   if(bl_head.length() > head_size) {

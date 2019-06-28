@@ -386,26 +386,28 @@ static int cls_gc_queue_remove(cls_method_context_t hctx, bufferlist *in, buffer
   } while(is_truncated);
   CLS_LOG(1, "INFO: cls_gc_queue_remove(): Total number of entries to remove: %d\n", total_num_entries);
 
-  cls_queue_remove_op rem_op;
-  if (op.marker.empty()) {
-    rem_op.start_offset = 0;
-  } else {
-    rem_op.start_offset = boost::lexical_cast<uint64_t>(op.marker.c_str());
-  }
+  if (end_offset != 0) {
+    cls_queue_remove_op rem_op;
+    if (op.marker.empty()) {
+      rem_op.start_offset = 0;
+    } else {
+      rem_op.start_offset = boost::lexical_cast<uint64_t>(op.marker.c_str());
+    }
 
-  rem_op.end_offset = end_offset;
-  CLS_LOG(1, "INFO: cls_gc_queue_remove(): start offset: %lu and end offset: %lu\n", rem_op.start_offset, rem_op.end_offset);
+    rem_op.end_offset = end_offset;
+    CLS_LOG(1, "INFO: cls_gc_queue_remove(): start offset: %lu and end offset: %lu\n", rem_op.start_offset, rem_op.end_offset);
 
-  encode(urgent_data, rem_op.bl_urgent_data);
+    encode(urgent_data, rem_op.bl_urgent_data);
 
-  in->clear();
-  encode(rem_op, *in);
+    in->clear();
+    encode(rem_op, *in);
 
-  CLS_LOG(1, "INFO: cls_gc_queue_remove(): Entering cls_queue_remove_entries \n");
-  int ret = cls_queue_remove_entries(hctx, in, out);
-  if (ret < 0) {
-    CLS_LOG(1, "ERROR: cls_queue_remove_entries(): returned error %d\n", ret);
-    return ret;
+    CLS_LOG(1, "INFO: cls_gc_queue_remove(): Entering cls_queue_remove_entries \n");
+    int ret = cls_queue_remove_entries(hctx, in, out);
+    if (ret < 0) {
+      CLS_LOG(1, "ERROR: cls_queue_remove_entries(): returned error %d\n", ret);
+      return ret;
+    }
   }
 
   return 0;
