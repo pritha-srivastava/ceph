@@ -47,7 +47,7 @@ static int cls_gc_create_queue(cls_method_context_t hctx, bufferlist *in, buffer
   cls_create_queue_op create_op;
 
   CLS_LOG(10, "INFO: cls_gc_create_queue: queue size is %lu\n", op.size);
-  create_op.head.size = op.size;
+  create_op.head.queue_size = op.size;
   create_op.head_size = g_ceph_context->_conf->rgw_gc_queue_head_size;
   create_op.head.has_urgent_data = true;
   encode(urgent_data, create_op.head.bl_urgent_data);

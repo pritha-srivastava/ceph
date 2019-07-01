@@ -11,29 +11,6 @@
 #include "cls/queue/cls_queue_const.h"
 #include "cls/queue/cls_queue.h"
 
-static int get_queue_head_size(cls_method_context_t hctx, uint64_t& head_size)
-{
-  //read head size
-  bufferlist bl_head_size;
-  int ret = cls_cxx_read(hctx, 0, sizeof(uint64_t), &bl_head_size);
-  if (ret < 0) {
-    CLS_LOG(0, "ERROR: get_queue_head_size: failed to read head\n");
-    return ret;
-  }
-  //decode head size
-  auto iter = bl_head_size.cbegin();
-  try {
-    decode(head_size, iter);
-  } catch (buffer::error& err) {
-    CLS_LOG(0, "ERROR: get_queue_head_size: failed to decode head size \n");
-    return -EINVAL;
-  }
-
-  CLS_LOG(10, "INFO: get_queue_head_size: head size is %lu\n", head_size);
-
-  return 0;
-}
-
 static int get_queue_head_and_size(cls_method_context_t hctx, cls_queue_head& head, uint64_t& head_size)
 {
   //read head size
@@ -54,7 +31,7 @@ static int get_queue_head_and_size(cls_method_context_t hctx, cls_queue_head& he
 
   CLS_LOG(10, "INFO: get_queue_head_and_size: head size is %lu\n", head_size);
 
-  // read the head
+  //read the head
   bufferlist bl_head;
   ret = cls_cxx_read2(hctx, sizeof(uint64_t), (head_size - sizeof(uint64_t)), &bl_head, CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
   if (ret < 0) {
@@ -93,12 +70,11 @@ int cls_create_queue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
   }
   
   CLS_LOG(10, "INFO: cls_create_queue create queue of head size %lu", op.head_size);
-  CLS_LOG(10, "INFO: cls_create_queue create queue of size %lu", op.head.size);
+  CLS_LOG(10, "INFO: cls_create_queue create queue of size %lu", op.head.queue_size);
 
   uint64_t head_size = QUEUE_HEAD_SIZE_1K;
 
   if (op.head.has_urgent_data) {
-    op.head.has_urgent_data = true;
     if (op.head_size == 0) {
       head_size = QUEUE_HEAD_SIZE_4K;
       op.head.tail = op.head.front = QUEUE_START_OFFSET_4K;
@@ -113,9 +89,9 @@ int cls_create_queue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
     op.head.tail = op.head.front = QUEUE_START_OFFSET_1K;
     op.head.last_entry_offset = QUEUE_START_OFFSET_1K;
   }
-  op.head.size += head_size;
+  op.head.queue_size += head_size;
 
-  CLS_LOG(10, "INFO: cls_create_queue queue actual size %lu", op.head.size);
+  CLS_LOG(10, "INFO: cls_create_queue queue actual size %lu", op.head.queue_size);
   CLS_LOG(10, "INFO: cls_create_queue head size %lu", head_size);
   CLS_LOG(10, "INFO: cls_create_queue queue front offset %lu", op.head.front);
 
@@ -150,11 +126,11 @@ int cls_get_queue_size(cls_method_context_t hctx, bufferlist *in, bufferlist *ou
     return ret;
   }
 
-  head.size -= head_size;
+  head.queue_size -= head_size;
 
-  CLS_LOG(10, "INFO: cls_get_queue_size: size of queue is %lu\n", head.size);
+  CLS_LOG(10, "INFO: cls_get_queue_size: size of queue is %lu\n", head.queue_size);
 
-  encode(head.size, *out);
+  encode(head.queue_size, *out);
 
   return 0;
 }
@@ -195,7 +171,7 @@ int cls_enqueue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 
     if (head.tail >= head.front) {
       // check if data can fit in the remaining space in queue
-      if ((head.tail + total_size) <= head.size) {
+      if ((head.tail + total_size) <= head.queue_size) {
         CLS_LOG(1, "INFO: cls_enqueue: Writing data size and data: offset: %lu, size: %u\n", head.tail, bl.length());
         head.last_entry_offset = head.tail;
         //write data size and data at tail offset
@@ -206,10 +182,10 @@ int cls_enqueue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
         head.tail += total_size;
       } else {
         CLS_LOG(1, "INFO: Wrapping around and checking for free space\n");
-        uint64_t free_space_available = (head.size - head.tail) + (head.front - head_size);
+        uint64_t free_space_available = (head.queue_size - head.tail) + (head.front - head_size);
         //Split data if there is free space available
         if (total_size <= free_space_available) {
-          uint64_t size_before_wrap = head.size - head.tail;
+          uint64_t size_before_wrap = head.queue_size - head.tail;
           bufferlist bl_data_before_wrap;
           bl.splice(0, size_before_wrap, &bl_data_before_wrap);
           head.last_entry_offset = head.tail;
@@ -220,7 +196,7 @@ int cls_enqueue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
             return ret;
           }
           head.tail = head_size;
-          //write remaining data at tail offset
+          //write remaining data at tail offset after wrapping around
           CLS_LOG(1, "INFO: cls_enqueue: Writing remaining data at offset: %lu and data size: %u\n", head.tail, bl.length());
           ret = cls_cxx_write2(hctx, head.tail, bl.length(), &bl, CEPH_OSD_OP_FLAG_FADVISE_SEQUENTIAL);
           if (ret < 0) {
@@ -235,7 +211,7 @@ int cls_enqueue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
         }
       }
     } else if (head.front > head.tail) {
-      if ((head.tail + total_size) < head.front) {
+      if ((head.tail + total_size) <= head.front) {
         CLS_LOG(1, "INFO: cls_enqueue: Writing data size and data: offset: %lu, size: %u\n\n", head.tail, bl.length());
         head.last_entry_offset = head.tail;
         //write data size and data at tail offset
@@ -251,7 +227,7 @@ int cls_enqueue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
       }
     }
 
-    if (head.tail == head.size) {
+    if (head.tail == head.queue_size) {
       head.tail = head_size;
     }
     CLS_LOG(1, "INFO: cls_enqueue: New tail offset: %lu \n", head.tail);
@@ -317,7 +293,7 @@ int cls_dequeue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
     }
     head.front += data_size;
   } else if (head.front >= head.tail) {
-    uint64_t actual_data_size = head.size - head.front;
+    uint64_t actual_data_size = head.queue_size - head.front;
     if (actual_data_size < sizeof(uint64_t)) {
       //Case 1. Data size has been spliced, first reconstruct data size
       CLS_LOG(1, "INFO: cls_dequeue: Spliced data size is read from from front offset %lu\n", head.front);
@@ -363,7 +339,7 @@ int cls_dequeue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
       CLS_LOG(1, "INFO: cls_dequeue: Data size: %lu, front offset: %lu\n", data_size, head.front);
       head.front += sizeof(uint64_t);
 
-      actual_data_size = head.size - head.front;
+      actual_data_size = head.queue_size - head.front;
       
       if (actual_data_size < data_size) {
         if (actual_data_size != 0) {
@@ -397,7 +373,7 @@ int cls_dequeue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
   }
 
   //front has reached the end, wrap it around
-  if (head.front == head.size) {
+  if (head.front == head.queue_size) {
     head.front = head_size;
   }
 
@@ -470,7 +446,7 @@ int cls_queue_list_entries(cls_method_context_t hctx, bufferlist *in, bufferlist
     contiguous_data_size = head.tail - start_offset;
   } else if (head.front >= head.tail) {
     if (start_offset >= head.front) {
-      contiguous_data_size = head.size - start_offset;
+      contiguous_data_size = head.queue_size - start_offset;
       wrap_around = true;
     } else if (start_offset <= head.tail) {
       contiguous_data_size = head.tail - start_offset;
@@ -481,7 +457,7 @@ int cls_queue_list_entries(cls_method_context_t hctx, bufferlist *in, bufferlist
   bufferlist bl;
   do
   {
-    CLS_LOG(1, "INFO: cls_queue_list_entries(): front is: %lu, tail is %lu,  and start_offset is %lu\n", head.front, head.tail, start_offset);
+    CLS_LOG(1, "INFO: cls_queue_list_entries(): front is: %lu, tail is %lu, and start_offset is %lu\n", head.front, head.tail, start_offset);
   
     bufferlist bl_chunk;
     //Read chunk size at a time, if it is less than contiguous data size, else read contiguous data size
@@ -587,7 +563,7 @@ int cls_queue_list_entries(cls_method_context_t hctx, bufferlist *in, bufferlist
   } while(num_ops < op.max);
 
   //Wrap around next offset if it has reached end of queue
-  if (op_ret.next_offset == head.size) {
+  if (op_ret.next_offset == head.queue_size) {
     op_ret.next_offset = head_size;
   }
   if (op_ret.next_offset == head.tail) {
@@ -657,7 +633,7 @@ int cls_queue_remove_entries(cls_method_context_t hctx, bufferlist *in, bufferli
       return ret;
     }
   } else { //start offset > end offset
-    ret = cls_cxx_write_zero(hctx, op.start_offset, (head.size - op.start_offset));
+    ret = cls_cxx_write_zero(hctx, op.start_offset, (head.queue_size - op.start_offset));
     if (ret < 0) {
       return ret;
     }
@@ -670,7 +646,7 @@ int cls_queue_remove_entries(cls_method_context_t hctx, bufferlist *in, bufferli
   head.front = end_offset;
 
   // Check if it is the end, then wrap around
-  if (head.front == head.size) {
+  if (head.front == head.queue_size) {
     head.front = head_size;
   }
 
@@ -728,7 +704,7 @@ int cls_queue_get_last_entry(cls_method_context_t hctx, bufferlist *in, bufferli
   
   //Read data based on size obtained above
   last_entry_offset += sizeof(uint64_t);
-  CLS_LOG(1, "INFO: cls_dequeue: Data is read from from last entry offset %lu\n", last_entry_offset);
+  CLS_LOG(1, "INFO: cls_queue_get_last_entry: Data is read from from last entry offset %lu\n", last_entry_offset);
   ret = cls_cxx_read2(hctx, last_entry_offset, data_size, out, CEPH_OSD_OP_FLAG_FADVISE_SEQUENTIAL);
   if (ret < 0) {
     return ret;

@@ -19,7 +19,7 @@ struct cls_queue_head
 {
   uint64_t front = QUEUE_START_OFFSET_1K;
   uint64_t tail = QUEUE_START_OFFSET_1K;
-  uint64_t size{0}; // size of queue requested by user, with head size added to it
+  uint64_t queue_size{0}; // size of queue requested by user, with head size added to it
   uint64_t last_entry_offset = QUEUE_START_OFFSET_1K;
   bool is_empty{true};
   bool has_urgent_data{false};
@@ -29,7 +29,7 @@ struct cls_queue_head
     ENCODE_START(1, 1, bl);
     encode(front, bl);
     encode(tail, bl);
-    encode(size, bl);
+    encode(queue_size, bl);
     encode(last_entry_offset, bl);
     encode(is_empty, bl);
     encode(has_urgent_data, bl);
@@ -41,7 +41,7 @@ struct cls_queue_head
     DECODE_START(1, bl);
     decode(front, bl);
     decode(tail, bl);
-    decode(size, bl);
+    decode(queue_size, bl);
     decode(last_entry_offset, bl);
     decode(is_empty, bl);
     decode(has_urgent_data, bl);
