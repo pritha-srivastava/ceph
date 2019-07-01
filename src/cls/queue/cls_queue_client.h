@@ -17,7 +17,7 @@ void cls_rgw_gc_enqueue(librados::ObjectWriteOperation& op, uint32_t expiration_
 int cls_rgw_gc_dequeue(librados::IoCtx& io_ctx, string& oid, cls_rgw_gc_obj_info& info);
 int cls_rgw_gc_list_queue(librados::IoCtx& io_ctx, string& oid, string& marker, uint32_t max, bool expired_only,
                     list<cls_rgw_gc_obj_info>& entries, bool *truncated, string& next_marker);
-void cls_rgw_gc_remove_queue(librados::ObjectWriteOperation& op, string& marker, uint32_t num_entries);
+void cls_rgw_gc_remove_entries_queue(librados::ObjectWriteOperation& op, string& marker, uint32_t num_entries);
 void cls_rgw_gc_defer_entry_queue(librados::ObjectWriteOperation& op, uint32_t expiration_secs, cls_rgw_gc_obj_info& info);
 
 #endif

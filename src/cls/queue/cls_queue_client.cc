@@ -80,7 +80,7 @@ int cls_rgw_gc_list_queue(IoCtx& io_ctx, string& oid, string& marker, uint32_t m
   return 0;
 }
 
-void cls_rgw_gc_remove_queue(ObjectWriteOperation& op, string& marker, uint32_t num_entries)
+void cls_rgw_gc_remove_entries_queue(ObjectWriteOperation& op, string& marker, uint32_t num_entries)
 {
   bufferlist in, out;
   cls_rgw_gc_queue_remove_op rem_op;
