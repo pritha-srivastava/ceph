@@ -5,8 +5,6 @@
 #include "common/ceph_time.h"
 #include "common/Formatter.h"
 
-//#include "rgw/rgw_basic_types.h"
-
 #define QUEUE_HEAD_SIZE_1K 1024
 //Actual start offset of queue data
 #define QUEUE_START_OFFSET_1K QUEUE_HEAD_SIZE_1K
