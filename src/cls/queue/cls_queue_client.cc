@@ -15,10 +15,22 @@ void cls_rgw_gc_create_queue(ObjectWriteOperation& op, string& queue_name, uint6
 {
   bufferlist in;
   cls_gc_create_queue_op call;
+  call.name = queue_name;
   call.size = size;
   call.num_urgent_data_entries = num_urgent_data_entries;
   encode(call, in);
   op.exec(RGW_QUEUE_CLASS, GC_CREATE_QUEUE, in);
+}
+
+void cls_rgw_gc_init_queue(ObjectWriteOperation& op, string& queue_name, uint64_t& size, uint64_t& num_urgent_data_entries)
+{
+  bufferlist in;
+  cls_gc_create_queue_op call;
+  call.name = queue_name;
+  call.size = size;
+  call.num_urgent_data_entries = num_urgent_data_entries;
+  encode(call, in);
+  op.exec(RGW_QUEUE_CLASS, GC_INIT_QUEUE, in);
 }
 
 int cls_rgw_gc_get_queue_size(IoCtx& io_ctx, string& oid, uint64_t& size)

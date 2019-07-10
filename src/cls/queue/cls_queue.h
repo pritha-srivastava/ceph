@@ -2,6 +2,7 @@
 #define CEPH_CLS_QUEUE_H
 
 int cls_create_queue(cls_method_context_t hctx, bufferlist *in, bufferlist *out);
+int cls_init_queue(cls_method_context_t hctx, bufferlist *in, bufferlist *out);
 int cls_get_queue_size(cls_method_context_t hctx, bufferlist *in, bufferlist *out);
 int cls_enqueue(cls_method_context_t hctx, bufferlist *in, bufferlist *out);
 int cls_dequeue(cls_method_context_t hctx, bufferlist *in, bufferlist *out);

@@ -17,7 +17,7 @@ static int get_queue_head_and_size(cls_method_context_t hctx, cls_queue_head& he
   bufferlist bl_head_size;
   int ret = cls_cxx_read(hctx, 0, sizeof(uint64_t), &bl_head_size);
   if (ret < 0) {
-    CLS_LOG(0, "ERROR: get_queue_head_and_size: failed to read head\n");
+    CLS_LOG(0, "ERROR: get_queue_head_and_size: failed to read head with error %d\n", ret);
     return ret;
   }
   //decode head size
@@ -116,6 +116,78 @@ int cls_create_queue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
   return 0;
 }
 
+int cls_init_queue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  //get head and its size
+  uint64_t head_size = 0;
+  cls_queue_head head;
+  int ret = get_queue_head_and_size(hctx, head, head_size);
+
+  //head is already initialized
+  if (ret == 0) {
+    CLS_LOG(1, "INFO: cls_init_queue_op(): head is already initialized\n");
+    return 0;
+  }
+
+  if (ret < 0 && ret != -EINVAL) {
+    return ret;
+  }
+
+  auto in_iter = in->cbegin();
+  cls_init_queue_op op;
+  try {
+    decode(op, in_iter);
+  } catch (buffer::error& err) {
+    CLS_LOG(1, "ERROR: cls_init_queue_op(): failed to decode entry\n");
+    return -EINVAL;
+  }
+
+  CLS_LOG(10, "INFO: cls_init_queue_op init queue of head size %lu", op.head_size);
+  CLS_LOG(10, "INFO: cls_init_queue_op init queue of size %lu", op.head.queue_size);
+
+  head_size = QUEUE_HEAD_SIZE_1K;
+
+  if (op.head.has_urgent_data) {
+    if (op.head_size == 0) {
+      head_size = QUEUE_HEAD_SIZE_4K;
+      op.head.tail = op.head.front = QUEUE_START_OFFSET_4K;
+      op.head.last_entry_offset = QUEUE_START_OFFSET_4K;
+    } else {
+      head_size = op.head_size;
+      op.head.tail = op.head.front = head_size;
+      op.head.last_entry_offset = head_size;
+    }
+  } else {
+    head_size = QUEUE_HEAD_SIZE_1K;
+    op.head.tail = op.head.front = QUEUE_START_OFFSET_1K;
+    op.head.last_entry_offset = QUEUE_START_OFFSET_1K;
+  }
+  op.head.queue_size += head_size;
+
+  CLS_LOG(10, "INFO: cls_init_queue_op queue actual size %lu", op.head.queue_size);
+  CLS_LOG(10, "INFO: cls_init_queue_op head size %lu", head_size);
+  CLS_LOG(10, "INFO: cls_init_queue_op queue front offset %lu", op.head.front);
+
+  //encode head size
+  bufferlist bl;
+  encode(head_size, bl);
+  CLS_LOG(0, "INFO: cls_init_queue_op head size %u", bl.length());
+
+  //encode head
+  bufferlist bl_head;
+  encode(op.head, bl_head);
+
+  bl.claim_append(bl_head);
+
+  CLS_LOG(0, "INFO: cls_init_queue_op writing head of size %u", bl.length());
+  ret = cls_cxx_write2(hctx, 0, bl.length(), &bl, CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
+  if (ret < 0) {
+    CLS_LOG(0, "ERROR: %s(): cls_init_queue_op returned %d", __func__, ret);
+    return ret;
+  }
+  return 0;
+}
+
 int cls_get_queue_size(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
   //get head and its size
@@ -145,8 +217,8 @@ int cls_enqueue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
     return ret;
   }
 
-  if (head.front == head.tail && ! head.is_empty) {
-    // return queue full error
+  if ((head.front == head.tail) && (! head.is_empty)) {
+    CLS_LOG(1, "ERROR: No space left in queue\n");
     return -ENOSPC;
   }
 
@@ -160,18 +232,16 @@ int cls_enqueue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
   }
 
   for (auto bl_data : op.bl_data_vec) {
-    uint64_t total_size = sizeof(uint64_t) + bl_data.length();
-    CLS_LOG(1, "INFO: cls_enqueue(): Total size to be written is %lu and data size is %u\n", total_size, bl_data.length());
-
     bufferlist bl;
     uint64_t data_size = bl_data.length();
     encode(data_size, bl);
-    CLS_LOG(1, "INFO: cls_enqueue(): bufferlist length after encoding is %u\n", bl.length());
     bl.claim_append(bl_data);
+
+    CLS_LOG(1, "INFO: cls_enqueue(): Total size to be written is %u and data size is %u\n", bl.length(), bl_data.length());
 
     if (head.tail >= head.front) {
       // check if data can fit in the remaining space in queue
-      if ((head.tail + total_size) <= head.queue_size) {
+      if ((head.tail + bl.length()) <= head.queue_size) {
         CLS_LOG(1, "INFO: cls_enqueue: Writing data size and data: offset: %lu, size: %u\n", head.tail, bl.length());
         head.last_entry_offset = head.tail;
         //write data size and data at tail offset
@@ -179,12 +249,12 @@ int cls_enqueue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
         if (ret < 0) {
           return ret;
         }
-        head.tail += total_size;
+        head.tail += bl.length();
       } else {
         CLS_LOG(1, "INFO: Wrapping around and checking for free space\n");
         uint64_t free_space_available = (head.queue_size - head.tail) + (head.front - head_size);
         //Split data if there is free space available
-        if (total_size <= free_space_available) {
+        if (bl.length() <= free_space_available) {
           uint64_t size_before_wrap = head.queue_size - head.tail;
           bufferlist bl_data_before_wrap;
           bl.splice(0, size_before_wrap, &bl_data_before_wrap);
@@ -203,15 +273,14 @@ int cls_enqueue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
             return ret;
           }
           head.tail += bl.length();
-        }
-        else {
+        } else {
           CLS_LOG(1, "ERROR: No space left in queue\n");
           // return queue full error
           return -ENOSPC;
         }
       }
     } else if (head.front > head.tail) {
-      if ((head.tail + total_size) <= head.front) {
+      if ((head.tail + bl.length()) <= head.front) {
         CLS_LOG(1, "INFO: cls_enqueue: Writing data size and data: offset: %lu, size: %u\n\n", head.tail, bl.length());
         head.last_entry_offset = head.tail;
         //write data size and data at tail offset
@@ -219,7 +288,7 @@ int cls_enqueue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
         if (ret < 0) {
           return ret;
         }
-        head.tail += total_size;
+        head.tail += bl.length();
       } else {
         CLS_LOG(1, "ERROR: No space left in queue\n");
         // return queue full error
@@ -272,12 +341,6 @@ int cls_queue_list_entries(cls_method_context_t hctx, bufferlist *in, bufferlist
   //Info related to urgent data
   op_ret.bl_urgent_data = head.bl_urgent_data;
 
-  if ((head.front == head.tail) && head.is_empty) {
-    op_ret.is_truncated = false;
-    encode(op_ret, *out);
-    return 0;
-  }
-
   auto in_iter = in->cbegin();
 
   cls_queue_list_op op;
@@ -312,11 +375,14 @@ int cls_queue_list_entries(cls_method_context_t hctx, bufferlist *in, bufferlist
     }
   }
 
+  CLS_LOG(1, "INFO: cls_queue_list_entries(): front is: %lu, tail is %lu\n", head.front, head.tail);
+
+  bool offset_populated = false;
   uint64_t num_ops = 0;
   bufferlist bl;
   do
   {
-    CLS_LOG(1, "INFO: cls_queue_list_entries(): front is: %lu, tail is %lu, and start_offset is %lu\n", head.front, head.tail, start_offset);
+    CLS_LOG(1, "INFO: cls_queue_list_entries(): start_offset is %lu\n", start_offset);
   
     bufferlist bl_chunk;
     //Read chunk size at a time, if it is less than contiguous data size, else read contiguous data size
@@ -352,6 +418,12 @@ int cls_queue_list_entries(cls_method_context_t hctx, bufferlist *in, bufferlist
       CLS_LOG(1, "INFO: cls_queue_list_entries(): index: %u, size_to_process: %lu\n", index, size_to_process);
       it.seek(index);
       uint64_t data_size = 0;
+      //Populate offset if not done, else don't if already done in previous iteration
+      if (! offset_populated) {
+        uint64_t data_offset = start_offset + index;
+        op_ret.offsets.emplace_back(data_offset);
+        CLS_LOG(1, "INFO: cls_queue_list_entries(): offset: %lu\n", data_offset);
+      }
       if (size_to_process >= sizeof(uint64_t)) {
         try {
           decode(data_size, it);
@@ -362,6 +434,7 @@ int cls_queue_list_entries(cls_method_context_t hctx, bufferlist *in, bufferlist
       } else {
         // Copy unprocessed data to bl
         bl_chunk.copy(index, size_to_process, bl);
+        offset_populated = true;
         CLS_LOG(1, "INFO: cls_queue_list_entries: not enough data to read data size, breaking out!\n");
         break;
       }
@@ -371,20 +444,19 @@ int cls_queue_list_entries(cls_method_context_t hctx, bufferlist *in, bufferlist
       bufferlist bl_data;
       if (data_size <= size_to_process) {
         bl_chunk.copy(index, data_size, bl_data);
-        //Return data and offset here
+        //Return data here
         op_ret.data.emplace_back(bl_data);
-        uint64_t data_offset = start_offset + (index - sizeof(uint64_t));
-        op_ret.offsets.emplace_back(data_offset);
-        CLS_LOG(1, "INFO: cls_queue_list_entries(): offset: %lu\n", data_offset);
         index += bl_data.length();
         size_to_process -= bl_data.length();
       } else {
         index -= sizeof(uint64_t);
         size_to_process += sizeof(uint64_t);
         bl_chunk.copy(index, size_to_process, bl);
+        offset_populated = true;
         CLS_LOG(1, "INFO: cls_queue_list_entries(): not enough data to read data, breaking out!\n");
         break;
       }
+      offset_populated = false;
       num_ops++;
       if (num_ops == op.max) {
         CLS_LOG(1, "INFO: cls_queue_list_entries(): num_ops is same as op.max, hence breaking out from inner loop!\n");
@@ -444,7 +516,7 @@ int cls_queue_remove_entries(cls_method_context_t hctx, bufferlist *in, bufferli
     return ret;
   }
 
-  if ((head.front == head.tail) && head.is_empty) {
+  if (head.is_empty) {
     return -ENOENT;
   }
 
@@ -459,45 +531,93 @@ int cls_queue_remove_entries(cls_method_context_t hctx, bufferlist *in, bufferli
 
   // If start offset is not set or set to zero, then we need to shift it to actual front of queue
   if (op.start_offset == 0) {
-    op.start_offset = head_size;
+    op.start_offset = head.front;
   }
 
   if (op.start_offset != head.front) {
     CLS_LOG(1, "ERROR: cls_queue_remove_entries: invalid start offset\n");
+    CLS_LOG(1, "ERROR: cls_queue_remove_entries: start offset = %lu\n", op.start_offset);
+    CLS_LOG(1, "ERROR: cls_queue_remove_entries: front = %lu\n", head.front);
     return -EINVAL;
   }
 
-  // Read the size from the end offset
-  bufferlist bl_size;
+  uint64_t end_offset = 0;
   uint64_t data_size = 0;
-  ret = cls_cxx_read(hctx, op.end_offset, sizeof(uint64_t), &bl_size);
-  if (ret < 0) {
-    return ret;
-  }
-  auto iter = bl_size.cbegin();
-  try {
-    decode(data_size, iter);
-  } catch (buffer::error& err) {
-    CLS_LOG(1, "ERROR: cls_queue_remove_entries: failed to decode data size \n");
-    return -EINVAL;
+
+  //Check for data size wrap around
+  if ((head.queue_size - op.end_offset) >= sizeof(uint64_t)) {
+    // Read the size from the end offset
+    bufferlist bl_size;
+    ret = cls_cxx_read(hctx, op.end_offset, sizeof(uint64_t), &bl_size);
+    if (ret < 0) {
+      CLS_LOG(1, "ERROR: cls_queue_remove_entries: failed to read data size \n");
+      return ret;
+    }
+    auto iter = bl_size.cbegin();
+    try {
+      decode(data_size, iter);
+    } catch (buffer::error& err) {
+      CLS_LOG(1, "ERROR: cls_queue_remove_entries: failed to decode data size \n");
+      return -EINVAL;
+    }
+    //Check for data wrap around
+    if ((head.queue_size - (op.end_offset + sizeof(uint64_t))) >= data_size) {
+      end_offset = op.end_offset + sizeof(uint64_t) + data_size;
+    } else {
+      uint64_t rem_size = data_size - (head.queue_size - (op.end_offset + sizeof(uint64_t)));
+      end_offset = head_size + rem_size;
+    }
+  } else {
+    bufferlist bl_size;
+    ret = cls_cxx_read(hctx, op.end_offset, (head.queue_size - op.end_offset), &bl_size);
+    if (ret < 0) {
+      CLS_LOG(1, "ERROR: cls_queue_remove_entries: failed to read first part of data size \n");
+      return ret;
+    }
+    uint64_t rem_size = sizeof(uint64_t) - (head.queue_size - op.end_offset);
+    bufferlist bl;
+    ret = cls_cxx_read(hctx, head_size, rem_size, &bl);
+    if (ret < 0) {
+      CLS_LOG(1, "ERROR: cls_queue_remove_entries: failed to read second part of data size \n");
+      return ret;
+    }
+    bl_size.claim_append(bl);
+    auto iter = bl_size.cbegin();
+    try {
+      decode(data_size, iter);
+    } catch (buffer::error& err) {
+      CLS_LOG(1, "ERROR: cls_queue_remove_entries: failed to decode data size \n");
+      return -EINVAL;
+    }
+    end_offset = head_size + rem_size + data_size;
   }
 
-  //offset obtained by adding last entry's size
-  uint64_t end_offset = op.end_offset + sizeof(uint64_t) + data_size;
+  CLS_LOG(1, "INFO: cls_queue_remove_entries: op.end_offset = %lu\n", op.end_offset);
+  CLS_LOG(1, "INFO: cls_queue_remove_entries: data_size = %lu\n", data_size);
+  CLS_LOG(1, "INFO: cls_queue_remove_entries: end_offset = %lu\n", end_offset);
 
   //Zero out the entries that have been removed, to reclaim storage space
   if (end_offset > op.start_offset) {
     ret = cls_cxx_write_zero(hctx, op.start_offset, (end_offset - op.start_offset));
     if (ret < 0) {
+      CLS_LOG(1, "INFO: cls_queue_remove_entries: Failed to zero out entries\n");
+      CLS_LOG(1, "INFO: cls_queue_remove_entries: Start offset = %lu\n", op.start_offset);
+      CLS_LOG(1, "INFO: cls_queue_remove_entries: Length = %lu\n", (end_offset - op.start_offset));
       return ret;
     }
   } else { //start offset > end offset
     ret = cls_cxx_write_zero(hctx, op.start_offset, (head.queue_size - op.start_offset));
     if (ret < 0) {
+      CLS_LOG(1, "INFO: cls_queue_remove_entries: Failed to zero out entries\n");
+      CLS_LOG(1, "INFO: cls_queue_remove_entries: Start offset = %lu\n", op.start_offset);
+      CLS_LOG(1, "INFO: cls_queue_remove_entries: Length = %lu\n", (head.queue_size - op.start_offset));
       return ret;
     }
     ret = cls_cxx_write_zero(hctx, head_size, (end_offset - head_size));
     if (ret < 0) {
+      CLS_LOG(1, "INFO: cls_queue_remove_entries: Failed to zero out entries\n");
+      CLS_LOG(1, "INFO: cls_queue_remove_entries: Start offset = %lu\n", head_size);
+      CLS_LOG(1, "INFO: cls_queue_remove_entries: Length = %lu\n", (end_offset - head_size));
       return ret;
     }
   }
@@ -546,28 +666,75 @@ int cls_queue_get_last_entry(cls_method_context_t hctx, bufferlist *in, bufferli
   }
 
   uint64_t data_size = 0, last_entry_offset = head.last_entry_offset;
-  bufferlist bl_size;
-  //Read size of data first
-  ret = cls_cxx_read(hctx, last_entry_offset, sizeof(uint64_t), &bl_size);
-  if (ret < 0) {
-    return ret;
+
+  //Check for data size wrap around
+  if ((head.queue_size - last_entry_offset) >= sizeof(uint64_t)) {
+    // Read the size from the end offset
+    bufferlist bl_size;
+    ret = cls_cxx_read(hctx, last_entry_offset, sizeof(uint64_t), &bl_size);
+    if (ret < 0) {
+      CLS_LOG(1, "ERROR: cls_queue_get_last_entry: failed to read data size \n");
+      return ret;
+    }
+    auto iter = bl_size.cbegin();
+    try {
+      decode(data_size, iter);
+    } catch (buffer::error& err) {
+      CLS_LOG(1, "ERROR: cls_queue_get_last_entry: failed to decode data size \n");
+      return -EINVAL;
+    }
+    last_entry_offset += sizeof(uint64_t);
+    //Check for data wrap around
+    if ((head.queue_size - (last_entry_offset + sizeof(uint64_t))) >= data_size) {
+      CLS_LOG(1, "INFO: cls_queue_get_last_entry: Data is read from from last entry offset %lu\n", last_entry_offset);
+      ret = cls_cxx_read2(hctx, last_entry_offset, data_size, out, CEPH_OSD_OP_FLAG_FADVISE_SEQUENTIAL);
+      if (ret < 0) {
+        return ret;
+      }
+    } else {
+      CLS_LOG(1, "INFO: cls_queue_get_last_entry: Data is read from from last entry offset %lu\n", last_entry_offset);
+      ret = cls_cxx_read2(hctx, last_entry_offset, (head.queue_size - (last_entry_offset + sizeof(uint64_t))), out, CEPH_OSD_OP_FLAG_FADVISE_SEQUENTIAL);
+      if (ret < 0) {
+        return ret;
+      }
+      uint64_t rem_size = data_size - (head.queue_size - (last_entry_offset + sizeof(uint64_t)));
+      bufferlist bl;
+      ret = cls_cxx_read(hctx, head_size, rem_size, &bl);
+      if (ret < 0) {
+        return ret;
+      }
+      out->claim_append(bl);
+    }
+  } else {
+    bufferlist bl_size;
+    ret = cls_cxx_read(hctx, last_entry_offset, (head.queue_size - last_entry_offset), &bl_size);
+    if (ret < 0) {
+      CLS_LOG(1, "ERROR: cls_queue_remove_entries: failed to read first part of data size \n");
+      return ret;
+    }
+    uint64_t rem_size = sizeof(uint64_t) - (head.queue_size - last_entry_offset);
+    bufferlist bl;
+    ret = cls_cxx_read(hctx, head_size, rem_size, &bl);
+    if (ret < 0) {
+      CLS_LOG(1, "ERROR: cls_queue_remove_entries: failed to read second part of data size \n");
+      return ret;
+    }
+    bl_size.claim_append(bl);
+    auto iter = bl_size.cbegin();
+    try {
+      decode(data_size, iter);
+    } catch (buffer::error& err) {
+      CLS_LOG(1, "ERROR: cls_queue_remove_entries: failed to decode data size \n");
+      return -EINVAL;
+    }
+    last_entry_offset = head_size + rem_size;
+    CLS_LOG(1, "INFO: cls_queue_get_last_entry: Data is read from from last entry offset %lu\n", last_entry_offset);
+    ret = cls_cxx_read2(hctx, last_entry_offset, data_size, out, CEPH_OSD_OP_FLAG_FADVISE_SEQUENTIAL);
+    if (ret < 0) {
+      return ret;
+    }
   }
-  auto iter = bl_size.cbegin();
-  try {
-    decode(data_size, iter);
-  } catch (buffer::error& err) {
-    CLS_LOG(1, "ERROR: cls_queue_get_last_entry: failed to decode data size \n");
-    return -EINVAL;
-  }
-  CLS_LOG(1, "INFO: cls_queue_get_last_entry: Data size: %lu, last data offset: %lu\n", data_size, last_entry_offset);
-  
-  //Read data based on size obtained above
-  last_entry_offset += sizeof(uint64_t);
-  CLS_LOG(1, "INFO: cls_queue_get_last_entry: Data is read from from last entry offset %lu\n", last_entry_offset);
-  ret = cls_cxx_read2(hctx, last_entry_offset, data_size, out, CEPH_OSD_OP_FLAG_FADVISE_SEQUENTIAL);
-  if (ret < 0) {
-    return ret;
-  }
+
   return 0;
 }
 
@@ -598,10 +765,39 @@ int cls_queue_update_last_entry(cls_method_context_t hctx, bufferlist *in, buffe
 
   CLS_LOG(1, "INFO: cls_queue_update_last_entry_op: Updating data at last offset: %lu and total data size is %u\n", head.last_entry_offset, bl.length());
 
-  //write data size + data at offset
-  ret = cls_cxx_write(hctx, head.last_entry_offset, bl.length(), &bl);
-  if (ret < 0) {
-    return ret;
+  // check if data can fit in the remaining space in queue
+  if ((head.last_entry_offset + bl.length()) <= head.queue_size) {
+    //write data size and data at tail offset
+    ret = cls_cxx_write2(hctx, head.last_entry_offset, bl.length(), &bl, CEPH_OSD_OP_FLAG_FADVISE_SEQUENTIAL);
+    if (ret < 0) {
+      return ret;
+    }
+  } else {
+    CLS_LOG(1, "INFO: Wrapping around and checking for free space\n");
+    uint64_t free_space_available = (head.queue_size - head.last_entry_offset) + (head.front - head_size);
+    //Split data if there is free space available
+    if (bl.length() <= free_space_available) {
+      uint64_t size_before_wrap = head.queue_size - head.last_entry_offset;
+      bufferlist bl_data_before_wrap;
+      bl.splice(0, size_before_wrap, &bl_data_before_wrap);
+      //write spliced (data size and data) at last entry offset
+      CLS_LOG(1, "INFO: cls_enqueue: Writing spliced data at offset: %lu and data size: %u\n", head.last_entry_offset, bl_data_before_wrap.length());
+      ret = cls_cxx_write2(hctx, head.last_entry_offset, bl_data_before_wrap.length(), &bl_data_before_wrap, CEPH_OSD_OP_FLAG_FADVISE_SEQUENTIAL);
+      if (ret < 0) {
+        return ret;
+      }
+      //write remaining data after wrapping around
+      CLS_LOG(1, "INFO: cls_enqueue: Writing remaining data at offset: %lu and data size: %u\n", head_size, bl.length());
+      ret = cls_cxx_write2(hctx, head_size, bl.length(), &bl, CEPH_OSD_OP_FLAG_FADVISE_SEQUENTIAL);
+      if (ret < 0) {
+        return ret;
+      }
+    }
+    else {
+      CLS_LOG(1, "ERROR: No space left in queue\n");
+      // return queue full error
+      return -ENOSPC;
+    }
   }
 
   if (op.bl_urgent_data.length() > 0) {

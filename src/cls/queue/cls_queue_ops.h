@@ -196,4 +196,9 @@ struct cls_queue_update_last_entry_op {
 };
 WRITE_CLASS_ENCODER(cls_queue_update_last_entry_op)
 
+struct cls_init_queue_op : cls_create_queue_op{
+
+};
+WRITE_CLASS_ENCODER(cls_init_queue_op)
+
 #endif /* CEPH_CLS_QUEUE_OPS_H */

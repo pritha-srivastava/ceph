@@ -47,6 +47,7 @@ static int cls_gc_create_queue(cls_method_context_t hctx, bufferlist *in, buffer
   cls_create_queue_op create_op;
 
   CLS_LOG(10, "INFO: cls_gc_create_queue: queue size is %lu\n", op.size);
+  CLS_LOG(10, "INFO: cls_gc_create_queue: queue name is %s\n", op.name.c_str());
   create_op.head.queue_size = op.size;
   create_op.head_size = g_ceph_context->_conf->rgw_gc_queue_head_size;
   create_op.head.has_urgent_data = true;
@@ -56,6 +57,36 @@ static int cls_gc_create_queue(cls_method_context_t hctx, bufferlist *in, buffer
   encode(create_op, *in);
 
   return cls_create_queue(hctx, in, out);
+}
+
+static int cls_gc_init_queue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  auto in_iter = in->cbegin();
+
+  cls_gc_init_queue_op op;
+  try {
+    decode(op, in_iter);
+  } catch (buffer::error& err) {
+    CLS_LOG(1, "ERROR: cls_gc_init_queue: failed to decode entry\n");
+    return -EINVAL;
+  }
+
+  cls_gc_urgent_data urgent_data;
+  urgent_data.num_urgent_data_entries = op.num_urgent_data_entries;
+
+  cls_init_queue_op init_op;
+
+  CLS_LOG(10, "INFO: cls_gc_init_queue: queue size is %lu\n", op.size);
+  CLS_LOG(10, "INFO: cls_gc_init_queue: queue name is %s\n", op.name.c_str());
+  init_op.head.queue_size = op.size;
+  init_op.head_size = g_ceph_context->_conf->rgw_gc_queue_head_size;
+  init_op.head.has_urgent_data = true;
+  encode(urgent_data, init_op.head.bl_urgent_data);
+
+  in->clear();
+  encode(init_op, *in);
+
+  return cls_init_queue(hctx, in, out);
 }
 
 static int cls_gc_enqueue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
@@ -114,7 +145,7 @@ static int cls_gc_queue_list(cls_method_context_t hctx, bufferlist *in, bufferli
 
   cls_queue_list_ret op_ret;
   cls_rgw_gc_list_ret list_ret;
-  uint32_t num_entries = 0;
+  uint32_t num_entries = 0; //Entries excluding the deferred ones
   bool urgent_data_decoded = false;
   cls_gc_urgent_data urgent_data;
   do {
@@ -136,6 +167,7 @@ static int cls_gc_queue_list(cls_method_context_t hctx, bufferlist *in, bufferli
       return -EINVAL;
     }
 
+    //Each cls_queue_list_entries will fetch the same urgent data, decode it only once
     if (! urgent_data_decoded) {
         auto iter_urgent_data = op_ret.bl_urgent_data.cbegin();
         try {
@@ -156,17 +188,20 @@ static int cls_gc_queue_list(cls_method_context_t hctx, bufferlist *in, bufferli
           CLS_LOG(1, "ERROR: cls_gc_queue_list(): failed to decode gc info\n");
           return -EINVAL;
         }
+        bool found = false;
         //Check for info tag in urgent data map
         if (urgent_data.urgent_data_map.size() > 0) {
-          auto found = urgent_data.urgent_data_map.find(info.tag);
-          if (found != urgent_data.urgent_data_map.end()) {
-            if (found->second > info.time) {
+          auto it = urgent_data.urgent_data_map.find(info.tag);
+          if (it != urgent_data.urgent_data_map.end()) {
+            found = true;
+            if (it->second > info.time) {
               CLS_LOG(1, "INFO: cls_gc_queue_list(): tag found in urgent data: %s\n", info.tag.c_str());
               continue;
             }
           }
-        } else {
-          //Search in xattrs
+        }
+        //Search in xattrs
+        if (! found) {
           bufferlist bl_xattrs;
           int ret = cls_cxx_getxattr(hctx, "cls_queue_urgent_data", &bl_xattrs);
           if (ret < 0 && (ret != -ENOENT && ret != -ENODATA)) {
@@ -183,21 +218,22 @@ static int cls_gc_queue_list(cls_method_context_t hctx, bufferlist *in, bufferli
               return -EINVAL;
             } //end - catch
             if (xattr_urgent_data_map.size() > 0) {
-              auto found = xattr_urgent_data_map.find(info.tag);
-              if (found != xattr_urgent_data_map.end()) {
-                if (found->second > info.time) {
+              auto it = xattr_urgent_data_map.find(info.tag);
+              if (it != xattr_urgent_data_map.end()) {
+                if (it->second > info.time) {
                   CLS_LOG(1, "INFO: cls_gc_queue_list(): tag found in xattrs urgent data map: %s\n", info.tag.c_str());
                   continue;
                 }
               }
             } // end - if xattrs size ...
           } // end - ret != ENOENT && ENODATA
-        }
+        } // end - if not found
         if (op.expired_only) {
           real_time now = ceph::real_clock::now();
           if (info.time <= now) {
             list_ret.entries.emplace_back(info);
           }
+          //Can break out here if info.time > now, since all subsequent entries won't have expired
         } else {
           list_ret.entries.emplace_back(info);
         }
@@ -209,9 +245,11 @@ static int cls_gc_queue_list(cls_method_context_t hctx, bufferlist *in, bufferli
         list_op.start_offset = op_ret.next_offset;
         out->clear();
       } else {
+        //We've reached the max number of entries needed
         break;
       }
     } else {
+      //We dont have data to process
       break;
     }
   } while(op_ret.is_truncated);
@@ -264,7 +302,7 @@ static int cls_gc_queue_remove(cls_method_context_t hctx, bufferlist *in, buffer
     CLS_LOG(1, "INFO: cls_gc_queue_remove(): Entering cls_queue_list_entries \n");
     int ret = cls_queue_list_entries(hctx, in, out);
     if (ret < 0) {
-      CLS_LOG(1, "ERROR: cls_gc_queue_remove(): returned error %d\n", ret);
+      CLS_LOG(1, "ERROR: cls_queue_list_entries(): returned error %d\n", ret);
       return ret;
     }
 
@@ -301,21 +339,23 @@ static int cls_gc_queue_remove(cls_method_context_t hctx, bufferlist *in, buffer
         CLS_LOG(1, "INFO: cls_gc_queue_remove(): entry: %s\n", info.tag.c_str());
         total_num_entries++;
         index++;
+        bool found = false;
         //Search for tag in urgent data map
         if (urgent_data.urgent_data_map.size() > 0) {
-          auto found = urgent_data.urgent_data_map.find(info.tag);
-          if (found != urgent_data.urgent_data_map.end()) {
-            if (found->second > info.time) {
+          auto it = urgent_data.urgent_data_map.find(info.tag);
+          if (it != urgent_data.urgent_data_map.end()) {
+            found = true;
+            if (it->second > info.time) {
               CLS_LOG(1, "INFO: cls_gc_queue_remove(): tag found in urgent data: %s\n", info.tag.c_str());
               continue;
-            } else if (found->second == info.time) {
+            } else if (it->second == info.time) {
               CLS_LOG(1, "INFO: cls_gc_queue_remove(): erasing tag from urgent data: %s\n", info.tag.c_str());
               urgent_data.urgent_data_map.erase(info.tag); //erase entry from map, as it will be removed later from queue
               urgent_data.num_head_urgent_entries -= 1;
             }
           }//end-if map end
         }//end-if urgent data
-        else {
+        if (! found) {
           //Search in xattrs
           bufferlist bl_xattrs;
           int ret = cls_cxx_getxattr(hctx, "cls_queue_urgent_data", &bl_xattrs);
@@ -520,7 +560,7 @@ static int cls_gc_queue_update_entry(cls_method_context_t hctx, bufferlist *in, 
 
     //insert as xattrs
     if (! can_fit) {
-      //remove inserted entry from urgent data in head
+      //remove inserted entry from urgent data
       urgent_data.urgent_data_map.erase(op.info.tag);
       urgent_data.num_head_urgent_entries -= 1;
       has_urgent_data = false;
@@ -603,6 +643,7 @@ CLS_INIT(rgw_queue)
 
   cls_handle_t h_class;
   cls_method_handle_t h_gc_create_queue;
+  cls_method_handle_t h_gc_init_queue;
   cls_method_handle_t h_gc_enqueue;
   cls_method_handle_t h_gc_queue_list_entries;
   cls_method_handle_t h_gc_queue_remove_entries;
@@ -612,6 +653,7 @@ CLS_INIT(rgw_queue)
 
   /* gc */
   cls_register_cxx_method(h_class, GC_CREATE_QUEUE, CLS_METHOD_RD | CLS_METHOD_WR, cls_gc_create_queue, &h_gc_create_queue);
+  cls_register_cxx_method(h_class, GC_INIT_QUEUE, CLS_METHOD_RD | CLS_METHOD_WR, cls_gc_init_queue, &h_gc_init_queue);
   cls_register_cxx_method(h_class, GC_ENQUEUE, CLS_METHOD_RD | CLS_METHOD_WR, cls_gc_enqueue, &h_gc_enqueue);
   cls_register_cxx_method(h_class, GC_QUEUE_LIST_ENTRIES, CLS_METHOD_RD, cls_gc_queue_list, &h_gc_queue_list_entries);
   cls_register_cxx_method(h_class, GC_QUEUE_REMOVE_ENTRIES, CLS_METHOD_RD | CLS_METHOD_WR, cls_gc_queue_remove, &h_gc_queue_remove_entries);

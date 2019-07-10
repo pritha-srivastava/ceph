@@ -20,6 +20,7 @@ CLS_INIT(queue)
 
   cls_handle_t h_class;
   cls_method_handle_t h_create_queue;
+  cls_method_handle_t h_init_queue;
   cls_method_handle_t h_get_queue_size;
   cls_method_handle_t h_enqueue;
   cls_method_handle_t h_queue_list_entries;
@@ -34,6 +35,7 @@ CLS_INIT(queue)
 
   /* queue*/
   cls_register_cxx_method(h_class, CREATE_QUEUE, CLS_METHOD_WR, cls_create_queue, &h_create_queue);
+  cls_register_cxx_method(h_class, INIT_QUEUE, CLS_METHOD_WR, cls_init_queue, &h_init_queue);
   cls_register_cxx_method(h_class, GET_QUEUE_SIZE, CLS_METHOD_RD, cls_get_queue_size, &h_get_queue_size);
   cls_register_cxx_method(h_class, ENQUEUE, CLS_METHOD_RD | CLS_METHOD_WR, cls_enqueue, &h_enqueue);
   cls_register_cxx_method(h_class, QUEUE_LIST_ENTRIES, CLS_METHOD_RD | CLS_METHOD_WR, cls_queue_list_entries, &h_queue_list_entries);
