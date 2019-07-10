@@ -29,8 +29,7 @@ void RGWGC::initialize(CephContext *_cct, RGWRados *_store) {
   cct = _cct;
   store = _store;
 
-  //max_objs = min(static_cast<int>(cct->_conf->rgw_gc_max_objs), rgw_shards_max());
-  max_objs = 1;
+  max_objs = min(static_cast<int>(cct->_conf->rgw_gc_max_objs), rgw_shards_max());
 
   obj_names = new string[max_objs];
 
@@ -41,12 +40,19 @@ void RGWGC::initialize(CephContext *_cct, RGWRados *_store) {
     obj_names[i].append(buf);
   }
 
-  // Create the GC queue
+  // Create GC queues
   for (int i = 0; i < max_objs; i++) {
+    ldpp_dout(this, 20) << "RGWGC::initialize initing gc queue with name = " << obj_names[i] << dendl;
     librados::ObjectWriteOperation op;
-    uint64_t queue_size = 1048576, num_urgent_data_entries = 10;
-    cls_rgw_gc_create_queue(op, obj_names[i], queue_size, num_urgent_data_entries);
-    store->gc_operate(obj_names[i], &op);
+    op.assert_exists();
+    uint64_t queue_size = 1048576, num_urgent_data_entries = 50;
+    cls_rgw_gc_init_queue(op, obj_names[i], queue_size, num_urgent_data_entries);
+    int ret = store->gc_operate(obj_names[i], &op);
+    if (ret == -ENOENT) {
+      ldpp_dout(this, 20) << "RGWGC::initialize creating gc queue with name = " << obj_names[i] << dendl;
+      cls_rgw_gc_create_queue(op, obj_names[i], queue_size, num_urgent_data_entries);
+      store->gc_operate(obj_names[i], &op);
+    }
   }
 }
 
@@ -75,12 +81,13 @@ int RGWGC::send_chain(cls_rgw_obj_chain& chain, const string& tag, bool sync)
   ObjectWriteOperation op;
   add_chain(op, chain, tag);
 
-  //int i = tag_index(tag);
+  int i = tag_index(tag);
 
+  ldpp_dout(this, 20) << "RGWGC::send_chain - on object name: " << obj_names[i] << "tag is: " << tag << dendl;
   if (sync)
-    return store->gc_operate(obj_names[0], &op);
+    return store->gc_operate(obj_names[i], &op);
 
-  return store->gc_aio_operate(obj_names[0], &op);
+  return store->gc_aio_operate(obj_names[i], &op);
 }
 
 int RGWGC::defer_chain(const string& tag, cls_rgw_obj_chain& chain, bool sync)
@@ -93,12 +100,12 @@ int RGWGC::defer_chain(const string& tag, cls_rgw_obj_chain& chain, bool sync)
   //cls_rgw_gc_defer_entry(op, cct->_conf->rgw_gc_obj_min_wait, tag);
   cls_rgw_gc_defer_entry_queue(op, cct->_conf->rgw_gc_obj_min_wait, info);
 
-  //int i = tag_index(tag);
+  int i = tag_index(tag);
 
   if (sync)
-    return store->gc_operate(obj_names[0], &op);
+    return store->gc_operate(obj_names[i], &op);
 
-  return store->gc_aio_operate(obj_names[0], &op);
+  return store->gc_aio_operate(obj_names[i], &op);
 }
 
 int RGWGC::remove(int index, const std::vector<string>& tags, AioCompletion **pc)
@@ -445,6 +452,7 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
     } // entries loop
     if (entries.size() > 0) {
       //Remove the entries from the queue
+      ldpp_dout(this, 5) << "RGWGC::process removing entries, marker: " << marker << dendl;
       ret = io_manager.remove_queue_entries(index, marker, entries.size());
       if (ret < 0) {
         ldpp_dout(this, 0) <<
