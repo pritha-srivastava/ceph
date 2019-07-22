@@ -7,7 +7,7 @@
 #include "include/scope_guard.h"
 #include "include/rados/librados.hpp"
 #include "cls/rgw/cls_rgw_client.h"
-#include "cls/queue/cls_queue_client.h"
+#include "cls/gc/cls_rgw_gc_client.h"
 #include "cls/refcount/cls_refcount_client.h"
 #include "rgw_perf_counters.h"
 #include "cls/lock/cls_lock_client.h"

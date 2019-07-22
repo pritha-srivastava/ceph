@@ -4,8 +4,8 @@
 #include "include/types.h"
 
 #include "cls/rgw/cls_rgw_types.h"
-#include "cls/queue/cls_queue_client.h"
-#include "cls/queue/cls_queue_ops.h"
+#include "cls/gc/cls_rgw_gc_client.h"
+#include "cls/gc/cls_rgw_gc_ops.h"
 
 #include "gtest/gtest.h"
 #include "test/librados/test_cxx.h"

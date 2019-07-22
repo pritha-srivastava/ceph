@@ -1,5 +1,5 @@
-#ifndef CEPH_CLS_RGW_QUEUE_TYPES_H
-#define CEPH_CLS_RGW_QUEUE_TYPES_H
+#ifndef CEPH_CLS_RGW_GC_TYPES_H
+#define CEPH_CLS_RGW_GC_TYPES_H
 
 #include "include/types.h"
 #include "common/ceph_time.h"

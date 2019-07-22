@@ -11,12 +11,12 @@
 #include "common/Mutex.h"
 #include "common/Cond.h"
 
-void cls_rgw_gc_init_queue(librados::ObjectWriteOperation& op, string& queue_name, uint64_t& size, uint64_t& num_urgent_data_entries);
-int cls_rgw_gc_get_queue_size(librados::IoCtx& io_ctx, string& oid, uint64_t& size);
-void cls_rgw_gc_enqueue(librados::ObjectWriteOperation& op, uint32_t expiration_secs, cls_rgw_gc_obj_info& info);
-int cls_rgw_gc_list_queue(librados::IoCtx& io_ctx, string& oid, string& marker, uint32_t max, bool expired_only,
-                    list<cls_rgw_gc_obj_info>& entries, bool *truncated, string& next_marker);
-void cls_rgw_gc_remove_entries_queue(librados::ObjectWriteOperation& op, uint32_t num_entries);
-void cls_rgw_gc_defer_entry_queue(librados::ObjectWriteOperation& op, uint32_t expiration_secs, cls_rgw_gc_obj_info& info);
+void cls_init_queue(librados::ObjectWriteOperation& op, string& queue_name, uint64_t& size);
+int cls_get_queue_size(librados::IoCtx& io_ctx, string& oid, uint64_t& size);
+void cls_gc_enqueue(librados::ObjectWriteOperation& op, uint32_t expiration_secs, vector<bufferlist> bl_data_vec);
+int cls_list_queue(librados::IoCtx& io_ctx, string& oid, string& marker, uint32_t max,
+                    vector<bufferlist>& entries, vector<string>& entry_markers,
+                    bool *truncated, string& next_marker);
+void cls_remove_entries_queue(librados::ObjectWriteOperation& op, string& end_marker);
 
 #endif

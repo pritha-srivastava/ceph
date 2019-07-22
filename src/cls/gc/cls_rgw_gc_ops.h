@@ -1,5 +1,5 @@
-#ifndef CEPH_CLS_RGW_QUEUE_OPS_H
-#define CEPH_CLS_RGW_QUEUE_OPS_H
+#ifndef CEPH_CLS_RGW_GC_OPS_H
+#define CEPH_CLS_RGW_GC_OPS_H
 
 #include "cls/rgw/cls_rgw_types.h"
 #include "cls/rgw/cls_rgw_ops.h"
@@ -69,4 +69,4 @@ struct cls_gc_defer_entry_op {
   }
 };
 WRITE_CLASS_ENCODER(cls_gc_defer_entry_op)
-#endif /* CEPH_CLS_RGW_QUEUE_OPS_H */
+#endif /* CEPH_CLS_RGW_GC_OPS_H */

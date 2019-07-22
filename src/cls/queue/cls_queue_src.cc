@@ -199,15 +199,11 @@ int enqueue(cls_method_context_t hctx, const cls_enqueue_op& op, cls_queue_head&
     bufferlist bl;
     uint16_t entry_start = QUEUE_ENTRY_START;
     encode(entry_start, bl);
-    CLS_LOG(1, "INFO: enqueue(): Entry start size is %u\n", bl.length());
     uint64_t data_size = bl_data.length();
-    CLS_LOG(1, "INFO: enqueue(): Data size is %lu\n", data_size);
     bufferlist bl_data_size;
     encode(data_size, bl_data_size);
     bl.claim_append(bl_data_size);
-    CLS_LOG(1, "INFO: enqueue():Size after appending data size %u\n", bl.length());
     bl.claim_append(bl_data);
-    CLS_LOG(1, "INFO: enqueue():Size after appending data %u\n", bl.length());
   
     CLS_LOG(1, "INFO: enqueue(): Total size to be written is %u and data size is %u\n", bl.length(), bl_data.length());
 

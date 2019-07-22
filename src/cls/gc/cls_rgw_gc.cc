@@ -8,16 +8,11 @@
 #include "objclass/objclass.h"
 #include "cls/rgw/cls_rgw_ops.h"
 #include "cls/rgw/cls_rgw_types.h"
-#include "cls/queue/cls_queue_types.h"
-#include "cls/queue/cls_rgw_queue_types.h"
+#include "cls/gc/cls_rgw_gc_types.h"
+#include "cls/gc/cls_rgw_gc_ops.h"
 #include "cls/queue/cls_queue_ops.h"
-#include "cls/queue/cls_rgw_queue_ops.h"
-#include "cls/queue/cls_queue_const.h"
+#include "cls/gc/cls_rgw_gc_const.h"
 #include "cls/queue/cls_queue_src.h"
-
-#include <boost/lexical_cast.hpp>
-#include <unordered_map>
-#include <sstream>
 
 #include "common/ceph_context.h"
 #include "global/global_context.h"
@@ -28,7 +23,7 @@
 #define GC_LIST_DEFAULT_MAX 128
 
 CLS_VER(1,0)
-CLS_NAME(rgw_queue)
+CLS_NAME(rgw_gc)
 
 static int cls_gc_init_queue(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
@@ -534,9 +529,9 @@ static int cls_gc_queue_update_entry(cls_method_context_t hctx, bufferlist *in, 
   return write_queue_head(hctx, head);
 }
 
-CLS_INIT(rgw_queue)
+CLS_INIT(rgw_gc)
 {
-  CLS_LOG(1, "Loaded rgw queue class!");
+  CLS_LOG(1, "Loaded rgw gc class!");
 
   cls_handle_t h_class;
   cls_method_handle_t h_gc_init_queue;
@@ -545,7 +540,7 @@ CLS_INIT(rgw_queue)
   cls_method_handle_t h_gc_queue_remove_entries;
   cls_method_handle_t h_gc_queue_update_entry;
 
-  cls_register(RGW_QUEUE_CLASS, &h_class);
+  cls_register(RGW_GC_CLASS, &h_class);
 
   /* gc */
   cls_register_cxx_method(h_class, GC_INIT_QUEUE, CLS_METHOD_RD | CLS_METHOD_WR, cls_gc_init_queue, &h_gc_init_queue);

@@ -3,7 +3,7 @@ if(${WITH_RADOSGW})
     test_cls_queue.cc
     )
   target_link_libraries(ceph_test_cls_queue
-    cls_queue_client
+    cls_rgw_gc_client
     librados
     global
     ${UNITTEST_LIBS}
