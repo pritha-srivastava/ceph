@@ -67,7 +67,6 @@ void RGWGC::add_chain(ObjectWriteOperation& op, cls_rgw_obj_chain& chain, const 
   info.chain = chain;
   info.tag = tag;
 
-  //cls_rgw_gc_set_entry(op, cct->_conf->rgw_gc_obj_min_wait, info);
   cls_rgw_gc_enqueue(op, cct->_conf->rgw_gc_obj_min_wait, info);
 }
 
@@ -92,7 +91,6 @@ int RGWGC::defer_chain(const string& tag, cls_rgw_obj_chain& chain, bool sync)
   info.tag = tag;
 
   ObjectWriteOperation op;
-  //cls_rgw_gc_defer_entry(op, cct->_conf->rgw_gc_obj_min_wait, tag);
   cls_rgw_gc_defer_entry_queue(op, cct->_conf->rgw_gc_obj_min_wait, info);
 
   int i = tag_index(tag);
@@ -124,9 +122,8 @@ int RGWGC::list(int *index, string& marker, uint32_t max, bool expired_only, std
 
   for (; *index < max_objs && result.size() < max; (*index)++, marker.clear()) {
     std::list<cls_rgw_gc_obj_info> entries;
-    //int ret = cls_rgw_gc_list(store->gc_pool_ctx, obj_names[*index], marker, max - result.size(), expired_only, entries, truncated, next_marker);
     int ret = cls_rgw_gc_list_queue(store->gc_pool_ctx, obj_names[*index], marker, max - result.size(), expired_only, entries, truncated, next_marker);
-    if (ret == -ENOENT)
+    if (ret == -ENOENT || entries.size() == 0)
       continue;
     if (ret < 0)
       return ret;
@@ -367,23 +364,20 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
     int max = 100;
     std::list<cls_rgw_gc_obj_info> entries;
 
-    //ret = cls_rgw_gc_list(store->gc_pool_ctx, obj_names[index], marker, max,
-			//  expired_only, entries, &truncated, next_marker);
-
     ret = cls_rgw_gc_list_queue(store->gc_pool_ctx, obj_names[index], marker, max, expired_only, entries, &truncated, next_marker);
     ldpp_dout(this, 20) <<
       "RGWGC::process cls_rgw_gc_list_queue returned with returned:" << ret <<
       ", entries.size=" << entries.size() << ", truncated=" << truncated <<
       ", next_marker='" << next_marker << "'" << dendl;
 
-    if (ret == -ENOENT) {
+    if (ret == -ENOENT || entries.size() == 0) {
       ret = 0;
       goto done;
     }
     if (ret < 0)
       goto done;
 
-    //marker = next_marker;
+    marker = next_marker;
 
     string last_pool;
     std::list<cls_rgw_gc_obj_info>::iterator iter;
@@ -454,7 +448,6 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
           "WARNING: failed to remove queue entries" << dendl;
         goto done;
       }
-      marker = next_marker;
     }
   } while (truncated);
 
