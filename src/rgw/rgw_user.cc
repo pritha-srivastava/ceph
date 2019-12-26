@@ -434,7 +434,7 @@ static void dump_user_info(Formatter *f, RGWUserInfo &info,
     break;
   }
   encode_json("type", user_source_type, f);
-  encode_json("mfa_ids", info.mfa_ids, f);
+  encode_json("mfa_ids", info.mfa_info, f);
   if (stats) {
     encode_json("stats", *stats, f);
   }
@@ -2057,8 +2057,8 @@ int RGWUser::execute_modify(RGWUserAdminOpState& op_state, std::string *err_msg)
     } while (buckets.is_truncated());
   }
 
-  if (op_state.mfa_ids_specified) {
-    user_info.mfa_ids = op_state.mfa_ids;
+  if (op_state.mfa_info_specified) {
+    user_info.mfa_info = op_state.mfa_info;
   }
   op_state.set_user_info(user_info);
 

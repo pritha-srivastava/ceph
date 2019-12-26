@@ -184,6 +184,28 @@ namespace rados {
 
         return 0;
       }
+      int OTP::get_info(librados::IoCtx& ioctx, const string& oid,
+                                const string& id, otp_info_t *result) {
+        bufferlist in;
+        bufferlist out;
+        cls_otp_get_info_op op;
+        op.id = id;
+        encode(op, in);
+        int r = ioctx.exec(oid, "otp", "get_otp_info", in, out);
+        if (r < 0) {
+          return r;
+        }
+
+        auto iter = out.cbegin();
+        cls_otp_get_info_reply ret;
+        try {
+          decode(ret, iter);
+        } catch (buffer::error& err) {
+	        return -EBADMSG;
+        }
+        *result = ret.otp_info;
+        return 0;
+      }
     } // namespace otp
   } // namespace cls
 } // namespace rados

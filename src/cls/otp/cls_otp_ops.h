@@ -163,4 +163,37 @@ struct cls_otp_get_current_time_reply
 };
 WRITE_CLASS_ENCODER(cls_otp_get_current_time_reply)
 
+struct cls_otp_get_info_op
+{
+  string id;
+
+  void encode(bufferlist &bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(id, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(bufferlist::const_iterator &bl) {
+    DECODE_START(1, bl);
+    decode(id, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(cls_otp_get_info_op)
+
+struct cls_otp_get_info_reply
+{
+  rados::cls::otp::otp_info_t otp_info;
+
+  void encode(bufferlist &bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(otp_info, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(bufferlist::const_iterator &bl) {
+    DECODE_START(1, bl);
+    decode(otp_info, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(cls_otp_get_info_reply)
 #endif

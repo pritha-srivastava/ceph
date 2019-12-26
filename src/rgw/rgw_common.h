@@ -773,7 +773,7 @@ struct RGWUserInfo
   map<int, string> temp_url_keys;
   RGWQuotaInfo user_quota;
   uint32_t type;
-  set<string> mfa_ids;
+  map<string,bool> mfa_info;
   string assumed_role_arn;
 
   RGWUserInfo()
@@ -797,7 +797,7 @@ struct RGWUserInfo
   }
 
   void encode(bufferlist& bl) const {
-     ENCODE_START(21, 9, bl);
+     ENCODE_START(22, 9, bl);
      encode((uint64_t)0, bl); // old auid
      string access_key;
      string secret_key;
@@ -838,12 +838,12 @@ struct RGWUserInfo
      encode(user_id.tenant, bl);
      encode(admin, bl);
      encode(type, bl);
-     encode(mfa_ids, bl);
+     encode(mfa_info, bl);
      encode(assumed_role_arn, bl);
      ENCODE_FINISH(bl);
   }
   void decode(bufferlist::const_iterator& bl) {
-     DECODE_START_LEGACY_COMPAT_LEN_32(20, 9, 9, bl);
+     DECODE_START_LEGACY_COMPAT_LEN_32(22, 9, 9, bl);
      if (struct_v >= 2) {
        uint64_t old_auid;
        decode(old_auid, bl);
@@ -918,8 +918,14 @@ struct RGWUserInfo
     if (struct_v >= 19) {
       decode(type, bl);
     }
-    if (struct_v >= 20) {
+    if (struct_v >= 20 && struct_v < 22) {
+      set<string> mfa_ids;
       decode(mfa_ids, bl);
+      for (auto &it : mfa_ids) {
+        mfa_info[it] = false;
+      }
+    } else if (struct_v >= 22) {
+      decode(mfa_info, bl);
     }
     if (struct_v >= 21) {
       decode(assumed_role_arn, bl);

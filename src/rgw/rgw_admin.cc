@@ -392,6 +392,7 @@ void usage()
   cout << "   --totp-seconds            the time resolution that is being used for TOTP generation\n";
   cout << "   --totp-window             the number of TOTP tokens that are checked before and after the current token when validating token\n";
   cout << "   --totp-pin                the valid value of a TOTP token at a certain time\n";
+  cout << "   --relaxed                 relaxed version of mfa\n";
   cout << "\n";
   generic_client_usage();
 }
@@ -2866,6 +2867,7 @@ int main(int argc, const char **argv)
   int totp_seconds = 0;
   int totp_window = 0;
   int trim_delay_ms = 0;
+  int relaxed_mode = false;
 
   string topic_name;
   string sub_name;
@@ -3205,6 +3207,8 @@ int main(int argc, const char **argv)
       totp_seconds = atoi(val.c_str());
     } else if (ceph_argparse_witharg(args, i, &val, "--totp-window", (char*)NULL)) {
       totp_window = atoi(val.c_str());
+    } else if (ceph_argparse_binary_flag(args, i, &relaxed_mode, NULL, "--relaxed", (char*)NULL)) {
+      // do nothing
     } else if (ceph_argparse_witharg(args, i, &val, "--trim-delay-ms", (char*)NULL)) {
       trim_delay_ms = atoi(val.c_str());
     } else if (ceph_argparse_witharg(args, i, &val, "--topic", (char*)NULL)) {
@@ -7771,7 +7775,6 @@ next:
       return EINVAL;
     }
 
-
     rados::cls::otp::SeedType seed_type;
     if (totp_seed_type == "hex") {
       seed_type = rados::cls::otp::OTP_SEED_HEX;
@@ -7810,8 +7813,8 @@ next:
     }
     
     RGWUserInfo& user_info = user_op.get_user_info();
-    user_info.mfa_ids.insert(totp_serial);
-    user_op.set_mfa_ids(user_info.mfa_ids);
+    user_info.mfa_info.insert(make_pair(totp_serial, relaxed_mode));
+    user_op.set_mfa_info(user_info.mfa_info);
     string err;
     ret = user.modify(user_op, &err);
     if (ret < 0) {
@@ -7846,8 +7849,11 @@ next:
     }
 
     RGWUserInfo& user_info = user_op.get_user_info();
-    user_info.mfa_ids.erase(totp_serial);
-    user_op.set_mfa_ids(user_info.mfa_ids);
+    auto it = user_info.mfa_info.find(totp_serial);
+    if (it != user_info.mfa_info.end()) {
+      user_info.mfa_info.erase(it);
+    }
+    user_op.set_mfa_info(user_info.mfa_info);
     string err;
     ret = user.modify(user_op, &err);
     if (ret < 0) {
@@ -7917,8 +7923,16 @@ next:
       return EINVAL;
     }
 
+    bool is_relaxed = false;
+    RGWUserInfo& user_info = user_op.get_user_info();
+    for (auto &it : user_info.mfa_info) {
+      if (totp_serial == it.first) {
+        is_relaxed = it.second;
+      }
+    }
+
     list<rados::cls::otp::otp_info_t> result;
-    int ret = store->svc()->cls->mfa.check_mfa(user_id, totp_serial, totp_pin.front(), null_yield);
+    int ret = store->svc()->cls->mfa.check_mfa(user_id, totp_serial, totp_pin.front(), is_relaxed, null_yield);
     if (ret < 0) {
       cerr << "MFA check failed, error: " << cpp_strerror(-ret) << std::endl;
       return -ret;

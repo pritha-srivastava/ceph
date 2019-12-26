@@ -62,7 +62,7 @@ public:
       return string("user:") + user.to_str();
     }
 
-    int check_mfa(const rgw_user& user, const string& otp_id, const string& pin, optional_yield y);
+    int check_mfa(const rgw_user& user, const string& otp_id, const string& pin, bool is_relaxed, optional_yield y);
     int create_mfa(const rgw_user& user, const rados::cls::otp::otp_info_t& config,
 		   RGWObjVersionTracker *objv_tracker, const ceph::real_time& mtime, optional_yield y);
     int remove_mfa(const rgw_user& user, const string& id,
@@ -77,6 +77,7 @@ public:
 		const real_time& mtime, optional_yield y);
     int list_mfa(const string& oid, list<rados::cls::otp::otp_info_t> *result,
 		 RGWObjVersionTracker *objv_tracker, ceph::real_time *pmtime, optional_yield y);
+    int check_otp(librados::IoCtx& ioctx, const string& obj_id, const string& otp_id, const string& pin, rados::cls::otp::OTPCheckResult& result, optional_yield y);
   } mfa;
 
   class TimeLog : public ClsSubService {

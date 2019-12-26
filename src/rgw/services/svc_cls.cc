@@ -1,6 +1,9 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab ft=cpp
 
+#include <liboath/oath.h>
+
+#include "common/Clock.h"
 
 #include "svc_cls.h"
 #include "svc_rados.h"
@@ -9,6 +12,7 @@
 #include "rgw/rgw_zone.h"
 
 #include "cls/otp/cls_otp_client.h"
+#include "cls/otp/cls_otp_ops.h"
 #include "cls/log/cls_log_client.h"
 #include "cls/lock/cls_lock_client.h"
 
@@ -54,7 +58,30 @@ int RGWSI_Cls::MFA::get_mfa_ref(const rgw_user& user, rgw_rados_ref *ref)
   return 0;
 }
 
-int RGWSI_Cls::MFA::check_mfa(const rgw_user& user, const string& otp_id, const string& pin, optional_yield y)
+int RGWSI_Cls::MFA::check_otp(librados::IoCtx &ioctx, const string& obj_id, const string& otp_id, const string& pin, rados::cls::otp::OTPCheckResult& result, optional_yield y)
+{
+  rados::cls::otp::otp_info_t otp;
+  int r = rados::cls::otp::OTP::get_info(ioctx, obj_id, otp_id, &otp);
+  if (r < 0) {
+    return r;
+  }
+  ceph::real_time now = ceph::real_clock::now();
+  uint32_t secs = (uint32_t)ceph::real_clock::to_time_t(now);
+  int ret = oath_totp_validate2(otp.seed_bin.c_str(), otp.seed_bin.length(),
+                                   secs, otp.step_size, otp.time_ofs, otp.window,
+                                   nullptr /* otp pos */,
+                                   pin.c_str());
+  if (ret == OATH_INVALID_OTP ||
+      ret < 0) {
+    ldout(cct, 20) << "otp check failed, result=" << ret << dendl;
+    result = rados::cls::otp::OTP_CHECK_FAIL;
+    return -EINVAL;
+  }
+  result = rados::cls::otp::OTP_CHECK_SUCCESS;
+  return 0;
+}
+
+int RGWSI_Cls::MFA::check_mfa(const rgw_user& user, const string& otp_id, const string& pin, bool is_relaxed, optional_yield y)
 {
   rgw_rados_ref ref;
   int r = get_mfa_ref(user, &ref);
@@ -64,10 +91,13 @@ int RGWSI_Cls::MFA::check_mfa(const rgw_user& user, const string& otp_id, const 
 
   rados::cls::otp::otp_check_t result;
 
-  r = rados::cls::otp::OTP::check(cct, ref.pool.ioctx(), ref.obj.oid, otp_id, pin, &result);
+  if (is_relaxed) {
+    r = check_otp(ref.pool.ioctx(), ref.obj.oid, otp_id, pin, result.result, y);
+  } else {
+    r = rados::cls::otp::OTP::check(cct, ref.pool.ioctx(), ref.obj.oid, otp_id, pin, &result);
+  }
   if (r < 0)
     return r;
-
   ldout(cct, 20) << "OTP check, otp_id=" << otp_id << " result=" << (int)result.result << dendl;
 
   return (result.result == rados::cls::otp::OTP_CHECK_SUCCESS ? 0 : -EACCES);

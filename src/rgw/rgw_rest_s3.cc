@@ -3930,7 +3930,7 @@ int RGWHandler_REST_S3::init_from_header(struct req_state* s,
   return 0;
 }
 
-static int verify_mfa(rgw::sal::RGWRadosStore *store, RGWUserInfo *user, const string& mfa_str, bool *verified, const DoutPrefixProvider *dpp)
+static int verify_mfa(rgw::sal::RGWRadosStore *store, RGWUserInfo *user, const string& mfa_str, bool *verified, const DoutPrefixProvider *dpp, const RGWEnv& env)
 {
   vector<string> params;
   get_str_vec(mfa_str, " ", params);
@@ -3943,13 +3943,26 @@ static int verify_mfa(rgw::sal::RGWRadosStore *store, RGWUserInfo *user, const s
   string& serial = params[0];
   string& pin = params[1];
 
-  auto i = user->mfa_ids.find(serial);
-  if (i == user->mfa_ids.end()) {
+  bool found = false, is_relaxed = false;
+  for (auto& it : user->mfa_info) {
+    if (it.first == serial) {
+      found = true;
+      is_relaxed = it.second;
+    }
+  }
+
+  if (! found) {
     ldpp_dout(dpp, 5) << "NOTICE: user does not have mfa device with serial=" << serial << dendl;
     return -EACCES;
   }
 
-  int ret = store->svc()->cls->mfa.check_mfa(user->user_id, serial, pin, null_yield);
+  if (rgw_transport_is_secure(store->ctx(), env)) {
+    is_relaxed &= true;
+  } else {
+    is_relaxed &= false;
+  }
+
+  int ret = store->svc()->cls->mfa.check_mfa(user->user_id, serial, pin, is_relaxed, null_yield);
   if (ret < 0) {
     ldpp_dout(dpp, 20) << "NOTICE: failed to check MFA, serial=" << serial << dendl;
     return -EACCES;
@@ -3990,7 +4003,7 @@ int RGWHandler_REST_S3::postauth_init()
 
   const char *mfa = s->info.env->get("HTTP_X_AMZ_MFA");
   if (mfa) {
-    ret = verify_mfa(store, s->user, string(mfa), &s->mfa_verified, s);
+    ret = verify_mfa(store, s->user, string(mfa), &s->mfa_verified, s, *s->info.env);
   }
 
   return 0;

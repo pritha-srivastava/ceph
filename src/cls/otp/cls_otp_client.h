@@ -32,6 +32,8 @@ namespace rados {
                          const string& id, const string& val, otp_check_t *result);
         static int get_current_time(librados::IoCtx& ioctx, const string& oid,
                                     ceph::real_time *result);
+        static int get_info(librados::IoCtx& ioctx, const string& oid,
+                                const string& id, otp_info_t *result);
 #endif
       };
 

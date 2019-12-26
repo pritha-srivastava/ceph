@@ -102,13 +102,11 @@ void otp_instance::check(const string& token, const string& val, bool *update)
 {
   ceph::real_time now = ceph::real_clock::now();
   trim_expired(now);
-
   if (last_checks.size() >= ATTEMPTS_PER_WINDOW) {
     /* too many attempts */
     *update = false;
     return;
   }
-
   otp_check_t check;
   check.token = token;
   check.timestamp = now;
@@ -523,6 +521,31 @@ static int otp_get_current_time_op(cls_method_context_t hctx,
   return 0;
 }
 
+static int otp_get_info(cls_method_context_t hctx,
+                        bufferlist *in, bufferlist *out)
+{
+  CLS_LOG(20, "%s", __func__);
+  cls_otp_get_info_op op;
+  try {
+    auto iter = in->cbegin();
+    decode(op, iter);
+  } catch (const buffer::error &err) {
+    CLS_ERR("ERROR: %s(): failed to decode request", __func__);
+    return -EINVAL;
+  }
+  otp_instance instance;
+
+  int r = get_otp_instance(hctx, op.id, &instance);
+  if (r < 0) {
+    return r;
+  }
+  cls_otp_get_info_reply reply;
+  reply.otp_info = instance.otp;
+  encode(reply, *out);
+
+  return 0;
+}
+
 CLS_INIT(otp)
 {
   CLS_LOG(20, "Loaded otp class!");
@@ -546,6 +569,7 @@ CLS_INIT(otp)
                                         */
   cls_method_handle_t h_remove_otp_op;
   cls_method_handle_t h_get_current_time_op;
+  cls_method_handle_t h_otp_info;
 
   cls_register("otp", &h_class);
   cls_register_cxx_method(h_class, "otp_set",
@@ -566,6 +590,9 @@ CLS_INIT(otp)
   cls_register_cxx_method(h_class, "get_current_time",
                           CLS_METHOD_RD,
                           otp_get_current_time_op, &h_get_current_time_op);
+  cls_register_cxx_method(h_class, "get_otp_info",
+                          CLS_METHOD_RD,
+                          otp_get_info, &h_otp_info);
 
   return;
 }
