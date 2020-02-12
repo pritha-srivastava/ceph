@@ -60,11 +60,13 @@ int RGWSI_Cls::MFA::get_mfa_ref(const rgw_user& user, rgw_rados_ref *ref)
 
 int RGWSI_Cls::MFA::check_otp(librados::IoCtx &ioctx, const string& obj_id, const string& otp_id, const string& pin, rados::cls::otp::OTPCheckResult& result, optional_yield y)
 {
+  // check if the otp info is in cache
   rados::cls::otp::otp_info_t otp;
   int r = rados::cls::otp::OTP::get_info(ioctx, obj_id, otp_id, &otp);
   if (r < 0) {
     return r;
   }
+  // put it in cache
   ceph::real_time now = ceph::real_clock::now();
   uint32_t secs = (uint32_t)ceph::real_clock::to_time_t(now);
   int ret = oath_totp_validate2(otp.seed_bin.c_str(), otp.seed_bin.length(),

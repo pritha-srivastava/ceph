@@ -459,6 +459,9 @@ protected:
   using RGWChainedCacheImpl_bucket_info_entry = RGWChainedCacheImpl<bucket_info_entry>;
   RGWChainedCacheImpl_bucket_info_entry *binfo_cache;
 
+  using RGWChainedCacheImpl_mfa_info = RGWChainedCacheImpl<rados::cls::otp::otp_info_t>;
+  RGWChainedCacheImpl_mfa_info *mfa_cache;
+
   tombstone_cache_t *obj_tombstone_cache;
 
   librados::IoCtx gc_pool_ctx;        // .rgw.gc
@@ -485,7 +488,7 @@ public:
                data_notifier(NULL), meta_sync_processor_thread(NULL),
                bucket_index_max_shards(0),
                max_bucket_id(0), cct(NULL),
-               binfo_cache(NULL), obj_tombstone_cache(nullptr),
+               binfo_cache(NULL), mfa_cache(NULL), obj_tombstone_cache(nullptr),
                pools_initialized(false),
                quota_handler(NULL),
                cr_registry(NULL),

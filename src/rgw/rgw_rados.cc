@@ -1057,6 +1057,7 @@ void RGWRados::finalize()
 
   delete binfo_cache;
   delete obj_tombstone_cache;
+  delete mfa_cache;
 
   if (reshard_wait.get()) {
     reshard_wait->stop();
@@ -1281,6 +1282,9 @@ int RGWRados::init_complete()
   if (need_tombstone_cache) {
     obj_tombstone_cache = new tombstone_cache_t(cct->_conf->rgw_obj_tombstone_cache_size);
   }
+
+  mfa_cache = new RGWChainedCacheImpl<rados::cls::otp::otp_info_t>;
+  mfa_cache->init(svc.cache);
 
   reshard_wait = std::make_shared<RGWReshardWait>();
 
