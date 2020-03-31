@@ -5835,7 +5835,7 @@ rgw::auth::s3::STSEngine::authenticate(
     }
     // This is mostly needed to assign the owner of a bucket during its creation
     user_id = token.user;
-    role_name = role.get_name();
+    role_name = role.get_tenant() + "$" + role.get_name();
   }
 
   if (! token.user.empty() && token.acct_type != TYPE_ROLE) {

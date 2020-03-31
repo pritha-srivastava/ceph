@@ -175,6 +175,7 @@ public:
                           const uint64_t& duration,
                           const boost::optional<string>& policy,
                           const boost::optional<string>& roleId,
+                          const boost::optional<string>& role_session,
                           boost::optional<rgw_user> user,
                           rgw::auth::Identity* identity);
   const string& getAccessKeyId() const { return accessKeyId; }

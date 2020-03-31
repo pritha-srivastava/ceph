@@ -2,6 +2,7 @@
 // vim: ts=8 sw=2 smarttab ft=cpp
 
 #include <array>
+#include <string>
 
 #include "rgw_common.h"
 #include "rgw_auth.h"
@@ -670,18 +671,30 @@ void rgw::auth::RoleApplier::to_str(std::ostream& out) const {
 
 bool rgw::auth::RoleApplier::is_identity(const idset_t& ids) const {
   for (auto& p : ids) {
-    string name;
-    string tenant = p.get_tenant();
-    if (tenant.empty()) {
-      name = p.get_id();
-    } else {
-      name = tenant + "$" + p.get_id();
-    }
     if (p.is_wildcard()) {
       return true;
-    } else if (p.is_role() && name == role_name) {
-      return true;
-    }
+    } else if (p.is_role()) {
+      string name;
+      string tenant = p.get_tenant();
+      if (tenant.empty()) {
+        name = p.get_id();
+      } else {
+        name = tenant + "$" + p.get_id();
+      }
+      if (name == role_name) {
+        return true;
+      }
+    } else if (p.is_assumed_role()) {
+      auto pos = role_name.find("$"); //role-tenant$role-name
+      string r_name = role_name;
+      if (pos != string::npos) {
+        r_name.erase(0, (pos + 1));
+      }
+      string role_session_name = r_name + "/" + user_id.id;
+      if (role_session_name == p.get_role_session()) {
+        return true;
+      }
+    }//assumed-role
   }
   return false;
 }
@@ -690,14 +703,20 @@ void rgw::auth::RoleApplier::load_acct_info(const DoutPrefixProvider* dpp, RGWUs
 {
   /* Load the user id */
   user_info.user_id = this->user_id;
+
+  auto pos = role_name.find("$");
+  string role_tenant = role_name.substr(0, pos);
+  user_info.user_id.tenant = role_tenant;
 }
 
 void rgw::auth::RoleApplier::modify_request_state(const DoutPrefixProvider *dpp, req_state* s) const
 {
+  auto pos = role_name.find("$");
+  string role_tenant = role_name.substr(0, pos);
   for (auto it : role_policies) {
     try {
       bufferlist bl = bufferlist::static_from_string(it);
-      const rgw::IAM::Policy p(s->cct, s->user->get_tenant(), bl);
+      const rgw::IAM::Policy p(s->cct, role_tenant, bl);
       s->iam_user_policies.push_back(std::move(p));
     } catch (rgw::IAM::PolicyParseException& e) {
       //Control shouldn't reach here as the policy has already been

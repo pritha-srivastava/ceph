@@ -362,6 +362,7 @@ class WebIdentityApplier : public IdentityApplier {
 protected:
   CephContext* const cct;
   RGWCtl* const ctl;
+  string role_session;
   rgw::web_idp::WebTokenClaims token_claims;
 
   string get_idp_url() const;
@@ -369,14 +370,16 @@ protected:
 public:
   WebIdentityApplier( CephContext* const cct,
                       RGWCtl* const ctl,
+                      const string& role_session,
                       const rgw::web_idp::WebTokenClaims& token_claims)
     : cct(cct),
       ctl(ctl),
+      role_session(role_session),
       token_claims(token_claims) {
   }
 
   void load_acct_info(const DoutPrefixProvider* dpp, RGWUserInfo& user_info) const override {
-    user_info.user_id = rgw_user(token_claims.sub);
+    user_info.user_id = rgw_user(role_session);
     user_info.display_name = token_claims.user_name;
   }
 
@@ -415,6 +418,7 @@ public:
 
     virtual aplptr_t create_apl_web_identity( CephContext* cct,
                                               const req_state* s,
+                                              const string& role_session,
                                               const rgw::web_idp::WebTokenClaims& token) const = 0;
   };
 };
@@ -615,7 +619,7 @@ public:
 
 class RoleApplier : public IdentityApplier {
 protected:
-  const string role_name;
+  const string role_name; // role-tenant$role-name
   const rgw_user user_id;
   vector<std::string> role_policies;
 
