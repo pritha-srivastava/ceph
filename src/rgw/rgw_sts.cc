@@ -118,7 +118,7 @@ int Credentials::generateCredentials(CephContext* cct,
     token.perm_mask = 0;
     token.is_admin = 0;
     token.acct_type = TYPE_ROLE;
-    token.user.id = role_session.get();
+    token.role_session = role_session.get();
   }
 
   buffer::list input, enc_output;
