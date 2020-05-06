@@ -100,10 +100,16 @@ int RGWSI_User_RADOS::do_start()
   return 0;
 }
 
-rgw_raw_obj RGWSI_User_RADOS::get_buckets_obj(const rgw_user& user) const
+rgw_raw_obj RGWSI_User_RADOS::get_buckets_obj(const rgw_user& user, bool identity_type_role) const
 {
   string oid = user.to_str() + RGW_BUCKETS_OBJ_SUFFIX;
-  return rgw_raw_obj(svc.zone->get_zone_params().user_uid_pool, oid);
+  rgw_pool pool;
+  if (identity_type_role) {
+    pool = svc.zone->get_zone_params().roles_pool;
+  } else {
+    pool = svc.zone->get_zone_params().user_uid_pool;
+  }
+  return rgw_raw_obj(pool, oid);
 }
 
 int RGWSI_User_RADOS::read_user_info(RGWSI_MetaBackend::Context *ctx,
@@ -642,7 +648,8 @@ int RGWSI_User_RADOS::cls_user_remove_bucket(rgw_raw_obj& obj, const cls_user_bu
 int RGWSI_User_RADOS::add_bucket(RGWSI_MetaBackend::Context *ctx,
                                  const rgw_user& user,
                                  const rgw_bucket& bucket,
-                                 ceph::real_time creation_time)
+                                 ceph::real_time creation_time,
+                                 bool identity_type_role)
 {
   int ret;
 
@@ -655,7 +662,7 @@ int RGWSI_User_RADOS::add_bucket(RGWSI_MetaBackend::Context *ctx,
   else
     new_bucket.creation_time = creation_time;
 
-  rgw_raw_obj obj = get_buckets_obj(user);
+  rgw_raw_obj obj = get_buckets_obj(user, identity_type_role);
   ret = cls_user_add_bucket(obj, new_bucket);
   if (ret < 0) {
     ldout(cct, 0) << "ERROR: error adding bucket to user: ret=" << ret << dendl;
@@ -668,11 +675,12 @@ int RGWSI_User_RADOS::add_bucket(RGWSI_MetaBackend::Context *ctx,
 
 int RGWSI_User_RADOS::remove_bucket(RGWSI_MetaBackend::Context *ctx,
                                     const rgw_user& user,
-                                    const rgw_bucket& _bucket)
+                                    const rgw_bucket& _bucket,
+                                    bool identity_type_role)
 {
   cls_user_bucket bucket;
   bucket.name = _bucket.name;
-  rgw_raw_obj obj = get_buckets_obj(user);
+  rgw_raw_obj obj = get_buckets_obj(user, identity_type_role);
   int ret = cls_user_remove_bucket(obj, bucket);
   if (ret < 0) {
     ldout(cct, 0) << "ERROR: error removing bucket from user: ret=" << ret << dendl;
@@ -733,13 +741,14 @@ int RGWSI_User_RADOS::list_buckets(RGWSI_MetaBackend::Context *ctx,
                                  const string& end_marker,
                                  uint64_t max,
                                  RGWUserBuckets *buckets,
-                                 bool *is_truncated)
+                                 bool *is_truncated,
+                                 bool identity_type_role)
 {
   int ret;
 
   buckets->clear();
   
-  rgw_raw_obj obj = get_buckets_obj(user);
+  rgw_raw_obj obj = get_buckets_obj(user, identity_type_role);
 
   bool truncated = false;
   string m = marker;
@@ -773,9 +782,10 @@ int RGWSI_User_RADOS::list_buckets(RGWSI_MetaBackend::Context *ctx,
 
 int RGWSI_User_RADOS::flush_bucket_stats(RGWSI_MetaBackend::Context *ctx,
                                          const rgw_user& user,
-                                         const RGWBucketEnt& ent)
+                                         const RGWBucketEnt& ent,
+                                         bool identity_type_role)
 {
-  rgw_raw_obj obj = get_buckets_obj(user);
+  rgw_raw_obj obj = get_buckets_obj(user, identity_type_role);
 
   return cls_user_flush_bucket_stats(obj, ent);
 }
