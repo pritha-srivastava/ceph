@@ -735,6 +735,10 @@ void rgw::auth::RoleApplier::modify_request_state(const DoutPrefixProvider *dpp,
   string condition = "aws:userid";
   string value = role.id + ":" + role_session_name;
   s->env.emplace(condition, value);
+
+  for (auto it:token_claims) {
+    s->info.args.append(it.first, it.second);
+  }
 }
 
 rgw::auth::Engine::result_t

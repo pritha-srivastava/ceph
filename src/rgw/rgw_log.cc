@@ -274,6 +274,13 @@ void rgw_format_ops_log_entry(struct rgw_log_entry& entry, Formatter *formatter)
     formatter->close_section();
   }
   formatter->dump_string("trans_id", entry.trans_id);
+  if (entry.token_claims.size() > 0) {
+    for (const auto& iter: entry.token_claims) {
+      formatter->open_object_section(iter.first.c_str());
+      formatter->dump_string(iter.first.c_str(), iter.second);
+      formatter->close_section();
+    }
+  }
   formatter->close_section();
 }
 
@@ -393,6 +400,18 @@ int rgw_log_op(RGWRados *store, RGWREST* const rest, struct req_state *s,
   entry.uri = std::move(uri);
 
   entry.op = op_name;
+
+  if (s->info.env->exists("HTTP_X_AMZ_SECURITY_TOKEN")) {
+    if (s->info.args.exists("aud")) {
+      entry.token_claims.emplace("aud", s->info.args.get("aud"));
+    }
+    if (s->info.args.exists("sub")) {
+      entry.token_claims.emplace("sub", s->info.args.get("sub"));
+    }
+    if (s->info.args.exists("iss")) {
+      entry.token_claims.emplace("iss", s->info.args.get("iss"));
+    }
+  }
 
   /* custom header logging */
   if (rest) {
