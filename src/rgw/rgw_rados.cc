@@ -2216,6 +2216,7 @@ int RGWRados::create_bucket(const RGWUserInfo& owner, rgw_bucket& bucket,
     info.swift_ver_location = swift_ver_location;
     info.swift_versioning = (!swift_ver_location.empty());
     info.is_owner_role = is_identity_role;
+    info.owner_display_name = owner.display_name;
     if (pmaster_num_shards) {
       info.layout.current_index.layout.normal.num_shards = *pmaster_num_shards;
     } else {
@@ -7637,6 +7638,7 @@ int RGWRados::put_linked_bucket_info(RGWBucketInfo& info, bool exclusive, real_t
   entry_point.creation_time = info.creation_time;
   entry_point.linked = true;
   entry_point.is_owner_role = info.is_owner_role;
+  entry_point.owner_display_name = info.owner_display_name;
   RGWObjVersionTracker ot;
   if (pep_objv && !pep_objv->tag.empty()) {
     ot.write_version = *pep_objv;
