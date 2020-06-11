@@ -141,6 +141,18 @@ WebTokenEngine::get_from_jwt(const DoutPrefixProvider* dpp, const std::string& t
     if (decoded.has_subject()) {
       t.sub = decoded.get_subject();
     }
+    if (decoded.has_payload_claim("amr")) {
+      t.amr = decoded.get_payload_claim("amr").as_string();
+    }
+    if (decoded.has_payload_claim("app_id")) {
+      t.app_id = decoded.get_payload_claim("app_id").as_string();
+    }
+    if (decoded.has_payload_claim("user_id")) {
+      t.user_id = decoded.get_payload_claim("user_id").as_string();
+    }
+    if (decoded.has_payload_claim("id")) {
+      t.id = decoded.get_payload_claim("id").as_string();
+    }
     if (decoded.has_payload_claim("client_id")) {
       t.client_id = decoded.get_payload_claim("client_id").as_string();
     }

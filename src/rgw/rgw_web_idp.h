@@ -19,6 +19,14 @@ struct WebTokenClaims {
   std::string user_name;
   //Client Id
   std::string client_id;
+  //AMR
+  std::string amr;
+  //app_id
+  std::string app_id;
+  //user_id
+  std::string user_id;
+  //id
+  std::string id;
 };
 
 }; /* namespace web_idp */

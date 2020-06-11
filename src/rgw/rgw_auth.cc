@@ -370,6 +370,32 @@ void rgw::auth::WebIdentityApplier::modify_request_state(const DoutPrefixProvide
   condition.clear();
   condition = idp_url + ":sub";
   s->env.emplace(condition, token_claims.sub);
+
+  // https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_iam-condition-keys.html#condition-keys-wif
+
+  condition.clear();
+  condition = idp_url + ":amr";
+  s->env.emplace(condition, token_claims.amr);
+
+  condition.clear();
+  condition = idp_url + ":aud";
+  s->env.emplace(condition, token_claims.aud);
+
+  condition.clear();
+  condition = idp_url + ":oaud";
+  s->env.emplace(condition, token_claims.aud);
+
+  condition.clear();
+  condition = idp_url + ":app_id";
+  s->env.emplace(condition, token_claims.app_id);
+
+  condition.clear();
+  condition = idp_url + ":id";
+  s->env.emplace(condition, token_claims.id);
+
+  condition.clear();
+  condition = idp_url + ":user_id";
+  s->env.emplace(condition, token_claims.user_id);
 }
 
 bool rgw::auth::WebIdentityApplier::is_identity(const idset_t& ids) const
