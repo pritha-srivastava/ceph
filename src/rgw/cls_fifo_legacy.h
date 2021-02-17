@@ -114,6 +114,7 @@ using part_info = fifo::part_header;
 /// AioCompletion and IoCtx.
 
 class FIFO {
+protected:
   friend struct Reader;
   friend struct Updater;
   friend struct Trimmer;
