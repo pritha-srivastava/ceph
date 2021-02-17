@@ -16,6 +16,8 @@
 #include <vector>
 #include <map>
 #include <set>
+#include <fmt/format.h>
+#include <fmt/ostream.h>
 
 using namespace librados;
 
@@ -686,6 +688,78 @@ TEST(cls_rgw_gc, gc_queue_ops9)
   //Test defer entry for first element
   cls_rgw_gc_queue_defer_entry(defer_op, 10, defer_info1);
   ASSERT_EQ(-ENOSPC, ioctx.operate(queue_name, &defer_op));
+}
+
+TEST(cls_rgw_gc, gc_queue_benchmark)
+{
+  string queue_name = "benchmark-queue";
+  uint64_t queue_size = 1048576, num_urgent_data_entries = 50;
+  librados::ObjectWriteOperation op;
+  op.create(true);
+  cls_rgw_gc_queue_init(op, queue_size, num_urgent_data_entries);
+  ASSERT_EQ(0, ioctx.operate(queue_name, &op));
+
+  uint64_t size = 0;
+  int ret = cls_rgw_gc_queue_get_capacity(ioctx, queue_name, size);
+  ASSERT_EQ(0, ret);
+  ASSERT_EQ(size, queue_size);
+
+  int max_entries = 512;
+
+  auto start_push = std::chrono::steady_clock::now();
+  //Test enqueue
+  for (int i = 0; i < max_entries; i++) {
+    string tag = "chain-" + to_string(i);
+    librados::ObjectWriteOperation op;
+    cls_rgw_gc_obj_info info;
+
+    cls_rgw_obj obj1, obj2;
+    create_obj(obj1, i, 1);
+    create_obj(obj2, i, 2);
+    info.chain.objs.push_back(obj1);
+    info.chain.objs.push_back(obj2);
+
+    info.tag = tag;
+    cls_rgw_gc_queue_enqueue(op, 300, info);
+    ASSERT_EQ(0, ioctx.operate(queue_name, &op));
+  }
+  auto finish_push = std::chrono::steady_clock::now();
+  //Test list queue for expired entries only
+  list<cls_rgw_gc_obj_info> result, list_info2;
+  string marker, next_marker;
+  bool expired_only = false, truncated;
+  auto start_list = std::chrono::steady_clock::now();
+  ret = cls_rgw_gc_queue_list_entries(ioctx, queue_name, marker, max_entries * 10, expired_only, result, &truncated, next_marker);
+  ASSERT_EQ(0, ret);
+  auto finish_list = std::chrono::steady_clock::now();
+
+  ASSERT_FALSE(truncated);
+  ASSERT_EQ(max_entries, result.size());
+
+  int i = 0;
+  for (auto it : result) {
+    string tag = "chain-" + to_string(i);
+    ASSERT_EQ(tag, it.tag);
+    i++;
+  }
+
+  //Test remove entries
+  librados::ObjectWriteOperation remove_op;
+  auto start_trim = std::chrono::steady_clock::now();
+  cls_rgw_gc_queue_remove_entries(remove_op, result.size());
+  ASSERT_EQ(0, ioctx.operate(queue_name, &remove_op));
+  auto finish_trim = std::chrono::steady_clock::now();
+
+  //Test list queue again for all entries
+  result.clear();
+  ret = cls_rgw_gc_queue_list_entries(ioctx, queue_name, marker, max_entries*10, expired_only, result, &truncated, next_marker);
+  ASSERT_EQ(0, result.size());
+  ASSERT_EQ(0, ret);
+  ASSERT_FALSE(truncated);
+
+  fmt::print(std::cerr, "Time taken to push {} entries {} \n", max_entries, (finish_push - start_push));
+  fmt::print(std::cerr, "Time taken to list {} entries {} \n", max_entries, (finish_list - start_list));
+  fmt::print(std::cerr, "Time taken to trim {} entries {} \n", max_entries, (finish_trim - start_trim));
 }
 
 /* must be last test! */

@@ -217,3 +217,8 @@ add_executable(unittest_rgw_lua test_rgw_lua.cc)
 add_ceph_unittest(unittest_rgw_lua)
 target_link_libraries(unittest_rgw_lua ${rgw_libs} ${LUA_LIBRARIES})
 
+# unittest_cls_fifo_rgw_gc
+add_executable(unittest_cls_fifo_rgw_gc test_cls_fifo_rgw_gc.cc)
+target_link_libraries(unittest_cls_fifo_rgw_gc radostest-cxx ${UNITTEST_LIBS}
+  ${rgw_libs})
+
