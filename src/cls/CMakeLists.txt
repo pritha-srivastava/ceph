@@ -340,3 +340,18 @@ set_target_properties(cls_fifo PROPERTIES
   INSTALL_RPATH ""
   CXX_VISIBILITY_PRESET hidden)
 install(TARGETS cls_fifo DESTINATION ${cls_dir})
+
+# cls_rgw_gc_fifo
+if (WITH_RADOSGW)
+  set(cls_rgw_gc_fifo_srcs
+    rgw_gc_fifo/cls_rgw_gc_fifo.cc
+    fifo/cls_fifo_src.cc
+    ${CMAKE_SOURCE_DIR}/src/common/ceph_json.cc)
+  add_library(cls_rgw_gc_fifo SHARED ${cls_rgw_gc_fifo_srcs})
+  set_target_properties(cls_rgw_gc_fifo PROPERTIES
+    VERSION "1.0.0"
+    SOVERSION "1"
+    INSTALL_RPATH ""
+    CXX_VISIBILITY_PRESET hidden)
+  install(TARGETS cls_rgw_gc_fifo DESTINATION ${cls_dir})
+endif (WITH_RADOSGW)
