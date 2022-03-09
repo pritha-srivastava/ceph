@@ -816,8 +816,8 @@ void RADOS::execute_(Object o, IOContext _ioc, WriteOp _op,
   trace.event("submitted");
 }
 
-void RADOS::lookup_pool_(std::string name,
-			 LookupPoolComp c)
+void RADOS::lookup_pool(std::string_view name,
+			std::unique_ptr<LookupPoolComp> c)
 {
   // I kind of want to make lookup_pg_pool return
   // std::optional<int64_t> since it can only return one error code.
@@ -1068,12 +1068,12 @@ void RADOS::watch_(Object o, IOContext _ioc,
       }), nullptr);
 }
 
-void RADOS::notify_ack_(Object o,
-			IOContext _ioc,
-			uint64_t notify_id,
-			uint64_t cookie,
-			bufferlist bl,
-			SimpleOpComp c)
+void RADOS::notify_ack(const Object& o,
+		       const IOContext& _ioc,
+		       uint64_t notify_id,
+		       uint64_t cookie,
+		       bufferlist&& bl,
+		       std::unique_ptr<SimpleOpComp> c)
 {
   auto oid = reinterpret_cast<const object_t*>(&o.impl);
   auto ioc = reinterpret_cast<const IOContextImpl*>(&_ioc.impl);
@@ -1085,7 +1085,7 @@ void RADOS::notify_ack_(Object o,
 		       nullptr, ioc->extra_op_flags, std::move(c));
 }
 
-tl::expected<ceph::timespan, bs::error_code> RADOS::watch_check_(uint64_t cookie)
+tl::expected<ceph::timespan, bs::error_code> RADOS::watch_check(uint64_t cookie)
 {
   Objecter::LingerOp *linger_op = reinterpret_cast<Objecter::LingerOp*>(cookie);
   return impl->objecter->linger_check(linger_op);
@@ -1114,7 +1114,7 @@ void RADOS::unwatch_(uint64_t cookie, IOContext _ioc,
 			   }));
 }
 
-void RADOS::flush_watch_(VoidOpComp c)
+void RADOS::flush_watch(std::unique_ptr<VoidOpComp> c)
 {
   impl->objecter->linger_callback_flush([c = std::move(c)]() mutable {
 					  asio::dispatch(std::move(c));
@@ -1335,27 +1335,29 @@ void RADOS::enumerate_objects_(IOContext _ioc,
 }
 
 
-void RADOS::osd_command_(int osd, std::vector<std::string> cmd,
-			 ceph::bufferlist in, CommandComp c) {
-  impl->objecter->osd_command(
-    osd, std::move(cmd), std::move(in), nullptr,
-    [c = std::move(c)]
-    (bs::error_code ec, std::string&& s, ceph::bufferlist&& b) mutable {
-      asio::dispatch(asio::append(std::move(c), ec, std::move(s),
-				  std::move(b)));
-    });
+void RADOS::osd_command(int osd, std::vector<std::string>&& cmd,
+			ceph::bufferlist&& in, std::unique_ptr<CommandComp> c) {
+  impl->objecter->osd_command(osd, std::move(cmd), std::move(in), nullptr,
+			      [c = std::move(c)]
+			      (bs::error_code ec,
+			       std::string&& s,
+			       ceph::bufferlist&& b) mutable {
+				ca::dispatch(std::move(c), ec,
+					     std::move(s),
+					     std::move(b));
+			      });
 }
-
-void RADOS::pg_command_(PG pg, std::vector<std::string> cmd,
-			ceph::bufferlist in, CommandComp c) {
-  impl->objecter->pg_command(
-    pg_t{pg.seed, pg.pool}, std::move(cmd), std::move(in), nullptr,
-    [c = std::move(c)]
-    (bs::error_code ec, std::string&& s,
-     ceph::bufferlist&& b) mutable {
-      asio::dispatch(asio::append(std::move(c), ec, std::move(s),
-				  std::move(b)));
-    });
+void RADOS::pg_command(PG pg, std::vector<std::string>&& cmd,
+		       ceph::bufferlist&& in, std::unique_ptr<CommandComp> c) {
+  impl->objecter->pg_command(pg_t{pg.seed, pg.pool}, std::move(cmd), std::move(in), nullptr,
+			     [c = std::move(c)]
+			     (bs::error_code ec,
+			      std::string&& s,
+			      ceph::bufferlist&& b) mutable {
+			       ca::dispatch(std::move(c), ec,
+					    std::move(s),
+					    std::move(b));
+			     });
 }
 
 void RADOS::enable_application_(std::string pool, std::string app_name,

@@ -168,11 +168,6 @@ IOContext::IOContext(const IOContext& rhs) {
   new (&impl) IOContextImpl(*reinterpret_cast<const IOContextImpl*>(&rhs.impl));
 }
 
-IOContext::IOContext(IOContext&& rhs) {
-  static_assert(impl_size >= sizeof(IOContextImpl));
-  new (&impl) IOContextImpl(std::move(*reinterpret_cast<const IOContextImpl*>(&rhs.impl)));
-}
-
 IOContext::IOContext(int64_t _pool, std::string_view _ns, std::string_view _key)
   : IOContext() {
   pool(_pool);
