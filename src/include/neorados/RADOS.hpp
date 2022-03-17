@@ -503,7 +503,7 @@ public:
     template<boost::asio::completion_token_for<BuildSig> CompletionToken>
     auto build(boost::asio::io_context& ioctx, CompletionToken&& token) {
       return boost::asio::async_initiate<CompletionToken, BuildSig>(
-	[&, this](auto&& handler) {
+	[&ioctx, this](auto&& handler) {
 	  build(ioctx, BuildComp::create(ioctx.get_executor(),
 					 std::move(handler)));
 	}, token);
@@ -520,7 +520,7 @@ public:
 			    boost::asio::io_context& ioctx,
 			    CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, BuildSig>(
-      [&](auto&& handler) {
+      [cct, &ioctx](auto&& handler) {
 	make_with_cct(cct, ioctx,
 		      BuildComp::create(ioctx.get_executor(),
 					std::move(handler)));
@@ -543,27 +543,29 @@ public:
   executor_type get_executor() const;
   boost::asio::io_context& get_io_context();
 
-  template<boost::asio::completion_token_for<Op::Signature> CompletionToken>
+  template<typename CompletionToken>
   auto execute(Object o, IOContext ioc, ReadOp op,
 	       ceph::buffer::list* bl,
 	       CompletionToken&& token, uint64_t* objver = nullptr,
 	       const blkin_trace_info* trace_info = nullptr) {
     return boost::asio::async_initiate<CompletionToken, Op::Signature>(
-      [&, this](auto&& handler) {
-	execute(o, ioc, std::move(op), bl,
+      [o = std::move(o), ioc = std::move(ioc), op = std::move(op),
+       bl, objver, trace_info, this](auto&& handler) mutable {
+	execute(std::move(o), std::move(ioc), std::move(op), bl,
 		ReadOp::Completion::create(get_executor(),
 					   std::move(handler)),
 		objver, trace_info);
       }, token);
   }
 
-  template<boost::asio::completion_token_for<Op::Signature> CompletionToken>
+  template<typename CompletionToken>
   auto execute(Object o, IOContext ioc, WriteOp op,
 	       CompletionToken&& token, uint64_t* objver = nullptr,
 	       const blkin_trace_info* trace_info = nullptr) {
     return boost::asio::async_initiate<CompletionToken, Op::Signature>(
-      [&, this](auto&& handler) {
-	execute(o, ioc, std::move(op),
+      [o = std::move(o), ioc = std::move(ioc), op = std::move(op),
+       objver, trace_info, this](auto&& handler) mutable {
+	execute(std::move(o), std::move(ioc), std::move(op),
 		WriteOp::Completion::create(get_executor(),
 					    std::move(handler)),
 		objver, trace_info);
@@ -574,14 +576,15 @@ public:
 
   using LookupPoolSig = void(boost::system::error_code,
 			     std::int64_t);
-  using LookupPoolComp = boost::asio::any_completion_handler<LookupPoolSig>;
-  template<boost::asio::completion_token_for<LookupPoolSig> CompletionToken>
+  using LookupPoolComp = ceph::async::Completion<LookupPoolSig>;
+  template<typename CompletionToken>
   auto lookup_pool(std::string name,
 		   CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, LookupPoolSig>(
-      [&, this](auto&& handler) {
-	lookup_pool(name, LookupPoolComp::create(get_executor(),
-						 std::move(handler)));
+      [name = std::move(name), this](auto&& handler) mutable {
+	lookup_pool(std::move(name),
+		    LookupPoolComp::create(get_executor(),
+					   std::move(handler)));
       }, token);
   }
 
@@ -599,13 +602,13 @@ public:
   }
 
   using SimpleOpSig = void(boost::system::error_code);
-  using SimpleOpComp = boost::asio::any_completion_handler<SimpleOpSig>;
-  template<boost::asio::completion_token_for<SimpleOpSig> CompletionToken>
+  using SimpleOpComp = ceph::async::Completion<SimpleOpSig>;
+  template<typename CompletionToken>
   auto create_pool_snap(int64_t pool, std::string snap_name,
 			CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, SimpleOpSig>(
-      [&, this](auto&& handler) {
-	create_pool_snap(pool, snapName,
+      [pool, snap_name = std::move(snap_name), this](auto&& handler) mutable {
+	create_pool_snap(pool, std::move(snap_name),
 			 SimpleOpComp::create(get_executor(),
 					      std::move(handler)));
       }, token);
@@ -617,52 +620,52 @@ public:
   auto allocate_selfmanaged_snap(int64_t pool,
 				 CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, SMSnapSig>(
-      [&, this](auto&& handler) {
+      [pool, this](auto&& handler) mutable {
 	allocage_selfmanaged_snap(pool,
 				  SMSnapComp::create(get_executor(),
 						     std::move(handler)));
       }, token);
   }
 
-  template<boost::asio::completion_token_for<SimpleOpSig> CompletionToken>
+  template<typename CompletionToken>
   auto delete_pool_snap(int64_t pool, std::string snap_name,
 			CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, SimpleOpSig>(
-      [&, this](auto&& handler) {
-	delete_pool_snap(pool, snapName,
+      [pool, snap_name = std::move(snap_name), this](auto&& handler) mutable {
+	delete_pool_snap(pool, std::move(snap_name),
 			 SimpleOpComp::create(get_executor(),
 					      std::move(handler)));
       }, token);
   }
 
-  template<boost::asio::completion_token_for<SimpleOpSig> CompletionToken>
+  template<typename CompletionToken>
   auto delete_selfmanaged_snap(int64_t pool, std::string snap_name,
 			       CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, SimpleOpSig>(
-      [&, this](auto&& handler) {
-	delete_selfmanaged_snap(pool, snapName,
+      [pool, snap_name = std::move(snap_name), this](auto&& handler) mutable {
+	delete_selfmanaged_snap(pool, std::move(snap_name),
 				SimpleOpComp::create(get_executor(),
 						     std::move(handler)));
       }, token);
   }
 
-  template<boost::asio::completion_token_for<SimpleOpSig> CompletionToken>
+  template<typename CompletionToken>
   auto create_pool(std::string name, std::optional<int> crush_rule,
 		   CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, SimpleOpSig>(
-      [&, this](auto&& handler) {
-	create_pool(name, crush_rule,
+      [name = std::move(name), crush_rule, this](auto&& handler) mutable {
+	create_pool(std::move(name), crush_rule,
 		    SimpleOpComp::create(get_executor(),
 					 std::move(handler)));
       }, token);
   }
 
-  template<boost::asio::completion_token_for<SimpleOpSig> CompletionToken>
+  template<typename CompletionToken>
   auto delete_pool(std::string name,
 		   CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, SimpleOpSig>(
-      [&, this](auto&& handler) {
-	delete_pool(name,
+      [name = std::move(name), this](auto&& handler) mutable {
+	delete_pool(std::move(name),
 		    SimpleOpComp::create(get_executor(),
 					 std::move(handler)));
       }, token);
@@ -672,7 +675,7 @@ public:
   auto delete_pool(int64_t pool,
 		   CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, SimpleOpSig>(
-      [&, this](auto&& handler) {
+      [pool, this](auto&& handler) mutable {
 	delete_pool(pool,
 		    SimpleOpComp::create(get_executor(),
 					 std::move(handler)));
@@ -682,13 +685,13 @@ public:
   using PoolStatSig = void(boost::system::error_code,
 			   boost::container::flat_map<std::string,
 						      PoolStats>, bool);
-  using PoolStatComp = boost::asio::any_completion_handler<PoolStatSig>;
-  template<boost::asio::completion_token_for<PoolStatSig> CompletionToken>
+  using PoolStatComp = ceph::async::Completion<PoolStatSig>;
+  template<typename CompletionToken>
   auto stat_pools(std::vector<std::string> pools,
 		  CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, PoolStatSig>(
-      [&, this](auto&& handler) {
-	stat_pools(pools,
+      [pools = std::move(pools), this](auto&& handler) mutable {
+	stat_pools(std::move(pools),
 		   PoolStatComp::create(get_executor(),
 					std::move(handler)));
       }, token);
@@ -701,7 +704,7 @@ public:
   auto statfs(std::optional<int64_t> pool,
 	      CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, StatFSSig>(
-      [&, this](auto&& handler) {
+      [pool, this](auto&& handler) mutable {
 	statfs(pool, StatFSComp::create(get_executor(),
 					std::move(handler)));
       }, token);
@@ -715,40 +718,44 @@ public:
 
   using WatchSig = void(boost::system::error_code ec,
 			uint64_t cookie);
-  using WatchComp = boost::asio::any_completion_handler<WatchSig>;
-  template<boost::asio::completion_token_for<WatchSig> CompletionToken>
+  using WatchComp = ceph::async::Completion<WatchSig>;
+  template<typename CompletionToken>
   auto watch(Object o, IOContext ioc,
 	     std::optional<std::chrono::seconds> timeout,
-	     WatchCB&& cb, CompletionToken&& token) {
+	     WatchCB cb, CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, WatchSig>(
-      [&, this](auto&& handler) {
-	watch(o, ioc, timeout, cb, WatchComp::create(get_executor(),
-						     std::move(handler)));
+      [o = std::move(o), ioc = std::move(ioc), timeout, cb = std::move(cb),
+       this](auto&& handler) mutable {
+	watch(std::move(o), std::move(ioc), timeout, std::move(cb),
+	      WatchComp::create(get_executor(),
+				std::move(handler)));
       }, token);
   }
 
   template<typename CompletionToken>
-  auto notify_ack(const Object& o,
-		  const IOContext& ioc,
+  auto notify_ack(Object o,
+		  IOContext ioc,
 		  uint64_t notify_id,
 		  uint64_t cookie,
 		  ceph::buffer::list bl,
 		  CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, SimpleOpSig>(
-      [&, this](auto&& handler) {
-	notify_ack(o, ioc, cookie, std::move(bl),
-		   SimpleOpComp::create(get_executor(),
-					std::move(handler)));
+      [o = std::move(o), ioc = std::move(ioc), notify_id, cookie,
+       bl = std::move(bl), this](auto&& handler) mutable {
+	notify_ack(std::move(o), std::move(ioc), std::move(cookie),
+		   std::move(bl), SimpleOpComp::create(get_executor(),
+						       std::move(handler)));
       }, token);
   }
 
   template<typename CompletionToken>
-  auto unwatch(std::uint64_t cookie, const IOContext& ioc,
+  auto unwatch(std::uint64_t cookie, IOContext ioc,
 	       CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, SimpleOpSig>(
-      [&, this](auto&& handler) {
-	unwatch(cookie, ioc, SimpleOpComp::create(get_executor(),
-						  std::move(handler)));
+      [cookie, ioc = std::move(ioc), this](auto&& handler) mutable {
+	unwatch(cookie, std::move(ioc),
+		SimpleOpComp::create(get_executor(),
+				     std::move(handler)));
       }, token);
   }
 
@@ -768,14 +775,15 @@ public:
   }
 
   using NotifySig = void(boost::system::error_code, ceph::buffer::list);
-  using NotifyComp = boost::asio::any_completion_handler<NotifySig>;
-  template<boost::asio::completion_token_for<NotifySig> CompletionToken>
+  using NotifyComp = ceph::async::Completion<NotifySig>;
+  template<typename CompletionToken>
   auto notify(Object o, IOContext ioc, ceph::buffer::list bl,
 	      std::optional<std::chrono::milliseconds> timeout,
 	      CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, NotifySig>(
-      [&, this](auto&& handler) {
-	notify(oid, ioc, std::move(bl), timeout,
+      [o = std::move(o), ioc = std::move(ioc), bl = std::move(bl), timeout,
+       this](auto&& handler) mutable {
+	notify(std::move(o), std::move(ioc), std::move(bl), timeout,
 	       NotifyComp::create(get_executor(),
 				  std::move(handler)));
       }, token);
@@ -786,17 +794,19 @@ public:
   using EnumerateSig = void(boost::system::error_code,
 			    std::vector<Entry>,
 			    Cursor);
-  using EnumerateComp = boost::asio::any_completion_handler<EnumerateSig>;
-  template<boost::asio::completion_token_for<EnumerateSig> CompletionToken>
+  using EnumerateComp = ceph::async::Completion<EnumerateSig>;
+  template<typename CompletionToken>
   auto enumerate_objects(IOContext ioc, Cursor begin,
 			 Cursor end, const std::uint32_t max,
 			 ceph::buffer::list filter,
 			 CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, EnumerateSig>(
-      [&, this](auto&& handler) {
-	enumerate_objects(ioc, begin, end, max, filter,
+      [ioc = std::move(ioc), begin = std::move(begin), end = std::move(end),
+       max, filter = std::move(filter), this](auto&& handler) mutable {
+	enumerate_objects(std::move(ioc), std::move(begin), std::move(end),
+			  std::move(max), std::move(filter),
 			  EnumerateComp::create(get_executor(),
-					     std::move(handler)));
+						std::move(handler)));
       }, token);
   }
 
@@ -804,57 +814,62 @@ public:
 			  std::string, ceph::buffer::list);
   using CommandComp = ceph::async::Completion<CommandSig>;
   template<typename CompletionToken>
-  auto osd_command(int osd, std::vector<std::string>&& cmd,
-		   ceph::buffer::list&& in, CompletionToken&& token) {
+  auto osd_command(int osd, std::vector<std::string> cmd,
+		   ceph::buffer::list in, CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, CommandSig>(
-      [&, this](auto&& handler) {
+      [osd, cmd = std::move(cmd), in = std::move(in),
+       this](auto&& handler) mutable {
 	osd_command(osd, std::move(cmd), std::move(in),
 		    CommandComp::create(get_executor(),
 					std::move(handler)));
       }, token);
   }
   template<typename CompletionToken>
-  auto pg_command(PG pg, std::vector<std::string>&& cmd,
-		  ceph::buffer::list&& in, CompletionToken&& token) {
+  auto pg_command(PG pg, std::vector<std::string> cmd,
+		  ceph::buffer::list in, CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, CommandSig>(
-      [&, this](auto&& handler) {
-	pg_command(pg, std::move(cmd), std::move(in),
+      [pg = std::move(pg), cmd = std::move(cmd), in = std::move(in),
+       this](auto&& handler) mutable {
+	pg_command(std::move(pg), std::move(cmd), std::move(in),
 		   CommandComp::create(get_executor(),
 				       std::move(handler)));
       }, token);
   }
 
   template<typename CompletionToken>
-  auto mon_command(const std::vector<std::string>& command,
-		   const ceph::buffer::list& bl,
+  auto mon_command(std::vector<std::string> command,
+		   ceph::buffer::list&& bl,
 		   std::string* outs, ceph::buffer::list* outbl,
 		   CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, SimpleOpSig>(
-      [&, this](auto&& handler) {
-	mon_command(command, bl, outs, outbl,
+      [command = std::move(command), bl = std::move(bl), outs, outbl,
+       this](auto&& handler) mutable {
+	mon_command(std::move(command), std::move(bl), outs, outbl,
 		    SimpleOpComp::create(get_executor(),
 					 std::move(handler)));
       }, token);
   }
 
-  template<boost::asio::completion_token_for<SimpleOpSig> CompletionToken>
+  template<typename CompletionToken>
   auto enable_application(std::string pool, std::string app_name,
 			  bool force, CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, SimpleOpSig>(
-      [&, this](auto&& handler) {
-	enable_application(pool, app_name, force,
+      [pool = std::move(pool), app_name = std::move(app_name),
+       force, this](auto&& handler) mutable {
+	enable_application(std::move(pool), std::move(app_name), force,
 			   SimpleOpComp::create(get_executor(),
 						std::move(handler)));
       }, token);
   }
 
-  template<boost::asio::completion_token_for<SimpleOpSig> CompletionToken>
+  template<typename CompletionToken>
   auto blocklist_add(std::string client_address,
                      std::optional<std::chrono::seconds> expire,
                      CompletionToken&& token) {
     return boost::asio::async_initiate<CompletionToken, SimpleOpSig>(
-      [&, this](auto&& handler) {
-	blocklist_add(client_address, expire,
+      [client_address = std::move(client_address), expire,
+       this](auto&& handler) mutable {
+	blocklist_add(std::move(client_address), expire,
 		      SimpleOpComp::create(get_executor(),
 					   std::move(handler)));
       }, token);
@@ -882,80 +897,79 @@ private:
 			     boost::asio::io_context& ioctx,
 			     BuildComp c);
 
-  void execute_(Object o, IOContext ioc, ReadOp op,
-		ceph::buffer::list* bl, Op::Completion c,
-		uint64_t* objver, const blkin_trace_info* trace_info);
+  void execute(Object o, IOContext ioc, ReadOp op,
+	       ceph::buffer::list* bl, std::unique_ptr<Op::Completion> c,
+	       uint64_t* objver, const blkin_trace_info* trace_info);
 
-  void execute_(Object o, IOContext ioc, WriteOp op,
-		Op::Completion c, uint64_t* objver,
-		const blkin_trace_info* trace_info);
+  void execute(Object o, IOContext ioc, WriteOp op,
+	       std::unique_ptr<Op::Completion> c, uint64_t* objver,
+	       const blkin_trace_info* trace_info);
 
 
-  void lookup_pool(std::string_view name, std::unique_ptr<LookupPoolComp> c);
+  void lookup_pool(std::string name, std::unique_ptr<LookupPoolComp> c);
   void list_pools(std::unique_ptr<LSPoolsComp> c);
-  void create_pool_snap(int64_t pool, std::string_view snapName,
+  void create_pool_snap(int64_t pool, std::string snap_name,
 			std::unique_ptr<SimpleOpComp> c);
   void allocate_selfmanaged_snap(int64_t pool, std::unique_ptr<SMSnapComp> c);
-  void delete_pool_snap(int64_t pool, std::string_view snapName,
+  void delete_pool_snap(int64_t pool, std::string snap_name,
 			std::unique_ptr<SimpleOpComp> c);
   void delete_selfmanaged_snap(int64_t pool, std::uint64_t snap,
 			       std::unique_ptr<SimpleOpComp> c);
-  void create_pool(std::string_view name, std::optional<int> crush_rule,
+  void create_pool(std::string name, std::optional<int> crush_rule,
 		   std::unique_ptr<SimpleOpComp> c);
-  void delete_pool(std::string_view name,
+  void delete_pool(std::string name,
 		   std::unique_ptr<SimpleOpComp> c);
   void delete_pool(int64_t pool,
 		   std::unique_ptr<SimpleOpComp> c);
-  void stat_pools(const std::vector<std::string>& pools,
+  void stat_pools(std::vector<std::string> pools,
 		  std::unique_ptr<PoolStatComp> c);
   void stat_fs(std::optional<std::int64_t> pool,
 	       std::unique_ptr<StatFSComp> c);
 
-  void watch(const Object& o, const IOContext& ioc,
+  void watch(Object o, IOContext ioc,
 	     std::optional<std::chrono::seconds> timeout,
-	     WatchCB&& cb, std::unique_ptr<WatchComp> c);
+	     WatchCB cb, std::unique_ptr<WatchComp> c);
   tl::expected<ceph::timespan, boost::system::error_code>
   watch_check(uint64_t cookie);
-  void notify_ack(const Object& o,
-		  const IOContext& _ioc,
+  void notify_ack(Object o, IOContext _ioc,
 		  uint64_t notify_id,
 		  uint64_t cookie,
-		  ceph::buffer::list&& bl,
+		  ceph::buffer::list bl,
 		  std::unique_ptr<SimpleOpComp>);
-  void unwatch(uint64_t cookie, const IOContext& ioc,
+  void unwatch(uint64_t cookie, IOContext ioc,
 	       std::unique_ptr<SimpleOpComp>);
-  void notify(const Object& oid, const IOContext& ioctx,
-	      ceph::buffer::list&& bl,
+  void notify(Object oid, IOContext ioctx,
+	      ceph::buffer::list bl,
 	      std::optional<std::chrono::milliseconds> timeout,
 	      std::unique_ptr<NotifyComp> c);
   void flush_watch(std::unique_ptr<VoidOpComp>);
 
-  void enumerate_objects(const IOContext& ioc, const Cursor& begin,
-			 const Cursor& end, const std::uint32_t max,
-			 const ceph::buffer::list& filter,
+  void enumerate_objects(IOContext ioc, Cursor begin,
+			 Cursor end, std::uint32_t max,
+			 ceph::buffer::list filter,
 			 std::vector<Entry>* ls,
 			 Cursor* cursor,
 			 std::unique_ptr<SimpleOpComp> c);
-  void enumerate_objects(const IOContext& ioc, const Cursor& begin,
-			 const Cursor& end, const std::uint32_t max,
-			 const ceph::buffer::list& filter,
+  void enumerate_objects(IOContext ioc, Cursor begin,
+			 Cursor end, std::uint32_t max,
+			 ceph::buffer::list filter,
 			 std::unique_ptr<EnumerateComp> c);
-  void osd_command(int osd, std::vector<std::string>&& cmd,
-		   ceph::buffer::list&& in, std::unique_ptr<CommandComp> c);
-  void pg_command(PG pg, std::vector<std::string>&& cmd,
-		  ceph::buffer::list&& in, std::unique_ptr<CommandComp> c);
+  void osd_command(int osd, std::vector<std::string> cmd,
+		   ceph::buffer::list in, std::unique_ptr<CommandComp> c);
+  void pg_command(PG pg, std::vector<std::string> cmd,
+		  ceph::buffer::list in, std::unique_ptr<CommandComp> c);
 
-  void mon_command_(std::vector<std::string> command,
-		    ceph::buffer::list bl,
-		    std::string* outs, ceph::buffer::list* outbl,
-		    SimpleOpComp c);
+  void mon_command(std::vector<std::string> command,
+		   ceph::buffer::list bl,
+		   std::string* outs, ceph::buffer::list* outbl,
+		   std::unique_ptr<SimpleOpComp> c);
 
-  void enable_application_(std::string pool, std::string app_name,
-			   bool force, SimpleOpComp c);
+  void enable_application(std::string pool, std::string app_name,
+			  bool force, std::unique_ptr<SimpleOpComp> c);
 
-  void blocklist_add_(std::string client_address,
-		      std::optional<std::chrono::seconds> expire,
-		      SimpleOpComp c);
+  void blocklist_add(std::string client_address,
+                     std::optional<std::chrono::seconds> expire,
+                     std::unique_ptr<SimpleOpComp> c);
 
   void wait_for_latest_osd_map_(SimpleOpComp c);
 
