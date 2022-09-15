@@ -65,8 +65,7 @@ void printseq(const V& v, std::ostream& m, F&& f)
 		});
 }
 
-R::IOContext lookup_pool(R::RADOS& r, const std::string& pname,
-			 s::yield_context y)
+ba::awaitable<R::IOContext> lookup_pool(R::RADOS& r, const std::string& pname)
 {
   bs::error_code ec;
   auto p = co_await r.lookup_pool(pname,
@@ -74,7 +73,7 @@ R::IOContext lookup_pool(R::RADOS& r, const std::string& pname,
   if (ec)
     throw bs::system_error(
       ec, fmt::format("when looking up '{}'", pname));
-  return R::IOContext(p);
+  co_return R::IOContext(p);
 }
 
 
@@ -91,14 +90,14 @@ ba::awaitable<void> lspools(R::RADOS& r, const std::vector<std::string>&)
 ba::awaitable<void> ls(R::RADOS& r, const std::vector<std::string>& p)
 {
   const auto& pname = p[0];
-  const auto pool = lookup_pool(r, pname, y).ns(R::all_nspaces);
-
+  const auto pool = (co_await lookup_pool(r, pname)).ns(R::all_nspaces);
   std::vector<R::Entry> ls;
   R::Cursor next = R::Cursor::begin();
   bs::error_code ec;
   do {
-    std::tie(ls, next) = r.enumerate_objects(pool, next, R::Cursor::end(),
-					     1000, {}, y[ec]);
+    std::tie(ls, next) =
+      co_await r.enumerate_objects(pool, next, R::Cursor::end(), 1000, {},
+				   ba::redirect_error(ba::use_awaitable, ec));
     if (ec)
       throw bs::system_error(ec, fmt::format("when listing {}", pname));
     printseq(ls, std::cout);
