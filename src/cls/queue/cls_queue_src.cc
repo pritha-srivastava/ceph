@@ -283,6 +283,8 @@ int queue_list_entries(cls_method_context_t hctx, const cls_queue_list_op& op, c
     gen = start_marker.gen;
   }
 
+ CLS_LOG(5, "INFO: queue_list_entries(): Start offset is %lu and gen is %ld", start_offset, gen);
+
   op_ret.is_truncated = true;
   uint64_t contiguous_data_size = 0, size_to_read = 0;
   bool wrap_around = false;
@@ -290,12 +292,15 @@ int queue_list_entries(cls_method_context_t hctx, const cls_queue_list_op& op, c
   //Calculate length of contiguous data to be read depending on front, tail and start offset
   if (head.tail.offset > head.front.offset) {
     contiguous_data_size = head.tail.offset - start_offset;
+    CLS_LOG(5, "INFO: tail > front queue_list_entries(): Contiguous data size is %lu",contiguous_data_size);
   } else if (head.front.offset >= head.tail.offset) {
     if (start_offset >= head.front.offset) {
       contiguous_data_size = head.queue_size - start_offset;
       wrap_around = true;
+      CLS_LOG(5, "INFO: front > tail and start > front queue_list_entries(): Contiguous data size is %lu",contiguous_data_size);
     } else if (start_offset <= head.tail.offset) {
       contiguous_data_size = head.tail.offset - start_offset;
+      CLS_LOG(5, "INFO: queue_list_entries(): Contiguous data size is %lu",contiguous_data_size);
     }
   }
 
@@ -345,6 +350,7 @@ int queue_list_entries(cls_method_context_t hctx, const cls_queue_list_op& op, c
       //Use the last marker saved in previous iteration as the marker for this entry
       if (offset_populated) {
         entry.marker = last_marker;
+        CLS_LOG(5, "INFO: queue_list_entries(): entry marker: %s\n", entry.marker.c_str());
       }
       //Populate offset if not done in previous iteration
       if (! offset_populated) {
@@ -368,6 +374,7 @@ int queue_list_entries(cls_method_context_t hctx, const cls_queue_list_op& op, c
           }
           index += sizeof(uint16_t);
           size_to_process -= sizeof(uint16_t);
+          CLS_LOG(5, "INFO: queue_list_entries(): index: %u, size_to_process: %lu", index, size_to_process);
           // Decode data size
           try {
             decode(data_size, it);
@@ -381,22 +388,26 @@ int queue_list_entries(cls_method_context_t hctx, const cls_queue_list_op& op, c
           offset_populated = true;
           last_marker = entry.marker;
           CLS_LOG(10, "INFO: queue_list_entries: not enough data to read entry start and data size, breaking out!");
+          CLS_LOG(5, "INFO: queue_list_entries(): last_marker: %s\n", last_marker.c_str());
           break;
         }
         CLS_LOG(20, "INFO: queue_list_entries(): data size: %lu", data_size);
         index += sizeof(uint64_t);
         size_to_process -= sizeof(uint64_t);
+        CLS_LOG(5, "INFO: queue_list_entries(): index: %u, size_to_process: %lu", index, size_to_process);
       }
       // Data
       if (data_size <= size_to_process) {
         it.copy(data_size, entry.data);
         index += entry.data.length();
         size_to_process -= entry.data.length();
+        CLS_LOG(5, "INFO: queue_list_entries(): index: %u, size_to_process: %lu", index, size_to_process);
       } else {
         it.copy(size_to_process, bl);
         offset_populated = true;
         entry_start_processed = true;
         last_marker = entry.marker;
+        CLS_LOG(5, "INFO: queue_list_entries(): last marker: %s\n", last_marker.c_str());
         CLS_LOG(10, "INFO: queue_list_entries(): not enough data to read data, breaking out!");
         break;
       }
@@ -412,6 +423,7 @@ int queue_list_entries(cls_method_context_t hctx, const cls_queue_list_op& op, c
         CLS_LOG(10, "INFO: queue_list_entries(): num_ops is same as op.max, hence breaking out from inner loop!");
         break;
       }
+      CLS_LOG(5, "INFO: queue_list_entries(): index: %u, bl_chunk length: %d\n", index, bl_chunk.length());
     } while(index < bl_chunk.length());
 
     CLS_LOG(10, "INFO: num_ops: %lu and op.max is %lu\n", num_ops, op.max);
@@ -425,12 +437,14 @@ int queue_list_entries(cls_method_context_t hctx, const cls_queue_list_op& op, c
     //Calculate new start_offset and contiguous data size
     start_offset += size_to_read;
     contiguous_data_size -= size_to_read;
+    CLS_LOG(5, "INFO: queue_list_entries(): Contiguous data size is %lu and start_offset is %lu",contiguous_data_size, start_offset);
     if (contiguous_data_size == 0) {
       if (wrap_around) {
         start_offset = head.max_head_size;
         contiguous_data_size = head.tail.offset - head.max_head_size;
         gen += 1;
         wrap_around = false;
+        CLS_LOG(5, "INFO: queue_list_entries(): New Contiguous data size is %lu and start_offset is %lu and gen is %lu",contiguous_data_size, start_offset, gen);
       } else {
         CLS_LOG(10, "INFO: queue_list_entries(): end of queue data is reached, hence breaking out from outer loop!");
         next_marker = head.tail;
