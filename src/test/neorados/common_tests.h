@@ -54,8 +54,19 @@
 /// \return A unique pool name
 std::string get_temp_pool_name(std::string_view prefix = {});
 
-template<typename CompletionToken>
-auto create_pool(neorados::RADOS& r, std::string pname,
+/// \brief Create a RADOS pool
+///
+/// Create a RADOS pool, returning its ID on success.
+///
+/// \param r RADOS handle
+/// \param pname Pool name
+/// \param token Boost.Asio completion token
+///
+/// \return The ID of the newly created pool
+template<boost::asio::completion_token_for<
+	   void(boost::system::error_code, int64_t)> CompletionToken>
+auto create_pool(neorados::RADOS& r,
+		 std::string pname,
 		 CompletionToken&& token)
 {
   namespace asio = boost::asio;
