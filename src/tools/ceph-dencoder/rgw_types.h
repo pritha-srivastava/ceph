@@ -35,9 +35,6 @@ TYPE(RGWLifecycleConfiguration)
 #include "cls/log/cls_log_types.h"
 TYPE(cls::log::entry)
 
-#include "cls/log/cls_log_ops.h"
-TYPE(cls_log_add_op)
-
 #include "cls/rgw/cls_rgw_types.h"
 TYPE(rgw_bucket_pending_info)
 TYPE(rgw_bucket_dir_entry_meta)
