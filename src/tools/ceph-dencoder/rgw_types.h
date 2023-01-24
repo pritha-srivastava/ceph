@@ -33,7 +33,7 @@ TYPE(RGWCacheNotifyInfo)
 TYPE(RGWLifecycleConfiguration)
 
 #include "cls/log/cls_log_types.h"
-TYPE(cls_log_entry)
+TYPE(cls::log::entry)
 
 #include "cls/log/cls_log_ops.h"
 TYPE(cls_log_add_op)
