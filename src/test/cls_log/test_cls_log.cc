@@ -99,7 +99,7 @@ real_time get_time(real_time start_time, int i, bool modify_time)
   return modify_time ? start_time + (i * 1s) : start_time;
 }
 
-void check_entry(cls::log::entry& entry, real_time start_time, int i, bool modified_time)
+void check_entry(cls_log_entry& entry, real_time start_time, int i, bool modified_time)
 {
   string section = "global";
   string name = get_name(i);
@@ -124,7 +124,7 @@ static int log_list(librados::IoCtx& ioctx, const std::string& oid,
 }
 
 static int log_list(librados::IoCtx& ioctx, const std::string& oid,
-                    utime_t& from, utime_t& to, int max_entries,
+                    real_time from, real_time to, int max_entries,
                     vector<cls_log_entry>& entries, bool *truncated)
 {
   std::string marker;
@@ -329,7 +329,7 @@ TEST_F(cls_log, trim_by_marker)
   auto start_time = real_clock::now();
   generate_log(ioctx, oid, 10, start_time, true);
 
-  std::vector<cls::log::entry> log1;
+  std::vector<cls_log_entry> log1;
   {
     vector<cls_log_entry> entries;
     ASSERT_EQ(0, log_list(ioctx, oid, entries));
