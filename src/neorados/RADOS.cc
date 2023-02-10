@@ -1122,8 +1122,8 @@ void RADOS::flush_watch(std::unique_ptr<VoidOpComp> c)
 }
 
 struct NotifyHandler : std::enable_shared_from_this<NotifyHandler> {
-  asio::io_context& ioc;
-  asio::strand<asio::io_context::executor_type> strand;
+  boost::asio::io_context& ioc;
+  boost::asio::strand<boost::asio::io_context::executor_type> strand;
   Objecter* objecter;
   Objecter::LingerOp* op;
   RADOS::NotifyComp c;
@@ -1136,8 +1136,8 @@ struct NotifyHandler : std::enable_shared_from_this<NotifyHandler> {
   NotifyHandler(asio::io_context& ioc,
 		Objecter* objecter,
 		Objecter::LingerOp* op,
-		RADOS::NotifyComp c)
-    : ioc(ioc), strand(asio::make_strand(ioc)),
+		std::unique_ptr<RADOS::NotifyComp> c)
+    : ioc(ioc), strand(boost::asio::make_strand(ioc)),
       objecter(objecter), op(op), c(std::move(c)) {}
 
   // Use bind or a lambda to pass this in.
