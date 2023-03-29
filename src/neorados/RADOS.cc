@@ -766,10 +766,10 @@ asio::io_context& RADOS::get_io_context() {
   return impl->ioctx;
 }
 
-void RADOS::execute(Object o, IOContext _ioc, ReadOp _op,
-		    cb::list* bl,
-		    std::unique_ptr<ReadOp::Completion> c, version_t* objver,
-		    const blkin_trace_info *trace_info) {
+void RADOS::execute_(Object o, IOContext _ioc, ReadOp _op,
+		     cb::list* bl,
+		     ReadOp::Completion c, version_t* objver,
+		     const blkin_trace_info *trace_info) {
   auto oid = reinterpret_cast<const object_t*>(&o.impl);
   auto ioc = reinterpret_cast<const IOContextImpl*>(&_ioc.impl);
   auto op = reinterpret_cast<OpImpl*>(&_op.impl);
@@ -789,9 +789,9 @@ void RADOS::execute(Object o, IOContext _ioc, ReadOp _op,
   trace.event("submitted");
 }
 
-void RADOS::execute(Object o, IOContext _ioc, WriteOp _op,
-		    std::unique_ptr<WriteOp::Completion> c, version_t* objver,
-		    const blkin_trace_info *trace_info) {
+void RADOS::execute_(Object o, IOContext _ioc, WriteOp _op,
+		     WriteOp::Completion c, version_t* objver,
+		     const blkin_trace_info *trace_info) {
   auto oid = reinterpret_cast<const object_t*>(&o.impl);
   auto ioc = reinterpret_cast<const IOContextImpl*>(&_ioc.impl);
   auto op = reinterpret_cast<OpImpl*>(&_op.impl);
@@ -816,8 +816,8 @@ void RADOS::execute(Object o, IOContext _ioc, WriteOp _op,
   trace.event("submitted");
 }
 
-void RADOS::lookup_pool(std::string name,
-			std::unique_ptr<LookupPoolComp> c)
+void RADOS::lookup_pool_(std::string name,
+			 LookupPoolComp c)
 {
   // I kind of want to make lookup_pg_pool return
   // std::optional<int64_t> since it can only return one error code.
@@ -866,28 +866,28 @@ std::optional<uint64_t> RADOS::get_pool_alignment(int64_t pool_id)
     });
 }
 
-void RADOS::list_pools(std::unique_ptr<LSPoolsComp> c) {
-  ca::dispatch(std::move(c),
-	       impl->objecter->with_osdmap(
-		 [&](OSDMap& o) {
-		   std::vector<std::pair<std::int64_t, std::string>> v;
-		   for (auto p : o.get_pools())
-		     v.push_back(std::make_pair(p.first,
-						o.get_pool_name(p.first)));
-		   return v;
-		 }));
+void RADOS::list_pools_(LSPoolsComp c) {
+  asio::dispatch(asio::append(std::move(c),
+			      impl->objecter->with_osdmap(
+				[&](OSDMap& o) {
+				  std::vector<std::pair<std::int64_t, std::string>> v;
+				  for (auto p : o.get_pools())
+				    v.push_back(std::make_pair(p.first,
+							       o.get_pool_name(p.first)));
+				  return v;
+				})));
 }
 
-void RADOS::create_pool_snap(std::int64_t pool,
-			     std::string snap_name,
-			     std::unique_ptr<SimpleOpComp> c)
+void RADOS::create_pool_snap_(std::int64_t pool,
+			      std::string snap_name,
+			      SimpleOpComp c)
 {
   auto e = asio::prefer(get_executor(),
 			asio::execution::outstanding_work.tracked);
   impl->objecter->create_pool_snap(
     pool, snap_name,
-    Objecter::PoolOp::OpComp::create(
-      get_executor(),
+    asio::bind_executor(
+      std::move(e),
       [c = std::move(c)](bs::error_code e, const bufferlist&) mutable {
 	asio::dispatch(asio::append(std::move(c), e));
       }));
@@ -908,16 +908,16 @@ void RADOS::allocate_selfmanaged_snap_(int64_t pool,
       }));
 }
 
-void RADOS::delete_pool_snap(std::int64_t pool,
-			     std::string snap_name,
-			     std::unique_ptr<SimpleOpComp> c)
+void RADOS::delete_pool_snap_(std::int64_t pool,
+			      std::string snap_name,
+			      SimpleOpComp c)
 {
   auto e = asio::prefer(get_executor(),
 			asio::execution::outstanding_work.tracked);
   impl->objecter->delete_pool_snap(
     pool, snap_name,
-    Objecter::PoolOp::OpComp::create(
-      get_executor(),
+    asio::bind_executor(
+      std::move(e),
       [c = std::move(c)](bs::error_code e, const bufferlist&) mutable {
 	asio::dispatch(asio::append(std::move(c), e));
       }));
@@ -938,9 +938,9 @@ void RADOS::delete_selfmanaged_snap_(std::int64_t pool,
       }));
 }
 
-void RADOS::create_pool(std::string name,
-			std::optional<int> crush_rule,
-			std::unique_ptr<SimpleOpComp> c)
+void RADOS::create_pool_(std::string name,
+			 std::optional<int> crush_rule,
+			 SimpleOpComp c)
 {
   auto e = asio::prefer(get_executor(),
 			asio::execution::outstanding_work.tracked);
@@ -955,8 +955,8 @@ void RADOS::create_pool(std::string name,
       crush_rule.value_or(-1));
 }
 
-void RADOS::delete_pool(std::string name,
-			std::unique_ptr<SimpleOpComp> c)
+void RADOS::delete_pool_(std::string name,
+			 SimpleOpComp c)
 {
   auto e = asio::prefer(get_executor(),
 			asio::execution::outstanding_work.tracked);
@@ -983,8 +983,8 @@ void RADOS::delete_pool_(std::int64_t pool,
       }));
 }
 
-void RADOS::stat_pools(std::vector<std::string> pools,
-		       std::unique_ptr<PoolStatComp> c) {
+void RADOS::stat_pools_(std::vector<std::string> pools,
+			PoolStatComp c) {
   impl->objecter->get_pool_stats(
     pools,
     [c = std::move(c)]
@@ -1043,9 +1043,9 @@ void RADOS::stat_fs_(std::optional<std::int64_t> _pool,
 
 // --- Watch/Notify
 
-void RADOS::watch(Object o, IOContext _ioc,
-		  std::optional<std::chrono::seconds> timeout, WatchCB cb,
-		  std::unique_ptr<WatchComp> c) {
+void RADOS::watch_(Object o, IOContext _ioc,
+		   std::optional<std::chrono::seconds> timeout, WatchCB cb,
+		   WatchComp c) {
   auto oid = reinterpret_cast<const object_t*>(&o.impl);
   auto ioc = reinterpret_cast<const IOContextImpl*>(&_ioc.impl);
 
@@ -1068,12 +1068,12 @@ void RADOS::watch(Object o, IOContext _ioc,
       }), nullptr);
 }
 
-void RADOS::notify_ack(Object o,
-		       IOContext _ioc,
-		       uint64_t notify_id,
-		       uint64_t cookie,
-		       bufferlist bl,
-		       std::unique_ptr<SimpleOpComp> c)
+void RADOS::notify_ack_(Object o,
+			IOContext _ioc,
+			uint64_t notify_id,
+			uint64_t cookie,
+			bufferlist bl,
+			SimpleOpComp c)
 {
   auto oid = reinterpret_cast<const object_t*>(&o.impl);
   auto ioc = reinterpret_cast<const IOContextImpl*>(&_ioc.impl);
@@ -1085,14 +1085,14 @@ void RADOS::notify_ack(Object o,
 		       nullptr, ioc->extra_op_flags, std::move(c));
 }
 
-tl::expected<ceph::timespan, bs::error_code> RADOS::watch_check(uint64_t cookie)
+tl::expected<ceph::timespan, bs::error_code> RADOS::watch_check_(uint64_t cookie)
 {
   Objecter::LingerOp *linger_op = reinterpret_cast<Objecter::LingerOp*>(cookie);
   return impl->objecter->linger_check(linger_op);
 }
 
-void RADOS::unwatch(uint64_t cookie, IOContext _ioc,
-		    std::unique_ptr<SimpleOpComp> c)
+void RADOS::unwatch_(uint64_t cookie, IOContext _ioc,
+		     SimpleOpComp c)
 {
   auto ioc = reinterpret_cast<const IOContextImpl*>(&_ioc.impl);
 
@@ -1114,7 +1114,7 @@ void RADOS::unwatch(uint64_t cookie, IOContext _ioc,
 			   }));
 }
 
-void RADOS::flush_watch(std::unique_ptr<VoidOpComp> c)
+void RADOS::flush_watch_(VoidOpComp c)
 {
   impl->objecter->linger_callback_flush([c = std::move(c)]() mutable {
 					  asio::dispatch(std::move(c));
@@ -1122,8 +1122,8 @@ void RADOS::flush_watch(std::unique_ptr<VoidOpComp> c)
 }
 
 struct NotifyHandler : std::enable_shared_from_this<NotifyHandler> {
-  boost::asio::io_context& ioc;
-  boost::asio::strand<boost::asio::io_context::executor_type> strand;
+  asio::io_context& ioc;
+  asio::strand<asio::io_context::executor_type> strand;
   Objecter* objecter;
   Objecter::LingerOp* op;
   RADOS::NotifyComp c;
@@ -1136,8 +1136,8 @@ struct NotifyHandler : std::enable_shared_from_this<NotifyHandler> {
   NotifyHandler(asio::io_context& ioc,
 		Objecter* objecter,
 		Objecter::LingerOp* op,
-		std::unique_ptr<RADOS::NotifyComp> c)
-    : ioc(ioc), strand(boost::asio::make_strand(ioc)),
+		RADOS::NotifyComp c)
+    : ioc(ioc), strand(asio::make_strand(ioc)),
       objecter(objecter), op(op), c(std::move(c)) {}
 
   // Use bind or a lambda to pass this in.
@@ -1175,9 +1175,9 @@ struct NotifyHandler : std::enable_shared_from_this<NotifyHandler> {
   }
 };
 
-void RADOS::notify(Object o, IOContext _ioc, bufferlist bl,
-		   std::optional<std::chrono::milliseconds> timeout,
-		   std::unique_ptr<NotifyComp> c)
+void RADOS::notify_(Object o, IOContext _ioc, bufferlist bl,
+		    std::optional<std::chrono::milliseconds> timeout,
+		    NotifyComp c)
 {
   auto oid = reinterpret_cast<const object_t*>(&o.impl);
   auto ioc = reinterpret_cast<const IOContextImpl*>(&_ioc.impl);
@@ -1311,12 +1311,12 @@ Cursor::from_str(const std::string& s) {
   return e;
 }
 
-void RADOS::enumerate_objects(IOContext _ioc,
-			      Cursor begin,
-			      Cursor end,
-			      const std::uint32_t max,
-			      bufferlist filter,
-			      std::unique_ptr<EnumerateComp> c) {
+void RADOS::enumerate_objects_(IOContext _ioc,
+			       Cursor begin,
+			       Cursor end,
+			       const std::uint32_t max,
+			       bufferlist filter,
+			       EnumerateComp c) {
   auto ioc = reinterpret_cast<const IOContextImpl*>(&_ioc.impl);
 
   impl->objecter->enumerate_objects<Entry>(
@@ -1335,34 +1335,31 @@ void RADOS::enumerate_objects(IOContext _ioc,
 }
 
 
-void RADOS::osd_command(int osd, std::vector<std::string> cmd,
-			ceph::bufferlist in, std::unique_ptr<CommandComp> c) {
-  impl->objecter->osd_command(osd, std::move(cmd), std::move(in), nullptr,
-			      [c = std::move(c)]
-			      (bs::error_code ec,
-			       std::string&& s,
-			       ceph::bufferlist&& b) mutable {
-				ca::dispatch(std::move(c), ec,
-					     std::move(s),
-					     std::move(b));
-			      });
+void RADOS::osd_command_(int osd, std::vector<std::string> cmd,
+			 ceph::bufferlist in, CommandComp c) {
+  impl->objecter->osd_command(
+    osd, std::move(cmd), std::move(in), nullptr,
+    [c = std::move(c)]
+    (bs::error_code ec, std::string&& s, ceph::bufferlist&& b) mutable {
+      asio::dispatch(asio::append(std::move(c), ec, std::move(s),
+				  std::move(b)));
+    });
 }
 
-void RADOS::pg_command(PG pg, std::vector<std::string> cmd,
-		       ceph::bufferlist in, std::unique_ptr<CommandComp> c) {
-  impl->objecter->pg_command(pg_t{pg.seed, pg.pool}, std::move(cmd), std::move(in), nullptr,
-			     [c = std::move(c)]
-			     (bs::error_code ec,
-			      std::string&& s,
-			      ceph::bufferlist&& b) mutable {
-			       ca::dispatch(std::move(c), ec,
-					    std::move(s),
-					    std::move(b));
-			     });
+void RADOS::pg_command_(PG pg, std::vector<std::string> cmd,
+			ceph::bufferlist in, CommandComp c) {
+  impl->objecter->pg_command(
+    pg_t{pg.seed, pg.pool}, std::move(cmd), std::move(in), nullptr,
+    [c = std::move(c)]
+    (bs::error_code ec, std::string&& s,
+     ceph::bufferlist&& b) mutable {
+      asio::dispatch(asio::append(std::move(c), ec, std::move(s),
+				  std::move(b)));
+    });
 }
 
-void RADOS::enable_application(std::string pool, std::string app_name,
-			       bool force, std::unique_ptr<SimpleOpComp> c) {
+void RADOS::enable_application_(std::string pool, std::string app_name,
+				bool force, SimpleOpComp c) {
   // pre-Luminous clusters will return -EINVAL and application won't be
   // preserved until Luminous is configured as minimum version.
   if (!impl->get_required_monitor_features().contains_all(
@@ -1382,9 +1379,9 @@ void RADOS::enable_application(std::string pool, std::string app_name,
   }
 }
 
-void RADOS::blocklist_add(std::string client_address,
-                          std::optional<std::chrono::seconds> expire,
-                          std::unique_ptr<SimpleOpComp> c) {
+void RADOS::blocklist_add_(std::string client_address,
+			   std::optional<std::chrono::seconds> expire,
+			   SimpleOpComp c) {
   auto expire_arg = (expire ?
     fmt::format(", \"expire\": \"{}.0\"", expire->count()) : std::string{});
   impl->monclient.start_mon_command(
@@ -1420,10 +1417,10 @@ void RADOS::wait_for_latest_osd_map_(SimpleOpComp c) {
   impl->objecter->wait_for_latest_osdmap(std::move(c));
 }
 
-void RADOS::mon_command(std::vector<std::string> command,
-			cb::list bl,
-			std::string* outs, cb::list* outbl,
-			std::unique_ptr<SimpleOpComp> c) {
+void RADOS::mon_command_(std::vector<std::string> command,
+			 cb::list bl,
+			 std::string* outs, cb::list* outbl,
+			 SimpleOpComp c) {
 
   impl->monclient.start_mon_command(
     command, bl,

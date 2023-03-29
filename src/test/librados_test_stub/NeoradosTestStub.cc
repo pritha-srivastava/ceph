@@ -535,9 +535,9 @@ boost::asio::io_context::executor_type neorados::RADOS::get_executor() const {
   return impl->io_context.get_executor();
 }
 
-void RADOS::execute(Object o, IOContext ioc, ReadOp op,
-                    ceph::buffer::list* bl, std::unique_ptr<Op::Completion> c,
-                    uint64_t* objver, const blkin_trace_info* trace_info) {
+void RADOS::execute_(Object o, IOContext ioc, ReadOp op,
+		     ceph::buffer::list* bl, Op::Completion c,
+		     uint64_t* objver, const blkin_trace_info* trace_info) {
   auto io_ctx = impl->get_io_ctx(ioc);
   if (io_ctx == nullptr) {
     asio::dispatch(asio::append(std::move(c), osdc_errc::pool_dne));
@@ -554,9 +554,9 @@ void RADOS::execute(Object o, IOContext ioc, ReadOp op,
   ceph_assert(r == 0);
 }
 
-void RADOS::execute(Object o, IOContext ioc, WriteOp op,
-                    std::unique_ptr<Op::Completion> c, uint64_t* objver,
-                    const blkin_trace_info* trace_info) {
+void RADOS::execute_(Object o, IOContext ioc, WriteOp op,
+		     Op::Completion c, uint64_t* objver,
+		     const blkin_trace_info* trace_info) {
   auto io_ctx = impl->get_io_ctx(ioc);
   if (io_ctx == nullptr) {
     asio::dispatch(asio::append(std::move(c), osdc_errc::pool_dne));
@@ -575,10 +575,10 @@ void RADOS::execute(Object o, IOContext ioc, WriteOp op,
   ceph_assert(r == 0);
 }
 
-void RADOS::mon_command(std::vector<std::string> command,
-                        bufferlist bl,
-                        std::string* outs, bufferlist* outbl,
-                        std::unique_ptr<Op::Completion> c) {
+void RADOS::mon_command_(std::vector<std::string> command,
+			 bufferlist bl,
+			 std::string* outs, bufferlist* outbl,
+			 Op::Completion c) {
   auto r = impl->test_rados_client->mon_command(command, bl, outbl, outs);
   asio::post(get_executor(),
 	     asio::append(std::move(c),
@@ -586,9 +586,9 @@ void RADOS::mon_command(std::vector<std::string> command,
 			   bs::error_code())));
 }
 
-void RADOS::blocklist_add(std::string client_address,
-                          std::optional<std::chrono::seconds> expire,
-                          std::unique_ptr<SimpleOpComp> c) {
+void RADOS::blocklist_add_(std::string client_address,
+			   std::optional<std::chrono::seconds> expire,
+			   SimpleOpComp c) {
   auto r = impl->test_rados_client->blocklist_add(
     std::string(client_address), expire.value_or(0s).count());
   asio::post(get_executor(),

@@ -3618,9 +3618,9 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
   // do callbacks
   if (Op::has_completion(onfinish)) {
     if (rc == 0 && handler_error) {
-      Op::complete(std::move(onfinish), handler_error, -EIO);
+      Op::complete(std::move(onfinish), handler_error, -EIO, service.get_executor());
     } else {
-      Op::complete(std::move(onfinish), osdcode(rc), rc);
+      Op::complete(std::move(onfinish), osdcode(rc), rc, service.get_executor());
     }
   }
   if (completion_lock.mutex()) {
