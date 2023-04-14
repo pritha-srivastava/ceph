@@ -47,7 +47,6 @@ class io_context_pool {
   }
 public:
   io_context_pool() noexcept {}
-
   io_context_pool(std::int64_t threadcnt) noexcept {
     start(threadcnt);
   }
