@@ -84,8 +84,8 @@ class AppMain {
   SiteConfig site;
   const DoutPrefixProvider* dpp;
   RGWProcessEnv env;
-  void need_context_pool();
-  std::optional<ceph::async::io_context_pool> context_pool;
+  ceph::async::io_context_pool context_pool{
+    dpp->get_cct()->_conf->rgw_thread_pool_size};
 public:
   AppMain(const DoutPrefixProvider* dpp);
   ~AppMain();
