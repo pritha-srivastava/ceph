@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "common/async/context_pool.h"
 #include "common/ceph_context.h"
 #include "rgw_common.h"
 #include "rgw_auth_registry.h"
