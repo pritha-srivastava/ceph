@@ -184,7 +184,7 @@ def main():
     log.debug("Check cache dir content: %s", chk_cache_dir)
     if chk_cache_dir == 0:
         log.info("NOTICE: datacache test object not found, inspect if datacache was bypassed or disabled during this check.")
-        return
+        #return
 
     # list the files in the cache dir for troubleshooting
     out = exec_cmd('ls -l %s' % (cache_dir))
