@@ -984,7 +984,7 @@ int RGWContinuousLeaseCR::operate(const DoutPrefixProvider *dpp)
 }
 
 RGWRadosTimelogAddCR::RGWRadosTimelogAddCR(const DoutPrefixProvider *_dpp, rgw::sal::RadosStore* _store, const string& _oid,
-                      const cls::log::entry& entry) : RGWSimpleCoroutine(_store->ctx()),
+                      const cls_log_entry& entry) : RGWSimpleCoroutine(_store->ctx()),
                                                 dpp(_dpp),
                                                 store(_store),
                                                 oid(_oid), cn(NULL)

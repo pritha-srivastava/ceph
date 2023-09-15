@@ -1524,7 +1524,7 @@ public:
 class RGWRadosTimelogAddCR : public RGWSimpleCoroutine {
   const DoutPrefixProvider *dpp;
   rgw::sal::RadosStore* store;
-  std::vector<cls::log::entry> entries;
+  std::list<cls_log_entry> entries;
 
   std::string oid;
 
@@ -1532,7 +1532,7 @@ class RGWRadosTimelogAddCR : public RGWSimpleCoroutine {
 
 public:
   RGWRadosTimelogAddCR(const DoutPrefixProvider *dpp, rgw::sal::RadosStore* _store, const std::string& _oid,
-		        const cls::log::entry& entry);
+		        const cls_log_entry& entry);
 
   int send_request(const DoutPrefixProvider *dpp) override;
   int request_complete() override;

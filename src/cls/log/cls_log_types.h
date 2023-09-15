@@ -3,34 +3,26 @@
 #ifndef CEPH_CLS_LOG_TYPES_H
 #define CEPH_CLS_LOG_TYPES_H
 
-#include <string>
-
-#include "include/buffer.h"
 #include "include/encoding.h"
 #include "include/types.h"
+
+#include "include/utime.h"
 
 #include "common/ceph_json.h"
 #include "common/Formatter.h"
 
-#include "common/ceph_time.h"
-
 class JSONObj;
 class JSONDecoder;
 
-namespace cls::log {
-struct entry {
+
+struct cls_log_entry {
   std::string id;
   std::string section;
   std::string name;
-  ceph::real_time timestamp;
+  utime_t timestamp;
   ceph::buffer::list data;
 
-  entry() = default;
-
-  entry(ceph::real_time timestamp, std::string section,
-	std::string name, ceph::buffer::list&& data)
-    : section(std::move(section)), name(std::move(name)),
-      timestamp(timestamp), data(std::move(data)) {}
+  cls_log_entry() {}
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(2, 1, bl);
@@ -69,23 +61,23 @@ struct entry {
     JSONDecoder::decode_json("id", id, obj);
   }
 
-  static void generate_test_instances(std::list<cls::log::entry *>& l) {
-    l.push_back(new cls::log::entry{});
-    l.push_back(new cls::log::entry);
+  static void generate_test_instances(std::list<cls_log_entry *>& l) {
+    l.push_back(new cls_log_entry{});
+    l.push_back(new cls_log_entry);
     l.back()->id = "test_id";
     l.back()->section = "test_section";
     l.back()->name = "test_name";
-    l.back()->timestamp = ceph::real_time{};
+    l.back()->timestamp = utime_t();
     ceph::buffer::list bl;
     ceph::encode(std::string("Test"), bl, 0);
     l.back()->data = bl;
   }
 };
-WRITE_CLASS_ENCODER(entry)
+WRITE_CLASS_ENCODER(cls_log_entry)
 
-struct header {
+struct cls_log_header {
   std::string max_marker;
-  ceph::real_time max_time;
+  utime_t max_time;
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
@@ -100,10 +92,15 @@ struct header {
     decode(max_time, bl);
     DECODE_FINISH(bl);
   }
-
-  friend auto operator <=>(const header&, const header&) = default;
 };
-WRITE_CLASS_ENCODER(header)
-} // namespace cls::log
+inline bool operator ==(const cls_log_header& lhs, const cls_log_header& rhs) {
+  return (lhs.max_marker == rhs.max_marker &&
+	  lhs.max_time == rhs.max_time);
+}
+inline bool operator !=(const cls_log_header& lhs, const cls_log_header& rhs) {
+  return !(lhs == rhs);
+}
+WRITE_CLASS_ENCODER(cls_log_header)
+
 
 #endif
