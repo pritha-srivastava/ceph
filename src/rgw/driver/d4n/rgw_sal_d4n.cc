@@ -382,9 +382,8 @@ std::unique_ptr<Object::DeleteOp> D4NFilterObject::get_delete_op()
 int D4NFilterObject::D4NFilterReadOp::prepare(optional_yield y, const DoutPrefixProvider* dpp)
 {
   rgw::sal::Attrs attrs;
-  int getObjReturn = source->driver->get_cache_driver()->get_attrs(dpp, 
-		                                                         source->get_key().get_oid(), 
-					   				 attrs, y);
+  int getObjReturn = source->driver->get_cache_driver()->get_attrs(dpp, source->get_key().get_oid(), 
+								    attrs, y);
 
   next->params.mod_ptr = params.mod_ptr;
   next->params.unmod_ptr = params.unmod_ptr;
@@ -421,20 +420,20 @@ int D4NFilterObject::D4NFilterReadOp::prepare(optional_yield y, const DoutPrefix
 	} else if (it->first == "version_id") {
 	  source->set_instance(it->second.c_str());
 	attrs.erase(it->first);
-      } else if (it->first == "source_zone_short_id") {
-	astate->zone_short_id = static_cast<uint32_t>(std::stoul(it->second.c_str()));
-	attrs.erase(it->first);
-      } else if (it->first == "user_quota.max_size") {
-        quota_info.max_size = std::stoull(it->second.c_str());
-	attrs.erase(it->first);
-      } else if (it->first == "user_quota.max_objects") {
-        quota_info.max_objects = std::stoull(it->second.c_str());
-	attrs.erase(it->first);
-      } else if (it->first == "max_buckets") {
-        source->get_bucket()->get_owner()->set_max_buckets(std::stoull(it->second.c_str()));
-	attrs.erase(it->first);
+	} else if (it->first == "source_zone_short_id") {
+	  astate->zone_short_id = static_cast<uint32_t>(std::stoul(it->second.c_str()));
+	  attrs.erase(it->first);
+	} else if (it->first == "user_quota.max_size") {
+	  quota_info.max_size = std::stoull(it->second.c_str());
+	  attrs.erase(it->first);
+	} else if (it->first == "user_quota.max_objects") {
+	  quota_info.max_objects = std::stoull(it->second.c_str());
+	  attrs.erase(it->first);
+	} else if (it->first == "max_buckets") {
+	  source->get_bucket()->get_owner()->set_max_buckets(std::stoull(it->second.c_str()));
+	  attrs.erase(it->first);
+	}
       }
-    }
     }
 
     source->get_bucket()->get_owner()->set_info(quota_info);
