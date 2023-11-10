@@ -22,6 +22,7 @@
 #include <boost/system/system_error.hpp>
 
 namespace bs = boost::system;
+namespace asio = boost::asio;
 using namespace std::literals;
 using namespace std::placeholders;
 
@@ -82,7 +83,7 @@ public:
 namespace {
 
 struct CompletionPayload {
-  std::unique_ptr<Op::Completion> c;
+  Op::Completion c;
 };
 
 void completion_callback_adapter(rados_completion_t c, void *arg) {
@@ -91,14 +92,14 @@ void completion_callback_adapter(rados_completion_t c, void *arg) {
   impl->release();
 
   auto payload = reinterpret_cast<CompletionPayload*>(arg);
-  payload->c->defer(std::move(payload->c),
-                    (r < 0) ? bs::error_code(-r, osd_category()) :
-                              bs::error_code());
+  asio::dispatch(asio::append(std::move(payload->c),
+			      (r < 0) ? bs::error_code(-r, osd_category()) :
+			      bs::error_code()));
   delete payload;
 }
 
 librados::AioCompletionImpl* create_aio_completion(
-    std::unique_ptr<Op::Completion>&& c) {
+  Op::Completion&& c) {
   auto payload = new CompletionPayload{std::move(c)};
 
   auto impl = new librados::AioCompletionImpl();
@@ -126,6 +127,16 @@ int save_operation_ec(int result, boost::system::error_code* ec) {
 Object::Object() {
   static_assert(impl_size >= sizeof(object_t));
   new (&impl) object_t();
+}
+
+Object::Object(const Object& rhs) {
+  static_assert(impl_size >= sizeof(object_t));
+  new (&impl) object_t(*reinterpret_cast<const object_t*>(&rhs.impl));
+}
+
+Object::Object(Object&& rhs) {
+  static_assert(impl_size >= sizeof(object_t));
+  new (&impl) object_t(std::move(*reinterpret_cast<object_t*>(&rhs.impl)));
 }
 
 Object::Object(std::string&& s) {
@@ -157,10 +168,16 @@ IOContext::IOContext(const IOContext& rhs) {
   new (&impl) IOContextImpl(*reinterpret_cast<const IOContextImpl*>(&rhs.impl));
 }
 
-IOContext::IOContext(int64_t _pool, std::string&& _ns)
+IOContext::IOContext(IOContext&& rhs) {
+  static_assert(impl_size >= sizeof(IOContextImpl));
+  new (&impl) IOContextImpl(std::move(*reinterpret_cast<const IOContextImpl*>(&rhs.impl)));
+}
+
+IOContext::IOContext(int64_t _pool, std::string_view _ns, std::string_view _key)
   : IOContext() {
   pool(_pool);
-  ns(std::move(_ns));
+  ns(_ns);
+  key(_key);
 }
 
 IOContext::~IOContext() {
@@ -171,57 +188,58 @@ std::int64_t IOContext::pool() const {
   return reinterpret_cast<const IOContextImpl*>(&impl)->oloc.pool;
 }
 
-void IOContext::pool(std::int64_t _pool) {
+IOContext&& IOContext::pool(std::int64_t _pool) {
   reinterpret_cast<IOContextImpl*>(&impl)->oloc.pool = _pool;
+  return std::move(*this);
 }
 
 std::string_view IOContext::ns() const {
   return reinterpret_cast<const IOContextImpl*>(&impl)->oloc.nspace;
 }
 
-void IOContext::ns(std::string&& _ns) {
-  reinterpret_cast<IOContextImpl*>(&impl)->oloc.nspace = std::move(_ns);
+IOContext&& IOContext::ns(std::string_view _ns) {
+  reinterpret_cast<IOContextImpl*>(&impl)->oloc.nspace.assign(_ns);
+  return std::move(*this);
 }
 
-std::optional<std::uint64_t> IOContext::read_snap() const {
+std::string_view IOContext::key() const {
+  return reinterpret_cast<const IOContextImpl*>(&impl)->oloc.key;
+}
+
+IOContext&& IOContext::key(std::string_view _key) {
+  reinterpret_cast<IOContextImpl*>(&impl)->oloc.key.assign(_key);
+  return std::move(*this);
+}
+
+std::uint64_t IOContext::read_snap() const {
   auto& snap_seq = reinterpret_cast<const IOContextImpl*>(&impl)->snap_seq;
-  if (snap_seq == CEPH_NOSNAP)
-    return std::nullopt;
-  else
     return snap_seq;
 }
-void IOContext::read_snap(std::optional<std::uint64_t> _snapid) {
+IOContext&& IOContext::read_snap(std::uint64_t _snapid) {
   auto& snap_seq = reinterpret_cast<IOContextImpl*>(&impl)->snap_seq;
-  snap_seq = _snapid.value_or(CEPH_NOSNAP);
+  snap_seq = _snapid;
+  return std::move(*this);
 }
 
-std::optional<
-  std::pair<std::uint64_t,
-            std::vector<std::uint64_t>>> IOContext::write_snap_context() const {
+std::pair<std::uint64_t,
+	  std::vector<std::uint64_t>> IOContext::write_snap_context() const {
   auto& snapc = reinterpret_cast<const IOContextImpl*>(&impl)->snapc;
-  if (snapc.empty()) {
-    return std::nullopt;
-  } else {
-    std::vector<uint64_t> v(snapc.snaps.begin(), snapc.snaps.end());
-    return std::make_optional(std::make_pair(uint64_t(snapc.seq), v));
-  }
+  std::vector<uint64_t> v(snapc.snaps.begin(), snapc.snaps.end());
+  return std::make_pair(uint64_t(snapc.seq), std::move(v));
 }
 
-void IOContext::write_snap_context(
-  std::optional<std::pair<std::uint64_t, std::vector<std::uint64_t>>> _snapc) {
+IOContext&& IOContext::write_snap_context(
+  std::uint64_t c, std::vector<std::uint64_t> v) {
   auto& snapc = reinterpret_cast<IOContextImpl*>(&impl)->snapc;
-  if (!_snapc) {
-    snapc.clear();
-  } else {
-    SnapContext n(_snapc->first, { _snapc->second.begin(), _snapc->second.end()});
-    if (!n.is_valid()) {
-      throw bs::system_error(EINVAL,
-                             bs::system_category(),
-                             "Invalid snap context.");
-    }
-
-    snapc = n;
+  SnapContext n(c, { v.begin(), v.end()});
+  if (!n.is_valid()) {
+    throw bs::system_error(EINVAL,
+			   bs::system_category(),
+			   "Invalid snap context.");
   }
+
+  snapc = std::move(n);
+  return std::move(*this);
 }
 
 void IOContext::full_try(bool _full_try) {
@@ -246,6 +264,15 @@ Op::Op() {
   auto& o = *reinterpret_cast<librados::TestObjectOperationImpl**>(&impl);
   o = new librados::TestObjectOperationImpl();
   o->get();
+}
+
+Op::Op(Op&& rhs) {
+  static_assert(Op::impl_size >= sizeof(librados::TestObjectOperationImpl*));
+  auto& o = *reinterpret_cast<librados::TestObjectOperationImpl**>(&impl);
+  auto& p = *reinterpret_cast<librados::TestObjectOperationImpl**>(&rhs.impl);
+  o = p;
+  p = new librados::TestObjectOperationImpl();
+  p->get();
 }
 
 Op::~Op() {
@@ -508,22 +535,18 @@ boost::asio::io_context::executor_type neorados::RADOS::get_executor() const {
   return impl->io_context.get_executor();
 }
 
-void RADOS::execute(const Object& o, const IOContext& ioc, ReadOp&& op,
-                    ceph::buffer::list* bl, std::unique_ptr<Op::Completion> c,
-                    uint64_t* objver, const blkin_trace_info* trace_info) {
+void RADOS::execute_(Object o, IOContext ioc, ReadOp op,
+		     ceph::buffer::list* bl, Op::Completion c,
+		     uint64_t* objver, const blkin_trace_info* trace_info) {
   auto io_ctx = impl->get_io_ctx(ioc);
   if (io_ctx == nullptr) {
-    c->dispatch(std::move(c), osdc_errc::pool_dne);
+    asio::dispatch(asio::append(std::move(c), osdc_errc::pool_dne));
     return;
   }
 
   auto ops = *reinterpret_cast<librados::TestObjectOperationImpl**>(&op.impl);
 
-  auto snap_id = CEPH_NOSNAP;
-  auto opt_snap_id = ioc.read_snap();
-  if (opt_snap_id) {
-    snap_id = *opt_snap_id;
-  }
+  auto snap_id = ioc.read_snap();
 
   auto completion = create_aio_completion(std::move(c));
   auto r = io_ctx->aio_operate_read(std::string{o}, *ops, completion, 0U, bl,
@@ -531,52 +554,54 @@ void RADOS::execute(const Object& o, const IOContext& ioc, ReadOp&& op,
   ceph_assert(r == 0);
 }
 
-void RADOS::execute(const Object& o, const IOContext& ioc, WriteOp&& op,
-                    std::unique_ptr<Op::Completion> c, uint64_t* objver,
-                    const blkin_trace_info* trace_info) {
+void RADOS::execute_(Object o, IOContext ioc, WriteOp op,
+		     Op::Completion c, uint64_t* objver,
+		     const blkin_trace_info* trace_info) {
   auto io_ctx = impl->get_io_ctx(ioc);
   if (io_ctx == nullptr) {
-    c->dispatch(std::move(c), osdc_errc::pool_dne);
+    asio::dispatch(asio::append(std::move(c), osdc_errc::pool_dne));
     return;
   }
 
   auto ops = *reinterpret_cast<librados::TestObjectOperationImpl**>(&op.impl);
 
   SnapContext snapc;
-  auto opt_snapc = ioc.write_snap_context();
-  if (opt_snapc) {
-    snapc.seq = opt_snapc->first;
-    snapc.snaps.assign(opt_snapc->second.begin(), opt_snapc->second.end());
-  }
+  auto got_snapc = ioc.write_snap_context();
+  snapc.seq = got_snapc.first;
+  snapc.snaps.assign(got_snapc.second.begin(), got_snapc.second.end());
 
   auto completion = create_aio_completion(std::move(c));
   auto r = io_ctx->aio_operate(std::string{o}, *ops, completion, &snapc, nullptr, 0U);
   ceph_assert(r == 0);
 }
 
-void RADOS::mon_command(std::vector<std::string> command,
-                        const bufferlist& bl,
-                        std::string* outs, bufferlist* outbl,
-                        std::unique_ptr<Op::Completion> c) {
+void RADOS::mon_command_(std::vector<std::string> command,
+			 bufferlist bl,
+			 std::string* outs, bufferlist* outbl,
+			 Op::Completion c) {
   auto r = impl->test_rados_client->mon_command(command, bl, outbl, outs);
-  c->post(std::move(c),
-          (r < 0 ? bs::error_code(-r, osd_category()) : bs::error_code()));
+  asio::post(get_executor(),
+	     asio::append(std::move(c),
+			  (r < 0 ? bs::error_code(-r, osd_category()) :
+			   bs::error_code())));
 }
 
-void RADOS::blocklist_add(std::string_view client_address,
-                          std::optional<std::chrono::seconds> expire,
-                          std::unique_ptr<SimpleOpComp> c) {
+void RADOS::blocklist_add_(std::string client_address,
+			   std::optional<std::chrono::seconds> expire,
+			   SimpleOpComp c) {
   auto r = impl->test_rados_client->blocklist_add(
     std::string(client_address), expire.value_or(0s).count());
-  c->post(std::move(c),
-          (r < 0 ? bs::error_code(-r, mon_category()) : bs::error_code()));
+  asio::post(get_executor(),
+	     asio::append(std::move(c),
+			  (r < 0 ? bs::error_code(-r, mon_category()) :
+			   bs::error_code())));
 }
 
-void RADOS::wait_for_latest_osd_map(std::unique_ptr<Op::Completion> c) {
+void RADOS::wait_for_latest_osd_map_(Op::Completion c) {
   auto r = impl->test_rados_client->wait_for_latest_osd_map();
-  c->dispatch(std::move(c),
-              (r < 0 ? bs::error_code(-r, osd_category()) :
-                       bs::error_code()));
+  asio::dispatch(asio::append(std::move(c),
+			      (r < 0 ? bs::error_code(-r, osd_category()) :
+			       bs::error_code())));
 }
 
 } // namespace neorados

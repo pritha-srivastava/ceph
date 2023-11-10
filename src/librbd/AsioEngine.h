@@ -9,11 +9,11 @@
 #include <memory>
 #include <boost/asio/dispatch.hpp>
 #include <boost/asio/io_context.hpp>
-#include <boost/asio/io_context_strand.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/asio/post.hpp>
 
 struct Context;
-namespace neorados { struct RADOS; }
+namespace neorbdrados { struct RADOS; }
 
 namespace librbd {
 
@@ -29,7 +29,7 @@ public:
   AsioEngine(const AsioEngine&) = delete;
   AsioEngine& operator=(const AsioEngine&) = delete;
 
-  inline neorados::RADOS& get_rados_api() {
+  inline neorbdrados::RADOS& get_rados_api() {
     return *m_rados_api;
   }
 
@@ -45,7 +45,7 @@ public:
     return m_io_context.get_executor();
   }
 
-  inline boost::asio::io_context::strand& get_api_strand() {
+  inline boost::asio::strand<executor_type>& get_api_strand() {
     // API client callbacks should never fire concurrently
     return *m_api_strand;
   }
@@ -67,11 +67,11 @@ public:
   void post(Context* ctx, int r);
 
 private:
-  std::shared_ptr<neorados::RADOS> m_rados_api;
+  std::shared_ptr<neorbdrados::RADOS> m_rados_api;
   CephContext* m_cct;
 
   boost::asio::io_context& m_io_context;
-  std::unique_ptr<boost::asio::io_context::strand> m_api_strand;
+  std::unique_ptr<boost::asio::strand<executor_type>> m_api_strand;
   std::unique_ptr<asio::ContextWQ> m_context_wq;
 };
 

@@ -41,11 +41,13 @@ class Messenger;
 class AioCompletionImpl;
 
 namespace neorados { namespace detail { class RadosClient; }}
+namespace neorbdrados { namespace detail { class RadosClient; }}
 
 class librados::RadosClient : public Dispatcher,
 			      public md_config_obs_t
 {
   friend neorados::detail::RadosClient;
+  friend neorbdrados::detail::RadosClient;
 public:
   using Dispatcher::cct;
 private:
@@ -96,7 +98,8 @@ private:
   int wait_for_osdmap();
 
 public:
-  boost::asio::io_context::strand finish_strand{poolctx.get_io_context()};
+  boost::asio::strand<boost::asio::io_context::executor_type>
+      finish_strand{poolctx.get_executor()};
 
   explicit RadosClient(CephContext *cct);
   ~RadosClient() override;

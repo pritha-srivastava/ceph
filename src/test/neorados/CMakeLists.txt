@@ -1,4 +1,3 @@
-
 add_executable(ceph_test_neorados test_neorados.cc)
 target_link_libraries(ceph_test_neorados global libneorados
   ${unittest_libs}
@@ -21,8 +20,24 @@ target_link_libraries(ceph_test_neorados_op_speed
 
 add_library(neoradostest-support STATIC common_tests.cc)
 target_link_libraries(neoradostest-support
-  libneorados fmt::fmt)
+  libneorados fmt::fmt GTest::GTest)
 
 add_executable(ceph_test_neorados_list_pool list_pool.cc)
 target_link_libraries(ceph_test_neorados_list_pool
   libneorados neoradostest-support global fmt::fmt ${unittest_libs})
+
+add_executable(ceph_test_neorados_handler_error
+  handler_error.cc
+  )
+target_link_libraries(ceph_test_neorados_handler_error
+  libneorados
+  ${BLKID_LIBRARIES}
+  ${CMAKE_DL_LIBS}
+  ${CRYPTO_LIBS}
+  ${EXTRALIBS}
+  neoradostest-support
+  ${UNITTEST_LIBS}
+  )
+install(TARGETS
+  ceph_test_neorados_handler_error
+  DESTINATION ${CMAKE_INSTALL_BINDIR})
