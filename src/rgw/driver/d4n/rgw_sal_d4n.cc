@@ -624,10 +624,7 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
     this->cb->bypass_cache_write();
   }
 
-  if (start_part_num == 0) {
-    this->cb->set_ofs(ofs);
-  } else {
-    this->cb->set_ofs(adjusted_start_ofs);
+  if (start_part_num != 0) {
     ofs = adjusted_start_ofs;
   }
 
@@ -675,40 +672,61 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
 
     if (bl.length() > 0 && last_part) { // if bl = bl_rem has data and this is the last part, write it to cache
       std::string oid = this->oid + "_" + std::to_string(ofs) + "_" + std::to_string(bl_len);
-      block.blockID = ofs; 
-      block.size = bl.length();
-      if (filter->get_policy_driver()->get_cache_policy()->eviction(dpp, block.size, *y) == 0) {
-        if (filter->get_cache_driver()->put_async(dpp, oid, bl, bl.length(), attrs) == 0) {
-	  filter->get_policy_driver()->get_cache_policy()->update(dpp, oid, ofs, bl.length(), "", *y);
+      if (!filter->get_policy_driver()->get_cache_policy()->exist_key(oid)) { //In case of concurrent reads for the same object, the block is already cached
+        block.blockID = ofs;
+        block.size = bl.length();
+        auto ret = filter->get_policy_driver()->get_cache_policy()->eviction(dpp, block.size, *y);
+        if (ret == 0) {
+          //Should we replace each put_async with put, to ensure data is actually written to the cache before updating the data structures and before the lock is released?
+          ret = filter->get_cache_driver()->put_async(dpp, oid, bl, bl.length(), attrs);
+          if (ret == 0) {
+            filter->get_policy_driver()->get_cache_policy()->update(dpp, oid, ofs, bl.length(), "", *y);
 
-	  /* Store block in directory */
-          if (!blockDir->exist_key(&block, *y)) {
-            if (blockDir->set(&block, *y) < 0) 
-	      ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set method failed." << dendl;
+      /* Store block in directory */
+            if (!blockDir->exist_key(&block, *y)) {
+              if (blockDir->set(&block, *y) < 0) //should we revert previous steps if this step fails?
+          ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set method failed." << dendl;
+            } else {
+              if (blockDir->update_field(&block, "blockHosts", blockDir->cct->_conf->rgw_local_cache_address, *y) < 0)
+          ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory update_field method failed." << dendl;
+            }
           } else {
-            if (blockDir->update_field(&block, "blockHosts", blockDir->cct->_conf->rgw_local_cache_address, *y) < 0)
-	      ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory update_field method failed." << dendl;
+            ldpp_dout(dpp, 20) << "D4N Filter: " << __func__ << " An error occured while caching oid: " << oid << " error: " << ret << dendl;
           }
+        } else {
+          ldpp_dout(dpp, 20) << "D4N Filter: " << __func__ << " An error occured during eviction: " << " error: " << ret << dendl;
         }
+      } else {
+        ldpp_dout(dpp, 20) << "D4N Filter: " << __func__ << " oid is already cached: " << oid << dendl;
       }
     } else if (bl.length() == rgw_get_obj_max_req_size && bl_rem.length() == 0) { // if bl is the same size as rgw_get_obj_max_req_size, write it to cache
       std::string oid = this->oid + "_" + std::to_string(ofs) + "_" + std::to_string(bl_len);
       ofs += bl_len;
       block.blockID = ofs;
       block.size = bl.length();
-      if (filter->get_policy_driver()->get_cache_policy()->eviction(dpp, block.size, *y) == 0) {
-        if (filter->get_cache_driver()->put_async(dpp, oid, bl, bl.length(), attrs) == 0) {
-	  filter->get_policy_driver()->get_cache_policy()->update(dpp, oid, ofs, bl.length(), "", *y);
+      if (!filter->get_policy_driver()->get_cache_policy()->exist_key(oid)) { //In case of concurrent reads for the same object, the block is already cached
+        auto ret = filter->get_policy_driver()->get_cache_policy()->eviction(dpp, block.size, *y);
+        if (ret == 0) {
+          ret = filter->get_cache_driver()->put_async(dpp, oid, bl, bl.length(), attrs);
+          if (ret == 0) {
+            filter->get_policy_driver()->get_cache_policy()->update(dpp, oid, ofs, bl.length(), "", *y);
 
-          /* Store block in directory */
-          if (!blockDir->exist_key(&block, *y)) {
-            if (blockDir->set(&block, *y) < 0) 
-	      ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set method failed." << dendl;
+            /* Store block in directory */
+            if (!blockDir->exist_key(&block, *y)) {
+              if (blockDir->set(&block, *y) < 0)
+          ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set method failed." << dendl;
+            } else {
+              if (blockDir->update_field(&block, "blockHosts", blockDir->cct->_conf->rgw_local_cache_address, *y) < 0)
+          ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory update_field method failed." << dendl;
+            }
           } else {
-            if (blockDir->update_field(&block, "blockHosts", blockDir->cct->_conf->rgw_local_cache_address, *y) < 0)
-	      ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory update_field method failed." << dendl;
+            ldpp_dout(dpp, 20) << "D4N Filter: " << __func__ << " An error occured while caching oid: " << oid << " error: " << ret << dendl;
           }
+        } else {
+          ldpp_dout(dpp, 20) << "D4N Filter: " << __func__ << " An error occured during eviction: " << " error: " << ret << dendl;
         }
+      } else {
+        ldpp_dout(dpp, 20) << "D4N Filter: " << __func__ << " oid is already cached: " << oid << dendl;
       }
     } else { //copy data from incoming bl to bl_rem till it is rgw_get_obj_max_req_size, and then write it to cache
       uint64_t rem_space = rgw_get_obj_max_req_size - bl_rem.length();
@@ -720,29 +738,37 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
 
       if (bl_rem.length() == rgw_get_obj_max_req_size) {
         std::string oid = this->oid + "_" + std::to_string(ofs) + "_" + std::to_string(bl_rem.length());
-        ofs += bl_rem.length();
-	block.blockID = ofs;
-	block.size = bl_rem.length();
-        if (filter->get_policy_driver()->get_cache_policy()->eviction(dpp, block.size, *y) == 0) {
-          if (filter->get_cache_driver()->put_async(dpp, oid, bl_rem, bl_rem.length(), attrs) == 0) {
-	    filter->get_policy_driver()->get_cache_policy()->update(dpp, oid, ofs, bl_rem.length(), "", *y);
+          if (!filter->get_policy_driver()->get_cache_policy()->exist_key(oid)) { //In case of concurrent reads for the same object, the block is already cached
+          ofs += bl_rem.length();
+          block.blockID = ofs;
+          block.size = bl_rem.length();
+          auto ret = filter->get_policy_driver()->get_cache_policy()->eviction(dpp, block.size, *y);
+          if (ret == 0) {
+            ret = filter->get_cache_driver()->put_async(dpp, oid, bl_rem, bl_rem.length(), attrs);
+            if (ret == 0) {
+              filter->get_policy_driver()->get_cache_policy()->update(dpp, oid, ofs, bl_rem.length(), "", *y);
 
-	    /* Store block in directory */
-	    if (!blockDir->exist_key(&block, *y)) {
-	      if (blockDir->set(&block, *y) < 0) 
-		ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set method failed." << dendl;
-	    } else {
-	      if (blockDir->update_field(&block, "blockHosts", blockDir->cct->_conf->rgw_local_cache_address, *y) < 0)
-		ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory update_field method failed." << dendl;
-	    } 
+              /* Store block in directory */
+              if (!blockDir->exist_key(&block, *y)) {
+                if (blockDir->set(&block, *y) < 0)
+                  ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set method failed." << dendl;
+                } else {
+                  if (blockDir->update_field(&block, "blockHosts", blockDir->cct->_conf->rgw_local_cache_address, *y) < 0)
+                    ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory update_field method failed." << dendl;
+                }
+            } else {
+              ldpp_dout(dpp, 20) << "D4N Filter: " << __func__ << " An error occured while caching oid: " << oid << " error: " << ret << dendl;
+            }
+          } else {
+            ldpp_dout(dpp, 20) << "D4N Filter: " << __func__ << " An error occured during eviction: " << " error: " << ret << dendl;
           }
-        }
 
-        bl_rem.clear();
-        bl_rem = std::move(bl);
+          bl_rem.clear();
+          bl_rem = std::move(bl);
+        }
       }
     }
-  }
+  } //write_to_cache
 
   return 0;
 }
