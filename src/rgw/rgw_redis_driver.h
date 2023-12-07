@@ -52,7 +52,13 @@ class RedisDriver : public CacheDriver {
     virtual int delete_attrs(const DoutPrefixProvider* dpp, const std::string& key, rgw::sal::Attrs& del_attrs, optional_yield y) override;
     virtual int set_attr(const DoutPrefixProvider* dpp, const std::string& key, const std::string& attr_name, const std::string& attr_val, optional_yield y) override;
     virtual std::string get_attr(const DoutPrefixProvider* dpp, const std::string& key, const std::string& attr_name, optional_yield y) override;
-    void shutdown();
+     
+  private:
+    std::shared_ptr<connection> conn;
+    static std::unordered_map<std::string, Partition> partitions;
+    Partition partition_info;
+    uint64_t free_space;
+    uint64_t outstanding_write_size;
 
     struct redis_response {
       boost::redis::response<std::string> resp;
@@ -71,16 +77,10 @@ class RedisDriver : public CacheDriver {
       }
     };
 
-  protected:
-    std::shared_ptr<connection> conn;
-
-    static std::unordered_map<std::string, Partition> partitions;
-    Partition partition_info;
-    uint64_t free_space;
-    uint64_t outstanding_write_size;
-
+    static Aio::OpFunc redis_read_op(optional_yield y, std::shared_ptr<connection> conn, off_t read_ofs, off_t read_len, const std::string& key);
     int add_partition_info(Partition& info);
     int remove_partition_info(Partition& info);
+    void shutdown();
 };
 
 } } // namespace rgw::cache
