@@ -8355,6 +8355,10 @@ next:
         other_attrs[iter->first] = bl;
     }
 
+    utime_t ut{obj->get_mtime()};
+    ut.gmtime(formatter->dump_stream("mtime"));
+
+
     formatter->open_object_section("attrs");
     for (iter = other_attrs.begin(); iter != other_attrs.end(); ++iter) {
       dump_string(iter->first.c_str(), iter->second, formatter.get());
