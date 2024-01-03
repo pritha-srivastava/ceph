@@ -376,85 +376,86 @@ std::unique_ptr<Object::DeleteOp> D4NFilterObject::get_delete_op()
 
 int D4NFilterObject::D4NFilterReadOp::prepare(optional_yield y, const DoutPrefixProvider* dpp)
 {
-  next->params.mod_ptr = params.mod_ptr;
-  next->params.unmod_ptr = params.unmod_ptr;
-  next->params.high_precision_time = params.high_precision_time;
-  next->params.mod_zone_id = params.mod_zone_id;
-  next->params.mod_pg_ver = params.mod_pg_ver;
-  next->params.if_match = params.if_match;
-  next->params.if_nomatch = params.if_nomatch;
-  next->params.lastmod = params.lastmod;
-  int ret = next->prepare(y, dpp);
-
   rgw::sal::Attrs attrs;
 
   if (source->driver->get_cache_driver()->get_attrs(dpp, source->get_key().get_oid(), attrs, y) < 0) {
     ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::" << __func__ << "(): CacheDriver get_attrs method failed." << dendl;
+    next->params = params;
+    int ret = next->prepare(y, dpp);
+    if (ret < 0) {
+      return ret;
+    }
+    attrs = this->source->get_attrs();
+    if (params.part_num) {
+      params.parts_count = next->params.parts_count;
+      if (params.parts_count > 1) {
+        ldpp_dout(dpp, 20) << __func__ << "params.part_count: " << params.parts_count << dendl;
+        return 0; // TODO: handle multipart read requests with part number, also how do we return this from the cache backend?
+      }
+    }
   } else {
     /* Set metadata locally */
-    RGWObjState* astate;
+    RGWObjState astate;
     RGWQuotaInfo quota_info;
     std::unique_ptr<rgw::sal::User> user = source->driver->get_user(source->get_bucket()->get_owner());
-    source->get_obj_state(dpp, &astate, y);
 
     for (auto& attr : attrs) {
       if (attr.second.length() > 0) {
-	if (attr.first == "mtime") {
-	  parse_time(attr.second.c_str(), &astate->mtime);
-	  attrs.erase(attr.first);
-	} else if (attr.first == "object_size") {
-	  source->set_obj_size(std::stoull(attr.second.c_str()));
-	  attrs.erase(attr.first);
-	} else if (attr.first == "accounted_size") {
-	  astate->accounted_size = std::stoull(attr.second.c_str());
-	  attrs.erase(attr.first);
-	} else if (attr.first == "epoch") {
-	  astate->epoch = std::stoull(attr.second.c_str());
-	  attrs.erase(attr.first);
-	} else if (attr.first == "version_id") {
-	  source->set_instance(attr.second.c_str());
-	  attrs.erase(attr.first);
-	} else if (attr.first == "source_zone_short_id") {
-	  astate->zone_short_id = static_cast<uint32_t>(std::stoul(attr.second.c_str()));
-	  attrs.erase(attr.first);
-	} else if (attr.first == "user_quota.max_size") {
-	  quota_info.max_size = std::stoull(attr.second.c_str());
-	  attrs.erase(attr.first);
-	} else if (attr.first == "user_quota.max_objects") {
-	  quota_info.max_objects = std::stoull(attr.second.c_str());
-	  attrs.erase(attr.first);
-	} else if (attr.first == "max_buckets") {
-	  user->set_max_buckets(std::stoull(attr.second.c_str()));
-	  attrs.erase(attr.first);
-	} else {
-	  ldpp_dout(dpp, 20) << "D4NFilterObject::D4NFilterReadOp::" << __func__ << "(): Unexpected attribute; not locally set." << dendl;
-	}
+        if (attr.first == "mtime") {
+          parse_time(attr.second.c_str(), &astate.mtime);
+          attrs.erase(attr.first);
+        } else if (attr.first == "object_size") {
+          source->set_obj_size(std::stoull(attr.second.c_str()));
+          attrs.erase(attr.first);
+        } else if (attr.first == "accounted_size") {
+          astate.accounted_size = std::stoull(attr.second.c_str());
+          attrs.erase(attr.first);
+        } else if (attr.first == "epoch") {
+          astate.epoch = std::stoull(attr.second.c_str());
+          attrs.erase(attr.first);
+        } else if (attr.first == "version_id") {
+          source->set_instance(attr.second.c_str());
+          attrs.erase(attr.first);
+        } else if (attr.first == "source_zone_short_id") {
+          astate.zone_short_id = static_cast<uint32_t>(std::stoul(attr.second.c_str()));
+          attrs.erase(attr.first);
+        } else if (attr.first == "user_quota.max_size") {
+          quota_info.max_size = std::stoull(attr.second.c_str());
+          attrs.erase(attr.first);
+        } else if (attr.first == "user_quota.max_objects") {
+          quota_info.max_objects = std::stoull(attr.second.c_str());
+          attrs.erase(attr.first);
+        } else if (attr.first == "max_buckets") {
+          user->set_max_buckets(std::stoull(attr.second.c_str()));
+          attrs.erase(attr.first);
+        } else {
+          ldpp_dout(dpp, 20) << "D4NFilterObject::D4NFilterReadOp::" << __func__ << "(): Unexpected attribute; not locally set." << dendl;
+          attrs.erase(attr.first);
+        }
       }
-    user->set_info(quota_info);
-    source->set_obj_state(*astate);
-   
-    /* Set attributes locally */
-    if (source->set_attrs(attrs) < 0)
-      ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::" << __func__ << "(): D4NFilterObject set_attrs method failed." << dendl;
-  }
-  }
-
-  //versioned objects have instance set to versionId, and get_oid() returns oid containing instance, hence using id tag as version for non versioned objects only
-  if (! this->source->have_instance()) {
-    RGWObjState* state = nullptr;
-    if (this->source->get_obj_state(dpp, &state, y) == 0) {
-      auto it = state->attrset.find(RGW_ATTR_ID_TAG);
-      if (it != state->attrset.end()) {
-        bufferlist bl = it->second;
-        this->source->set_object_version(bl.c_str());
-        ldpp_dout(dpp, 20) << __func__ << "id tag version is: " << this->source->get_object_version() << dendl;
-      } else {
-        ldpp_dout(dpp, 20) << __func__ << "Failed to find id tag" << dendl;
+      user->set_info(quota_info);
+      source->set_obj_state(astate);
+    
+      /* Set attributes locally */
+      if (source->set_attrs(attrs) < 0) {
+        ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::" << __func__ << "(): D4NFilterObject set_attrs method failed." << dendl;
       }
     }
   }
 
-  return ret;
+  //versioned objects have instance set to versionId, and get_oid() returns oid containing instance, hence using id tag as version for non versioned objects only
+  if (! this->source->have_instance()) {
+    auto it = attrs.find(RGW_ATTR_ID_TAG);
+    if (it != attrs.end()) {
+      bufferlist bl = it->second;
+      this->source->set_object_version(bl.c_str());
+      ldpp_dout(dpp, 20) << __func__ << "id tag version is: " << this->source->get_object_version() << dendl;
+    } else {
+      ldpp_dout(dpp, 20) << __func__ << "Failed to find id tag" << dendl;
+    }
+  }
+
+  return 0;
 }
 
 void D4NFilterObject::D4NFilterReadOp::cancel() {
