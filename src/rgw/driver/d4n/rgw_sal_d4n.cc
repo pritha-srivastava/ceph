@@ -376,9 +376,39 @@ std::unique_ptr<Object::DeleteOp> D4NFilterObject::get_delete_op()
 
 int D4NFilterObject::D4NFilterReadOp::prepare(optional_yield y, const DoutPrefixProvider* dpp)
 {
-  rgw::sal::Attrs attrs;
+  rgw::d4n::BlockDirectory* blockDir = source->driver->get_block_dir();
+  std::string version;
 
-  if (source->driver->get_cache_driver()->get_attrs(dpp, source->get_key().get_oid(), attrs, y) < 0) {
+  rgw::d4n::CacheObj object = rgw::d4n::CacheObj{
+				 .objName = source->get_key().get_oid(), 
+				 .bucketName = source->get_bucket()->get_name(),
+        };
+
+  rgw::d4n::CacheBlock block = rgw::d4n::CacheBlock{
+          .cacheObj = object,
+          .blockID = 0,
+          .version = version,
+          .size = 0
+          };
+
+  //entry in directory to get latest version (like olh), version signifies latest version in case of both versioned and non-versioned objects
+  if (blockDir->exist_key(&block, y)) {
+    auto ret = blockDir->get(&block, y);
+    if (ret < 0) {
+      ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::" << __func__ << "(): Blockdirectory get method failed with error: " << ret << dendl;
+      version = "";
+    } else {
+      version = block.version;
+    }
+  }
+
+  std::string oid_in_cache = source->get_bucket()->get_name() + "_" + version + "_" + source->get_key().get_oid();
+
+  rgw::sal::Attrs attrs;
+  
+  ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::" << __func__ << "oid_in_cache is: "<< oid_in_cache << dendl;
+
+  if (source->driver->get_cache_driver()->get_attrs(dpp, oid_in_cache, attrs, y) < 0) {
     ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::" << __func__ << "(): CacheDriver get_attrs method failed." << dendl;
     next->params = params;
     int ret = next->prepare(y, dpp);
@@ -394,6 +424,7 @@ int D4NFilterObject::D4NFilterReadOp::prepare(optional_yield y, const DoutPrefix
       }
     }
   } else {
+    ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::" << __func__ << "(): CacheDriver get_attrs succeeded." << dendl;
     /* Set metadata locally */
     RGWObjState astate;
     RGWQuotaInfo quota_info;
@@ -403,34 +434,22 @@ int D4NFilterObject::D4NFilterReadOp::prepare(optional_yield y, const DoutPrefix
       if (attr.second.length() > 0) {
         if (attr.first == "mtime") {
           parse_time(attr.second.c_str(), &astate.mtime);
-          attrs.erase(attr.first);
         } else if (attr.first == "object_size") {
           source->set_obj_size(std::stoull(attr.second.c_str()));
-          attrs.erase(attr.first);
         } else if (attr.first == "accounted_size") {
           astate.accounted_size = std::stoull(attr.second.c_str());
-          attrs.erase(attr.first);
         } else if (attr.first == "epoch") {
           astate.epoch = std::stoull(attr.second.c_str());
-          attrs.erase(attr.first);
         } else if (attr.first == "version_id") {
           source->set_instance(attr.second.c_str());
-          attrs.erase(attr.first);
         } else if (attr.first == "source_zone_short_id") {
           astate.zone_short_id = static_cast<uint32_t>(std::stoul(attr.second.c_str()));
-          attrs.erase(attr.first);
         } else if (attr.first == "user_quota.max_size") {
           quota_info.max_size = std::stoull(attr.second.c_str());
-          attrs.erase(attr.first);
         } else if (attr.first == "user_quota.max_objects") {
           quota_info.max_objects = std::stoull(attr.second.c_str());
-          attrs.erase(attr.first);
         } else if (attr.first == "max_buckets") {
           user->set_max_buckets(std::stoull(attr.second.c_str()));
-          attrs.erase(attr.first);
-        } else {
-          ldpp_dout(dpp, 20) << "D4NFilterObject::D4NFilterReadOp::" << __func__ << "(): Unexpected attribute; not locally set." << dendl;
-          attrs.erase(attr.first);
         }
       }
       user->set_info(quota_info);
@@ -445,6 +464,7 @@ int D4NFilterObject::D4NFilterReadOp::prepare(optional_yield y, const DoutPrefix
 
   //versioned objects have instance set to versionId, and get_oid() returns oid containing instance, hence using id tag as version for non versioned objects only
   if (! this->source->have_instance()) {
+    this->source->set_object_version(version);
     auto it = attrs.find(RGW_ATTR_ID_TAG);
     if (it != attrs.end()) {
       bufferlist bl = it->second;
@@ -927,19 +947,103 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
                        const req_context& rctx,
                        uint32_t flags)
 {
+  rgw::d4n::BlockDirectory* blockDir = driver->get_block_dir();
+  std::string version;
+  if (obj->have_instance()) {
+    version = obj->get_instance();
+  } else {
+    version = ""; //version for non-versioned objects, how will that be arrived at?
+  } 
+
+  //write an object that has attrs for the object being currently written
+  std::string oid_in_cache;
+  if (version.empty()) { //for versioned objects, get_oid() returns an oid with versionId added
+    oid_in_cache = obj->get_bucket()->get_name() + "_" + obj->get_key().get_oid();
+  } else {
+    oid_in_cache = obj->get_bucket()->get_name() + "_" + version + "_" + obj->get_key().get_oid();
+  }
+
+  bufferlist bl_attr;
+  bl_attr.append(to_iso_8601(obj->get_mtime()));
+  attrs.insert({"mtime", bl_attr});
+  bl_attr.clear();
+
+  bl_attr.append(std::to_string(obj->get_obj_size()));
+  attrs.insert({"object_size", bl_attr});
+  bl_attr.clear();
+
+  bl_attr.append(std::to_string(accounted_size));
+  attrs.insert({"accounted_size", bl_attr});
+  bl_attr.clear();
+ 
+#if 0
+  bl_attr.append(std::to_string(astate->epoch));
+  attrs.insert({"epoch", bl_attr});
+  bl_attr.clear();
+#endif
+
+  if (obj->have_instance()) {
+    bl_attr.append(obj->get_instance());
+    attrs.insert({"version_id", bl_attr});
+    bl_attr.clear();
+  } else {
+    bl_attr.append(""); /* Empty value */
+    attrs.insert({"version_id", bl_attr});
+    bl_attr.clear();
+  }
+#if 0
+  auto iter = attrs_temp.find(RGW_ATTR_SOURCE_ZONE);
+  if (iter != attrs_temp.end()) {
+    bl_attr.append(std::to_string(astate->zone_short_id));
+    attrs.insert({"source_zone_short_id", bl_attr});
+    bl_attr.clear();
+  } else {
+    bl_attr.append("0"); /* Initialized to zero */
+    attrs.insert({"source_zone_short_id", bl_attr});
+    bl_attr.clear();
+  }
+#endif
+  bufferlist bl_data;
+  auto ret = driver->get_cache_driver()->put(save_dpp, oid_in_cache, bl_data, 0, attrs, y);
+  if (ret < 0) {
+    ldpp_dout(save_dpp, 10) << "D4NFilterWriter::" << __func__ << " put failed for oid_in_cache wih error: " << ret << dendl;
+  }
+
+  ldpp_dout(save_dpp, 10) << "D4NFilterWriter::" << __func__ << " oid_in_cache: " << oid_in_cache << dendl;
   rgw::d4n::CacheObj object = rgw::d4n::CacheObj{
 				 .objName = obj->get_key().get_oid(), 
 				 .bucketName = obj->get_bucket()->get_name(),
-				 .creationTime = to_iso_8601(*mtime), 
+				 .creationTime = to_iso_8601(*mtime),
 				 .dirty = false,
 				 .hostsList = { /*driver->get_block_dir()->cct->_conf->rgw_local_cache_address*/ } //TODO: Object is not currently being cached 
                                };
 
-  if (driver->get_obj_dir()->set(&object, y) < 0) 
-    ldpp_dout(save_dpp, 10) << "D4NFilterWriter::" << __func__ << "(): ObjectDirectory set method failed." << dendl;
+  rgw::d4n::CacheBlock block = rgw::d4n::CacheBlock{
+          .cacheObj = object,
+          .blockID = 0,
+          .version = version,
+          .size = 0
+          };
+
+  //entry in directory to get latest version (like olh), version signifies latest version in case of both versioned and non-versioned objects
+  if (blockDir->exist_key(&block, y)) {
+    blockDir->update_field(&block, "version", version, y);
+  } else {
+    if (blockDir->set(&block, y) < 0) {
+      ldpp_dout(save_dpp, 10) << "D4NFilterWriter::" << __func__ << " (): BlockDirectory set method failed for olh block." << dendl;
+    }
+  }
+
+  if (obj->have_instance()) {
+    //entry for versions in case of versioned objects, index uses version
+    if (blockDir->set(&block, y, true) < 0) {
+      ldpp_dout(save_dpp, 10) << "D4NFilterWriter::" << __func__ << " (): BlockDirectory set method failed for versioned blocks." << dendl;
+    }
+  }
    
+#if 0
   /* Retrieve complete set of attrs */
-  int ret = next->complete(accounted_size, etag, mtime, set_mtime, attrs,
+  ret = next->complete(accounted_size, etag, mtime, set_mtime, attrs,
 			delete_at, if_match, if_nomatch, user_data, zones_trace,
 			canceled, rctx, flags);
   obj->get_obj_attrs(rctx.y, save_dpp, NULL);
@@ -950,45 +1054,9 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
   buffer::list bl;
   RGWObjState* astate;
   obj->get_obj_state(save_dpp, &astate, rctx.y);
-
-  bl.append(to_iso_8601(obj->get_mtime()));
-  baseAttrs.insert({"mtime", bl});
-  bl.clear();
-
-  bl.append(std::to_string(obj->get_obj_size()));
-  baseAttrs.insert({"object_size", bl});
-  bl.clear();
-
-  bl.append(std::to_string(accounted_size));
-  baseAttrs.insert({"accounted_size", bl});
-  bl.clear();
- 
-  bl.append(std::to_string(astate->epoch));
-  baseAttrs.insert({"epoch", bl});
-  bl.clear();
-
-  if (obj->have_instance()) {
-    bl.append(obj->get_instance());
-    baseAttrs.insert({"version_id", bl});
-    bl.clear();
-  } else {
-    bl.append(""); /* Empty value */
-    baseAttrs.insert({"version_id", bl});
-    bl.clear();
-  }
-
-  auto iter = attrs_temp.find(RGW_ATTR_SOURCE_ZONE);
-  if (iter != attrs_temp.end()) {
-    bl.append(std::to_string(astate->zone_short_id));
-    baseAttrs.insert({"source_zone_short_id", bl});
-    bl.clear();
-  } else {
-    bl.append("0"); /* Initialized to zero */
-    baseAttrs.insert({"source_zone_short_id", bl});
-    bl.clear();
-  }
-
-  baseAttrs.insert(attrs.begin(), attrs.end());
+#endif
+  
+  // is the accounted_size equivalent to the length? -Sam
   
   //bufferlist bl_empty;
   //int putReturn = driver->get_cache_driver()->
