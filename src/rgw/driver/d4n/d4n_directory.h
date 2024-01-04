@@ -66,10 +66,10 @@ class BlockDirectory: public Directory {
     void init(CephContext* cct) {
       this->cct = cct;
     }
-    int exist_key(CacheBlock* block, optional_yield y);
+    int exist_key(CacheBlock* block, optional_yield y, bool version=false);
 
-    int set(CacheBlock* block, optional_yield y);
-    int get(CacheBlock* block, optional_yield y);
+    int set(CacheBlock* block, optional_yield y, bool version=false);
+    int get(CacheBlock* block, optional_yield y, bool version=false);
     int copy(CacheBlock* block, std::string copyName, std::string copyBucketName, optional_yield y);
     int del(CacheBlock* block, optional_yield y);
     int update_field(CacheBlock* block, std::string field, std::string value, optional_yield y);
@@ -78,7 +78,7 @@ class BlockDirectory: public Directory {
   private:
     std::shared_ptr<connection> conn;
 
-    std::string build_index(CacheBlock* block);
+    std::string build_index(CacheBlock* block, bool version=false);
 };
 
 } } // namespace rgw::d4n

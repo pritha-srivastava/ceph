@@ -305,14 +305,16 @@ int ObjectDirectory::update_field(CacheObj* object, std::string field, std::stri
   }
 }
 
-std::string BlockDirectory::build_index(CacheBlock* block) 
-{
-  return block->cacheObj.bucketName + "_" + block->cacheObj.objName + "_" + std::to_string(block->blockID) + "_" + std::to_string(block->size);
+std::string BlockDirectory::build_index(CacheBlock* block, bool version) {
+  if (version) {
+    return block->cacheObj.bucketName + "_" + block->cacheObj.objName + "_" + std::to_string(block->blockID) + "_" + std::to_string(block->size);
+  } else {
+    return block->cacheObj.bucketName + "_" + block->cacheObj.objName + "_" + std::to_string(block->blockID) + "_" + std::to_string(block->size) + "_" + block->version;
+  }
 }
 
-int BlockDirectory::exist_key(CacheBlock* block, optional_yield y) 
-{
-  std::string key = build_index(block);
+int BlockDirectory::exist_key(CacheBlock* block, optional_yield y, bool version) {
+  std::string key = build_index(block, version);
   response<int> resp;
 
   try {
@@ -329,9 +331,8 @@ int BlockDirectory::exist_key(CacheBlock* block, optional_yield y)
   return std::get<0>(resp).value();
 }
 
-int BlockDirectory::set(CacheBlock* block, optional_yield y) 
-{
-  std::string key = build_index(block);
+int BlockDirectory::set(CacheBlock* block, optional_yield y, bool version) {
+  std::string key = build_index(block, version);
     
   /* Every set will be treated as new */
   std::string endpoint;
@@ -401,9 +402,8 @@ int BlockDirectory::set(CacheBlock* block, optional_yield y)
   return 0;
 }
 
-int BlockDirectory::get(CacheBlock* block, optional_yield y) 
-{
-  std::string key = build_index(block);
+int BlockDirectory::get(CacheBlock* block, optional_yield y, bool version) {
+  std::string key = build_index(block, version);
 
   if (exist_key(block, y)) {
     std::vector<std::string> fields;
