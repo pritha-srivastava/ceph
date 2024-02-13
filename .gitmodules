@@ -75,3 +75,4 @@
 [submodule "src/boost_redis"]
 	path = src/boost_redis
 	url = https://github.com/boostorg/redis.git
+	branch = develop
