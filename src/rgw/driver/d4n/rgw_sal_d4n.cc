@@ -778,7 +778,7 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
         block.blockID = ofs;
         block.size = bl.length();
         block.version = version;
-        block.dirty = false; //writing to the backend
+        block.dirty = false; //Reading from the backend, data is clean
         auto ret = filter->get_policy_driver()->get_cache_policy()->eviction(dpp, block.size, *y);
         if (ret == 0) {
           ret = filter->get_cache_driver()->put(dpp, oid, bl, bl.length(), attrs, *y);
@@ -973,9 +973,6 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
 
     auto version = obj->get_instance();
 
-ldpp_dout(save_dpp, 10) << "AMIN::" << __func__ << "(): " << __LINE__ << " offest is: "  << offset << dendl;
-ldpp_dout(save_dpp, 10) << "AMIN::" << __func__ << "(): " << __LINE__ << " ofs is: "  << ofs << dendl;
-ldpp_dout(save_dpp, 10) << "AMIN::" << __func__ << "(): " << __LINE__ << " bl_len is: "  << bl_len << dendl;
     std::string prefix;
     if (version.empty()) { //for versioned objects, get_oid() returns an oid with versionId added
       prefix =obj->get_bucket()->get_name() + "_" + obj->get_key().get_oid();
@@ -983,7 +980,6 @@ ldpp_dout(save_dpp, 10) << "AMIN::" << __func__ << "(): " << __LINE__ << " bl_le
       prefix = obj->get_bucket()->get_name() + "_" + version + "_" + obj->get_key().get_oid();
     }
 
-ldpp_dout(save_dpp, 10) << "AMIN::" << __func__ << "(): " << __LINE__ << " prefix is: "  << prefix << dendl;
     rgw::d4n::BlockDirectory* blockDir = driver->get_block_dir();
 
     block.hostsList.push_back(blockDir->cct->_conf->rgw_d4n_l1_datacache_address); 
@@ -996,27 +992,63 @@ ldpp_dout(save_dpp, 10) << "AMIN::" << __func__ << "(): " << __LINE__ << " prefi
 
     int ret = 0;
 
-      if (d4n_writecache == false){
+    if (d4n_writecache == false){
 	
-        std::string oid = prefix + "_" + std::to_string(ofs)+ "_" + std::to_string(bl_len);
-        block.size = bl.length();
-        block.blockID = ofs;
-        block.dirty = false; //writing to the backend
-    	dirty = false;
+      std::string oid = prefix + "_" + std::to_string(ofs)+ "_" + std::to_string(bl_len);
+      block.size = bl.length();
+      block.blockID = ofs;
+      block.dirty = false; //writing to the backend, hence the data is clean
+      block.hostsList.push_back(blockDir->cct->_conf->rgw_d4n_backend_address);
 	
-  	ldpp_dout(save_dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): calling next process" << dendl;
-	ret = next->process(std::move(data), offset);
-	
-        if (ret == 0) {
-          driver->get_policy_driver()->get_cache_policy()->update(save_dpp, oid, ofs, bl.length(), version, dirty, creationTime, std::get<rgw_user>(obj->get_bucket()->get_owner()), y);
-
-          if (!blockDir->exist_key(&block, y)) {
-            if (blockDir->set(&block, y) < 0) //should we revert previous steps if this step fails?
-  	      ldpp_dout(save_dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): BlockDirectory set method failed." << dendl;
+      ldpp_dout(save_dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): calling next process" << dendl;
+      ret = next->process(std::move(data), offset);
+      if (ret == 0){
+        if (!blockDir->exist_key(&block, y)) {
+          if (blockDir->set(&block, y) < 0) 
+            ldpp_dout(save_dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): BlockDirectory set method failed." << dendl;
+          } else {
+            existing_block.blockID = block.blockID;
+            existing_block.size = block.size;
+            if (blockDir->get(&existing_block, y) < 0) {
+              ldpp_dout(save_dpp, 10) << "Failed to fetch existing block for: " << existing_block.cacheObj.objName << " blockID: " << existing_block.blockID << " block size: " << existing_block.size << dendl;
+            } else {
+              if (existing_block.version != block.version) {
+                if (blockDir->del(&existing_block, y) < 0) //delete existing block
+                  ldpp_dout(save_dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): BlockDirectory del method failed." << dendl;
+                if (blockDir->set(&block, y) < 0) //new versioned block will have new version, hostsList etc, how about globalWeight?
+                  ldpp_dout(save_dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): BlockDirectory set method failed." << dendl;
+              } else {
+            if (blockDir->update_field(&block, "blockHosts", blockDir->cct->_conf->rgw_d4n_l1_datacache_address, y) < 0)
+              ldpp_dout(save_dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): BlockDirectory update_field method failed for hostsList." << dendl;
+            }
+          }
+        }
+      } else{
+          ldpp_dout(save_dpp, 1) << "D4NFilterObject::D4NFilterWriteOp::process" << __func__ << "(): ERROR: wrtiting data to the backend failed!" << dendl;
+	  return ret;
+      }
+    } else {
+      std::string oid = prefix + "_" + std::to_string(ofs);
+      std::string key = "D_" + oid + "_" + std::to_string(bl_len);
+      std::string oid_in_cache = oid + "_" + std::to_string(bl_len);
+      block.size = bl.length();
+      block.blockID = ofs;
+      block.dirty = true;
+      block.hostsList.push_back(blockDir->cct->_conf->rgw_d4n_l1_datacache_address);
+      dirty = true;
+      ret = driver->get_policy_driver()->get_cache_policy()->eviction(save_dpp, block.size, y);
+      if (ret == 0) {
+        //Should we replace each put_async with put, to ensure data is actually written to the cache before updating the data structures and before the lock is released?
+	if (bl.length() > 0) {          
+          ret = driver->get_cache_driver()->put(save_dpp, key, bl, bl.length(), obj->get_attrs(), y);
+          if (ret == 0) {
+ 	    driver->get_policy_driver()->get_cache_policy()->update(save_dpp, oid_in_cache, ofs, bl.length(), version, dirty, creationTime,  std::get<rgw_user>(obj->get_bucket()->get_owner()), y);
+            if (!blockDir->exist_key(&block, y)) {
+              if (blockDir->set(&block, y) < 0) //should we revert previous steps if this step fails?
+  	        ldpp_dout(save_dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): BlockDirectory set method failed." << dendl;
             } else {
               existing_block.blockID = block.blockID;
               existing_block.size = block.size;
-  	      existing_block.dirty = block.dirty;
               if (blockDir->get(&existing_block, y) < 0) {
                 ldpp_dout(save_dpp, 10) << "Failed to fetch existing block for: " << existing_block.cacheObj.objName << " blockID: " << existing_block.blockID << " block size: " << existing_block.size << dendl;
               } else {
@@ -1026,61 +1058,18 @@ ldpp_dout(save_dpp, 10) << "AMIN::" << __func__ << "(): " << __LINE__ << " prefi
                   if (blockDir->set(&block, y) < 0) //new versioned block will have new version, hostsList etc, how about globalWeight?
                     ldpp_dout(save_dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): BlockDirectory set method failed." << dendl;
                 } else {
-              if (blockDir->update_field(&block, "blockHosts", blockDir->cct->_conf->rgw_d4n_l1_datacache_address, y) < 0)
-                ldpp_dout(save_dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): BlockDirectory update_field method failed for hostsList." << dendl;
-              }
-            }
-	  }
-	} else{
-            ldpp_dout(save_dpp, 1) << "D4NFilterObject::D4NFilterWrtieOp::process" << __func__ << "(): ERROR: wrtiting data to the backend failed!" << dendl;
-	    return ret;
-	}
-      } 
-	else {
-        std::string oid = prefix + "_" + std::to_string(ofs);
-        std::string key = "D_" + oid + "_" + std::to_string(bl_len);
-        std::string oid_in_cache = oid + "_" + std::to_string(bl_len);
-        block.size = bl.length();
-        block.blockID = ofs;
-        block.dirty = true;
-    	dirty = true;
-ldpp_dout(save_dpp, 10) << "AMIN::" << __func__ << "(): " << __LINE__ << " ofs is: "  << ofs << dendl;
-ldpp_dout(save_dpp, 10) << "AMIN::" << __func__ << "(): " << __LINE__ << " bl.len is: "  << bl.length() << dendl;
-        ret = driver->get_policy_driver()->get_cache_policy()->eviction(save_dpp, block.size, y);
-        if (ret == 0) {
-          //Should we replace each put_async with put, to ensure data is actually written to the cache before updating the data structures and before the lock is released?
-	 if (bl.length() > 0) {          
-          ret = driver->get_cache_driver()->put(save_dpp, key, bl, bl.length(), obj->get_attrs(), y);
-          if (ret == 0) {
-	    driver->get_policy_driver()->get_cache_policy()->update(save_dpp, oid_in_cache, ofs, bl.length(), version, dirty, creationTime, std::get<rgw_user>(obj->get_bucket()->get_owner()), y);
-            if (!blockDir->exist_key(&block, y)) {
-              if (blockDir->set(&block, y) < 0) //should we revert previous steps if this step fails?
-  	        ldpp_dout(save_dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): BlockDirectory set method failed." << dendl;
-              } else {
-                existing_block.blockID = block.blockID;
-                existing_block.size = block.size;
-  	        existing_block.dirty = block.dirty;
-                if (blockDir->get(&existing_block, y) < 0) {
-                  ldpp_dout(save_dpp, 10) << "Failed to fetch existing block for: " << existing_block.cacheObj.objName << " blockID: " << existing_block.blockID << " block size: " << existing_block.size << dendl;
-                } else {
-                  if (existing_block.version != block.version) {
-                    if (blockDir->del(&existing_block, y) < 0) //delete existing block
-                      ldpp_dout(save_dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): BlockDirectory del method failed." << dendl;
-                    if (blockDir->set(&block, y) < 0) //new versioned block will have new version, hostsList etc, how about globalWeight?
-                      ldpp_dout(save_dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): BlockDirectory set method failed." << dendl;
-                  } else {
-                if (blockDir->update_field(&block, "blockHosts", blockDir->cct->_conf->rgw_d4n_l1_datacache_address, y) < 0)
-                  ldpp_dout(save_dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): BlockDirectory update_field method failed for hostsList." << dendl;
+                  if (blockDir->update_field(&block, "blockHosts", blockDir->cct->_conf->rgw_d4n_l1_datacache_address, y) < 0)
+                    ldpp_dout(save_dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): BlockDirectory update_field method failed for hostsList." << dendl;
                 }
               }
 	    }
           } else {
-              ldpp_dout(save_dpp, 1) << "D4NFilterObject::D4NFilterWriteOp::process" << __func__ << "(): ERROR: wrtiting data to the cache failed!" << dendl;
-	      return ret;
+            ldpp_dout(save_dpp, 1) << "D4NFilterObject::D4NFilterWriteOp::process" << __func__ << "(): ERROR: wrtiting data to the cache failed!" << dendl;
+	    return ret;
 	  }
 	}
-       }
-      } 
+      }
+    } 
     return 0;
 }
 
@@ -1102,12 +1091,12 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
 
   auto version = obj->get_instance();
 
-    std::string prefix;
-    if (version.empty()) { //for versioned objects, get_oid() returns an oid with versionId added
-      prefix = obj->get_bucket()->get_name() + "_" + obj->get_key().get_oid();
-    } else {
-      prefix = obj->get_bucket()->get_name() + "_" + version + "_" + obj->get_key().get_oid();
-    }
+  std::string prefix;
+  if (version.empty()) { //for versioned objects, get_oid() returns an oid with versionId added
+    prefix = obj->get_bucket()->get_name() + "_" + obj->get_key().get_oid();
+  } else {
+    prefix = obj->get_bucket()->get_name() + "_" + version + "_" + obj->get_key().get_oid();
+  }
 
 
   if (d4n_writecache == true){
