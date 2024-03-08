@@ -104,6 +104,10 @@ class D4NFilterObject : public FilterObject {
     std::string version;
     std::string prefix;
 
+    bool get_obj_attrs_from_cache(const DoutPrefixProvider* dpp, optional_yield y);
+    void set_obj_state_attrs(const DoutPrefixProvider* dpp, optional_yield y, RGWObjState& state, rgw::sal::Attrs& attrs);
+    int calculate_version(const DoutPrefixProvider* dpp, optional_yield y, RGWObjState& state, std::string& version);
+    int set_head_obj_dir_entry(const DoutPrefixProvider* dpp, optional_yield y);
   public:
     struct D4NFilterReadOp : FilterReadOp {
       public:
