@@ -55,7 +55,15 @@ class Redis(Task):
                         'redis-server',
                         '--daemonize',
                         'yes'
-                        ],
+                        ]
+                    )
+
+                self.ctx.cluster.only(client).run(
+                    args=[
+                        'sudo',
+                        'redis-cli',
+                        'flushall'
+                        ]
                     )
     
         except Exception as err:
