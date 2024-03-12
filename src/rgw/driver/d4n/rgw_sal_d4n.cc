@@ -518,7 +518,20 @@ int D4NFilterObject::D4NFilterReadOp::flush(const DoutPrefixProvider* dpp, rgw::
       */
       time_t creationTime = ceph::real_clock::to_time_t(source->get_mtime());
 
+      rgw::d4n::CacheBlock block;
+      block.cacheObj.objName = source->get_key().get_oid();
+      block.cacheObj.bucketName = source->get_bucket()->get_name();
+      block.blockID = ofs;
+      block.size = len;
+
       std::string oid_in_cache = prefix + "_" + std::to_string(ofs) + "_" + std::to_string(len);
+
+      if (source->driver->get_block_dir()->get(&block, y) == 0){
+        if (block.dirty == true){ 
+          dirty = true;
+        }
+      }
+
       ldpp_dout(dpp, 20) << "D4NFilterObject::" << __func__ << " calling update for offset: " << offset << " adjusted offset: " << ofs  << " length: " << len << " oid_in_cache: " << oid_in_cache << dendl;
       ldpp_dout(dpp, 20) << "D4NFilterObject::" << __func__ << " version stored in update method is: " << version << " " << source->get_object_version() << dendl;
       source->driver->get_policy_driver()->get_cache_policy()->update(dpp, oid_in_cache, ofs, len, version, dirty, creationTime, std::get<rgw_user>(source->get_bucket()->get_owner()), y);
@@ -615,10 +628,13 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
       if (it != block.hostsList.end()) { /* Local copy */
 	ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): Block found in local cache. " << oid_in_cache << dendl;
         std::string key = oid_in_cache;
+        ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): READ FROM CACHE: block is dirty = " << block.dirty << dendl;
         if (block.dirty == true) { 
           key = "D_" + oid_in_cache; //we keep track of dirty data in the cache for the metadata failure case
+          ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): READ FROM CACHE: key=" << key << " data is Dirty." << dendl;
         }
-
+        ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__  << "(): " << __LINE__ << ": READ FROM CACHE: block dirty =" << block.dirty << dendl;
+        ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): " << __LINE__ << ": READ FROM CACHE: key=" << key << dendl;
 	if (block.version == version) {
 	  if (source->driver->get_policy_driver()->get_cache_policy()->exist_key(oid_in_cache) > 0) { 
 	    // Read From Cache
@@ -645,6 +661,8 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
         if (block.dirty == true){ 
           key = "D_" + oid_in_cache; //we keep track of dirty data in the cache for the metadata failure case
         }
+        ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__  << "(): " << __LINE__ << ": READ FROM CACHE: block dirty =" << block.dirty << dendl;
+        ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): " << __LINE__ << ": READ FROM CACHE: key=" << key << dendl;
 	      // Read From Cache
 	      auto completed = source->driver->get_cache_driver()->get_async(dpp, y, aio.get(), key, read_ofs, len_to_read, cost, id);  
 
@@ -893,8 +911,8 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
 		    if (blockDir->set(&block, *y) < 0)
 		      ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set method failed." << dendl;
 		  } else {
-		  if (blockDir->update_field(&block, "blockHosts", blockDir->cct->_conf->rgw_d4n_l1_datacache_address, *y) < 0)
-		    ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory update_field method failed." << dendl;
+		    if (blockDir->update_field(&block, "blockHosts", blockDir->cct->_conf->rgw_d4n_l1_datacache_address, *y) < 0)
+		      ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory update_field method failed." << dendl;
 		  }
 		}
 	      }
@@ -1024,7 +1042,7 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
           }
         }
       } else{
-          ldpp_dout(save_dpp, 1) << "D4NFilterObject::D4NFilterWriteOp::process" << __func__ << "(): ERROR: wrtiting data to the backend failed!" << dendl;
+          ldpp_dout(save_dpp, 1) << "D4NFilterObject::D4NFilterWriteOp::process" << __func__ << "(): ERROR: writing data to the backend failed!" << dendl;
 	  return ret;
       }
     } else {
@@ -1064,7 +1082,7 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
               }
 	    }
           } else {
-            ldpp_dout(save_dpp, 1) << "D4NFilterObject::D4NFilterWriteOp::process" << __func__ << "(): ERROR: wrtiting data to the cache failed!" << dendl;
+            ldpp_dout(save_dpp, 1) << "D4NFilterObject::D4NFilterWriteOp::process" << __func__ << "(): ERROR: writting data to the cache failed!" << dendl;
 	    return ret;
 	  }
 	}
