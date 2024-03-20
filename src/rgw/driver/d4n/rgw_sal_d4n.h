@@ -103,11 +103,6 @@ class D4NFilterObject : public FilterObject {
     D4NFilterDriver* driver;
     std::string version;
     std::string prefix;
-
-    bool get_obj_attrs_from_cache(const DoutPrefixProvider* dpp, optional_yield y);
-    void set_obj_state_attrs(const DoutPrefixProvider* dpp, optional_yield y, RGWObjState& state, rgw::sal::Attrs& attrs);
-    int calculate_version(const DoutPrefixProvider* dpp, optional_yield y, RGWObjState& state, std::string& version);
-    int set_head_obj_dir_entry(const DoutPrefixProvider* dpp, optional_yield y);
   public:
     struct D4NFilterReadOp : FilterReadOp {
       public:
@@ -216,12 +211,17 @@ class D4NFilterObject : public FilterObject {
 
     void set_prefix(const std::string& prefix) { this->prefix = prefix; }
     const std::string get_prefix() { return this->prefix; }
+    bool get_obj_attrs_from_cache(const DoutPrefixProvider* dpp, optional_yield y);
+    void set_obj_state_attrs(const DoutPrefixProvider* dpp, optional_yield y, RGWObjState& state, rgw::sal::Attrs& attrs);
+    int calculate_version(const DoutPrefixProvider* dpp, optional_yield y, RGWObjState& state, std::string& version);
+    int set_head_obj_dir_entry(const DoutPrefixProvider* dpp, optional_yield y);
 };
 
 class D4NFilterWriter : public FilterWriter {
   private:
     D4NFilterDriver* driver; 
-    const DoutPrefixProvider* save_dpp;
+    D4NFilterObject* object;
+    const DoutPrefixProvider* dpp;
     bool atomic;
     optional_yield y;
     bool d4n_writecache;
@@ -231,11 +231,11 @@ class D4NFilterWriter : public FilterWriter {
     D4NFilterWriter(std::unique_ptr<Writer> _next, D4NFilterDriver* _driver, Object* _obj, 
 	const DoutPrefixProvider* _dpp, optional_yield _y) : FilterWriter(std::move(_next), _obj),
 							     driver(_driver),
-							     save_dpp(_dpp), atomic(false), y(_y) {}
+							     dpp(_dpp), atomic(false), y(_y) { object = dynamic_cast<D4NFilterObject*>(obj); }
     D4NFilterWriter(std::unique_ptr<Writer> _next, D4NFilterDriver* _driver, Object* _obj, 
 	const DoutPrefixProvider* _dpp, bool _atomic, optional_yield _y) : FilterWriter(std::move(_next), _obj),
 									   driver(_driver),
-									   save_dpp(_dpp), atomic(_atomic), y(_y) {}
+									   dpp(_dpp), atomic(_atomic), y(_y) { object = dynamic_cast<D4NFilterObject*>(obj); }
     virtual ~D4NFilterWriter() = default;
 
     virtual int prepare(optional_yield y);
@@ -250,7 +250,7 @@ class D4NFilterWriter : public FilterWriter {
                        const req_context& rctx,
                        uint32_t flags) override;
    bool is_atomic() { return atomic; };
-   const DoutPrefixProvider* dpp() { return save_dpp; } 
+   const DoutPrefixProvider* get_dpp() { return this->dpp; } 
 };
 
 } } // namespace rgw::sal
