@@ -145,6 +145,8 @@ class D4NFilterObject : public FilterObject {
 	virtual int prepare(optional_yield y, const DoutPrefixProvider* dpp) override;
 	virtual int iterate(const DoutPrefixProvider* dpp, int64_t ofs, int64_t end,
 	  RGWGetDataCB* cb, optional_yield y) override;
+  virtual int get_attr(const DoutPrefixProvider* dpp, const char* name,
+			 bufferlist& dest, optional_yield y) override;
 
       private:
 	RGWGetDataCB* client_cb;
@@ -226,6 +228,7 @@ class D4NFilterWriter : public FilterWriter {
     optional_yield y;
     bool d4n_writecache;
     time_t startTime;
+    std::string version;
 
   public:
     D4NFilterWriter(std::unique_ptr<Writer> _next, D4NFilterDriver* _driver, Object* _obj, 
