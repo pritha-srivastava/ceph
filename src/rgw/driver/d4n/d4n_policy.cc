@@ -68,13 +68,13 @@ int LFUDAPolicy::init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_
     redis_exec(conn, ec, req, resp, y);
 
     if (ec) {
-      ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ec.what() << dendl;
+      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
 
     result = std::min(std::get<1>(resp).value(), std::min(std::get<2>(resp).value(), std::get<3>(resp).value()));
   } catch (std::exception &e) {
-    ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "() ERROR: " << e.what() << dendl;
+    ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EINVAL;
   }
 
@@ -88,13 +88,13 @@ int LFUDAPolicy::init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_
       redis_exec(conn, ec, req, value, y);
 
       if (ec) {
-	ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ec.what() << dendl;
+	ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ec.what() << dendl;
 	return -ec.value();
       }
 
       result = std::min(result, std::get<0>(value).value());
     } catch (std::exception &e) {
-      ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "() ERROR: " << e.what() << dendl;
+      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << e.what() << dendl;
       return -EINVAL;
     }
   }
@@ -221,19 +221,19 @@ asio::awaitable<void> LFUDAPolicy::redis_sync(const DoutPrefixProvider* dpp, opt
   for (;;) try {
     /* Update age */
     if (int ret = age_sync(dpp, y) < 0) {
-      ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "() ERROR: ret=" << ret << dendl;
+      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: ret=" << ret << dendl;
     }
     
     /* Update minimum local weight sum */
     if (int ret = local_weight_sync(dpp, y) < 0) {
-      ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "() ERROR: ret=" << ret << dendl;
+      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: ret=" << ret << dendl;
     }
 
     int interval = dpp->get_cct()->_conf->rgw_lfuda_sync_frequency;
     rthread_timer->expires_after(std::chrono::seconds(interval));
     co_await rthread_timer->async_wait(asio::use_awaitable);
   } catch (sys::system_error& e) {
-    ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "() ERROR: " << e.what() << dendl;
+    ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << e.what() << dendl;
 
     if (e.code() == asio::error::operation_aborted) {
       break;
@@ -281,7 +281,7 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
     CacheBlock* victim = get_victim_block(dpp, y);
   
     if (victim == nullptr) {
-      ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Could not retrieve victim block." << dendl;
+      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "(): Could not retrieve victim block." << dendl;
       delete victim;
       return -ENOENT;
     }
@@ -295,7 +295,7 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
     }
     // check dirty flag of entry to be evicted, if the flag is dirty, all entries on the local node are dirty
     if (it->second->dirty) {
-      ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Top entry in min heap is dirty, no entry is available for eviction!" << dendl;
+      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "(): Top entry in min heap is dirty, no entry is available for eviction!" << dendl;
       return -ENOENT;
     }
     int avgWeight = weightSum / entries_map.size();
@@ -384,7 +384,7 @@ void LFUDAPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64
 
   if (updateLocalWeight) {
     if (cacheDriver->set_attr(dpp, oid_in_cache, "user.rgw.localWeight", std::to_string(localWeight), y) < 0) 
-      ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): CacheDriver set_attr method failed." << dendl;
+      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "(): CacheDriver set_attr method failed." << dendl;
   }
 
   weightSum += ((localWeight < 0) ? 0 : localWeight);
@@ -590,7 +590,7 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
         block.blockID = fst;
         op_ret = dir->update_field(dpp, &block, "dirty", "false", null_yield);
         if (op_ret < 0) {
-            ldpp_dout(dpp, 5) << __func__ << "updating dirty flag in Block directory failed!" << dendl;
+            ldpp_dout(dpp, 0) << __func__ << "updating dirty flag in Block directory failed!" << dendl;
             return;
         }
         fst += cur_len;
@@ -665,7 +665,7 @@ int LRUPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_y
     entries_lru_list.pop_front_and_dispose(Entry_delete_disposer());
     auto ret = cacheDriver->delete_data(dpp, p.key, y);
     if (ret < 0) {
-      ldpp_dout(dpp, 10) << __func__ << "(): Failed to delete data from the cache backend: " << ret << dendl;
+      ldpp_dout(dpp, 0) << __func__ << "(): Failed to delete data from the cache backend: " << ret << dendl;
       return ret;
     }
 
