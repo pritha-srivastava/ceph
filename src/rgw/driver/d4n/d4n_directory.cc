@@ -1,4 +1,6 @@
 #include <boost/asio/consign.hpp>
+#include <boost/lexical_cast.hpp>
+#include <boost/algorithm/string.hpp>
 #include "common/async/blocked_completion.h"
 #include "common/dout.h" 
 #include "d4n_directory.h"
@@ -151,16 +153,7 @@ int ObjectDirectory::get(CacheObj* object, optional_yield y)
       object->bucketName = std::get<0>(resp).value()[1];
       object->creationTime = std::get<0>(resp).value()[2];
       object->dirty = boost::lexical_cast<bool>(std::get<0>(resp).value()[3]);
-
-      {
-        std::stringstream ss(boost::lexical_cast<std::string>(std::get<0>(resp).value()[4]));
-
-	while (!ss.eof()) {
-          std::string host;
-	  std::getline(ss, host, '_');
-	  object->hostsList.push_back(host);
-	}
-      }
+      boost::split(object->hostsList, std::get<0>(resp).value()[4], boost::is_any_of("_"));
     } catch (std::exception &e) {
       return -EINVAL;
     }
@@ -447,32 +440,12 @@ int BlockDirectory::get(const DoutPrefixProvider* dpp, CacheBlock* block, option
       block->version = std::get<0>(resp).value()[1];
       block->size = boost::lexical_cast<uint64_t>(std::get<0>(resp).value()[2]);
       block->globalWeight = boost::lexical_cast<int>(std::get<0>(resp).value()[3]);
-      {
-        std::stringstream ss(boost::lexical_cast<std::string>(std::get<0>(resp).value()[4]));
-	block->hostsList.clear();
-
-	while (!ss.eof()) { // Replace with boost::split? -Sam
-          std::string host;
-	  std::getline(ss, host, '_');
-	  block->hostsList.push_back(host);
-	}
-      }
-
+      boost::split(block->hostsList, std::get<0>(resp).value()[4], boost::is_any_of("_"));
       block->cacheObj.objName = std::get<0>(resp).value()[5];
       block->cacheObj.bucketName = std::get<0>(resp).value()[6];
       block->cacheObj.creationTime = std::get<0>(resp).value()[7];
       block->cacheObj.dirty = boost::lexical_cast<bool>(std::get<0>(resp).value()[8]);
-      block->dirty = boost::lexical_cast<bool>(std::get<0>(resp).value()[8]);
-      {
-        std::stringstream ss(boost::lexical_cast<std::string>(std::get<0>(resp).value()[9]));
-	block->cacheObj.hostsList.clear();
-
-	while (!ss.eof()) {
-          std::string host;
-	  std::getline(ss, host, '_');
-	  block->cacheObj.hostsList.push_back(host);
-	}
-      }
+      boost::split(block->cacheObj.hostsList, std::get<0>(resp).value()[9], boost::is_any_of("_"));
     } catch (std::exception &e) {
       return -EINVAL;
     }

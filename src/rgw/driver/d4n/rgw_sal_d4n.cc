@@ -797,6 +797,7 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
       } else if (block.hostsList.size()) { /* Remote copy */
 	ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): Block found in remote cache. " << oid_in_cache << dendl;
 	// TODO: Retrieve remotely
+	// Policy decision: should we cache remote blocks locally?
       }
     // if (source->driver->get_block_dir()->exist_key(&block, y) > 0 && int ret = source->driver->get_block_dir()->get(&block, y) == 0)  
     } else { /* Fetch from backend */
