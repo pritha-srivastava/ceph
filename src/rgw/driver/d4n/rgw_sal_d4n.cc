@@ -633,6 +633,7 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
             if (block.hostsList.size() && r == 0) { /* Remote copy */
 	      ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): Block with oid=" << oid_in_cache << " found in remote cache." << dendl;
 	      // TODO: Retrieve remotely
+	      // Policy decision: should we cache remote blocks locally?
 	    } else {
 	      ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): Info: draining data for oid: " << oid_in_cache << dendl;
 
