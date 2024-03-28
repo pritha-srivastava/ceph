@@ -200,7 +200,7 @@ class D4NFilterObject : public FilterObject {
     bool get_obj_attrs_from_cache(const DoutPrefixProvider* dpp, optional_yield y);
     void set_obj_state_attrs(const DoutPrefixProvider* dpp, optional_yield y, rgw::sal::Attrs& attrs);
     int calculate_version(const DoutPrefixProvider* dpp, optional_yield y, std::string& version);
-    int set_head_obj_dir_entry(const DoutPrefixProvider* dpp, optional_yield y);
+    int set_head_obj_dir_entry(const DoutPrefixProvider* dpp, optional_yield y, bool dirty = false);
 };
 
 class D4NFilterWriter : public FilterWriter {
