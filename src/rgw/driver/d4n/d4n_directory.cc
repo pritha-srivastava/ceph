@@ -1,5 +1,4 @@
 #include <boost/asio/consign.hpp>
-#include <boost/lexical_cast.hpp>
 #include <boost/algorithm/string.hpp>
 #include "common/async/blocked_completion.h"
 #include "common/dout.h" 
@@ -46,6 +45,16 @@ void redis_exec(std::shared_ptr<connection> conn,
     async_exec(std::move(conn), req, resp, yield[ec]);
   } else {
     async_exec(std::move(conn), req, resp, ceph::async::use_blocked[ec]);
+  }
+}
+
+int check_bool(std::string str) {
+  if (str == "true" || str == "1") {
+    return 1;
+  } else if (str == "false" || str == "0") {
+    return 0;
+  } else {
+    return -EINVAL;
   }
 }
 
@@ -159,10 +168,16 @@ int ObjectDirectory::get(const DoutPrefixProvider* dpp, CacheObj* object, option
       return -ENOENT;
     }
 
+    int ret;
     object->objName = std::get<0>(resp).value()[0];
     object->bucketName = std::get<0>(resp).value()[1];
     object->creationTime = std::get<0>(resp).value()[2];
-    object->dirty = std::stoi(std::get<0>(resp).value()[3]);
+    if ((ret = check_bool(std::get<0>(resp).value()[3])) != -EINVAL) {
+      object->dirty = (ret != 0);
+    } else {
+      ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: Invalid bool value" << dendl;
+      return -EINVAL;
+    }
     boost::split(object->hostsList, std::get<0>(resp).value()[4], boost::is_any_of("_"));
   } catch (std::exception &e) {
     ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
@@ -432,6 +447,7 @@ int BlockDirectory::get(const DoutPrefixProvider* dpp, CacheBlock* block, option
       return -ENOENT;
     } 
 
+    int ret;
     block->blockID = std::stoull(std::get<0>(resp).value().value()[0]);
     block->version = std::get<0>(resp).value().value()[1];
     block->size = std::stoull(std::get<0>(resp).value().value()[2]);
@@ -440,7 +456,12 @@ int BlockDirectory::get(const DoutPrefixProvider* dpp, CacheBlock* block, option
     block->cacheObj.objName = std::get<0>(resp).value().value()[5];
     block->cacheObj.bucketName = std::get<0>(resp).value().value()[6];
     block->cacheObj.creationTime = std::get<0>(resp).value().value()[7];
-    block->cacheObj.dirty = std::stoi(std::get<0>(resp).value().value()[8]);
+    if ((ret = check_bool(std::get<0>(resp).value().value()[8])) != -EINVAL) {
+      block->cacheObj.dirty = (ret != 0);
+    } else {
+      ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: Invalid bool value" << dendl;
+      return -EINVAL;
+    }
     boost::split(block->cacheObj.hostsList, std::get<0>(resp).value().value()[9], boost::is_any_of("_"));
   } catch (std::exception &e) {
     ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
