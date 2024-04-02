@@ -48,7 +48,6 @@ void redis_exec(std::shared_ptr<connection> conn,
 }
 
 int LFUDAPolicy::init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context) {
-  dir->init(cct);
   int result = 0;
   response<int, int, int, int> resp;
 
@@ -58,7 +57,7 @@ int LFUDAPolicy::init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_
     req.push("HEXISTS", "lfuda", "age"); 
     req.push("HSET", "lfuda", "minLocalWeights_sum", std::to_string(weightSum)); /* New cache node will always have the minimum average weight */
     req.push("HSET", "lfuda", "minLocalWeights_size", std::to_string(entries_map.size()));
-    req.push("HSET", "lfuda", "minLocalWeights_address", dir->cct->_conf->rgw_local_cache_address);
+    req.push("HSET", "lfuda", "minLocalWeights_address", dpp->get_cct()->_conf->rgw_local_cache_address);
   
     redis_exec(conn, ec, req, resp, y);
 
@@ -111,6 +110,7 @@ int LFUDAPolicy::age_sync(const DoutPrefixProvider* dpp, optional_yield y) {
     redis_exec(conn, ec, req, resp, y);
 
     if (ec) {
+      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
   } catch (std::exception &e) {
@@ -126,6 +126,7 @@ int LFUDAPolicy::age_sync(const DoutPrefixProvider* dpp, optional_yield y) {
       redis_exec(conn, ec, req, resp, y);
 
       if (ec) {
+	ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ec.what() << dendl;
 	return -ec.value();
       }
 
@@ -154,6 +155,7 @@ int LFUDAPolicy::local_weight_sync(const DoutPrefixProvider* dpp, optional_yield
       redis_exec(conn, ec, req, resp, y);
 
       if (ec) {
+	ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ec.what() << dendl;
 	return -ec.value();
       }
     } catch (std::exception &e) {
@@ -169,10 +171,11 @@ int LFUDAPolicy::local_weight_sync(const DoutPrefixProvider* dpp, optional_yield
 	response<int, int, int> value;
 	req.push("HSET", "lfuda", "minLocalWeights_sum", std::to_string(weightSum));
 	req.push("HSET", "lfuda", "minLocalWeights_size", std::to_string(entries_map.size()));
-	req.push("HSET", "lfuda", "minLocalWeights_address", dir->cct->_conf->rgw_local_cache_address);
+	req.push("HSET", "lfuda", "minLocalWeights_address", dpp->get_cct()->_conf->rgw_local_cache_address);
 	redis_exec(conn, ec, req, resp, y);
 
 	if (ec) {
+	  ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ec.what() << dendl;
 	  return -ec.value();
 	}
 
@@ -196,6 +199,7 @@ int LFUDAPolicy::local_weight_sync(const DoutPrefixProvider* dpp, optional_yield
     redis_exec(conn, ec, req, resp, y);
 
     if (ec) {
+      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
 
@@ -253,7 +257,7 @@ CacheBlock* LFUDAPolicy::get_victim_block(const DoutPrefixProvider* dpp, optiona
   victim->blockID = entries_heap.top()->offset;
   victim->size = entries_heap.top()->len;
 
-  if (dir->get(victim, y) < 0) {
+  if (dir->get(dpp, victim, y) < 0) {
     return nullptr;
   }
 
@@ -291,7 +295,7 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
 
     int avgWeight = weightSum / entries_map.size();
 
-    if (victim->hostsList.size() == 1 && victim->hostsList[0] == dir->cct->_conf->rgw_local_cache_address) { /* Last copy */
+    if (victim->hostsList.size() == 1 && victim->hostsList[0] == dpp->get_cct()->_conf->rgw_local_cache_address) { /* Last copy */
       if (victim->globalWeight) {
 	it->second->localWeight += victim->globalWeight;
         (*it->second->handle)->localWeight = it->second->localWeight;
@@ -303,7 +307,7 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
         }
 
 	victim->globalWeight = 0;
-	if (int ret = dir->update_field(victim, "globalWeight", std::to_string(victim->globalWeight), y) < 0) {
+	if (int ret = dir->update_field(dpp, victim, "globalWeight", std::to_string(victim->globalWeight), y) < 0) {
 	  delete victim;
 	  return ret;
         }
@@ -316,12 +320,12 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
     }
 
     victim->globalWeight += it->second->localWeight;
-    if (int ret = dir->update_field(victim, "globalWeight", std::to_string(victim->globalWeight), y) < 0) {
+    if (int ret = dir->update_field(dpp, victim, "globalWeight", std::to_string(victim->globalWeight), y) < 0) {
       delete victim;
       return ret;
     }
 
-    if (int ret = dir->remove_host(victim, dir->cct->_conf->rgw_local_cache_address, y) < 0) {
+    if (int ret = dir->remove_host(dpp, victim, dpp->get_cct()->_conf->rgw_local_cache_address, y) < 0) {
       delete victim;
       return ret;
     }
