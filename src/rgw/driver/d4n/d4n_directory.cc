@@ -1,5 +1,4 @@
 #include <boost/asio/consign.hpp>
-#include <boost/lexical_cast.hpp>
 #include <boost/algorithm/string.hpp>
 #include "common/async/blocked_completion.h"
 #include "common/dout.h" 
@@ -46,6 +45,14 @@ void redis_exec(std::shared_ptr<connection> conn,
     async_exec(std::move(conn), req, resp, yield[ec]);
   } else {
     async_exec(std::move(conn), req, resp, ceph::async::use_blocked[ec]);
+  }
+}
+
+bool to_bool(std::string str) {
+  if (str == "true" || str == "1") {
+    return 1;
+  } else {
+    return 0;
   }
 }
 
@@ -161,7 +168,7 @@ int ObjectDirectory::get(const DoutPrefixProvider* dpp, CacheObj* object, option
       object->objName = std::get<0>(resp).value()[0];
       object->bucketName = std::get<0>(resp).value()[1];
       object->creationTime = std::get<0>(resp).value()[2];
-      object->dirty = boost::lexical_cast<bool>(std::get<0>(resp).value()[3]);
+      object->dirty = to_bool(std::get<0>(resp).value()[3]);
       boost::split(object->hostsList, std::get<0>(resp).value()[4], boost::is_any_of("_"));
     } catch (std::exception &e) {
       ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
@@ -458,15 +465,15 @@ int BlockDirectory::get(const DoutPrefixProvider* dpp, CacheBlock* block, option
 	return -ec.value();
       }
 
-      block->blockID = boost::lexical_cast<uint64_t>(std::get<0>(resp).value()[0]);
+      block->blockID = std::stoull(std::get<0>(resp).value()[0]);
       block->version = std::get<0>(resp).value()[1];
-      block->size = boost::lexical_cast<uint64_t>(std::get<0>(resp).value()[2]);
-      block->globalWeight = boost::lexical_cast<int>(std::get<0>(resp).value()[3]);
+      block->size = std::stoull(std::get<0>(resp).value()[2]);
+      block->globalWeight = std::stoull(std::get<0>(resp).value()[3]);
       boost::split(block->hostsList, std::get<0>(resp).value()[4], boost::is_any_of("_"));
       block->cacheObj.objName = std::get<0>(resp).value()[5];
       block->cacheObj.bucketName = std::get<0>(resp).value()[6];
       block->cacheObj.creationTime = std::get<0>(resp).value()[7];
-      block->cacheObj.dirty = boost::lexical_cast<bool>(std::get<0>(resp).value()[8]);
+      block->cacheObj.dirty = to_bool(std::get<0>(resp).value()[8]);
       boost::split(block->cacheObj.hostsList, std::get<0>(resp).value()[9], boost::is_any_of("_"));
     } catch (std::exception &e) {
       ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
