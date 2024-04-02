@@ -106,6 +106,7 @@ int RedisDriver::put(const DoutPrefixProvider* dpp, const std::string& key, cons
     redis_exec(conn, ec, req, resp, y);
 
     if (ec) {
+      ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
   } catch (std::exception &e) {
@@ -131,6 +132,7 @@ int RedisDriver::get(const DoutPrefixProvider* dpp, const std::string& key, off_
     redis_exec(conn, ec, req, resp, y);
 
     if (ec) {
+      ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
 
@@ -165,6 +167,7 @@ int RedisDriver::del(const DoutPrefixProvider* dpp, const std::string& key, opti
     redis_exec(conn, ec, req, resp, y);
 
     if (ec) {
+      ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
   } catch (std::exception &e) {
@@ -184,6 +187,7 @@ int RedisDriver::del(const DoutPrefixProvider* dpp, const std::string& key, opti
       redis_exec(conn, ec, req, data, y);
 
       if (ec) {
+	ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << ec.what() << dendl;
 	return -ec.value();
       }
     } catch (std::exception &e) {
@@ -201,6 +205,7 @@ int RedisDriver::del(const DoutPrefixProvider* dpp, const std::string& key, opti
       if (!std::get<0>(ret).value()) {
 	return -ENOENT;
       } else if (ec) {
+	ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << ec.what() << dendl;
 	return -ec.value();
       }
     } catch (std::exception &e) {
@@ -228,6 +233,7 @@ int RedisDriver::append_data(const DoutPrefixProvider* dpp, const::std::string& 
     redis_exec(conn, ec, req, exists, y);
 
     if (ec) {
+      ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
   } catch (std::exception &e) {
@@ -249,6 +255,7 @@ int RedisDriver::append_data(const DoutPrefixProvider* dpp, const::std::string& 
     redis_exec(conn, ec, req, resp, y);
 
     if (ec) {
+      ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
 
@@ -270,6 +277,7 @@ int RedisDriver::append_data(const DoutPrefixProvider* dpp, const::std::string& 
     redis_exec(conn, ec, req, resp, y);
 
     if (ec) {
+      ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
   } catch (std::exception &e) {
@@ -294,6 +302,7 @@ int RedisDriver::delete_data(const DoutPrefixProvider* dpp, const::std::string& 
     redis_exec(conn, ec, req, resp, y);
 
     if (ec) {
+      ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
   } catch (std::exception &e) {
@@ -313,6 +322,7 @@ int RedisDriver::delete_data(const DoutPrefixProvider* dpp, const::std::string& 
       redis_exec(conn, ec, req, data, y);
 
       if (ec) {
+	ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << ec.what() << dendl;
 	return -ec.value();
       }
     } catch (std::exception &e) {
@@ -330,6 +340,7 @@ int RedisDriver::delete_data(const DoutPrefixProvider* dpp, const::std::string& 
       if (!std::get<0>(ret).value()) {
 	return -ENOENT;
       } else if (ec) {
+	ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << ec.what() << dendl;
 	return -ec.value();
       }
     } catch (std::exception &e) {
@@ -379,6 +390,7 @@ int RedisDriver::get_attrs(const DoutPrefixProvider* dpp, const std::string& key
     redis_exec(conn, ec, req, resp, y);
 
     if (ec) {
+      ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
 
@@ -418,6 +430,7 @@ int RedisDriver::set_attrs(const DoutPrefixProvider* dpp, const std::string& key
     redis_exec(conn, ec, req, resp, y);
 
     if (ec) {
+      ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
   } catch (std::exception &e) {
@@ -443,6 +456,7 @@ int RedisDriver::update_attrs(const DoutPrefixProvider* dpp, const std::string& 
     redis_exec(conn, ec, req, resp, y);
 
     if (ec) {
+      ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
   } catch (std::exception &e) {
@@ -470,6 +484,7 @@ int RedisDriver::delete_attrs(const DoutPrefixProvider* dpp, const std::string& 
     if (!std::get<0>(resp).value()) {
       return -ENOENT;
     } else if (ec) {
+      ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
 
@@ -496,6 +511,7 @@ int RedisDriver::get_attr(const DoutPrefixProvider* dpp, const std::string& key,
     redis_exec(conn, ec, req, resp, y);
 
     if (ec) {
+      ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
   } catch (std::exception &e) {
@@ -517,6 +533,7 @@ int RedisDriver::get_attr(const DoutPrefixProvider* dpp, const std::string& key,
     redis_exec(conn, ec, req, value, y);
 
     if (ec) {
+      ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
   } catch (std::exception &e) {
@@ -538,6 +555,7 @@ int RedisDriver::get_attr(const DoutPrefixProvider* dpp, const std::string& key,
     redis_exec(conn, ec, req, value, y);
 
     if (ec) {
+      ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
   } catch (std::exception &e) {
@@ -563,6 +581,7 @@ int RedisDriver::set_attr(const DoutPrefixProvider* dpp, const std::string& key,
     redis_exec(conn, ec, req, resp, y);
 
     if (ec) {
+      ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
   } catch (std::exception &e) {

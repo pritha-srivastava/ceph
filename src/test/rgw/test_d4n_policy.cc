@@ -131,7 +131,7 @@ class LFUDAPolicyFixture : public ::testing::Test {
 	    }
 	  }
 	} else if (!exists) { /* No remote copy */
-	  block->hostsList.push_back(dir->cct->_conf->rgw_d4n_l1_datacache_address);
+	  block->hostsList.push_back(env->dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address);
 	  if (dir->set(env->dpp, block, y) < 0)
 	    return -1;
 

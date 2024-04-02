@@ -33,8 +33,6 @@ struct CacheBlock {
 
 class Directory {
   public:
-    CephContext* cct;
-
     Directory() {}
 };
 
@@ -42,16 +40,13 @@ class ObjectDirectory: public Directory {
   public:
     ObjectDirectory(std::shared_ptr<connection>& conn) : conn(conn) {}
 
-    void init(CephContext* cct) {
-      this->cct = cct;
-    }
-    int exist_key(CacheObj* object, optional_yield y);
+    int exist_key(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y);
 
-    int set(CacheObj* object, optional_yield y);
-    int get(CacheObj* object, optional_yield y);
-    int copy(CacheObj* object, std::string copyName, std::string copyBucketName, optional_yield y);
-    int del(CacheObj* object, optional_yield y);
-    int update_field(CacheObj* object, std::string field, std::string value, optional_yield y);
+    int set(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y);
+    int get(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y);
+    int copy(const DoutPrefixProvider* dpp, CacheObj* object, std::string copyName, std::string copyBucketName, optional_yield y);
+    int del(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y);
+    int update_field(const DoutPrefixProvider* dpp, CacheObj* object, std::string field, std::string value, optional_yield y);
 
   private:
     std::shared_ptr<connection> conn;
@@ -63,9 +58,6 @@ class BlockDirectory: public Directory {
   public:
     BlockDirectory(std::shared_ptr<connection>& conn) : conn(conn) {}
     
-    void init(CephContext* cct) {
-      this->cct = cct;
-    }
     int exist_key(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y);
 
     int set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y);

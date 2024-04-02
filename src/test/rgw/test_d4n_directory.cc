@@ -63,8 +63,6 @@ class ObjectDirectoryFixture: public ::testing::Test {
       ASSERT_NE(dir, nullptr);
       ASSERT_NE(conn, nullptr);
 
-      dir->init(env->cct);
-
       /* Run fixture's connection */
       config cfg;
       cfg.addr.host = env->redisHost.substr(0, env->redisHost.find(":"));
@@ -111,8 +109,6 @@ class BlockDirectoryFixture: public ::testing::Test {
       ASSERT_NE(dir, nullptr);
       ASSERT_NE(conn, nullptr);
 
-      dir->init(env->cct);
-
       /* Run fixture's connection */
       config cfg;
       cfg.addr.host = env->redisHost.substr(0, env->redisHost.find(":"));
@@ -145,7 +141,7 @@ void rethrow(std::exception_ptr eptr) {
 TEST_F(ObjectDirectoryFixture, SetYield)
 {
   boost::asio::spawn(io, [this] (boost::asio::yield_context yield) {
-    ASSERT_EQ(0, dir->set(obj, yield));
+    ASSERT_EQ(0, dir->set(env->dpp, obj, yield));
 
     boost::system::error_code ec;
     request req;
@@ -168,7 +164,7 @@ TEST_F(ObjectDirectoryFixture, SetYield)
 TEST_F(ObjectDirectoryFixture, GetYield)
 {
   boost::asio::spawn(io, [this] (boost::asio::yield_context yield) {
-    ASSERT_EQ(0, dir->set(obj, yield));
+    ASSERT_EQ(0, dir->set(env->dpp, obj, yield));
 
     {
       boost::system::error_code ec;
@@ -182,7 +178,7 @@ TEST_F(ObjectDirectoryFixture, GetYield)
       EXPECT_EQ(std::get<0>(resp).value(), 0);
     }
 
-    ASSERT_EQ(0, dir->get(obj, yield));
+    ASSERT_EQ(0, dir->get(env->dpp, obj, yield));
     EXPECT_EQ(obj->objName, "newoid");
 
     {
@@ -204,8 +200,8 @@ TEST_F(ObjectDirectoryFixture, GetYield)
 TEST_F(ObjectDirectoryFixture, CopyYield)
 {
   boost::asio::spawn(io, [this] (boost::asio::yield_context yield) {
-    ASSERT_EQ(0, dir->set(obj, yield));
-    ASSERT_EQ(0, dir->copy(obj, "copyTestName", "copyBucketName", yield));
+    ASSERT_EQ(0, dir->set(env->dpp, obj, yield));
+    ASSERT_EQ(0, dir->copy(env->dpp, obj, "copyTestName", "copyBucketName", yield));
 
     boost::system::error_code ec;
     request req;
@@ -236,7 +232,7 @@ TEST_F(ObjectDirectoryFixture, CopyYield)
 TEST_F(ObjectDirectoryFixture, DelYield)
 {
   boost::asio::spawn(io, [this] (boost::asio::yield_context yield) {
-    ASSERT_EQ(0, dir->set(obj, yield));
+    ASSERT_EQ(0, dir->set(env->dpp, obj, yield));
 
     {
       boost::system::error_code ec;
@@ -250,7 +246,7 @@ TEST_F(ObjectDirectoryFixture, DelYield)
       EXPECT_EQ(std::get<0>(resp).value(), 1);
     }
 
-    ASSERT_EQ(0, dir->del(obj, yield));
+    ASSERT_EQ(0, dir->del(env->dpp, obj, yield));
 
     {
       boost::system::error_code ec;
@@ -274,9 +270,9 @@ TEST_F(ObjectDirectoryFixture, DelYield)
 TEST_F(ObjectDirectoryFixture, UpdateFieldYield)
 {
   boost::asio::spawn(io, [this] (boost::asio::yield_context yield) {
-    ASSERT_EQ(0, dir->set(obj, yield));
-    ASSERT_EQ(0, dir->update_field(obj, "objName", "newTestName", yield));
-    ASSERT_EQ(0, dir->update_field(obj, "objHosts", "127.0.0.1:5000", yield));
+    ASSERT_EQ(0, dir->set(env->dpp, obj, yield));
+    ASSERT_EQ(0, dir->update_field(env->dpp, obj, "objName", "newTestName", yield));
+    ASSERT_EQ(0, dir->update_field(env->dpp, obj, "objHosts", "127.0.0.1:5000", yield));
 
     boost::system::error_code ec;
     request req;
