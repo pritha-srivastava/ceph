@@ -50,7 +50,6 @@ void redis_exec(std::shared_ptr<connection> conn,
 
 int LFUDAPolicy::init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver) {
   response<int, int, int, int> resp;
-  int result = 0;
 
   driver = _driver;
   tc = std::thread(&CachePolicy::cleaning, this, dpp);
@@ -58,11 +57,12 @@ int LFUDAPolicy::init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_
 
   try {
     boost::system::error_code ec;
+    response<ignore_t, ignore_t> resp;
     request req;
-    req.push("HEXISTS", "lfuda", "age"); 
-    req.push("HSET", "lfuda", "minLocalWeights_sum", std::to_string(weightSum)); /* New cache node will always have the minimum average weight */
-    req.push("HSET", "lfuda", "minLocalWeights_size", std::to_string(entries_map.size()));
-    req.push("HSET", "lfuda", "minLocalWeights_address", dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address);
+    req.push("HSET", "lfuda", "minLocalWeights_sum", std::to_string(weightSum), /* New cache node will always have the minimum average weight */
+              "minLocalWeights_size", std::to_string(entries_map.size()), 
+              "minLocalWeights_address", dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address);
+    req.push("HSETNX", "lfuda", "age", age); /* Only set maximum age if it doesn't exist */
   
     redis_exec(conn, ec, req, resp, y);
 
@@ -70,42 +70,19 @@ int LFUDAPolicy::init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_
       ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
-
-    result = std::min(std::get<1>(resp).value(), std::min(std::get<2>(resp).value(), std::get<3>(resp).value()));
   } catch (std::exception &e) {
     ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EINVAL;
   }
 
-  if (!std::get<0>(resp).value()) { /* Only set maximum age if it doesn't exist */
-    try {
-      boost::system::error_code ec;
-      response<int> value;
-      request req;
-      req.push("HSET", "lfuda", "age", age);
-    
-      redis_exec(conn, ec, req, value, y);
-
-      if (ec) {
-	ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ec.what() << dendl;
-	return -ec.value();
-      }
-
-      result = std::min(result, std::get<0>(value).value());
-    } catch (std::exception &e) {
-      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << e.what() << dendl;
-      return -EINVAL;
-    }
-  }
-
   asio::co_spawn(io_context.get_executor(),
 		   redis_sync(dpp, y), asio::detached);
 
-  return result;
+  return 0;
 }
 
 int LFUDAPolicy::age_sync(const DoutPrefixProvider* dpp, optional_yield y) {
-  response<std::string> resp;
+  response< std::optional<std::string> > resp;
 
   try { 
     boost::system::error_code ec;
@@ -122,40 +99,37 @@ int LFUDAPolicy::age_sync(const DoutPrefixProvider* dpp, optional_yield y) {
     return -EINVAL;
   }
 
-  if (age > std::stoi(std::get<0>(resp).value()) || std::get<0>(resp).value().empty()) { /* Set new maximum age */
+  if (std::get<0>(resp).value().value().empty() || age > std::stoi(std::get<0>(resp).value().value())) { /* Set new maximum age */
     try { 
       boost::system::error_code ec;
+      response<ignore_t> ret;
       request req;
-      response<int> value;
       req.push("HSET", "lfuda", "age", age);
-      redis_exec(conn, ec, req, resp, y);
+
+      redis_exec(conn, ec, req, ret, y);
 
       if (ec) {
 	ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ec.what() << dendl;
 	return -ec.value();
       }
-
-      return std::get<0>(value).value();
     } catch (std::exception &e) {
       return -EINVAL;
     }
   } else {
-    age = std::stoi(std::get<0>(resp).value());
-    return 0;
+    age = std::stoi(std::get<0>(resp).value().value());
   }
+
+  return 0;
 }
 
 int LFUDAPolicy::local_weight_sync(const DoutPrefixProvider* dpp, optional_yield y) {
-  int result; 
-
   if (fabs(weightSum - postedSum) > (postedSum * 0.1)) {
-    response<std::string, std::string> resp;
+    response<std::vector<std::string>> resp;
 
     try { 
       boost::system::error_code ec;
       request req;
-      req.push("HGET", "lfuda", "minLocalWeights_sum");
-      req.push("HGET", "lfuda", "minLocalWeights_size");
+      req.push("HMGET", "lfuda", "minLocalWeights_sum", "minLocalWeights_size");
 	
       redis_exec(conn, ec, req, resp, y);
 
@@ -167,40 +141,39 @@ int LFUDAPolicy::local_weight_sync(const DoutPrefixProvider* dpp, optional_yield
       return -EINVAL;
     }
   
-    float minAvgWeight = std::stof(std::get<0>(resp).value()) / std::stof(std::get<1>(resp).value());
+    float minAvgWeight = std::stof(std::get<0>(resp).value()[0]) / std::stof(std::get<0>(resp).value()[1]);
 
     if ((static_cast<float>(weightSum) / static_cast<float>(entries_map.size())) < minAvgWeight) { /* Set new minimum weight */
       try { 
 	boost::system::error_code ec;
+	response<ignore_t> resp;
 	request req;
-	response<int, int, int> value;
-	req.push("HSET", "lfuda", "minLocalWeights_sum", std::to_string(weightSum));
-	req.push("HSET", "lfuda", "minLocalWeights_size", std::to_string(entries_map.size()));
-	req.push("HSET", "lfuda", "minLocalWeights_address", dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address);
+	req.push("HSET", "lfuda", "minLocalWeights_sum", std::to_string(weightSum), 
+                  "minLocalWeights_size", std::to_string(entries_map.size()), 
+                  "minLocalWeights_address", dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address);
+
 	redis_exec(conn, ec, req, resp, y);
 
 	if (ec) {
 	  ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ec.what() << dendl;
 	  return -ec.value();
 	}
-
-	result = std::min(std::get<0>(value).value(), std::get<1>(value).value());
-	result = std::min(result, std::get<2>(value).value());
       } catch (std::exception &e) {
 	return -EINVAL;
       }
     } else {
-      weightSum = std::stoi(std::get<0>(resp).value());
-      postedSum = std::stoi(std::get<0>(resp).value());
+      weightSum = std::stoi(std::get<0>(resp).value()[0]);
+      postedSum = std::stoi(std::get<0>(resp).value()[0]);
     }
   }
 
   try { /* Post update for local cache */
     boost::system::error_code ec;
+    response<ignore_t> resp;
     request req;
-    response<int, int> resp;
-    req.push("HSET", dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address, "avgLocalWeight_sum", std::to_string(weightSum));
-    req.push("HSET", dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address, "avgLocalWeight_size", std::to_string(entries_map.size()));
+    req.push("HSET", dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address, "avgLocalWeight_sum", std::to_string(weightSum), 
+              "avgLocalWeight_size", std::to_string(entries_map.size()));
+
     redis_exec(conn, ec, req, resp, y);
 
     if (ec) {
@@ -208,12 +181,10 @@ int LFUDAPolicy::local_weight_sync(const DoutPrefixProvider* dpp, optional_yield
       return -ec.value();
     }
 
-    result = std::min(std::get<0>(resp).value(), std::get<1>(resp).value());
+    return 0;
   } catch (std::exception &e) {
     return -EINVAL;
   }
-  
-  return result;
 }
 
 asio::awaitable<void> LFUDAPolicy::redis_sync(const DoutPrefixProvider* dpp, optional_yield y) {
@@ -316,10 +287,6 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
         }
 
 	victim->globalWeight = 0;
-	if (int ret = dir->update_field(dpp, victim, "globalWeight", std::to_string(victim->globalWeight), y) < 0) {
-	  delete victim;
-	  return ret;
-        }
       }
 
       if (it->second->localWeight > avgWeight) {

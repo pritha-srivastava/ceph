@@ -35,11 +35,11 @@ auto async_exec(std::shared_ptr<connection> conn,
       initiate_exec{std::move(conn)}, token, req, resp);
 }
 
-template <typename T>
+template <typename... Types>
 void redis_exec(std::shared_ptr<connection> conn,
                 boost::system::error_code& ec,
                 const boost::redis::request& req,
-                boost::redis::response<T>& resp, optional_yield y)
+                boost::redis::response<Types...>& resp, optional_yield y)
 {
   if (y) {
     auto yield = y.get_yield_context();
@@ -68,7 +68,7 @@ int ObjectDirectory::exist_key(const DoutPrefixProvider* dpp, CacheObj* object, 
 
     if (ec) {
       ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
-      return false;
+      return -ec.value();
     }
   } catch (std::exception &e) {
     ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
@@ -80,9 +80,10 @@ int ObjectDirectory::exist_key(const DoutPrefixProvider* dpp, CacheObj* object, 
 
 int ObjectDirectory::set(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) 
 {
+  /* For existing keys, call get method beforehand. 
+     Sets completely overwrite existing values. */
   std::string key = build_index(object);
-    
-  /* Every set will be treated as new */
+
   std::string endpoint;
   std::list<std::string> redisValues;
     
@@ -111,9 +112,9 @@ int ObjectDirectory::set(const DoutPrefixProvider* dpp, CacheObj* object, option
 
   try {
     boost::system::error_code ec;
+    response<ignore_t> resp;
     request req;
-    req.push_range("HMSET", key, redisValues);
-    response<std::string> resp;
+    req.push_range("HSET", key, redisValues);
 
     redis_exec(conn, ec, req, resp, y);
 
@@ -132,43 +133,40 @@ int ObjectDirectory::set(const DoutPrefixProvider* dpp, CacheObj* object, option
 int ObjectDirectory::get(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) 
 {
   std::string key = build_index(object);
+  std::vector<std::string> fields;
 
-  if (exist_key(dpp, object, y)) {
-    std::vector<std::string> fields;
+  fields.push_back("objName");
+  fields.push_back("bucketName");
+  fields.push_back("creationTime");
+  fields.push_back("dirty");
+  fields.push_back("objHosts");
 
-    fields.push_back("objName");
-    fields.push_back("bucketName");
-    fields.push_back("creationTime");
-    fields.push_back("dirty");
-    fields.push_back("objHosts");
+  try {
+    boost::system::error_code ec;
+    response< std::vector<std::string> > resp;
+    request req;
+    req.push_range("HMGET", key, fields);
 
-    try {
-      boost::system::error_code ec;
-      request req;
-      req.push_range("HMGET", key, fields);
-      response< std::vector<std::string> > resp;
+    redis_exec(conn, ec, req, resp, y);
 
-      redis_exec(conn, ec, req, resp, y);
-
-      if (std::get<0>(resp).value().empty()) {
-	ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "(): No values returned." << dendl;
-	return -ENOENT;
-      } else if (ec) {
-	ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
-	return -ec.value();
-      }
-
-      object->objName = std::get<0>(resp).value()[0];
-      object->bucketName = std::get<0>(resp).value()[1];
-      object->creationTime = std::get<0>(resp).value()[2];
-      object->dirty = boost::lexical_cast<bool>(std::get<0>(resp).value()[3]);
-      boost::split(object->hostsList, std::get<0>(resp).value()[4], boost::is_any_of("_"));
-    } catch (std::exception &e) {
-      ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
-      return -EINVAL;
+    if (ec) {
+      ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
+      return -ec.value();
     }
-  } else {
-    return -ENOENT;
+
+    if (std::get<0>(resp).value().empty()) {
+      ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "(): No values returned." << dendl;
+      return -ENOENT;
+    }
+
+    object->objName = std::get<0>(resp).value()[0];
+    object->bucketName = std::get<0>(resp).value()[1];
+    object->creationTime = std::get<0>(resp).value()[2];
+    object->dirty = std::stoi(std::get<0>(resp).value()[3]);
+    boost::split(object->hostsList, std::get<0>(resp).value()[4], boost::is_any_of("_"));
+  } catch (std::exception &e) {
+    ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
+    return -EINVAL;
   }
 
   return 0;
@@ -181,44 +179,28 @@ int ObjectDirectory::copy(const DoutPrefixProvider* dpp, CacheObj* object, std::
   auto copyObj = CacheObj{ .objName = copyName, .bucketName = copyBucketName };
   std::string copyKey = build_index(&copyObj);
 
-  if (exist_key(dpp, object, y)) {
-    try {
-      response<int> resp;
-     
-      {
-	boost::system::error_code ec;
-	request req;
-	req.push("COPY", key, copyKey);
+  try {
+    boost::system::error_code ec;
+    response<int, ignore_t> resp;
+    request req;
+    req.push("COPY", key, copyKey);
+    req.push("HSET", copyKey, "objName", copyName, "bucketName", copyBucketName);
 
-	redis_exec(conn, ec, req, resp, y);
+    redis_exec(conn, ec, req, resp, y);
 
-	if (ec) {
-	  ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
-	  return -ec.value();
-	}
-      }
-
-      {
-	boost::system::error_code ec;
-	request req;
-	req.push("HMSET", copyKey, "objName", copyName, "bucketName", copyBucketName);
-	response<std::string> res;
-
-	redis_exec(conn, ec, req, res, y);
-
-	if (ec) {
-	  ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
-	  return -ec.value();
-	}
-      }
-
-      return std::get<0>(resp).value() - 1; 
-    } catch (std::exception &e) {
-      ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
-      return -EINVAL;
+    if (ec) {
+      ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
+      return -ec.value();
     }
-  } else {
-    return -ENOENT;
+
+    if (std::get<0>(resp).value() == 1) {
+      return 0;
+    } else {
+      return -ENOENT;
+    }
+  } catch (std::exception &e) {
+    ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
+    return -EINVAL;
   }
 }
 
@@ -226,28 +208,24 @@ int ObjectDirectory::del(const DoutPrefixProvider* dpp, CacheObj* object, option
 {
   std::string key = build_index(object);
 
-  if (exist_key(dpp, object, y)) {
-    try {
-      boost::system::error_code ec;
-      request req;
-      req.push("DEL", key);
-      response<int> resp;
+  try {
+    boost::system::error_code ec;
+    response<ignore_t> resp;
+    request req;
+    req.push("DEL", key);
 
-      redis_exec(conn, ec, req, resp, y);
+    redis_exec(conn, ec, req, resp, y);
 
-      if (ec) {
-	ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
-	return -ec.value();
-      }
-
-      return std::get<0>(resp).value() - 1; 
-    } catch (std::exception &e) {
-      ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
-      return -EINVAL;
+    if (ec) {
+      ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
+      return -ec.value();
     }
-  } else {
-    return 0; /* No delete was necessary */
+  } catch (std::exception &e) {
+    ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
+    return -EINVAL;
   }
+
+  return 0; 
 }
 
 int ObjectDirectory::update_field(const DoutPrefixProvider* dpp, CacheObj* object, std::string field, std::string value, optional_yield y) 
@@ -256,52 +234,14 @@ int ObjectDirectory::update_field(const DoutPrefixProvider* dpp, CacheObj* objec
 
   if (exist_key(dpp, object, y)) {
     try {
-      /* Ensure field exists */
-      {
-	boost::system::error_code ec;
-	request req;
-	req.push("HEXISTS", key, field);
-	response<int> resp;
-
-	redis_exec(conn, ec, req, resp, y);
-
-	if (!std::get<0>(resp).value()) {
-	  return -ENOENT;
-	} else if (ec) {
-	  ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
-	  return -ec.value();
-	}
-      }
-
       if (field == "objHosts") {
 	/* Append rather than overwrite */
 	ldpp_dout(dpp, 20) << "ObjectDirectory::" << __func__ << "() Appending to hosts list." << dendl;
 
 	boost::system::error_code ec;
+	response<std::string> resp;
 	request req;
 	req.push("HGET", key, field);
-	response<std::string> resp;
-
-	redis_exec(conn, ec, req, resp, y);
-
-	if (std::get<0>(resp).value().empty()) {
-	  ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "(): No values returned." << dendl;
-	  return -ENOENT;
-	} else if (ec) {
-	  ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
-	  return -ec.value();
-	}
-
-	std::get<0>(resp).value() += "_";
-	std::get<0>(resp).value() += value;
-	value = std::get<0>(resp).value();
-      }
-
-      {
-	boost::system::error_code ec;
-	request req;
-	req.push_range("HSET", key, std::map<std::string, std::string>{{field, value}});
-	response<int> resp;
 
 	redis_exec(conn, ec, req, resp, y);
 
@@ -310,8 +250,25 @@ int ObjectDirectory::update_field(const DoutPrefixProvider* dpp, CacheObj* objec
 	  return -ec.value();
 	}
 
-	return std::get<0>(resp).value(); 
+	/* If entry exists, it should have at least one host */
+	std::get<0>(resp).value() += "_";
+	std::get<0>(resp).value() += value;
+	value = std::get<0>(resp).value();
       }
+
+      boost::system::error_code ec;
+      response<ignore_t> resp;
+      request req;
+      req.push("HSET", key, field, value);
+
+      redis_exec(conn, ec, req, resp, y);
+
+      if (ec) {
+	ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
+	return -ec.value();
+      }
+
+      return 0; 
     } catch (std::exception &e) {
       ldpp_dout(dpp, 0) << "ObjectDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
       return -EINVAL;
@@ -352,9 +309,10 @@ int BlockDirectory::exist_key(const DoutPrefixProvider* dpp, CacheBlock* block, 
 
 int BlockDirectory::set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) 
 {
+  /* For existing keys, call get method beforehand. 
+     Sets completely overwrite existing values. */
   std::string key = build_index(block);
     
-  /* Every set will be treated as new */
   std::string endpoint;
   std::list<std::string> redisValues;
     
@@ -412,9 +370,9 @@ int BlockDirectory::set(const DoutPrefixProvider* dpp, CacheBlock* block, option
 
   try {
     boost::system::error_code ec;
+    response<ignore_t> resp;
     request req;
-    req.push_range("HMSET", key, redisValues);
-    response<std::string> resp;
+    req.push_range("HSET", key, redisValues);
 
     redis_exec(conn, ec, req, resp, y);
 
@@ -433,56 +391,53 @@ int BlockDirectory::set(const DoutPrefixProvider* dpp, CacheBlock* block, option
 int BlockDirectory::get(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) 
 {
   std::string key = build_index(block);
+  std::vector<std::string> fields;
 
   ldpp_dout(dpp, 10) << __func__ << "(): index is: " << key << dendl;
 
-  if (exist_key(dpp, block, y)) {
-    std::vector<std::string> fields;
+  fields.push_back("blockID");
+  fields.push_back("version");
+  fields.push_back("size");
+  fields.push_back("globalWeight");
+  fields.push_back("blockHosts");
 
-    fields.push_back("blockID");
-    fields.push_back("version");
-    fields.push_back("size");
-    fields.push_back("globalWeight");
-    fields.push_back("blockHosts");
+  fields.push_back("objName");
+  fields.push_back("bucketName");
+  fields.push_back("creationTime");
+  fields.push_back("dirty");
+  fields.push_back("objHosts");
 
-    fields.push_back("objName");
-    fields.push_back("bucketName");
-    fields.push_back("creationTime");
-    fields.push_back("dirty");
-    fields.push_back("objHosts");
+  try {
+    boost::system::error_code ec;
+    response< std::optional<std::vector<std::string>> > resp;
+    request req;
+    req.push_range("HMGET", key, fields);
 
-    try {
-      boost::system::error_code ec;
-      request req;
-      req.push_range("HMGET", key, fields);
-      response< std::vector<std::string> > resp;
+    redis_exec(conn, ec, req, resp, y);
 
-      redis_exec(conn, ec, req, resp, y);
-
-      if (std::get<0>(resp).value().empty()) {
-	ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "(): No values returned." << dendl;
-	return -ENOENT;
-      } else if (ec) {
-	ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
-	return -ec.value();
-      }
-
-      block->blockID = boost::lexical_cast<uint64_t>(std::get<0>(resp).value()[0]);
-      block->version = std::get<0>(resp).value()[1];
-      block->size = boost::lexical_cast<uint64_t>(std::get<0>(resp).value()[2]);
-      block->globalWeight = boost::lexical_cast<int>(std::get<0>(resp).value()[3]);
-      boost::split(block->hostsList, std::get<0>(resp).value()[4], boost::is_any_of("_"));
-      block->cacheObj.objName = std::get<0>(resp).value()[5];
-      block->cacheObj.bucketName = std::get<0>(resp).value()[6];
-      block->cacheObj.creationTime = std::get<0>(resp).value()[7];
-      block->cacheObj.dirty = boost::lexical_cast<bool>(std::get<0>(resp).value()[8]);
-      boost::split(block->cacheObj.hostsList, std::get<0>(resp).value()[9], boost::is_any_of("_"));
-    } catch (std::exception &e) {
-      ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
-      return -EINVAL;
+    if (ec) {
+      ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
+      return -ec.value();
     }
-  } else {
-    return -ENOENT;
+
+    if (std::get<0>(resp).value().value().empty()) {
+      ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "(): No values returned." << dendl;
+      return -ENOENT;
+    } 
+
+    block->blockID = std::stoull(std::get<0>(resp).value().value()[0]);
+    block->version = std::get<0>(resp).value().value()[1];
+    block->size = std::stoull(std::get<0>(resp).value().value()[2]);
+    block->globalWeight = std::stoull(std::get<0>(resp).value().value()[3]);
+    boost::split(block->hostsList, std::get<0>(resp).value().value()[4], boost::is_any_of("_"));
+    block->cacheObj.objName = std::get<0>(resp).value().value()[5];
+    block->cacheObj.bucketName = std::get<0>(resp).value().value()[6];
+    block->cacheObj.creationTime = std::get<0>(resp).value().value()[7];
+    block->cacheObj.dirty = std::stoi(std::get<0>(resp).value().value()[8]);
+    boost::split(block->cacheObj.hostsList, std::get<0>(resp).value().value()[9], boost::is_any_of("_"));
+  } catch (std::exception &e) {
+    ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
+    return -EINVAL;
   }
 
   return 0;
@@ -495,44 +450,28 @@ int BlockDirectory::copy(const DoutPrefixProvider* dpp, CacheBlock* block, std::
   auto copyBlock = CacheBlock{ .cacheObj = { .objName = copyName, .bucketName = copyBucketName }, .blockID = 0 };
   std::string copyKey = build_index(&copyBlock);
 
-  if (exist_key(dpp, block, y)) {
-    try {
-      response<int> resp;
-     
-      {
-	boost::system::error_code ec;
-	request req;
-	req.push("COPY", key, copyKey);
+  try {
+    boost::system::error_code ec;
+    response<int, ignore_t> resp;
+    request req;
+    req.push("COPY", key, copyKey);
+    req.push("HSET", copyKey, "objName", copyName, "bucketName", copyBucketName);
 
-	redis_exec(conn, ec, req, resp, y);
+    redis_exec(conn, ec, req, resp, y);
 
-	if (ec) {
-	  ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
-	  return -ec.value();
-	}
-      }
-
-      {
-	boost::system::error_code ec;
-	request req;
-	req.push("HMSET", copyKey, "objName", copyName, "bucketName", copyBucketName);
-	response<std::string> res;
-
-	redis_exec(conn, ec, req, res, y);
-
-	if (ec) {
-	  ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
-	  return -ec.value();
-	}
-      }
-
-      return std::get<0>(resp).value() - 1; 
-    } catch (std::exception &e) {
-      ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
-      return -EINVAL;
+    if (ec) {
+      ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
+      return -ec.value();
     }
-  } else {
-    return -ENOENT;
+
+    if (std::get<0>(resp).value() == 1) {
+      return 0;
+    } else {
+      return -ENOENT;
+    }
+  } catch (std::exception &e) {
+    ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
+    return -EINVAL;
   }
 }
 
@@ -540,28 +479,24 @@ int BlockDirectory::del(const DoutPrefixProvider* dpp, CacheBlock* block, option
 {
   std::string key = build_index(block);
 
-  if (exist_key(dpp, block, y)) {
-    try {
-      boost::system::error_code ec;
-      request req;
-      req.push("DEL", key);
-      response<int> resp;
+  try {
+    boost::system::error_code ec;
+    response<ignore_t> resp;
+    request req;
+    req.push("DEL", key);
 
-      redis_exec(conn, ec, req, resp, y);
+    redis_exec(conn, ec, req, resp, y);
 
-      if (ec) {
-	ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
-	return -ec.value();
-      }
-
-      return std::get<0>(resp).value() - 1; 
-    } catch (std::exception &e) {
-      ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
-      return -EINVAL;
+    if (ec) {
+      ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
+      return -ec.value();
     }
-  } else {
-    return 0; /* No delete was necessary */
+  } catch (std::exception &e) {
+    ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
+    return -EINVAL;
   }
+
+  return 0; 
 }
 
 int BlockDirectory::update_field(const DoutPrefixProvider* dpp, CacheBlock* block, std::string field, std::string value, optional_yield y) 
@@ -570,59 +505,14 @@ int BlockDirectory::update_field(const DoutPrefixProvider* dpp, CacheBlock* bloc
 
   if (exist_key(dpp, block, y)) {
     try {
-      /* Ensure field exists */
-      {
-	boost::system::error_code ec;
-	request req;
-	req.push("HEXISTS", key, field);
-	response<int> resp;
-
-	redis_exec(conn, ec, req, resp, y);
-
-	if (!std::get<0>(resp).value()) {
-	  return -ENOENT;
-	} else if (ec) {
-	  ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
-	  return -ec.value();
-	}
-      }
-
       if (field == "blockHosts") { 
 	/* Append rather than overwrite */
 	ldpp_dout(dpp, 20) << "BlockDirectory::" << __func__ << "() Appending to hosts list." << dendl;
 
 	boost::system::error_code ec;
+	response< std::optional<std::string> > resp;
 	request req;
 	req.push("HGET", key, field);
-	response<std::string> resp;
-
-	redis_exec(conn, ec, req, resp, y);
-
-	if (std::get<0>(resp).value().empty()) {
-	  ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "(): No values returned." << dendl;
-	  return -ENOENT;
-	} else if (ec) {
-	  ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
-	  return -ec.value();
-	}
-
-	std::get<0>(resp).value() += "_";
-	std::get<0>(resp).value() += value;
-	value = std::get<0>(resp).value();
-      }
-  if (field == "dirty") { 
-    if (value == "true" || value == "1") {
-      value = "1";
-    }
-    if (value == "false" || value == "0") {
-      value = "0";
-    }
-  }
-      {
-	boost::system::error_code ec;
-	request req;
-	req.push_range("HSET", key, std::map<std::string, std::string>{{field, value}});
-	response<int> resp;
 
 	redis_exec(conn, ec, req, resp, y);
 
@@ -631,8 +521,32 @@ int BlockDirectory::update_field(const DoutPrefixProvider* dpp, CacheBlock* bloc
 	  return -ec.value();
 	}
 
-	return std::get<0>(resp).value(); 
+	/* If entry exists, it should have at least one host */
+	std::get<0>(resp).value().value() += "_";
+	std::get<0>(resp).value().value() += value;
+	value = std::get<0>(resp).value().value();
+      } else if (field == "dirty") { 
+	if (value == "true" || value == "1") {
+	  value = "1";
+	}
+	if (value == "false" || value == "0") {
+	  value = "0";
+	}
       }
+
+      boost::system::error_code ec;
+      response<ignore_t> resp;
+      request req;
+      req.push("HSET", key, field, value);
+
+      redis_exec(conn, ec, req, resp, y);
+
+      if (ec) {
+	ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
+	return -ec.value();
+      }
+
+      return 0; 
     } catch (std::exception &e) {
       ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
       return -EINVAL;
@@ -646,79 +560,61 @@ int BlockDirectory::remove_host(const DoutPrefixProvider* dpp, CacheBlock* block
 {
   std::string key = build_index(block);
 
-  if (exist_key(dpp, block, y)) {
-    try {
-      /* Ensure field exists */
-      {
-	boost::system::error_code ec;
-	request req;
-	req.push("HEXISTS", key, "blockHosts");
-	response<int> resp;
+  try {
+    {
+      boost::system::error_code ec;
+      response< std::optional<std::string> > resp;
+      request req;
+      req.push("HGET", key, "blockHosts");
 
-	redis_exec(conn, ec, req, resp, y);
+      redis_exec(conn, ec, req, resp, y);
 
-	if (!std::get<0>(resp).value()) {
-	  return -ENOENT;
-	} else if (ec) {
-	  ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
-	  return -ec.value();
-	}
+      if (ec) {
+	ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
+	return -ec.value();
       }
 
-      {
-	boost::system::error_code ec;
-	request req;
-	req.push("HGET", key, "blockHosts");
-	response<std::string> resp;
-
-	redis_exec(conn, ec, req, resp, y);
-
-	if (std::get<0>(resp).value().empty()) {
-	  ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "(): No values returned." << dendl;
-	  return -ENOENT;
-	} else if (ec) {
-	  ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
-	  return -ec.value();
-	}
-
-	if (std::get<0>(resp).value().find("_") == std::string::npos) /* Last host, delete entirely */
-          return del(dpp, block, y);
-
-        std::string result = std::get<0>(resp).value();
-        auto it = result.find(delValue);
-        if (it != std::string::npos) 
-          result.erase(result.begin() + it, result.begin() + it + delValue.size());
-        else
-          return -ENOENT;
-
-        if (result[0] == '_')
-          result.erase(0, 1);
-
-	delValue = result;
+      if (std::get<0>(resp).value().value().empty()) {
+	ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "(): No values returned." << dendl;
+	return -ENOENT;
       }
 
-      {
-	boost::system::error_code ec;
-	request req;
-	req.push_range("HSET", key, std::map<std::string, std::string>{{"blockHosts", delValue}});
-	response<int> resp;
-
-	redis_exec(conn, ec, req, resp, y);
-
-	if (ec) {
-	  ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
-	  return -ec.value();
-	}
-
-	return std::get<0>(resp).value();
+      std::string result = std::get<0>(resp).value().value();
+      auto it = result.find(delValue);
+      if (it != std::string::npos) { 
+	result.erase(result.begin() + it, result.begin() + it + delValue.size());
+      } else {
+	return -ENOENT;
       }
-    } catch (std::exception &e) {
-      ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
-      return -EINVAL;
+
+      if (result[0] == '_')
+	result.erase(0, 1);
+
+      if (result.length() == 0) /* Last host, delete entirely */
+	return del(dpp, block, y);
+
+      delValue = result;
     }
-  } else {
-    return -ENOENT;
+
+    {
+      boost::system::error_code ec;
+      response<ignore_t> resp;
+      request req;
+      req.push("HSET", key, "blockHosts", delValue);
+
+      redis_exec(conn, ec, req, resp, y);
+
+      if (ec) {
+	ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
+	return -ec.value();
+      }
+    }
+  } catch (std::exception &e) {
+    ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
+    return -EINVAL;
   }
+
+  return 0;
 }
 
 } } // namespace rgw::d4n
