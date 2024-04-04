@@ -601,7 +601,7 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
     " read_ofs: " << read_ofs << " part len: " << part_len << dendl;
 
     int ret = -1;
-    if (source->driver->get_block_dir()->exist_key(dpp, &block, y) > 0 && (ret = source->driver->get_block_dir()->get(dpp, &block, y)) == 0) { 
+    if ((ret = source->driver->get_block_dir()->get(dpp, &block, y)) == 0) { 
       auto it = find(block.hostsList.begin(), block.hostsList.end(), dpp->get_cct()->_conf->rgw_local_cache_address);
 
       if (it != block.hostsList.end()) { /* Local copy */
@@ -628,7 +628,7 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
 	    if ((r = source->driver->get_block_dir()->remove_host(dpp, &block, dpp->get_cct()->_conf->rgw_local_cache_address, y)) < 0)
 	      ldpp_dout(dpp, 0) << "D4NFilterObject::iterate:: " << __func__ << "(): Error: failed to remove incorrect host from block with oid=" << oid_in_cache << dendl;
 
-            if (block.hostsList.size() && r == 0) { /* Remote copy */
+            if ((block.hostsList.size() - 1) > 0 && r == 0) { /* Remote copy */
 	      ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): Block with oid=" << oid_in_cache << " found in remote cache." << dendl;
 	      // TODO: Retrieve remotely
 	      // Policy decision: should we cache remote blocks locally?
@@ -663,13 +663,13 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
 	ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): Block with oid=" << oid_in_cache << " found in remote cache." << dendl;
 	// TODO: Retrieve remotely
       }
-    // if (source->driver->get_block_dir()->exist_key(dpp, &block, y) > 0 && (ret = source->driver->get_block_dir()->get(dpp, &block, y)) == 0)  
-    } else {
+    // if ((ret = source->driver->get_block_dir()->get(dpp, &block, y)) == 0)  
+    } else if (ret == -ENOENT) { 
       block.blockID = adjusted_start_ofs;
       block.size = obj_max_req_size;
 
       //for ranged requests, for last part, the whole part might exist in the cache
-      if (source->driver->get_block_dir()->exist_key(dpp, &block, y) > 0 && (ret = source->driver->get_block_dir()->get(dpp, &block, y)) == 0) {  
+      if ((ret = source->driver->get_block_dir()->get(dpp, &block, y)) == 0) {  
 	auto it = find(block.hostsList.begin(), block.hostsList.end(), dpp->get_cct()->_conf->rgw_local_cache_address);
 
 	if (it != block.hostsList.end()) { /* Local copy */
@@ -700,7 +700,7 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
 	      if ((r = source->driver->get_block_dir()->remove_host(dpp, &block, dpp->get_cct()->_conf->rgw_local_cache_address, y)) < 0)
 		ldpp_dout(dpp, 0) << "D4NFilterObject::iterate:: " << __func__ << "(): Error: failed to remove incorrect host from block with oid=" << oid_in_cache << dendl;
 
-	      if (block.hostsList.size() && r == 0) { /* Remote copy */
+	      if ((block.hostsList.size() - 1) > 0 && r == 0) { /* Remote copy */
 		ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): Block with oid=" << oid_in_cache << " found in remote cache." << dendl;
 		// TODO: Retrieve remotely
 	      } else {
@@ -734,11 +734,8 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
 	  ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): Block with oid=" << oid_in_cache << " found in remote cache." << dendl;
 	  // TODO: Retrieve remotely
 	}
-      // if (source->driver->get_block_dir()->exist_key(dpp, &block, y) > 0 && (ret = source->driver->get_block_dir()->get(dpp, &block, y)) == 0)  
-      } else { /* Fetch from backend */
-	if (ret < 0)
-	  ldpp_dout(dpp, 0) << "Failed to fetch existing block for: " << block.cacheObj.objName << " blockID: " << block.blockID << " blockSize: " << block.size << dendl;
-
+      // if ((ret = source->driver->get_block_dir()->get(dpp, &block, y)) == 0)  
+      } else if (ret == -ENOENT) { /* Fetch from backend */
 	ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): Info: draining data for oid: " << oid_in_cache << dendl;
 
 	auto r = drain(dpp, y);
@@ -749,8 +746,16 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
 	}
 
 	break;
+      // else if (ret == -ENOENT)
+      } else {
+	ldpp_dout(dpp, 0) << "Failed to fetch existing block for: " << block.cacheObj.objName << " blockID: " << block.blockID << " blockSize: " << block.size << dendl;
+        return ret;
       }
-    }
+    // else if (ret == -ENOENT)
+    } else {
+      ldpp_dout(dpp, 0) << "Failed to fetch existing block for: " << block.cacheObj.objName << " blockID: " << block.blockID << " blockSize: " << block.size << dendl;
+      return ret;
+    } 
 
     if (start_part_num == (num_parts - 1)) {
       ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): Info: draining data for oid: " << oid_in_cache << dendl;
@@ -845,9 +850,8 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
             filter->get_policy_driver()->get_cache_policy()->update(dpp, oid, ofs, bl.length(), version, *y);
 
 	    /* Store block in directory */
-            if (!blockDir->exist_key(dpp, &block, *y)) {
-              if (blockDir->set(dpp, &block, *y) < 0) //should we revert previous steps if this step fails?
-		ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set method failed." << dendl;
+	    if (blockDir->set(dpp, &block, true, *y) < 0) { //should we revert previous steps if this step fails?
+	      ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set method failed." << dendl;
             } else {
               existing_block.blockID = block.blockID;
               existing_block.size = block.size;
@@ -857,11 +861,11 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
                 if (existing_block.version != block.version) {
                   if (blockDir->del(dpp, &existing_block, *y) < 0) //delete existing block
                     ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory del method failed." << dendl;
-                  if (blockDir->set(dpp, &block, *y) < 0) //new versioned block will have new version, hostsList etc, how about globalWeight?
+                  if (blockDir->set(dpp, &block, false, *y) < 0) //new versioned block will have new version, hostsList etc, how about globalWeight?
                     ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set method failed." << dendl;
                 } else {
-                if (blockDir->update_field(dpp, &block, "blockHosts", dpp->get_cct()->_conf->rgw_local_cache_address, *y) < 0)
-                  ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory update_field method failed for hostsList." << dendl;
+		  if (blockDir->update_field(dpp, &block, "blockHosts", dpp->get_cct()->_conf->rgw_local_cache_address, *y) < 0)
+		    ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory update_field method failed for hostsList." << dendl;
                 }
               }
             }
@@ -885,9 +889,8 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
             filter->get_policy_driver()->get_cache_policy()->update(dpp, oid, ofs, bl.length(), version, *y);
 
             /* Store block in directory */
-            if (!blockDir->exist_key(dpp, &block, *y)) {
-              if (blockDir->set(dpp, &block, *y) < 0)
-		ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set method failed." << dendl;
+	    if (blockDir->set(dpp, &block, true, *y) < 0) {
+	      ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set method failed." << dendl;
             } else {
               existing_block.blockID = block.blockID;
               existing_block.size = block.size;
@@ -897,8 +900,8 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
               if (existing_block.version != block.version) {
                 if (blockDir->del(dpp, &existing_block, *y) < 0)
                     ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory del method failed." << dendl;
-                  if (blockDir->set(dpp, &block, *y) < 0)
-                    ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set method failed." << dendl;
+		if (blockDir->set(dpp, &block, false, *y) < 0)
+		  ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set method failed." << dendl;
               } else {
                 if (blockDir->update_field(dpp, &block, "blockHosts", dpp->get_cct()->_conf->rgw_local_cache_address, *y) < 0)
                   ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory update_field method failed for blockHosts." << dendl;
@@ -932,9 +935,8 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
               filter->get_policy_driver()->get_cache_policy()->update(dpp, oid, ofs, bl_rem.length(), version, *y);
 
               /* Store block in directory */
-              if (!blockDir->exist_key(dpp, &block, *y)) {
-                if (blockDir->set(dpp, &block, *y) < 0)
-                  ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set method failed." << dendl;
+	      if (blockDir->set(dpp, &block, true, *y) < 0) {
+		ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set method failed." << dendl;
 	      } else {
 		existing_block.blockID = block.blockID;
 		existing_block.size = block.size;
@@ -944,11 +946,11 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
 		  if (existing_block.version != block.version) {
 		    if (blockDir->del(dpp, &existing_block, *y) < 0)
 		      ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory del method failed." << dendl;
-		    if (blockDir->set(dpp, &block, *y) < 0)
+		    if (blockDir->set(dpp, &block, false, *y) < 0)
 		      ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set method failed." << dendl;
 		  } else {
-		  if (blockDir->update_field(dpp, &block, "blockHosts", dpp->get_cct()->_conf->rgw_local_cache_address, *y) < 0)
-		    ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory update_field method failed." << dendl;
+		    if (blockDir->update_field(dpp, &block, "blockHosts", dpp->get_cct()->_conf->rgw_local_cache_address, *y) < 0)
+		      ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory update_field method failed." << dendl;
 		  }
 		}
 	      }
@@ -1042,7 +1044,7 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
 				 .hostsList = { /*driver->get_block_dir()->cct->_conf->rgw_local_cache_address*/ } //TODO: Object is not currently being cached 
                                };
 
-  if (driver->get_obj_dir()->set(save_dpp, &object, y) < 0) 
+  if (driver->get_obj_dir()->set(save_dpp, &object, false, y) < 0) 
     ldpp_dout(save_dpp, 0) << "D4NFilterWriter::" << __func__ << "(): ObjectDirectory set method failed." << dendl;
    
   /* Retrieve complete set of attrs */

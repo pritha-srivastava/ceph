@@ -12,6 +12,7 @@ using boost::redis::config;
 using boost::redis::connection;
 using boost::redis::request;
 using boost::redis::response;
+using boost::redis::ignore_t;
 
 struct CacheObj {
   std::string objName; /* S3 object name */
@@ -41,7 +42,7 @@ class ObjectDirectory: public Directory {
 
     int exist_key(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y);
 
-    int set(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y);
+    int set(const DoutPrefixProvider* dpp, CacheObj* object, bool nx, optional_yield y); /* If nx is true, set only if key doesn't exist */
     int get(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y);
     int copy(const DoutPrefixProvider* dpp, CacheObj* object, std::string copyName, std::string copyBucketName, optional_yield y);
     int del(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y);
@@ -59,7 +60,7 @@ class BlockDirectory: public Directory {
     
     int exist_key(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y);
 
-    int set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y);
+    int set(const DoutPrefixProvider* dpp, CacheBlock* block, bool nx, optional_yield y);
     int get(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y);
     int copy(const DoutPrefixProvider* dpp, CacheBlock* block, std::string copyName, std::string copyBucketName, optional_yield y);
     int del(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y);

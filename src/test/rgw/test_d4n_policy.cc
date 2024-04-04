@@ -130,7 +130,7 @@ class LFUDAPolicyFixture : public ::testing::Test {
 	  }
 	} else if (!exists) { /* No remote copy */
 	  block->hostsList.push_back(env->dpp->get_cct()->_conf->rgw_local_cache_address);
-	  if (dir->set(env->dpp, block, y) < 0)
+	  if (dir->set(env->dpp, block, false, y) < 0)
 	    return -1;
 
 	  this->policyDriver->get_cache_policy()->update(dpp, oid, 0, bl.length(), "", y);
@@ -209,7 +209,7 @@ TEST_F(LFUDAPolicyFixture, RemoteGetBlockYield)
     attrVal.append("testBucket");
     attrs.insert({"bucket_name", attrVal});
 
-    ASSERT_EQ(0, dir->set(env->dpp, &victim, optional_yield{io, yield}));
+    ASSERT_EQ(0, dir->set(env->dpp, &victim, false, optional_yield{io, yield}));
     std::string victimKey = victim.cacheObj.bucketName + "_" + victim.cacheObj.objName + "_" + std::to_string(victim.blockID) + "_" + std::to_string(victim.size);
     ASSERT_EQ(0, cacheDriver->put(env->dpp, victimKey, bl, bl.length(), attrs, optional_yield{io, yield}));
     policyDriver->get_cache_policy()->update(env->dpp, victimKey, 0, bl.length(), "", optional_yield{io, yield});
@@ -221,7 +221,7 @@ TEST_F(LFUDAPolicyFixture, RemoteGetBlockYield)
     block->hostsList.push_back("127.0.0.1:6000");
     block->cacheObj.hostsList.push_back("127.0.0.1:6000");
 
-    ASSERT_EQ(0, dir->set(env->dpp, block, optional_yield{io, yield}));
+    ASSERT_EQ(0, dir->set(env->dpp, block, false, optional_yield{io, yield}));
 
     ASSERT_GE(lfuda(env->dpp, block, cacheDriver, optional_yield{io, yield}), 0);
 
