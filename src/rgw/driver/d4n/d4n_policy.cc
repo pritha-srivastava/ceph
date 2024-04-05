@@ -292,7 +292,7 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
       delete victim;
       return -ENOENT;
     }
-
+    //TODO: check dirty flag of entry to be evicted, if the flag is dirty, all entries on the local node are dirty
     int avgWeight = weightSum / entries_map.size();
 
     if (victim->hostsList.size() == 1 && victim->hostsList[0] == dir->cct->_conf->rgw_local_cache_address) { /* Last copy */
@@ -354,6 +354,9 @@ void LFUDAPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64
   const std::lock_guard l(lfuda_lock);
   int localWeight = age;
   auto entry = find_entry(key);
+  //TODO: check the dirty flag in the entry above and the incoming dirty flag. If the
+  // incoming dirty flag is false, that means update() is invoked as part of cleaning process,
+  // so we must not update its localWeight.
   if (entry != nullptr) { 
     localWeight = entry->localWeight + age;
   }  
@@ -557,6 +560,7 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
         cacheDriver->rename(dpp, head_oid_in_cache, new_head_oid_in_cache, null_yield);
         //data is clean now, updating in-memory metadata
         it->second->dirty = false;
+        //TODO: invoke update() to with dirty flag set to false
       } //end-if
     } //end-for
 

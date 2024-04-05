@@ -1153,42 +1153,8 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
     int ret = 0;
 
     if (d4n_writecache == false) {
-      #if 0
-      std::string oid = prefix + "_" + std::to_string(ofs)+ "_" + std::to_string(bl_len);
-      block.size = bl.length();
-      block.blockID = ofs;
-      block.dirty = false; //writing to the backend, hence the data is clean
-      block.hostsList.push_back(blockDir->cct->_conf->rgw_d4n_backend_address);
-      #endif
       ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): calling next process" << dendl;
       ret = next->process(std::move(data), offset);
-      #if 0
-      if (ret == 0){
-        if (!blockDir->exist_key(dpp, &block, y)) {
-          if (blockDir->set(dpp, &block, y) < 0) 
-            ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): BlockDirectory set method failed." << dendl;
-          } else {
-            existing_block.blockID = block.blockID;
-            existing_block.size = block.size;
-            if (blockDir->get(&existing_block, y) < 0) {
-              ldpp_dout(dpp, 10) << "Failed to fetch existing block for: " << existing_block.cacheObj.objName << " blockID: " << existing_block.blockID << " block size: " << existing_block.size << dendl;
-            } else {
-              if (existing_block.version != block.version) {
-                if (blockDir->del(&existing_block, y) < 0) //delete existing block
-                  ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): BlockDirectory del method failed." << dendl;
-                if (blockDir->set(dpp, &block, y) < 0) //new versioned block will have new version, hostsList etc, how about globalWeight?
-                  ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): BlockDirectory set method failed." << dendl;
-              } else {
-            if (blockDir->update_field(dpp, &block, "blockHosts", blockDir->cct->_conf->rgw_local_cache_address, y) < 0)
-              ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): BlockDirectory update_field method failed for hostsList." << dendl;
-            }
-          }
-        }
-      } else{
-          ldpp_dout(dpp, 1) << "D4NFilterObject::D4NFilterWriteOp::process" << __func__ << "(): ERROR: writing data to the backend failed!" << dendl;
-	  return ret;
-      }
-      #endif
     } else {
       std::string oid = prefix + "_" + std::to_string(ofs);
       std::string key = "D_" + oid + "_" + std::to_string(bl_len);
@@ -1311,9 +1277,9 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
                             canceled, rctx, flags);
   }
 
-  if (ret == 0) { //Set object directory entry for every object, for bucket listing??
+  if (ret == 0) {
     hostsList = { driver->get_block_dir()->cct->_conf->rgw_local_cache_address };
-      
+    //TODO: write object to directory only in case write_to_backend_store is false.
     rgw::d4n::CacheObj object = rgw::d4n::CacheObj{
         .objName = obj->get_name(), 
         .bucketName = obj->get_bucket()->get_name(),
