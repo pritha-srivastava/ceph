@@ -77,7 +77,16 @@ class LFUDAPolicy : public CachePolicy {
     template<typename T>
     struct EntryComparator {
       bool operator()(T* const e1, T* const e2) const {
-	return e1->localWeight > e2->localWeight;
+        // order the min heap using localWeight and dirty flag so that dirty blocks are at the bottom
+        if ((e1->dirty && e2->dirty) || (!e1->dirty && !e2->dirty)) {
+	        return e1->localWeight > e2->localWeight;
+        } else if (e1->dirty && !e2->dirty){
+          return true;
+        } else if (!e1->dirty && e2->dirty) {
+          return false;
+        } else {
+          return e1->localWeight > e2->localWeight;
+        }
       }
     }; 
 
