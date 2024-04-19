@@ -57,12 +57,19 @@ int LFUDAPolicy::init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_
 
   try {
     boost::system::error_code ec;
-    response<ignore_t, ignore_t> resp;
+    response<
+      ignore_t,
+      ignore_t,
+      ignore_t,
+      response<std::optional<int>, std::optional<int>>
+    > resp;
     request req;
+    req.push("MULTI");
     req.push("HSET", "lfuda", "minLocalWeights_sum", std::to_string(weightSum), /* New cache node will always have the minimum average weight */
               "minLocalWeights_size", std::to_string(entries_map.size()), 
               "minLocalWeights_address", dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address);
     req.push("HSETNX", "lfuda", "age", age); /* Only set maximum age if it doesn't exist */
+    req.push("EXEC");
   
     redis_exec(conn, ec, req, resp, y);
 

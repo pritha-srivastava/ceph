@@ -181,10 +181,17 @@ int ObjectDirectory::copy(const DoutPrefixProvider* dpp, CacheObj* object, std::
 
   try {
     boost::system::error_code ec;
-    response<int, ignore_t> resp;
+    response<
+      ignore_t,
+      ignore_t,
+      ignore_t,
+      response<std::optional<int>, std::optional<int>> 
+    > resp;
     request req;
+    req.push("MULTI");
     req.push("COPY", key, copyKey);
     req.push("HSET", copyKey, "objName", copyName, "bucketName", copyBucketName);
+    req.push("EXEC");
 
     redis_exec(conn, ec, req, resp, y);
 
@@ -193,7 +200,7 @@ int ObjectDirectory::copy(const DoutPrefixProvider* dpp, CacheObj* object, std::
       return -ec.value();
     }
 
-    if (std::get<0>(resp).value() == 1) {
+    if (std::get<0>(std::get<3>(resp).value()).value().value() == 1) {
       return 0;
     } else {
       return -ENOENT;
@@ -452,10 +459,17 @@ int BlockDirectory::copy(const DoutPrefixProvider* dpp, CacheBlock* block, std::
 
   try {
     boost::system::error_code ec;
-    response<int, ignore_t> resp;
+    response<
+      ignore_t,
+      ignore_t,
+      ignore_t,
+      response<std::optional<int>, std::optional<int>> 
+    > resp;
     request req;
+    req.push("MULTI");
     req.push("COPY", key, copyKey);
     req.push("HSET", copyKey, "objName", copyName, "bucketName", copyBucketName);
+    req.push("EXEC");
 
     redis_exec(conn, ec, req, resp, y);
 
@@ -464,7 +478,7 @@ int BlockDirectory::copy(const DoutPrefixProvider* dpp, CacheBlock* block, std::
       return -ec.value();
     }
 
-    if (std::get<0>(resp).value() == 1) {
+    if (std::get<0>(std::get<3>(resp).value()).value().value() == 1) {
       return 0;
     } else {
       return -ENOENT;
