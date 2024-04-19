@@ -169,10 +169,17 @@ int RedisDriver::del(const DoutPrefixProvider* dpp, const std::string& key, opti
 
   try {
     boost::system::error_code ec;
-    response<int, ignore_t> resp;
+    response<
+      ignore_t,
+      ignore_t,
+      ignore_t,
+      response<std::optional<int>, std::optional<int>>
+    > resp;
     request req;
+    req.push("MULTI");
     req.push("HSTRLEN", entry, "data");
     req.push("DEL", entry);
+    req.push("EXEC");
 
     redis_exec(conn, ec, req, resp, y);
 
@@ -181,7 +188,7 @@ int RedisDriver::del(const DoutPrefixProvider* dpp, const std::string& key, opti
       return -ec.value();
     }
 
-    this->free_space += std::get<0>(resp).value();
+    this->free_space += std::get<0>(std::get<3>(resp).value()).value().value();
   } catch (std::exception &e) {
     ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << e.what() << dendl;
     return -EINVAL;
@@ -244,13 +251,20 @@ int RedisDriver::append_data(const DoutPrefixProvider* dpp, const::std::string& 
 int RedisDriver::delete_data(const DoutPrefixProvider* dpp, const::std::string& key, optional_yield y) 
 {
   std::string entry = partition_info.location + key;
-  response<int, ignore_t> resp;
 
   try {
     boost::system::error_code ec;
     request req;
+    response<
+      ignore_t,
+      ignore_t,
+      ignore_t,
+      response<std::optional<int>, std::optional<int>>
+    > resp;
+    req.push("MULTI");
     req.push("HSTRLEN", entry, "data");
     req.push("HDEL", entry, "data");
+    req.push("EXEC");
 
     redis_exec(conn, ec, req, resp, y);
 
@@ -258,12 +272,12 @@ int RedisDriver::delete_data(const DoutPrefixProvider* dpp, const::std::string& 
       ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
+
+    this->free_space += std::get<0>(std::get<3>(resp).value()).value().value();
   } catch (std::exception &e) {
     ldpp_dout(dpp, 0) << "RedisDriver::" << __func__ << "(): ERROR: " << e.what() << dendl;
     return -EINVAL;
   }
-
-  this->free_space += std::get<0>(resp).value();
 
   return 0;
 }
