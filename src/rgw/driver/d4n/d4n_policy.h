@@ -39,7 +39,7 @@ class CachePolicy {
       }
     };
 
-    struct ObjEntry : public boost::intrusive::list_base_hook<> {
+    struct ObjEntry {
       std::string key;
       std::string version;
       bool dirty;
@@ -49,13 +49,8 @@ class CachePolicy {
       std::string etag;
       std::string bucket_name;
       rgw_obj_key obj_key;
+      ObjEntry() = default;
       ObjEntry(std::string& key, std::string version, bool dirty, uint64_t size, time_t creationTime, rgw_user user, std::string& etag, const std::string& bucket_name, const rgw_obj_key& obj_key) : key(key), version(version), dirty(dirty), size(size), creationTime(creationTime), user(user), etag(etag), bucket_name(bucket_name), obj_key(obj_key) {}
-    };
-
-    struct ObjEntry_delete_disposer {
-      void operator()(ObjEntry *e) {
-        delete e;
-      }
     };
 
   public:
@@ -90,6 +85,14 @@ class LFUDAPolicy : public CachePolicy {
       }
     }; 
 
+    template<typename T>
+    struct ObjectComparator {
+      bool operator()(T* const e1, T* const e2) const {
+        // order the min heap using creationTime
+        return e1->creationTime > e2->creationTime;
+      }
+    };
+
     struct LFUDAEntry : public Entry {
       int localWeight;
       using handle_type = boost::heap::fibonacci_heap<LFUDAEntry*, boost::heap::compare<EntryComparator<LFUDAEntry>>>::handle_type;
@@ -97,18 +100,28 @@ class LFUDAPolicy : public CachePolicy {
 
       LFUDAEntry(std::string& key, uint64_t offset, uint64_t len, std::string& version, bool dirty, int localWeight) : Entry(key, offset, len, version, dirty), localWeight(localWeight) {}
       
-      void set_handle(handle_type handle_) { handle = handle_; } 
+      void set_handle(handle_type handle_) { handle = handle_; }
     };
 
     struct LFUDAObjEntry : public ObjEntry {
+      using handle_type = boost::heap::fibonacci_heap<LFUDAObjEntry*, boost::heap::compare<ObjectComparator<LFUDAObjEntry>>>::handle_type;
+      handle_type handle;
+
       LFUDAObjEntry(std::string& key, std::string& version, bool dirty, uint64_t size, time_t creationTime, rgw_user user, std::string& etag, const std::string& bucket_name, const rgw_obj_key& obj_key) : ObjEntry(key, version, dirty, size, creationTime, user, etag, bucket_name, obj_key) {}
+
+      void set_handle(handle_type handle_) { handle = handle_; }
     };
 
     using Heap = boost::heap::fibonacci_heap<LFUDAEntry*, boost::heap::compare<EntryComparator<LFUDAEntry>>>;
+    using Object_Heap = boost::heap::fibonacci_heap<LFUDAObjEntry*, boost::heap::compare<ObjectComparator<LFUDAObjEntry>>>;
     Heap entries_heap;
+    Object_Heap object_heap; //This heap contains dirty objects ordered by their creation time, used for cleaning method
     std::unordered_map<std::string, LFUDAEntry*> entries_map;
-    std::unordered_map<std::string, LFUDAObjEntry*> o_entries_map;
+    std::unordered_map<std::string, LFUDAObjEntry*> o_entries_map; //Contains only dirty objects, used for look-up
     std::mutex lfuda_lock;
+    std::mutex lfuda_cleaning_lock;
+    std::condition_variable cond;
+    bool quit{false};
 
     int age = 1, weightSum = 0, postedSum = 0;
     optional_yield y = null_yield;
@@ -148,6 +161,9 @@ class LFUDAPolicy : public CachePolicy {
     ~LFUDAPolicy() {
       rthread_stop();
       delete dir;
+      std::lock_guard l(lfuda_cleaning_lock);
+      quit = true;
+      cond.notify_all();
     } 
 
     virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver);
@@ -157,12 +173,13 @@ class LFUDAPolicy : public CachePolicy {
     virtual bool erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) override;
     void save_y(optional_yield y) { this->y = y; }
     virtual void updateObj(const DoutPrefixProvider* dpp, std::string& key, std::string version, bool dirty, uint64_t size, time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name, const rgw_obj_key& obj_key, optional_yield y) override;
-    virtual bool eraseObj(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) override;
+    virtual bool eraseObj(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y);
     virtual void cleaning(const DoutPrefixProvider* dpp) override;
     LFUDAObjEntry* find_obj_entry(std::string key) {
       auto it = o_entries_map.find(key);
-      if (it == o_entries_map.end())
+      if (it == o_entries_map.end()) {
         return nullptr;
+      }
       return it->second;
     }
 };

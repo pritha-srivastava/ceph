@@ -165,7 +165,11 @@ bool D4NFilterObject::get_obj_attrs_from_cache(const DoutPrefixProvider* dpp, op
     std::string version;
     std::string head_oid_in_cache;
     rgw::sal::Attrs attrs;
-    version = block.version;
+    if (have_instance()) {
+      version = get_instance();
+    } else {
+      version = block.version;
+    }
     this->set_object_version(version);
     //uniform name for versioned and non-versioned objects, since input for versioned objects might not contain version
     head_oid_in_cache = get_bucket()->get_name() + "_" + version + "_" + get_name();
@@ -819,7 +823,6 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
     block.cacheObj.creationTime = std::to_string(ceph::real_clock::to_time_t(source->get_mtime()));
     block.cacheObj.dirty = false;
     bool dirty = false;
-    time_t creationTime = ceph::real_clock::to_time_t(source->get_mtime());
 
     //populating fields needed for building directory index
     existing_block.cacheObj.objName = block.cacheObj.objName;
@@ -843,7 +846,6 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
           if (ret == 0) {
   	    std::string objEtag = "";
  	    filter->get_policy_driver()->get_cache_policy()->update(dpp, oid, ofs, bl.length(), version, dirty, *y);
-	    filter->get_policy_driver()->get_cache_policy()->updateObj(dpp, prefix, version, dirty, source->get_size(), creationTime, std::get<rgw_user>(source->get_bucket()->get_owner()), objEtag, source->get_bucket()->get_name(), source->get_key(), *y);
 
 	    /* Store block in directory */
             if (!blockDir->exist_key(dpp, &block, *y)) {
@@ -982,6 +984,17 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
 int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp,
                                                    optional_yield y, uint32_t flags)
 {
+  /*
+  1. Check if object exists in Object Directory
+  2. get dirty flag and version to construct the oid in cache correctly 
+  3. loop and delete all blocks in the cache
+  4. delete the head block
+  5. Update the in memory data structure for all blocks, and update the block directory also
+  6. Update the in memory data structure for head block, and update the block directory also
+  7. If the blocks reside in other caches, send remote request for the same
+  8. Need to figure out a way to get all versions to be deleted in case of versioned objects when a version is not specified.
+  9. If the object is not in object directory call next->delete_obj
+  */
   rgw::d4n::CacheObj obj = rgw::d4n::CacheObj{ // TODO: Add logic to ObjectDirectory del method to also delete all blocks belonging to that object
 			     .objName = source->get_key().get_oid(),
 			     .bucketName = source->get_bucket()->get_name()
@@ -1134,7 +1147,7 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
         object->set_instance(version);
       }
     } 
-    std::string prefix = obj->get_bucket()->get_name() + "_" + version + "_" + obj->get_name();
+    std::string key = obj->get_bucket()->get_name() + "_" + version + "_" + obj->get_name();
 
     ceph::real_time m_time;
     if (mtime) {
@@ -1147,7 +1160,7 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
     ldpp_dout(dpp, 20) << "D4NFilterWriter::" << __func__ << " size is: " << object->get_size() << dendl;
     object->set_obj_state_attrs(dpp, y, attrs);
     bufferlist bl;
-    std::string head_oid_in_cache = "D_" + prefix; //same as prefix, as there is no len or offset attached to head oid in cache
+    std::string head_oid_in_cache = "D_" + key; //same as key, as there is no len or offset attached to head oid in cache
     ret = driver->get_cache_driver()->put(dpp, head_oid_in_cache, bl, 0, attrs, y);
     attrs.erase("user.rgw.mtime");
     attrs.erase("user.rgw.object_size");
@@ -1157,13 +1170,13 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
     if (ret == 0) {
       object->set_attrs(attrs);
       ldpp_dout(dpp, 20) << "D4NFilterWriter::" << __func__ << " version stored in update method is: " << version << dendl;
-      driver->get_policy_driver()->get_cache_policy()->update(dpp, head_oid_in_cache, 0, bl.length(), version, dirty, y);
+      driver->get_policy_driver()->get_cache_policy()->update(dpp, key, 0, bl.length(), version, dirty, y);
       ret = object->set_head_obj_dir_entry(dpp, y, true);
       if (ret < 0) {
         ldpp_dout(dpp, 10) << "D4NFilterWriter::" << __func__ << "(): BlockDirectory set method failed for head object with ret: " << ret << dendl;
         return ret;
       }
-      driver->get_policy_driver()->get_cache_policy()->updateObj(dpp, prefix, version, dirty, accounted_size, creationTime, std::get<rgw_user>(obj->get_bucket()->get_owner()), objEtag, obj->get_bucket()->get_name(), obj->get_key(), y);
+      driver->get_policy_driver()->get_cache_policy()->updateObj(dpp, key, version, dirty, accounted_size, creationTime, std::get<rgw_user>(obj->get_bucket()->get_owner()), objEtag, obj->get_bucket()->get_name(), obj->get_key(), y);
 
       //write object to directory.
       hostsList = { driver->get_block_dir()->cct->_conf->rgw_d4n_l1_datacache_address };
