@@ -576,14 +576,8 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
   const uint64_t window_size = g_conf()->rgw_get_obj_window_size;
   std::string version = source->get_object_version();
   std::string prefix;
-  /* After prepare() method, for versioned objects, get_oid() returns an oid with versionId added,
-   * even for versioned objects, where version id is not provided as input
-   */
-  if (source->have_instance()) {
-    prefix = source->get_bucket()->get_name() + "_" + source->get_key().get_oid();
-  } else {
-    prefix = source->get_bucket()->get_name() + "_" + version + "_" + source->get_key().get_oid();
-  }
+
+  prefix = source->get_bucket()->get_name() + "_" + version + "_" + source->get_name();
 
   ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << "prefix: " << prefix << dendl;
   ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << "oid: " << source->get_key().get_oid() << " ofs: " << ofs << " end: " << end << dendl;
@@ -1050,11 +1044,10 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
     std::string prefix;
     if (object->have_instance()) {
       version = obj->get_instance();
-      prefix = obj->get_bucket()->get_name() + "_" + obj->get_key().get_oid();
     } else {
       version = this->version;
-      prefix = obj->get_bucket()->get_name() + "_" + version + "_" + obj->get_key().get_oid();
     }
+    prefix = obj->get_bucket()->get_name() + "_" + version + "_" + obj->get_name();
     rgw::d4n::BlockDirectory* blockDir = driver->get_block_dir();
 
     block.hostsList.push_back(blockDir->cct->_conf->rgw_d4n_l1_datacache_address); 

@@ -508,14 +508,14 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
           break;
       }
 
-      std::string head_prefix = b_name+"_"+key;
+      std::string prefix = b_name + "_" + e->version + "_" + c_obj->get_name();
       off_t lst = e->size;
       off_t fst = 0;
       off_t ofs = 0;
 
       rgw::sal::DataProcessor *filter = processor.get();
-      std::string head_oid_in_cache = "D_" + head_prefix;
-      std::string new_head_oid_in_cache = head_prefix;
+      std::string head_oid_in_cache = "D_" + prefix;
+      std::string new_head_oid_in_cache = prefix;
       ldpp_dout(dpp, 10) << __func__ << "(): head_oid_in_cache=" << head_oid_in_cache << dendl;
       ldpp_dout(dpp, 10) << __func__ << "(): new_head_oid_in_cache=" << new_head_oid_in_cache << dendl;
       bufferlist bl;
@@ -525,12 +525,6 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
       obj_attrs.erase("user.rgw.accounted_size");
       obj_attrs.erase("user.rgw.epoch");
 
-      std::string prefix;
-      if (c_obj->have_instance()) {
-        prefix = b_name + "_" + c_obj->get_key().get_oid();
-      } else {
-        prefix = b_name + "_" + e->version + "_" + c_obj->get_key().get_oid();
-      }
       do {
         ceph::bufferlist data;
         if (fst >= lst){
