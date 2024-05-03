@@ -203,12 +203,12 @@ asio::awaitable<void> LFUDAPolicy::redis_sync(const DoutPrefixProvider* dpp, opt
   for (;;) try {
     /* Update age */
     if (int ret = age_sync(dpp, y) < 0) {
-      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: ret=" << ret << dendl;
+      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ret << dendl;
     }
     
     /* Update minimum local weight sum */
     if (int ret = local_weight_sync(dpp, y) < 0) {
-      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: ret=" << ret << dendl;
+      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ret << dendl;
     }
 
     int interval = dpp->get_cct()->_conf->rgw_lfuda_sync_frequency;
@@ -361,8 +361,9 @@ void LFUDAPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64
   }
 
   if (updateLocalWeight) {
-    if (cacheDriver->set_attr(dpp, oid_in_cache, "user.rgw.localWeight", std::to_string(localWeight), y) < 0) 
-      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "(): CacheDriver set_attr method failed." << dendl;
+    int ret = -1;
+    if ((ret = cacheDriver->set_attr(dpp, oid_in_cache, "user.rgw.localWeight", std::to_string(localWeight), y)) < 0) 
+      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "(): CacheDriver set_attr method failed, ret=" << ret << dendl;
   }
 
   weightSum += ((localWeight < 0) ? 0 : localWeight);
@@ -568,7 +569,7 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
         block.blockID = fst;
         op_ret = dir->update_field(dpp, &block, "dirty", "false", null_yield);
         if (op_ret < 0) {
-            ldpp_dout(dpp, 0) << __func__ << "updating dirty flag in Block directory failed!" << dendl;
+            ldpp_dout(dpp, 0) << __func__ << "updating dirty flag in Block directory failed, ret=" << op_ret << dendl;
             return;
         }
         fst += cur_len;
@@ -614,6 +615,13 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
             //return;
         }
       }
+
+      op_ret = dir->update_field(dpp, &block, "dirty", "false", null_yield);
+      if (op_ret < 0) {
+	  ldpp_dout(dpp, 0) << __func__ << "updating dirty flag in block directory for head failed, ret=" << op_ret << dendl;
+	  return;
+      }
+
       //remove entry from map and queue, eraseObj locks correctly
       eraseObj(dpp, e->key, null_yield);
     } else { //end-if std::difftime(time(NULL), e->creationTime) > interval
@@ -643,7 +651,7 @@ int LRUPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_y
     entries_lru_list.pop_front_and_dispose(Entry_delete_disposer());
     auto ret = cacheDriver->delete_data(dpp, p.key, y);
     if (ret < 0) {
-      ldpp_dout(dpp, 0) << __func__ << "(): Failed to delete data from the cache backend: " << ret << dendl;
+      ldpp_dout(dpp, 0) << __func__ << "(): Failed to delete data from the cache backend, ret=" << ret << dendl;
       return ret;
     }
 
