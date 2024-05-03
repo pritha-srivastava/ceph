@@ -271,7 +271,7 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
 
     int avgWeight = weightSum / entries_map.size();
 
-    if (victim->hostsList.size() == 1 && victim->hostsList[0] == dpp->get_cct()->_conf->rgw_local_cache_address) { /* Last copy */
+    if (victim->hostsList.size() == 1 && *(victim->hostsList.begin()) == dpp->get_cct()->_conf->rgw_local_cache_address) { /* Last copy */
       if (victim->globalWeight) {
 	it->second->localWeight += victim->globalWeight;
         (*it->second->handle)->localWeight = it->second->localWeight;
