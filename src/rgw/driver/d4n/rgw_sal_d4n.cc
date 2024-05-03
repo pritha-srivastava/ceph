@@ -823,7 +823,6 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
   if (write_to_cache) {
     rgw::d4n::CacheBlock block, existing_block;
     rgw::d4n::BlockDirectory* blockDir = source->driver->get_block_dir();
-    block.hostsList.insert(dpp->get_cct()->_conf->rgw_local_cache_address); 
     block.cacheObj.objName = source->get_key().get_oid();
     block.cacheObj.bucketName = source->get_bucket()->get_name();
     std::stringstream s;
@@ -859,17 +858,16 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
 	    existing_block.blockID = block.blockID;
 	    existing_block.size = block.size;
 
-	    if ((ret = blockDir->get(dpp, &existing_block, *y)) == -ENOENT) {
-              if ((ret = blockDir->set(dpp, &block, *y)) < 0) 
-                ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
-	    } else if (ret == 0) {
-	      if (existing_block.version != block.version) {
-		if ((ret = blockDir->set(dpp, &block, *y)) < 0) //new versioned block will have new version, hostsList etc, how about globalWeight?
-		  ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
-	      } else {
-		if ((ret = blockDir->set(dpp, &block, *y)) < 0)
-		  ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
-	      }
+	    if ((ret = blockDir->get(dpp, &existing_block, *y)) == 0 || ret == -ENOENT) {
+              if (ret == 0) { //new versioned block will have new version, hostsList etc, how about globalWeight?
+		block = existing_block;
+                block.version = version;
+              }
+
+	      block.hostsList.insert(dpp->get_cct()->_conf->rgw_local_cache_address); 
+
+	      if ((ret = blockDir->set(dpp, &block, *y)) < 0)
+		ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
 	    } else { 
 	      ldpp_dout(dpp, 0) << "Failed to fetch existing block for: " << existing_block.cacheObj.objName << " blockID: " << existing_block.blockID << " block size: " << existing_block.size << dendl;
             }
@@ -896,17 +894,16 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
 	    existing_block.blockID = block.blockID;
 	    existing_block.size = block.size;
 
-	    if ((ret = blockDir->get(dpp, &existing_block, *y)) == -ENOENT) {
+	    if ((ret = blockDir->get(dpp, &existing_block, *y)) == 0 || ret == -ENOENT) {
+              if (ret == 0) { //new versioned block will have new version, hostsList etc, how about globalWeight?
+		block = existing_block;
+                block.version = version;
+              }
+
+	      block.hostsList.insert(dpp->get_cct()->_conf->rgw_local_cache_address); 
+
 	      if ((ret = blockDir->set(dpp, &block, *y)) < 0)
 		ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
-            } else if (ret == 0) {
-              if (existing_block.version != block.version) {
-		if ((ret = blockDir->set(dpp, &block, *y)) < 0) //new versioned block will have new version, hostsList etc, how about globalWeight?
-		  ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
-	      } else {
-		if ((ret = blockDir->set(dpp, &block, *y)) < 0)
-		  ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
-	      }
             } else {
 	      ldpp_dout(dpp, 0) << "Failed to fetch existing block for: " << existing_block.cacheObj.objName << " blockID: " << existing_block.blockID << " block size: " << existing_block.size << dendl;
             }
@@ -941,18 +938,16 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
 	      existing_block.blockID = block.blockID;
 	      existing_block.size = block.size;
 
-	      if ((ret = blockDir->get(dpp, &existing_block, *y)) == -ENOENT) {
-
-		if ((ret = blockDir->set(dpp, &block, *y)) < 0) 
-		  ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
-	      } else if (ret == 0) {
-		if (existing_block.version != block.version) {
-		  if ((ret = blockDir->set(dpp, &block, *y)) < 0) //new versioned block will have new version, hostsList etc, how about globalWeight?
-		    ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
-		} else {
-		  if ((ret = blockDir->set(dpp, &block, *y)) < 0)
-		    ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
+	      if ((ret = blockDir->get(dpp, &existing_block, *y)) == 0 || ret == -ENOENT) {
+		if (ret == 0) { //new versioned block will have new version, hostsList etc, how about globalWeight?
+		  block = existing_block;
+		  block.version = version;
 		}
+
+		block.hostsList.insert(dpp->get_cct()->_conf->rgw_local_cache_address); 
+
+		if ((ret = blockDir->set(dpp, &block, *y)) < 0)
+		  ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
 	      } else {
 		ldpp_dout(dpp, 0) << "Failed to fetch existing block for: " << existing_block.cacheObj.objName << " blockID: " << existing_block.blockID << " block size: " << existing_block.size << dendl;
               }
