@@ -1000,7 +1000,7 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
 
     rgw::d4n::CacheBlock block, existing_block;
     rgw::d4n::BlockDirectory* blockDir = source->driver->get_block_dir();
-    block.hostsList.push_back(dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address); 
+    block.hostsList.insert(dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address); 
     block.cacheObj.objName = source->get_key().get_oid();
     block.cacheObj.bucketName = source->get_bucket()->get_name();
     std::stringstream s;
@@ -1040,9 +1040,6 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
 		if ((ret = blockDir->set(dpp, &block, *y)) < 0) //new versioned block will have new version, hostsList etc, how about globalWeight?
 		  ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
 	      } else {
-                auto last = std::unique(block.hostsList.begin(), block.hostsList.end());
-                block.hostsList.erase(last, block.hostsList.end());
-
 		if ((ret = blockDir->set(dpp, &block, *y)) < 0)
 		  ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
 	      }
@@ -1090,9 +1087,6 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
 		if ((ret = blockDir->set(dpp, &block, *y)) < 0) //new versioned block will have new version, hostsList etc, how about globalWeight?
 		  ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
 	      } else {
-                auto last = std::unique(block.hostsList.begin(), block.hostsList.end());
-                block.hostsList.erase(last, block.hostsList.end());
-
 		if ((ret = blockDir->set(dpp, &block, *y)) < 0)
 		  ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
 	      }
@@ -1137,9 +1131,6 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
 		  if ((ret = blockDir->set(dpp, &block, *y)) < 0) //new versioned block will have new version, hostsList etc, how about globalWeight?
 		    ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
 		} else {
-		  auto last = std::unique(block.hostsList.begin(), block.hostsList.end());
-		  block.hostsList.erase(last, block.hostsList.end());
-
 		  if ((ret = blockDir->set(dpp, &block, *y)) < 0)
 		    ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
 		}
@@ -1258,11 +1249,11 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
     prefix = obj->get_bucket()->get_name() + "_" + version + "_" + obj->get_name();
     rgw::d4n::BlockDirectory* blockDir = driver->get_block_dir();
 
-    block.hostsList.push_back(dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address); 
+    block.hostsList.insert(dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address); 
     block.cacheObj.bucketName = obj->get_bucket()->get_name();
     block.cacheObj.objName = obj->get_key().get_oid();
     block.cacheObj.dirty = dirty;
-    block.cacheObj.hostsList.push_back(dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address);
+    block.cacheObj.hostsList.insert(dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address);
     existing_block.cacheObj.objName = block.cacheObj.objName;
     existing_block.cacheObj.bucketName = block.cacheObj.bucketName;
 
@@ -1279,7 +1270,7 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
       block.size = bl.length();
       block.blockID = ofs;
       block.dirty = true;
-      block.hostsList.push_back(dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address);
+      block.hostsList.insert(dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address);
       block.version = version;
       dirty = true;
       ret = driver->get_policy_driver()->get_cache_policy()->eviction(dpp, block.size, y);
@@ -1332,7 +1323,7 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
                        uint32_t flags)
 {
   bool dirty = false;
-  std::vector<std::string> hostsList = {};
+  std::unordered_set<std::string> hostsList = {};
   auto creationTime = startTime;
   std::string objEtag = etag;
   bool write_to_backend_store = false;

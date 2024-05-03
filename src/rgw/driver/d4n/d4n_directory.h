@@ -19,7 +19,7 @@ struct CacheObj {
   std::string bucketName; /* S3 bucket name */
   std::string creationTime; /* Creation time of the S3 Object */
   bool dirty{false};
-  std::vector<std::string> hostsList; /* List of hostnames <ip:port> of object locations for multiple backends */
+  std::unordered_set<std::string> hostsList; /* List of hostnames <ip:port> of object locations for multiple backends */
 };
 
 struct CacheBlock {
@@ -29,7 +29,7 @@ struct CacheBlock {
   bool dirty{false};
   uint64_t size; /* Block size in bytes */
   int globalWeight = 0; /* LFUDA policy variable */
-  std::vector<std::string> hostsList; /* List of hostnames <ip:port> of block locations */
+  std::unordered_set<std::string> hostsList; /* List of hostnames <ip:port> of block locations */
 };
 
 class Directory {

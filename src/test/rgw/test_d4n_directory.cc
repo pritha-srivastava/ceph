@@ -452,7 +452,7 @@ TEST_F(BlockDirectoryFixture, UpdateFieldYield)
 TEST_F(BlockDirectoryFixture, RemoveHostYield)
 {
   boost::asio::spawn(io, [this] (boost::asio::yield_context yield) {
-    block->hostsList.push_back("127.0.0.1:6000");
+    block->hostsList.insert("127.0.0.1:6000");
     ASSERT_EQ(0, dir->set(env->dpp, block, optional_yield{yield}));
     ASSERT_EQ(0, dir->remove_host(env->dpp, block, "127.0.0.1:6379", optional_yield{yield}));
 
