@@ -188,8 +188,8 @@ bool D4NFilterObject::get_obj_attrs_from_cache(const DoutPrefixProvider* dpp, op
           auto epoch = std::stoull(attr.second.c_str());
           this->set_epoch(epoch);
         } else if (attr.first == "user.rgw.version_id") {
-          ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): setting version_id." << dendl;
           instance = attr.second.to_str();
+          ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): setting version_id to: " << instance << dendl;
         } else if (attr.first == "user.rgw.source_zone") {
           ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): setting source zone id." << dendl;
           auto short_zone_id = static_cast<uint32_t>(std::stoul(attr.second.c_str()));
@@ -1054,10 +1054,17 @@ int D4NFilterWriter::prepare(optional_yield y)
     return next->prepare(y);
   }
   if (!object->have_instance()) {
-    enum { OBJ_INSTANCE_LEN = 32 };
-    char buf[OBJ_INSTANCE_LEN + 1];
-    gen_rand_alphanumeric_no_underscore(dpp->get_cct(), buf, OBJ_INSTANCE_LEN);
-    this->version = buf; //version for non-versioned objects, using gen_rand_alphanumeric_no_underscore for the time being
+    if (object->get_bucket()->versioned() && !object->get_bucket()->versioning_enabled()) { //if versioning is suspended
+      this->version = "null";
+    } else { // this holds true for non-versioned object and for version enabled object with no versionId given as input
+      enum { OBJ_INSTANCE_LEN = 32 };
+      char buf[OBJ_INSTANCE_LEN + 1];
+      gen_rand_alphanumeric_no_underscore(dpp->get_cct(), buf, OBJ_INSTANCE_LEN);
+      this->version = buf; // using gen_rand_alphanumeric_no_underscore for the time being
+      ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): generating version: " << version << dendl;
+    }
+  } else {
+    ldpp_dout(dpp, 10) << "D4NFilterWriter::" << __func__ << "(): " << "version is: " << object->get_instance() << dendl;
   }
   return 0;
 }
@@ -1166,7 +1173,7 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
       version = obj->get_instance();
     } else {
       version = this->version; //version for non-versioned objects, using gen_rand_alphanumeric_no_underscore for the time being
-      if (obj->get_bucket()->versioning_enabled()) {
+      if (obj->get_bucket()->versioned()) {
         object->set_instance(version);
       }
     } 
