@@ -215,11 +215,10 @@ asio::awaitable<void> LFUDAPolicy::redis_sync(const DoutPrefixProvider* dpp, opt
     rthread_timer->expires_after(std::chrono::seconds(interval));
     co_await rthread_timer->async_wait(asio::use_awaitable);
   } catch (sys::system_error& e) {
-    ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << e.what() << dendl;
-
     if (e.code() == asio::error::operation_aborted) {
       break;
     } else {
+      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << e.what() << dendl;
       continue;
     }
   }
@@ -392,6 +391,8 @@ bool LFUDAPolicy::erase(const DoutPrefixProvider* dpp, const std::string& key, o
 
   entries_heap.erase(p->second->handle);
   entries_map.erase(p);
+  delete p->second;
+  p->second = nullptr;
 
   return true;
 }
@@ -407,6 +408,7 @@ bool LFUDAPolicy::eraseObj(const DoutPrefixProvider* dpp, const std::string& key
   object_heap.erase(p->second->handle);
   o_entries_map.erase(p);
   delete p->second;
+  p->second = nullptr;
 
   return true;
 }
