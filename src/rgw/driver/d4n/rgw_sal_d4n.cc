@@ -1203,7 +1203,7 @@ int D4NFilterWriter::prepare(optional_yield y)
     ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): CacheDriver delete_data() method failed, ret=" << ret << dendl;
 
   d4n_writecache = g_conf()->d4n_writecache_enabled;
-  if (d4n_writecache == false){
+  if (d4n_writecache == false) {
     ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): calling next iterate" << dendl;
     return next->prepare(y);
   }

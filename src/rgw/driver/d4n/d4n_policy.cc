@@ -239,7 +239,7 @@ CacheBlock* LFUDAPolicy::get_victim_block(const DoutPrefixProvider* dpp, optiona
   victim->blockID = entries_heap.top()->offset;
   victim->size = entries_heap.top()->len;
 
-  if (dir->get(dpp, victim, y) < 0) {
+  if (blockDir->get(dpp, victim, y) < 0) {
     return nullptr;
   }
 
@@ -302,12 +302,12 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
     }
 
     victim->globalWeight += it->second->localWeight;
-    if (int ret = dir->update_field(dpp, victim, "globalWeight", std::to_string(victim->globalWeight), y) < 0) {
+    if (int ret = blockDir->update_field(dpp, victim, "globalWeight", std::to_string(victim->globalWeight), y) < 0) {
       delete victim;
       return ret;
     }
 
-    if (int ret = dir->remove_host(dpp, victim, dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address, y) < 0) {
+    if (int ret = blockDir->remove_host(dpp, victim, dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address, y) < 0) {
       delete victim;
       return ret;
     }
@@ -486,8 +486,8 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
 
       int op_ret = processor->prepare(null_yield);
       if (op_ret < 0) {
-          ldpp_dout(dpp, 20) << __func__ << "processor->prepare() returned ret=" << op_ret << dendl;
-          break;
+	ldpp_dout(dpp, 20) << __func__ << "processor->prepare() returned ret=" << op_ret << dendl;
+	break;
       }
 
       std::string prefix = b_name + "_" + e->version + "_" + c_obj->get_name();
@@ -510,7 +510,7 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
       do {
         ceph::bufferlist data;
         if (fst >= lst){
-            break;
+	  break;
         }
         off_t cur_size = std::min<off_t>(fst + dpp->get_cct()->_conf->rgw_max_chunk_size, lst);
         off_t cur_len = cur_size - fst;
@@ -528,9 +528,9 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
 
         op_ret = filter->process(std::move(data), ofs);
         if (op_ret < 0) {
-            ldpp_dout(dpp, 20) << __func__ << "processor->process() returned ret="
-            << op_ret << dendl;
-            return;
+	  ldpp_dout(dpp, 20) << __func__ << "processor->process() returned ret="
+	  << op_ret << dendl;
+	  return;
         }
 
         ofs += len;
@@ -551,7 +551,7 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
       fst = 0;
       do {
         if (fst >= lst) {
-            break;
+	  break;
         }
         off_t cur_size = std::min<off_t>(fst + dpp->get_cct()->_conf->rgw_max_chunk_size, lst);
         off_t cur_len = cur_size - fst;
@@ -569,10 +569,10 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
         block.cacheObj.objName = c_obj->get_key().get_oid();
         block.size = cur_len;
         block.blockID = fst;
-        op_ret = dir->update_field(dpp, &block, "dirty", "false", null_yield);
+        op_ret = blockDir->update_field(dpp, &block, "dirtyBlock", "false", null_yield);
         if (op_ret < 0) {
-            ldpp_dout(dpp, 0) << __func__ << "updating dirty flag in Block directory failed, ret=" << op_ret << dendl;
-            return;
+	  ldpp_dout(dpp, 0) << __func__ << "updating dirty flag in block directory failed, ret=" << op_ret << dendl;
+	  return;
         }
         fst += cur_len;
       } while(fst < lst);
@@ -589,16 +589,16 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
       block.size = 0;
       block.blockID = 0;
       if (c_obj->have_instance()) {
-        dir->get(dpp, &block, null_yield);
+        blockDir->get(dpp, &block, null_yield);
         if (block.version == c_obj->get_instance()) { //versioned case - update head block entry that has latest version
-          op_ret = dir->update_field(dpp, &block, "dirty", "false", null_yield);
+          op_ret = blockDir->update_field(dpp, &block, "dirty", "false", null_yield);
           if (op_ret < 0) {
               ldpp_dout(dpp, 20) << __func__ << "updating dirty flag in block directory for head failed!" << dendl;
               //return;
           }
         }
       } else { //non-versioned case
-        op_ret = dir->update_field(dpp, &block, "dirty", "false", null_yield);
+        op_ret = blockDir->update_field(dpp, &block, "dirty", "false", null_yield);
         if (op_ret < 0) {
             ldpp_dout(dpp, 20) << __func__ << "updating dirty flag in block directory for head failed!" << dendl;
             //return;
@@ -611,27 +611,41 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
         instance_block.cacheObj.objName = c_obj->get_oid();
         instance_block.size = 0;
         instance_block.blockID = 0;
-        op_ret = dir->update_field(dpp, &instance_block, "dirty", "false", null_yield);
+        op_ret = blockDir->update_field(dpp, &instance_block, "dirty", "false", null_yield);
         if (op_ret < 0) {
             ldpp_dout(dpp, 20) << __func__ << "updating dirty flag in block directory for instance block failed!" << dendl;
             //return;
         }
       }
 
-      op_ret = dir->update_field(dpp, &block, "dirty", "false", null_yield);
+      op_ret = blockDir->update_field(dpp, &block, "dirtyBlock", "false", null_yield);
       if (op_ret < 0) {
 	  ldpp_dout(dpp, 0) << __func__ << "updating dirty flag in block directory for head failed, ret=" << op_ret << dendl;
 	  return;
       }
 
       //remove entry from map and queue, eraseObj locks correctly
+      rgw::d4n::CacheObj obj;
+      obj.bucketName = c_obj->get_bucket()->get_name();
+      obj.objName = c_obj->get_key().get_oid();
+      op_ret = objDir->update_field(dpp, &obj, "dirty", "false", null_yield);
+      if (op_ret < 0) {
+	ldpp_dout(dpp, 0) << __func__ << "updating dirty flag in object directory failed, ret=" << op_ret << dendl;
+	return;
+      }
+
+      op_ret = blockDir->update_field(dpp, &block, "dirtyObj", "false", null_yield);
+      if (op_ret < 0) {
+	ldpp_dout(dpp, 0) << __func__ << "updating dirty flag in block directory failed, ret=" << op_ret << dendl;
+	return;
+      }
+
       eraseObj(dpp, e->key, null_yield);
     } else { //end-if std::difftime(time(NULL), e->creationTime) > interval
       std::this_thread::sleep_for(std::chrono::milliseconds(interval)); //TODO:: should this time be optimised?
     }
   } //end-while true
 }
-
 
 int LRUPolicy::exist_key(std::string key)
 {

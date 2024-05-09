@@ -128,10 +128,10 @@ class BlockDirectoryFixture: public ::testing::Test {
     net::io_context io;
     std::shared_ptr<connection> conn;
 
-    std::vector<std::string> vals{"0", "", "0", "0", env->redisHost, 
+    std::vector<std::string> vals{"0", "", "0", "0", "0", env->redisHost, 
                                    "testName", "testBucket", "", "0", env->redisHost};
-    std::vector<std::string> fields{"blockID", "version", "size", "globalWeight", "blockHosts", 
-				     "objName", "bucketName", "creationTime", "dirty", "objHosts"};
+    std::vector<std::string> fields{"blockID", "version", "dirtyBlock", "size", "globalWeight", "blockHosts", 
+				     "objName", "bucketName", "creationTime", "dirtyObj", "objHosts"};
 };
 
 void rethrow(std::exception_ptr eptr) {
@@ -374,8 +374,8 @@ TEST_F(BlockDirectoryFixture, CopyYield)
     EXPECT_EQ(std::get<0>(resp).value(), 1);
 
     auto copyVals = vals;
-    copyVals[5] = "copyTestName";
-    copyVals[6] = "copyBucketName";
+    copyVals[6] = "copyTestName";
+    copyVals[7] = "copyBucketName";
     EXPECT_EQ(std::get<1>(resp).value(), copyVals);
 
     conn->cancel();
