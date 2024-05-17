@@ -282,7 +282,7 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
     }
     int avgWeight = weightSum / entries_map.size();
 
-    if (victim->hostsList.size() == 1 && *(victim->hostsList.begin()) == dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address) { /* Last copy */
+    if (victim->cacheObj.hostsList.size() == 1 && *(victim->cacheObj.hostsList.begin()) == dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address) { /* Last copy */
       if (victim->globalWeight) {
 	it->second->localWeight += victim->globalWeight;
         (*it->second->handle)->localWeight = it->second->localWeight;
@@ -574,7 +574,7 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
         block.cacheObj.objName = c_obj->get_key().get_oid();
         block.size = cur_len;
         block.blockID = fst;
-        op_ret = blockDir->update_field(dpp, &block, "dirtyBlock", "false", null_yield);
+        op_ret = blockDir->update_field(dpp, &block, "dirty", "false", null_yield);
         if (op_ret < 0) {
 	  ldpp_dout(dpp, 0) << __func__ << "updating dirty flag in block directory failed, ret=" << op_ret << dendl;
 	  return;
@@ -623,7 +623,7 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
         }
       }
 
-      op_ret = blockDir->update_field(dpp, &block, "dirtyBlock", "false", null_yield);
+      op_ret = blockDir->update_field(dpp, &block, "dirty", "false", null_yield);
       if (op_ret < 0) {
 	  ldpp_dout(dpp, 0) << __func__ << "updating dirty flag in block directory for head failed, ret=" << op_ret << dendl;
 	  return;
@@ -639,7 +639,7 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
 	return;
       }
 
-      op_ret = blockDir->update_field(dpp, &block, "dirtyObj", "false", null_yield);
+      op_ret = blockDir->update_field(dpp, &block, "dirty", "false", null_yield);
       if (op_ret < 0) {
 	ldpp_dout(dpp, 0) << __func__ << "updating dirty flag in block directory failed, ret=" << op_ret << dendl;
 	return;
