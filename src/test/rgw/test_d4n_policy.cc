@@ -58,7 +58,7 @@ class LFUDAPolicyFixture : public ::testing::Test {
         .blockID = 0,
 	.version = "",
 	.size = bl.length(),
-	.hostsList = { env->redisHost }
+	.globalWeight = 0
       };
 
       conn = std::make_shared<connection>(net::make_strand(io));
@@ -117,7 +117,7 @@ class LFUDAPolicyFixture : public ::testing::Test {
 	  if (dir->get(env->dpp, block, y) < 0) {
 	    return -1;
 	  } else {
-	    if (!block->hostsList.empty()) { 
+	    if (!block->cacheObj.hostsList.empty()) { 
 	      block->globalWeight += age;
 	      
 	      if (dir->update_field(env->dpp, block, "globalWeight", std::to_string(block->globalWeight), y) < 0) {
@@ -130,7 +130,7 @@ class LFUDAPolicyFixture : public ::testing::Test {
 	    }
 	  }
 	} else if (!exists) { /* No remote copy */
-	  block->hostsList.insert(env->dpp->get_cct()->_conf->rgw_local_cache_address);
+	  block->cacheObj.hostsList.insert(env->dpp->get_cct()->_conf->rgw_local_cache_address);
 	  if (dir->set(env->dpp, block, y) < 0)
 	    return -1;
 
@@ -208,7 +208,6 @@ TEST_F(LFUDAPolicyFixture, RemoteGetBlockYield)
       .version = "",
       .size = bl.length(),
       .globalWeight = 5,
-      .hostsList = { env->redisHost }
     };
 
     bufferlist attrVal;
@@ -229,9 +228,9 @@ TEST_F(LFUDAPolicyFixture, RemoteGetBlockYield)
 
     /* Remote block */
     block->size = cacheDriver->get_free_space(env->dpp) + 1; /* To trigger eviction */
-    block->hostsList.clear();  
+    block->cacheObj.hostsList.clear();  
     block->cacheObj.hostsList.clear();
-    block->hostsList.insert("127.0.0.1:6000");
+    block->cacheObj.hostsList.insert("127.0.0.1:6000");
     block->cacheObj.hostsList.insert("127.0.0.1:6000");
 
     ASSERT_EQ(0, dir->set(env->dpp, block, optional_yield{io, yield}));
