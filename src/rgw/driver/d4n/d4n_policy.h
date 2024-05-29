@@ -200,15 +200,43 @@ class LFUDAPolicy : public CachePolicy {
 
 class LRUPolicy : public CachePolicy {
   private:
+    template<typename T>
+    struct EntryComparator {
+      bool operator()(T* const e1, T* const e2) const {
+        // order the min heap using access time and dirty flag so that dirty blocks are at the bottom
+        if ((e1->dirty && e2->dirty) || (!e1->dirty && !e2->dirty)) {
+	        return e1->access_time > e2->access_time;
+        } else if (e1->dirty && !e2->dirty){
+          return true;
+        } else if (!e1->dirty && e2->dirty) {
+          return false;
+        } else {
+          return e1->access_time > e2->access_time;
+        }
+      }
+    };
+    struct LRUEntry : public Entry {
+      uint64_t access_time;
+      using handle_type = boost::heap::fibonacci_heap<LRUEntry*, boost::heap::compare<EntryComparator<LRUEntry>>>::handle_type;
+      handle_type handle;
+
+      LRUEntry(std::string& key, uint64_t offset, uint64_t len, std::string& version, bool dirty, int localWeight) : Entry(key, offset, len, version, dirty)
+														      { access_time = get_current_timestamp(); }
+      
+      void set_handle(handle_type handle_) { handle = handle_; }
+    };
+    using Heap = boost::heap::fibonacci_heap<LRUEntry*, boost::heap::compare<EntryComparator<LRUEntry>>>;
     typedef boost::intrusive::list<Entry> List;
 
     std::unordered_map<std::string, Entry*> entries_map;
     std::unordered_map<std::string, ObjEntry*> o_entries_map;
     std::mutex lru_lock;
     List entries_lru_list;
+    Heap entries_heap;
     rgw::cache::CacheDriver* cacheDriver;
 
     bool _erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y);
+    static inline uint64_t get_current_timestamp() { return std::chrono::system_clock::now().time_since_epoch().count(); }
 
   public:
     LRUPolicy(rgw::cache::CacheDriver* cacheDriver) : cacheDriver{cacheDriver} {}
