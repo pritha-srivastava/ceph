@@ -21,6 +21,14 @@ namespace sys = boost::system;
 
 class CachePolicy {
   protected:
+    BlockDirectory* blockDir;
+    ObjectDirectory* objDir;
+    rgw::sal::Driver *driver;
+    rgw::cache::CacheDriver* cacheDriver;
+    optional_yield y = null_yield;
+    std::mutex lfuda_cleaning_lock;
+    std::condition_variable cond;
+    bool quit{false};
     struct Entry : public boost::intrusive::list_base_hook<> {
       std::string key;
       uint64_t offset;
@@ -38,7 +46,17 @@ class CachePolicy {
       }
     };
 
+    template<typename T>
+    struct ObjectComparator {
+      bool operator()(T* const e1, T* const e2) const {
+        // order the min heap using creationTime
+        return e1->creationTime > e2->creationTime;
+      }
+    };
+
     struct ObjEntry {
+      using handle_type = boost::heap::fibonacci_heap<ObjEntry*, boost::heap::compare<ObjectComparator<ObjEntry>>>::handle_type;
+      handle_type handle;
       std::string key;
       std::string version;
       bool dirty;
@@ -50,15 +68,24 @@ class CachePolicy {
       rgw_obj_key obj_key;
       ObjEntry() = default;
       ObjEntry(std::string& key, std::string version, bool dirty, uint64_t size, 
-		time_t creationTime, rgw_user user, std::string& etag, 
-		const std::string& bucket_name, const rgw_obj_key& obj_key) : key(key), version(version), dirty(dirty), size(size), 
+        time_t creationTime, rgw_user user, std::string& etag, 
+        const std::string& bucket_name, const rgw_obj_key& obj_key) : key(key), version(version), dirty(dirty), size(size), 
 									      creationTime(creationTime), user(user), etag(etag), 
 									      bucket_name(bucket_name), obj_key(obj_key) {}
+      void set_handle(handle_type handle_) { handle = handle_; }
     };
+  
+    using Object_Heap = boost::heap::fibonacci_heap<ObjEntry*, boost::heap::compare<ObjectComparator<ObjEntry>>>;
+    Object_Heap object_heap; //This heap contains dirty objects ordered by their creation time, used for cleaning method
+    std::unordered_map<std::string, ObjEntry*> o_entries_map; //Contains only dirty objects, used for look-up
 
   public:
-    CachePolicy() {}
-    virtual ~CachePolicy() = default; 
+    CachePolicy(rgw::cache::CacheDriver* cacheDriver) : cacheDriver(cacheDriver) {}
+    virtual ~CachePolicy() {
+      std::lock_guard l(lfuda_cleaning_lock);
+      quit = true;
+      cond.notify_all();
+    }
 
     virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver) = 0; 
     virtual int exist_key(std::string key) = 0;
@@ -69,7 +96,7 @@ class CachePolicy {
 			    const rgw_obj_key& obj_key, optional_yield y) = 0;
     virtual bool erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) = 0;
     virtual bool eraseObj(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) = 0;
-    virtual void cleaning(const DoutPrefixProvider* dpp) = 0;
+    virtual void cleaning(const DoutPrefixProvider* dpp);
 };
 
 class LFUDAPolicy : public CachePolicy {
@@ -89,7 +116,7 @@ class LFUDAPolicy : public CachePolicy {
         }
       }
     }; 
-
+#if 0
     template<typename T>
     struct ObjectComparator {
       bool operator()(T* const e1, T* const e2) const {
@@ -97,7 +124,7 @@ class LFUDAPolicy : public CachePolicy {
         return e1->creationTime > e2->creationTime;
       }
     };
-
+#endif
     struct LFUDAEntry : public Entry {
       int localWeight;
       using handle_type = boost::heap::fibonacci_heap<LFUDAEntry*, boost::heap::compare<EntryComparator<LFUDAEntry>>>::handle_type;
@@ -108,7 +135,7 @@ class LFUDAPolicy : public CachePolicy {
       
       void set_handle(handle_type handle_) { handle = handle_; }
     };
-
+#if 0
     struct LFUDAObjEntry : public ObjEntry {
       using handle_type = boost::heap::fibonacci_heap<LFUDAObjEntry*, boost::heap::compare<ObjectComparator<LFUDAObjEntry>>>::handle_type;
       handle_type handle;
@@ -121,26 +148,19 @@ class LFUDAPolicy : public CachePolicy {
 
       void set_handle(handle_type handle_) { handle = handle_; }
     };
-
+#endif
     using Heap = boost::heap::fibonacci_heap<LFUDAEntry*, boost::heap::compare<EntryComparator<LFUDAEntry>>>;
-    using Object_Heap = boost::heap::fibonacci_heap<LFUDAObjEntry*, boost::heap::compare<ObjectComparator<LFUDAObjEntry>>>;
+    //using Object_Heap = boost::heap::fibonacci_heap<LFUDAObjEntry*, boost::heap::compare<ObjectComparator<LFUDAObjEntry>>>;
     Heap entries_heap;
-    Object_Heap object_heap; //This heap contains dirty objects ordered by their creation time, used for cleaning method
+    //Object_Heap object_heap; //This heap contains dirty objects ordered by their creation time, used for cleaning method
     std::unordered_map<std::string, LFUDAEntry*> entries_map;
-    std::unordered_map<std::string, LFUDAObjEntry*> o_entries_map; //Contains only dirty objects, used for look-up
+    //std::unordered_map<std::string, LFUDAObjEntry*> o_entries_map; //Contains only dirty objects, used for look-up
     std::mutex lfuda_lock;
-    std::mutex lfuda_cleaning_lock;
-    std::condition_variable cond;
-    bool quit{false};
 
     int age = 1, weightSum = 0, postedSum = 0;
     optional_yield y = null_yield;
     std::shared_ptr<connection> conn;
-    BlockDirectory* blockDir;
-    ObjectDirectory* objDir;
-    rgw::cache::CacheDriver* cacheDriver;
     std::optional<asio::steady_timer> rthread_timer;
-    rgw::sal::Driver *driver;
     std::thread tc;
 
     CacheBlock* get_victim_block(const DoutPrefixProvider* dpp, optional_yield y);
@@ -162,9 +182,8 @@ class LFUDAPolicy : public CachePolicy {
     }
 
   public:
-    LFUDAPolicy(std::shared_ptr<connection>& conn, rgw::cache::CacheDriver* cacheDriver) : CachePolicy(), 
-											   conn(conn), 
-											   cacheDriver(cacheDriver)
+    LFUDAPolicy(std::shared_ptr<connection>& conn, rgw::cache::CacheDriver* cacheDriver) : CachePolicy(cacheDriver), 
+											   conn(conn)
     {
       blockDir = new BlockDirectory{conn};
       objDir = new ObjectDirectory{conn};
@@ -173,9 +192,6 @@ class LFUDAPolicy : public CachePolicy {
       rthread_stop();
       delete blockDir;
       delete objDir;
-      std::lock_guard l(lfuda_cleaning_lock);
-      quit = true;
-      cond.notify_all();
     } 
 
     virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver);
@@ -188,8 +204,8 @@ class LFUDAPolicy : public CachePolicy {
 			    time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name, 
 			    const rgw_obj_key& obj_key, optional_yield y) override;
     virtual bool eraseObj(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y);
-    virtual void cleaning(const DoutPrefixProvider* dpp) override;
-    LFUDAObjEntry* find_obj_entry(std::string key) {
+    //virtual void cleaning(const DoutPrefixProvider* dpp) override;
+    ObjEntry* find_obj_entry(std::string key) {
       auto it = o_entries_map.find(key);
       if (it == o_entries_map.end()) {
         return nullptr;
@@ -199,6 +215,33 @@ class LFUDAPolicy : public CachePolicy {
 };
 
 class LRUPolicy : public CachePolicy {
+  private:
+    typedef boost::intrusive::list<Entry> List;
+
+    std::unordered_map<std::string, Entry*> entries_map;
+    std::unordered_map<std::string, ObjEntry*> o_entries_map;
+    std::mutex lru_lock;
+    List entries_lru_list;
+    //rgw::cache::CacheDriver* cacheDriver;
+
+    bool _erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y);
+
+  public:
+    LRUPolicy(rgw::cache::CacheDriver* cacheDriver) : CachePolicy(cacheDriver) {}
+
+    virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver* _driver) { return 0; }
+    virtual int exist_key(std::string key) override;
+    virtual int eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) override;
+    virtual void update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, optional_yield y) override;
+    virtual void updateObj(const DoutPrefixProvider* dpp, std::string& key, std::string version, bool dirty, uint64_t size,
+			    time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name,
+			    const rgw_obj_key& obj_key, optional_yield y) override;
+    virtual bool erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) override;
+    virtual bool eraseObj(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) override;
+    virtual void cleaning(const DoutPrefixProvider* dpp) override {}
+};
+
+class LRUHeapPolicy : public CachePolicy {
   private:
     template<typename T>
     struct EntryComparator {
@@ -215,31 +258,53 @@ class LRUPolicy : public CachePolicy {
         }
       }
     };
+#if 0
+    template<typename T>
+    struct ObjectComparator {
+      bool operator()(T* const e1, T* const e2) const {
+        // order the min heap using creationTime
+        return e1->creationTime > e2->creationTime;
+      }
+    };
+#endif
     struct LRUEntry : public Entry {
       uint64_t access_time;
       using handle_type = boost::heap::fibonacci_heap<LRUEntry*, boost::heap::compare<EntryComparator<LRUEntry>>>::handle_type;
       handle_type handle;
 
-      LRUEntry(std::string& key, uint64_t offset, uint64_t len, std::string& version, bool dirty, int localWeight) : Entry(key, offset, len, version, dirty)
+      LRUEntry(std::string& key, uint64_t offset, uint64_t len, std::string& version, bool dirty) : Entry(key, offset, len, version, dirty)
 														      { access_time = get_current_timestamp(); }
-      
+
       void set_handle(handle_type handle_) { handle = handle_; }
     };
-    using Heap = boost::heap::fibonacci_heap<LRUEntry*, boost::heap::compare<EntryComparator<LRUEntry>>>;
-    typedef boost::intrusive::list<Entry> List;
+#if 0
+    struct LRUObjEntry : public ObjEntry {
+      using handle_type = boost::heap::fibonacci_heap<LRUObjEntry*, boost::heap::compare<ObjectComparator<LRUObjEntry>>>::handle_type;
+      handle_type handle;
 
-    std::unordered_map<std::string, Entry*> entries_map;
-    std::unordered_map<std::string, ObjEntry*> o_entries_map;
+      LRUObjEntry(std::string& key, std::string& version, bool dirty, uint64_t size, 
+                     time_t creationTime, rgw_user user, std::string& etag, 
+                     const std::string& bucket_name, const rgw_obj_key& obj_key) : ObjEntry(key, version, dirty, size, 
+									           creationTime, user, etag, bucket_name, obj_key) {}
+
+      void set_handle(handle_type handle_) { handle = handle_; }
+    };
+#endif
+    using Heap = boost::heap::fibonacci_heap<LRUEntry*, boost::heap::compare<EntryComparator<LRUEntry>>>;
+    //using Object_Heap = boost::heap::fibonacci_heap<LRUObjEntry*, boost::heap::compare<ObjectComparator<LRUObjEntry>>>;
+
+    std::unordered_map<std::string, LRUEntry*> entries_map;
+    //std::unordered_map<std::string, LRUObjEntry*> o_entries_map;
     std::mutex lru_lock;
-    List entries_lru_list;
     Heap entries_heap;
-    rgw::cache::CacheDriver* cacheDriver;
+    //Object_Heap object_heap;
+    //rgw::cache::CacheDriver* cacheDriver;
 
     bool _erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y);
     static inline uint64_t get_current_timestamp() { return std::chrono::system_clock::now().time_since_epoch().count(); }
 
   public:
-    LRUPolicy(rgw::cache::CacheDriver* cacheDriver) : cacheDriver{cacheDriver} {}
+    LRUHeapPolicy(rgw::cache::CacheDriver* cacheDriver) : CachePolicy(cacheDriver) {}
 
     virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver* _driver) { return 0; } 
     virtual int exist_key(std::string key) override;
@@ -250,7 +315,7 @@ class LRUPolicy : public CachePolicy {
 			    const rgw_obj_key& obj_key, optional_yield y) override;
     virtual bool erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) override;
     virtual bool eraseObj(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) override;
-    virtual void cleaning(const DoutPrefixProvider* dpp) override {}
+    //virtual void cleaning(const DoutPrefixProvider* dpp) override {}
 };
 
 class PolicyDriver {

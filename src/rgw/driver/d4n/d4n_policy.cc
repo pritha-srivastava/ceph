@@ -369,10 +369,10 @@ void LFUDAPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64
 
 void LFUDAPolicy::updateObj(const DoutPrefixProvider* dpp, std::string& key, std::string version, bool dirty, uint64_t size, time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name, const rgw_obj_key& obj_key, optional_yield y)
 {
-  using handle_type = boost::heap::fibonacci_heap<LFUDAObjEntry*, boost::heap::compare<ObjectComparator<LFUDAObjEntry>>>::handle_type;
+  using handle_type = boost::heap::fibonacci_heap<ObjEntry*, boost::heap::compare<ObjectComparator<ObjEntry>>>::handle_type;
   ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Before acquiring lock." << dendl;
   const std::lock_guard l(lfuda_cleaning_lock);
-  LFUDAObjEntry *e = new LFUDAObjEntry{key, version, dirty, size, creationTime, user, etag, bucket_name, obj_key};
+  ObjEntry *e = new ObjEntry{key, version, dirty, size, creationTime, user, etag, bucket_name, obj_key};
   handle_type handle = object_heap.push(e);
   e->set_handle(handle);
   o_entries_map.emplace(key, e);
@@ -412,7 +412,7 @@ bool LFUDAPolicy::eraseObj(const DoutPrefixProvider* dpp, const std::string& key
   return true;
 }
 
-void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
+void CachePolicy::cleaning(const DoutPrefixProvider* dpp)
 {
   const int interval = dpp->get_cct()->_conf->rgw_d4n_cache_cleaning_interval;
   while(!quit) {
@@ -425,7 +425,7 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
   
     ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__ << "" << __LINE__ << "(): Before acquiring cleaning-lock" << dendl;
     std::unique_lock<std::mutex> l(lfuda_cleaning_lock);
-    LFUDAObjEntry* e;
+    ObjEntry* e;
     if (object_heap.size() > 0) {
       e = object_heap.top();
     } else {
@@ -719,6 +719,106 @@ bool LRUPolicy::_erase(const DoutPrefixProvider* dpp, const std::string& key, op
   }
   entries_map.erase(p);
   entries_lru_list.erase_and_dispose(entries_lru_list.iterator_to(*(p->second)), Entry_delete_disposer());
+  return true;
+}
+
+int LRUHeapPolicy::exist_key(std::string key)
+{
+  const std::lock_guard l(lru_lock);
+  if (entries_map.count(key) != 0) {
+      return true;
+    }
+    return false;
+}
+
+int LRUHeapPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y)
+{
+  const std::lock_guard l(lru_lock);
+  uint64_t freeSpace = cacheDriver->get_free_space(dpp);
+
+  while (freeSpace < size) {
+    std::string key = entries_heap.top()->key;
+    auto it = entries_map.find(key);
+    if (it == entries_map.end()) {
+      return -ENOENT;
+    }
+    // check dirty flag of entry to be evicted, if the flag is dirty, all entries on the local node are dirty
+    if (it->second->dirty) {
+      ldpp_dout(dpp, 0) << "LRUHeapPolicy::" << __func__ << "(): Top entry in min heap is dirty, no entry is available for eviction!" << dendl;
+      return -ENOENT;
+    }
+
+    _erase(dpp, key, y);
+    auto ret = cacheDriver->delete_data(dpp, key, y);
+    if (ret < 0) {
+      ldpp_dout(dpp, 0) << __func__ << "(): Failed to delete data from the cache backend, ret=" << ret << dendl;
+      return ret;
+    }
+
+    freeSpace = cacheDriver->get_free_space(dpp);
+  }
+
+  return 0;
+}
+
+void LRUHeapPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, optional_yield y)
+{
+  using handle_type = boost::heap::fibonacci_heap<LRUEntry*, boost::heap::compare<EntryComparator<LRUEntry>>>::handle_type;
+  const std::lock_guard l(lru_lock);
+  _erase(dpp, key, y);
+  LRUEntry *e = new LRUEntry(key, offset, len, version, dirty);
+  handle_type handle = entries_heap.push(e);
+  e->set_handle(handle);
+  entries_map.emplace(key, e);
+}
+
+void LRUHeapPolicy::updateObj(const DoutPrefixProvider* dpp, std::string& key, std::string version, bool dirty, uint64_t size, time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name, const rgw_obj_key& obj_key, optional_yield y)
+{
+  using handle_type = boost::heap::fibonacci_heap<ObjEntry*, boost::heap::compare<ObjectComparator<ObjEntry>>>::handle_type;
+  ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Before acquiring lock." << dendl;
+  const std::lock_guard l(lfuda_cleaning_lock);
+  ObjEntry *e = new ObjEntry{key, version, dirty, size, creationTime, user, etag, bucket_name, obj_key};
+  handle_type handle = object_heap.push(e);
+  e->set_handle(handle);
+  o_entries_map.emplace(key, e);
+  cond.notify_one();
+}
+
+
+bool LRUHeapPolicy::erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y)
+{
+  const std::lock_guard l(lru_lock);
+  return _erase(dpp, key, y);
+}
+
+bool LRUHeapPolicy::eraseObj(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y)
+{
+  const std::lock_guard l(lfuda_cleaning_lock);
+  auto p = o_entries_map.find(key);
+  if (p == o_entries_map.end()) {
+    return false;
+  }
+
+  object_heap.erase(p->second->handle);
+  o_entries_map.erase(p);
+  delete p->second;
+  p->second = nullptr;
+
+  return true;
+}
+
+bool LRUHeapPolicy::_erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y)
+{
+  auto p = entries_map.find(key);
+  if (p == entries_map.end()) {
+    return false;
+  }
+
+  entries_heap.erase(p->second->handle);
+  entries_map.erase(p);
+  delete p->second;
+  p->second = nullptr;
+
   return true;
 }
 
