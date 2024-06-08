@@ -29,14 +29,22 @@ class CachePolicy {
     std::mutex lfuda_cleaning_lock;
     std::condition_variable cond;
     bool quit{false};
+    std::thread tc;
+    uint64_t cur_read_cache_size{0};
+    uint64_t cur_write_cache_size{0};
+    uint64_t total_cache_size{0};
+    uint64_t max_read_cache_size{0};
+    uint64_t max_write_cache_size{0};
+    const double read_cache_to_cache_size_ratio = 0.5;
     struct Entry : public boost::intrusive::list_base_hook<> {
       std::string key;
       uint64_t offset;
       uint64_t len;
       std::string version;
       bool dirty;
-      Entry(std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty) : key(key), offset(offset), 
-											        len(len), version(version), dirty(dirty) {}
+      uint64_t total_size; //this includes size of attrs or attrs + data len, len can be used later for this also if there is no need for this extra variable
+      Entry(std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, uint64_t total_size) : key(key), offset(offset), 
+											        len(len), version(version), dirty(dirty), total_size(total_size) {}
       };
    
     //The disposer object function
@@ -78,6 +86,8 @@ class CachePolicy {
     using Object_Heap = boost::heap::fibonacci_heap<ObjEntry*, boost::heap::compare<ObjectComparator<ObjEntry>>>;
     Object_Heap object_heap; //This heap contains dirty objects ordered by their creation time, used for cleaning method
     std::unordered_map<std::string, ObjEntry*> o_entries_map; //Contains only dirty objects, used for look-up
+  
+    virtual int evict_for_clean_block(const DoutPrefixProvider* dpp, std::string key, uint64_t total_size) = 0;
 
   public:
     CachePolicy(rgw::cache::CacheDriver* cacheDriver) : cacheDriver(cacheDriver) {}
@@ -90,13 +100,15 @@ class CachePolicy {
     virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver) = 0; 
     virtual int exist_key(std::string key) = 0;
     virtual int eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) = 0;
-    virtual void update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, optional_yield y) = 0;
+    virtual void update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, uint64_t total_size, optional_yield y) = 0;
     virtual void updateObj(const DoutPrefixProvider* dpp, std::string& key, std::string version, bool dirty, uint64_t size, 
 			    time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name, 
 			    const rgw_obj_key& obj_key, optional_yield y) = 0;
     virtual bool erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) = 0;
     virtual bool eraseObj(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) = 0;
     virtual void cleaning(const DoutPrefixProvider* dpp);
+    virtual bool is_write_space_available(const DoutPrefixProvider* dpp, uint64_t size) { return (cur_write_cache_size + size) <= max_write_cache_size; }
+    virtual bool is_read_space_available(const DoutPrefixProvider* dpp, uint64_t size) { return (cur_read_cache_size + size) <= max_read_cache_size; }
 };
 
 class LFUDAPolicy : public CachePolicy {
@@ -130,7 +142,7 @@ class LFUDAPolicy : public CachePolicy {
       using handle_type = boost::heap::fibonacci_heap<LFUDAEntry*, boost::heap::compare<EntryComparator<LFUDAEntry>>>::handle_type;
       handle_type handle;
 
-      LFUDAEntry(std::string& key, uint64_t offset, uint64_t len, std::string& version, bool dirty, int localWeight) : Entry(key, offset, len, version, dirty), 
+      LFUDAEntry(std::string& key, uint64_t offset, uint64_t len, std::string& version, bool dirty, int localWeight, uint64_t total_size) : Entry(key, offset, len, version, dirty, total_size), 
 														       localWeight(localWeight) {}
       
       void set_handle(handle_type handle_) { handle = handle_; }
@@ -161,7 +173,6 @@ class LFUDAPolicy : public CachePolicy {
     optional_yield y = null_yield;
     std::shared_ptr<connection> conn;
     std::optional<asio::steady_timer> rthread_timer;
-    std::thread tc;
 
     CacheBlock* get_victim_block(const DoutPrefixProvider* dpp, optional_yield y);
     int age_sync(const DoutPrefixProvider* dpp, optional_yield y); 
@@ -180,7 +191,7 @@ class LFUDAPolicy : public CachePolicy {
         return nullptr;
       return it->second;
     }
-
+    virtual int evict_for_clean_block(const DoutPrefixProvider* dpp, std::string key, uint64_t total_size) override { return 0; }
   public:
     LFUDAPolicy(std::shared_ptr<connection>& conn, rgw::cache::CacheDriver* cacheDriver) : CachePolicy(cacheDriver), 
 											   conn(conn)
@@ -197,7 +208,7 @@ class LFUDAPolicy : public CachePolicy {
     virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver);
     virtual int exist_key(std::string key) override;
     virtual int eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) override;
-    virtual void update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, optional_yield y) override;
+    virtual void update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, uint64_t total_size, optional_yield y) override;
     virtual bool erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) override;
     void save_y(optional_yield y) { this->y = y; }
     virtual void updateObj(const DoutPrefixProvider* dpp, std::string& key, std::string version, bool dirty, uint64_t size, 
@@ -225,6 +236,7 @@ class LRUPolicy : public CachePolicy {
     //rgw::cache::CacheDriver* cacheDriver;
 
     bool _erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y);
+    virtual int evict_for_clean_block(const DoutPrefixProvider* dpp, std::string key, uint64_t total_size) override { return 0; }
 
   public:
     LRUPolicy(rgw::cache::CacheDriver* cacheDriver) : CachePolicy(cacheDriver) {}
@@ -232,7 +244,7 @@ class LRUPolicy : public CachePolicy {
     virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver* _driver) { return 0; }
     virtual int exist_key(std::string key) override;
     virtual int eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) override;
-    virtual void update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, optional_yield y) override;
+    virtual void update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, uint64_t total_size, optional_yield y) override;
     virtual void updateObj(const DoutPrefixProvider* dpp, std::string& key, std::string version, bool dirty, uint64_t size,
 			    time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name,
 			    const rgw_obj_key& obj_key, optional_yield y) override;
@@ -272,7 +284,7 @@ class LRUHeapPolicy : public CachePolicy {
       using handle_type = boost::heap::fibonacci_heap<LRUEntry*, boost::heap::compare<EntryComparator<LRUEntry>>>::handle_type;
       handle_type handle;
 
-      LRUEntry(std::string& key, uint64_t offset, uint64_t len, std::string& version, bool dirty) : Entry(key, offset, len, version, dirty)
+      LRUEntry(std::string& key, uint64_t offset, uint64_t len, std::string& version, bool dirty, uint64_t total_size) : Entry(key, offset, len, version, dirty, total_size)
 														      { access_time = get_current_timestamp(); }
 
       void set_handle(handle_type handle_) { handle = handle_; }
@@ -302,14 +314,22 @@ class LRUHeapPolicy : public CachePolicy {
 
     bool _erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y);
     static inline uint64_t get_current_timestamp() { return std::chrono::system_clock::now().time_since_epoch().count(); }
+    LRUEntry* find_entry(std::string key) { 
+      auto it = entries_map.find(key); 
+      if (it == entries_map.end())
+        return nullptr;
+      return it->second;
+    }
+    int evict_top_element(const DoutPrefixProvider* dpp);
+    virtual int evict_for_clean_block(const DoutPrefixProvider* dpp, std::string key, uint64_t total_size) override;
 
   public:
     LRUHeapPolicy(rgw::cache::CacheDriver* cacheDriver) : CachePolicy(cacheDriver) {}
 
-    virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver* _driver) { return 0; } 
+    virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver* _driver); 
     virtual int exist_key(std::string key) override;
     virtual int eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) override;
-    virtual void update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, optional_yield y) override;
+    virtual void update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, uint64_t total_size, optional_yield y) override;
     virtual void updateObj(const DoutPrefixProvider* dpp, std::string& key, std::string version, bool dirty, uint64_t size, 
 			    time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name, 
 			    const rgw_obj_key& obj_key, optional_yield y) override;
