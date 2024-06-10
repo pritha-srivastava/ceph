@@ -115,7 +115,8 @@ class D4NFilterObject : public FilterObject {
 	    D4NFilterDriver* filter;
 	    D4NFilterObject* source;
 	    RGWGetDataCB* client_cb;
-	    uint64_t ofs = 0, len = 0;
+	    int64_t ofs = 0, len = 0;
+      int64_t adjusted_start_ofs{0};
 	    bufferlist bl_rem;
 	    bool last_part{false};
 	    bool write_to_cache{true};
@@ -133,6 +134,7 @@ class D4NFilterObject : public FilterObject {
               this->y = y;
             }
 	    void set_ofs(uint64_t ofs) { this->ofs = ofs; }
+      void set_adjusted_start_ofs(uint64_t adjusted_start_ofs) { this->adjusted_start_ofs = adjusted_start_ofs; }
 	    int flush_last_part();
 	    void bypass_cache_write() { this->write_to_cache = false; }
 	};
