@@ -3686,6 +3686,16 @@ options:
   flags:
   - startup
   with_legacy: true
+- name: rgw_d4n_readcache_to_cachesize_ratio
+  type: float
+  level: advanced
+  desc: The ratio of read cache size to total cache space
+  default: 0.5
+  services:
+  - rgw
+  flags:
+  - startup
+  with_legacy: true
 - name: rgw_backend_store
   type: str
   level: advanced

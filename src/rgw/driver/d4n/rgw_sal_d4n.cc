@@ -41,13 +41,13 @@ D4NFilterDriver::D4NFilterDriver(Driver* _next, boost::asio::io_context& io_cont
   rgw::cache::Partition partition_info;
   partition_info.location = g_conf()->rgw_d4n_l1_datacache_persistent_path;
   partition_info.name = "d4n";
-  partition_info.type = "read-cache";
-  partition_info.size = g_conf()->rgw_d4n_l1_datacache_size;
+  partition_info.type = "read-write";
+  partition_info.size = g_conf()->rgw_d4n_l1_datacache_size; // this is not being used in the ssd driver for the time being
 
   cacheDriver = new rgw::cache::SSDDriver(partition_info);
   objDir = new rgw::d4n::ObjectDirectory(conn);
   blockDir = new rgw::d4n::BlockDirectory(conn);
-  policyDriver = new rgw::d4n::PolicyDriver(conn, cacheDriver, "lfuda");
+  policyDriver = new rgw::d4n::PolicyDriver(conn, cacheDriver, "lru");
 }
 
 D4NFilterDriver::~D4NFilterDriver()
@@ -1604,6 +1604,7 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
     std::string head_oid_in_cache = "D_" + key; //same as key, as there is no len or offset attached to head oid in cache
     if (driver->get_policy_driver()->get_cache_policy()->is_write_space_available(dpp, attrs.size())) {
       ret = driver->get_cache_driver()->put(dpp, head_oid_in_cache, bl, 0, attrs, y);
+      uint64_t attrs_size = attrs.size();
       attrs.erase("user.rgw.mtime");
       attrs.erase("user.rgw.object_size");
       attrs.erase("user.rgw.accounted_size");
@@ -1612,7 +1613,7 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
       if (ret == 0) {
         object->set_obj_state(state);
         ldpp_dout(dpp, 20) << "D4NFilterWriter::" << __func__ << " version stored in update method is: " << version << dendl;
-        driver->get_policy_driver()->get_cache_policy()->update(dpp, key, 0, bl.length(), version, dirty, attrs.size(), y);
+        driver->get_policy_driver()->get_cache_policy()->update(dpp, key, 0, bl.length(), version, dirty, attrs_size, y);
         ret = object->set_head_obj_dir_entry(dpp, y, true, true);
         if (ret < 0) {
           ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): BlockDirectory set method failed for head object, ret=" << ret << dendl;

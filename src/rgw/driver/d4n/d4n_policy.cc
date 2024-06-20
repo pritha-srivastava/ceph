@@ -6,6 +6,22 @@
 
 namespace rgw { namespace d4n {
 
+bool CachePolicy::is_write_space_available(const DoutPrefixProvider* dpp, uint64_t size)
+{
+  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "() cur_write_cache_size: " << cur_write_cache_size << dendl;
+  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "() max_write_cache_size: " << max_write_cache_size << dendl;
+  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "() size: " << size << dendl;
+  return (cur_write_cache_size + size) <= max_write_cache_size;
+}
+
+bool CachePolicy::is_read_space_available(const DoutPrefixProvider* dpp, uint64_t size)
+{
+  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "() cur_read_cache_size: " << cur_read_cache_size << dendl;
+  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "() max_read_cache_size: " << max_read_cache_size << dendl;
+  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "() size: " << size << dendl;
+  return (cur_read_cache_size + size) <= max_read_cache_size;
+}
+
 // initiate a call to async_exec() on the connection's executor
 struct initiate_exec {
   std::shared_ptr<boost::redis::connection> conn;
@@ -48,11 +64,8 @@ void redis_exec(std::shared_ptr<connection> conn,
 }
 
 int LFUDAPolicy::init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver) {
+  CachePolicy::init(cct, dpp, io_context, _driver);
   response<int, int, int, int> resp;
-
-  driver = _driver;
-  tc = std::thread(&CachePolicy::cleaning, this, dpp);
-  tc.detach();
 
   try {
     boost::system::error_code ec;
@@ -371,7 +384,7 @@ void LFUDAPolicy::updateObj(const DoutPrefixProvider* dpp, std::string& key, std
 {
   using handle_type = boost::heap::fibonacci_heap<ObjEntry*, boost::heap::compare<ObjectComparator<ObjEntry>>>::handle_type;
   ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Before acquiring lock." << dendl;
-  const std::lock_guard l(lfuda_cleaning_lock);
+  const std::lock_guard l(cleaning_lock);
   ObjEntry *e = new ObjEntry{key, version, dirty, size, creationTime, user, etag, bucket_name, obj_key};
   handle_type handle = object_heap.push(e);
   e->set_handle(handle);
@@ -398,7 +411,7 @@ bool LFUDAPolicy::erase(const DoutPrefixProvider* dpp, const std::string& key, o
 
 bool LFUDAPolicy::eraseObj(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y)
 {
-  const std::lock_guard l(lfuda_cleaning_lock);
+  const std::lock_guard l(cleaning_lock);
   auto p = o_entries_map.find(key);
   if (p == o_entries_map.end()) {
     return false;
@@ -412,6 +425,29 @@ bool LFUDAPolicy::eraseObj(const DoutPrefixProvider* dpp, const std::string& key
   return true;
 }
 
+int CachePolicy::init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver)
+{
+  this->cacheDriver = cacheDriver;
+  this->driver = _driver;
+  float readcache_to_cachesize_ratio = dpp->get_cct()->_conf->rgw_d4n_readcache_to_cachesize_ratio;
+  //initialize total cache size, write-back cache size and read cache size
+  total_cache_size = cacheDriver->get_free_space(dpp);
+  //total_cache_size = 10485760;
+  max_read_cache_size = readcache_to_cachesize_ratio*total_cache_size;
+  max_write_cache_size = total_cache_size - max_read_cache_size;
+
+  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "(): total_cache_size: " << total_cache_size << dendl;
+  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "(): max_read_cache_size: " << max_read_cache_size << dendl;
+  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "(): max_write_cache_size: " << max_write_cache_size << dendl;
+
+  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "(): cur_read_cache_size: " << cur_read_cache_size << dendl;
+  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "(): cur_write_cache_size: " << cur_write_cache_size << dendl;
+  tc = std::thread(&CachePolicy::cleaning, this, dpp);
+  tc.detach();
+
+  return 0;
+}
+
 void CachePolicy::cleaning(const DoutPrefixProvider* dpp)
 {
   const int interval = dpp->get_cct()->_conf->rgw_d4n_cache_cleaning_interval;
@@ -423,8 +459,8 @@ void CachePolicy::cleaning(const DoutPrefixProvider* dpp)
     uint64_t len = 0;
     rgw::sal::Attrs obj_attrs;
   
-    ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__ << "" << __LINE__ << "(): Before acquiring cleaning-lock" << dendl;
-    std::unique_lock<std::mutex> l(lfuda_cleaning_lock);
+    ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "" << __LINE__ << "(): Before acquiring cleaning-lock" << dendl;
+    std::unique_lock<std::mutex> l(cleaning_lock);
     ObjEntry* e;
     if (object_heap.size() > 0) {
       e = object_heap.top();
@@ -485,7 +521,7 @@ void CachePolicy::cleaning(const DoutPrefixProvider* dpp)
 
       int op_ret = processor->prepare(null_yield);
       if (op_ret < 0) {
-	ldpp_dout(dpp, 20) << __func__ << "processor->prepare() returned ret=" << op_ret << dendl;
+	ldpp_dout(dpp, 20) << __func__ << "(): processor->prepare() returned ret=" << op_ret << dendl;
 	break;
       }
 
@@ -528,7 +564,7 @@ void CachePolicy::cleaning(const DoutPrefixProvider* dpp)
 
         op_ret = filter->process(std::move(data), ofs);
         if (op_ret < 0) {
-	  ldpp_dout(dpp, 20) << __func__ << "processor->process() returned ret="
+	  ldpp_dout(dpp, 20) << __func__ << "(): processor->process() returned ret="
 	  << op_ret << dendl;
 	  return;
         }
@@ -565,11 +601,11 @@ void CachePolicy::cleaning(const DoutPrefixProvider* dpp)
         block.size = cur_len;
         block.blockID = fst;
         //evict data from read cache if required, since clean blocks will be part of read-cache now.
-        auto ret = evict_for_clean_block(dpp, oid_in_cache, cur_len);
+        auto ret = evict_for_clean_block(dpp, new_oid_in_cache, cur_len);
         if (ret < 0) {
           //delete block entry and delete entry from cache and update in-memory data structures
           //evict the block
-          erase(dpp, oid_in_cache, y);
+          erase(dpp, new_oid_in_cache, y);
           auto ret = cacheDriver->delete_data(dpp, oid_in_cache, y);
           if (ret < 0) {
             ldpp_dout(dpp, 0) << __func__ << "(): eviction of cleaned block failed with ret = " << ret << dendl;
@@ -577,17 +613,18 @@ void CachePolicy::cleaning(const DoutPrefixProvider* dpp)
           }
           op_ret = blockDir->del(dpp, &block, null_yield);
           if (op_ret < 0) {
-            ldpp_dout(dpp, 0) << __func__ << "deleting in block directory failed, ret=" << op_ret << dendl;
+            ldpp_dout(dpp, 0) << __func__ << "(): deleting in block directory failed, ret=" << op_ret << dendl;
             return;
           }
         } else {
+          ldpp_dout(dpp, 20) << __func__ << "(): renaming block to " << new_oid_in_cache << dendl;
           //Rename block to remove "D" prefix
           cacheDriver->rename(dpp, oid_in_cache, new_oid_in_cache, null_yield);
           //Update in-memory data structure for each block
-          this->update(dpp, new_oid_in_cache, 0, 0, e->version, false, 0, y);
+          this->update(dpp, new_oid_in_cache, 0, 0, e->version, false, cur_len, y);
           op_ret = blockDir->update_field(dpp, &block, "dirtyBlock", "false", null_yield);
           if (op_ret < 0) {
-      ldpp_dout(dpp, 0) << __func__ << "updating dirty flag in block directory failed, ret=" << op_ret << dendl;
+      ldpp_dout(dpp, 0) << __func__ << "(): updating dirty flag in block directory failed, ret=" << op_ret << dendl;
       return;
           }
         }
@@ -600,10 +637,10 @@ void CachePolicy::cleaning(const DoutPrefixProvider* dpp)
       block.size = 0;
       block.blockID = 0;
       //evict data from read cache if required, since clean blocks will be part of read-cache now.
-      ret = evict_for_clean_block(dpp, head_oid_in_cache, attrs_size);
+      ret = evict_for_clean_block(dpp, new_head_oid_in_cache, attrs_size);
       if (ret < 0) {
         //delete block entry and delete entry from cache and update in-memory data structures
-        erase(dpp, head_oid_in_cache, y);
+        erase(dpp, new_head_oid_in_cache, y);
         auto ret = cacheDriver->delete_data(dpp, head_oid_in_cache, y);
         if (ret < 0) {
           ldpp_dout(dpp, 0) << __func__ << "(): eviction of cleaned block failed with ret = " << ret << dendl;
@@ -613,7 +650,7 @@ void CachePolicy::cleaning(const DoutPrefixProvider* dpp)
           if (block.version == c_obj->get_instance()) { //versioned case - update head block entry that has latest version
             op_ret = blockDir->del(dpp, &block, null_yield);
             if (op_ret < 0) {
-                ldpp_dout(dpp, 20) << __func__ << "deleting block directory entry for head failed!" << dendl;
+                ldpp_dout(dpp, 20) << __func__ << "(): deleting block directory entry for head failed!" << dendl;
                 //return;
             }
           }
@@ -624,29 +661,30 @@ void CachePolicy::cleaning(const DoutPrefixProvider* dpp)
           instance_block.blockID = 0;
           op_ret = blockDir->del(dpp, &instance_block, null_yield);
           if (op_ret < 0) {
-              ldpp_dout(dpp, 20) << __func__ << "deleting block directory entry for instance block failed!" << dendl;
+              ldpp_dout(dpp, 20) << __func__ << "(): deleting block directory entry for instance block failed!" << dendl;
               //return;
           }
         } else {
           op_ret = blockDir->del(dpp, &block, null_yield);
           if (op_ret < 0) {
-            ldpp_dout(dpp, 0) << __func__ << "deleting in block directory failed, ret=" << op_ret << dendl;
+            ldpp_dout(dpp, 0) << __func__ << "(): deleting in block directory failed, ret=" << op_ret << dendl;
             return;
           }
         }
       } else {
+        ldpp_dout(dpp, 20) << __func__ << "(): renaming head block to " << new_head_oid_in_cache << dendl;
         cacheDriver->rename(dpp, head_oid_in_cache, new_head_oid_in_cache, null_yield);
         //data is clean now, updating in-memory metadata for an object
         e->dirty = false;
         //invoke update() with dirty flag set to false, to update in-memory metadata for head
-        this->update(dpp, new_head_oid_in_cache, 0, 0, e->version, false, 0, y);
+        this->update(dpp, new_head_oid_in_cache, 0, 0, e->version, false, attrs_size, y);
       
         if (c_obj->have_instance()) {
           blockDir->get(dpp, &block, null_yield);
           if (block.version == c_obj->get_instance()) { //versioned case - update head block entry that has latest version
             op_ret = blockDir->update_field(dpp, &block, "dirty", "false", null_yield);
             if (op_ret < 0) {
-                ldpp_dout(dpp, 20) << __func__ << "updating dirty flag in block directory for head failed!" << dendl;
+                ldpp_dout(dpp, 20) << __func__ << "(): updating dirty flag in block directory for head failed!" << dendl;
                 //return;
             }
           }
@@ -657,13 +695,13 @@ void CachePolicy::cleaning(const DoutPrefixProvider* dpp)
           instance_block.blockID = 0;
           op_ret = blockDir->update_field(dpp, &instance_block, "dirty", "false", null_yield);
           if (op_ret < 0) {
-              ldpp_dout(dpp, 20) << __func__ << "updating dirty flag in block directory for instance block failed!" << dendl;
+              ldpp_dout(dpp, 20) << __func__ << "(): updating dirty flag in block directory for instance block failed!" << dendl;
               //return;
           }
         } else { //non-versioned case
           op_ret = blockDir->update_field(dpp, &block, "dirty", "false", null_yield);
           if (op_ret < 0) {
-              ldpp_dout(dpp, 20) << __func__ << "updating dirty flag in block directory for head failed!" << dendl;
+              ldpp_dout(dpp, 20) << __func__ << "(): updating dirty flag in block directory for head failed!" << dendl;
               //return;
           }
         }
@@ -671,7 +709,7 @@ void CachePolicy::cleaning(const DoutPrefixProvider* dpp)
 
       op_ret = blockDir->update_field(dpp, &block, "dirtyBlock", "false", null_yield);
       if (op_ret < 0) {
-	  ldpp_dout(dpp, 0) << __func__ << "updating dirty flag in block directory for head failed, ret=" << op_ret << dendl;
+	  ldpp_dout(dpp, 0) << __func__ << "(): updating dirty flag in block directory for head failed, ret=" << op_ret << dendl;
 	  return;
       }
 
@@ -681,13 +719,13 @@ void CachePolicy::cleaning(const DoutPrefixProvider* dpp)
       obj.objName = c_obj->get_key().get_oid();
       op_ret = objDir->update_field(dpp, &obj, "dirty", "false", null_yield);
       if (op_ret < 0) {
-	ldpp_dout(dpp, 0) << __func__ << "updating dirty flag in object directory failed, ret=" << op_ret << dendl;
+	ldpp_dout(dpp, 0) << __func__ << "(): updating dirty flag in object directory failed, ret=" << op_ret << dendl;
 	return;
       }
 
       op_ret = blockDir->update_field(dpp, &block, "dirtyObj", "false", null_yield);
       if (op_ret < 0) {
-	ldpp_dout(dpp, 0) << __func__ << "updating dirty flag in block directory failed, ret=" << op_ret << dendl;
+	ldpp_dout(dpp, 0) << __func__ << "(): updating dirty flag in block directory failed, ret=" << op_ret << dendl;
 	return;
       }
 
@@ -698,6 +736,12 @@ void CachePolicy::cleaning(const DoutPrefixProvider* dpp)
   } //end-while true
 }
 
+int LRUPolicy::init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver* _driver)
+{
+  CachePolicy::init(cct, dpp, io_context, _driver);
+  return 0;
+} 
+
 int LRUPolicy::exist_key(std::string key)
 {
   const std::lock_guard l(lru_lock);
@@ -707,96 +751,7 @@ int LRUPolicy::exist_key(std::string key)
     return false;
 }
 
-int LRUPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y)
-{
-  const std::lock_guard l(lru_lock);
-  uint64_t freeSpace = cacheDriver->get_free_space(dpp);
-
-  while (freeSpace < size) {
-    auto p = entries_lru_list.front();
-    entries_map.erase(entries_map.find(p.key));
-    entries_lru_list.pop_front_and_dispose(Entry_delete_disposer());
-    auto ret = cacheDriver->delete_data(dpp, p.key, y);
-    if (ret < 0) {
-      ldpp_dout(dpp, 0) << __func__ << "(): Failed to delete data from the cache backend, ret=" << ret << dendl;
-      return ret;
-    }
-
-    freeSpace = cacheDriver->get_free_space(dpp);
-  }
-
-  return 0;
-}
-
-void LRUPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, uint64_t total_size, optional_yield y)
-{
-  const std::lock_guard l(lru_lock);
-  _erase(dpp, key, y);
-  Entry *e = new Entry(key, offset, len, version, dirty, total_size);
-  entries_lru_list.push_back(*e);
-  entries_map.emplace(key, e);
-}
-
-void LRUPolicy::updateObj(const DoutPrefixProvider* dpp, std::string& key, std::string version, bool dirty, uint64_t size, time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name, const rgw_obj_key& obj_key, optional_yield y)
-{
-  const std::lock_guard l(lru_lock);
-  ObjEntry *e = new ObjEntry(key, version, dirty, size, creationTime, user, etag, bucket_name, obj_key);
-  o_entries_map.emplace(key, e);
-  return;
-}
-
-
-bool LRUPolicy::erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y)
-{
-  const std::lock_guard l(lru_lock);
-  return _erase(dpp, key, y);
-}
-
-bool LRUPolicy::eraseObj(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y)
-{
-  const std::lock_guard l(lru_lock);
-  auto p = o_entries_map.find(key);
-  if (p == o_entries_map.end()) {
-    return false;
-  }
-  o_entries_map.erase(p);
-  return true;
-}
-
-bool LRUPolicy::_erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y)
-{
-  auto p = entries_map.find(key);
-  if (p == entries_map.end()) {
-    return false;
-  }
-  entries_map.erase(p);
-  entries_lru_list.erase_and_dispose(entries_lru_list.iterator_to(*(p->second)), Entry_delete_disposer());
-  return true;
-}
-
-int LRUHeapPolicy::init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver* _driver)
-{
-  //initialize total cache size, write-back cache size and read cache size
-  total_cache_size = cacheDriver->get_free_space(dpp);
-  max_read_cache_size = read_cache_to_cache_size_ratio*total_cache_size;
-  max_write_cache_size = total_cache_size - max_read_cache_size;
-
-  tc = std::thread(&CachePolicy::cleaning, this, dpp);
-  tc.detach();
-
-  return 0;
-} 
-
-int LRUHeapPolicy::exist_key(std::string key)
-{
-  const std::lock_guard l(lru_lock);
-  if (entries_map.count(key) != 0) {
-      return true;
-    }
-    return false;
-}
-
-int LRUHeapPolicy::evict_top_element(const DoutPrefixProvider* dpp)
+int LRUPolicy::evict_top_element(const DoutPrefixProvider* dpp)
 {
   std::string key = entries_heap.top()->key;
   LRUEntry *e = find_entry(key);
@@ -804,10 +759,10 @@ int LRUHeapPolicy::evict_top_element(const DoutPrefixProvider* dpp)
     return -ENOENT;
   }
   uint64_t entry_size = e->total_size;
-
+  ldpp_dout(dpp, 20) << "LRUPolicy::" << __func__ << "(): Top entry to be evicted: " << e->key << " of size: " << e->total_size << dendl;
   // check dirty flag of entry to be evicted, if the flag is dirty, all entries on the local node are dirty (this most likely won't happen)
   if (e->dirty) {
-    ldpp_dout(dpp, 0) << "LRUHeapPolicy::" << __func__ << "(): Top entry in min heap is dirty, no entry is available for eviction!" << dendl;
+    ldpp_dout(dpp, 0) << "LRUPolicy::" << __func__ << "(): Top entry in min heap is dirty, no entry is available for eviction!" << dendl;
     return -ENOENT;
   }
 
@@ -821,7 +776,7 @@ int LRUHeapPolicy::evict_top_element(const DoutPrefixProvider* dpp)
   return entry_size; //return the amount of space freed up
 }
 
-int LRUHeapPolicy::evict_for_clean_block(const DoutPrefixProvider* dpp, std::string key, uint64_t total_size)
+int LRUPolicy::evict_for_clean_block(const DoutPrefixProvider* dpp, std::string key, uint64_t total_size)
 {
   const std::lock_guard l(lru_lock);
   if (is_read_space_available(dpp, total_size)) {
@@ -856,46 +811,47 @@ int LRUHeapPolicy::evict_for_clean_block(const DoutPrefixProvider* dpp, std::str
 
     free_read_cache_size = free_read_cache_size + ret;
   }
+
+  cur_read_cache_size = max_read_cache_size - free_read_cache_size;
+  ldpp_dout(dpp, 20) << __func__ << "(): cur_read_cache_size = " << cur_read_cache_size << dendl;
   return 0;
 }
 
-int LRUHeapPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y)
+int LRUPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y)
 {
   const std::lock_guard l(lru_lock);
   uint64_t free_read_cache_size = max_read_cache_size - cur_read_cache_size;
 
   ldpp_dout(dpp, 20) << __func__ << "(): free_read_cache_size = " << free_read_cache_size << ", size = " << size << dendl;
   while (free_read_cache_size < size) {
-    std::string key = entries_heap.top()->key;
-    LRUEntry *e = find_entry(key);
-    uint64_t entry_size = e->total_size;
-    if (!e) {
-      return -ENOENT;
-    }
-    // check dirty flag of entry to be evicted, if the flag is dirty, all entries on the local node are dirty (this most likely won't happen)
-    if (e->dirty) {
-      ldpp_dout(dpp, 0) << "LRUHeapPolicy::" << __func__ << "(): Top entry in min heap is dirty, no entry is available for eviction!" << dendl;
-      return -ENOENT;
-    }
-
-    _erase(dpp, key, y);
-    auto ret = cacheDriver->delete_data(dpp, key, y);
+    //evict top element
+    auto ret = evict_top_element(dpp);
     if (ret < 0) {
-      ldpp_dout(dpp, 0) << __func__ << "(): Failed to delete data from the cache backend, ret=" << ret << dendl;
+      ldpp_dout(dpp, 20) << __func__ << "(): eviction of top element failed with ret = " << ret << dendl;
       return ret;
     }
-    free_read_cache_size = free_read_cache_size + entry_size;
+
+    free_read_cache_size = free_read_cache_size + ret;
   }
 
+  cur_read_cache_size = max_read_cache_size - free_read_cache_size;
+  ldpp_dout(dpp, 20) << __func__ << "(): cur_read_cache_size = " << cur_read_cache_size << dendl;
   return 0;
 }
 
-void LRUHeapPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, uint64_t total_size, optional_yield y)
+void LRUPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, uint64_t total_size, optional_yield y)
 {
   using handle_type = boost::heap::fibonacci_heap<LRUEntry*, boost::heap::compare<EntryComparator<LRUEntry>>>::handle_type;
   const std::lock_guard l(lru_lock);
 
+  ldpp_dout(dpp, 20) << "LRUPolicy::" << __func__ << "(): key: " << key << " total_size: " << total_size << " dirty: " << dirty << dendl;
+  bool is_dirty = false;
+  bool is_existing_entry = false;
   LRUEntry* existing_entry = find_entry(key);
+  if (existing_entry) {
+    is_dirty = existing_entry->dirty;
+    is_existing_entry = true;
+  }
   _erase(dpp, key, y);
 
   LRUEntry *new_entry = new LRUEntry(key, offset, len, version, dirty, total_size);
@@ -904,25 +860,36 @@ void LRUHeapPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint
   entries_map.emplace(key, new_entry);
 
   //if it is a new entry, increment the respective cache size
-  if (!existing_entry) {
+  if (!is_existing_entry) {
+    ldpp_dout(dpp, 20) << "LRUPolicy::" << __func__ << "(): new entry: " << key << dendl;
     if (!dirty) {
       cur_read_cache_size += total_size; //non-dirty blocks belong to the read cache
     } else {
       cur_write_cache_size += total_size; //dirty blocks belong to the write-back cache
     }
   } else {
-    if (existing_entry->dirty && !dirty) {//if the entry was dirty, and the flag is being reset, then the block now belongs to read-cache
+    ldpp_dout(dpp, 20) << "LRUPolicy::" << __func__ << "(): is_dirty: " << is_dirty << " dirty: " << dirty << dendl;
+    if (is_dirty && !dirty) {//if the entry was dirty, and the flag is being reset, then the block now belongs to read-cache
       cur_write_cache_size -= total_size;
       cur_read_cache_size += total_size;
     } //no changes to sizes otherwise
   }
+
+  ldpp_dout(dpp, 20) << "LRUPolicy::" << __func__ << "(): cur_read_cache_size: " << cur_read_cache_size << dendl;
+  ldpp_dout(dpp, 20) << "LRUPolicy::" << __func__ << "(): cur_write_cache_size: " << cur_write_cache_size << dendl;
+  //for debugging only
+  {
+    std::string key = entries_heap.top()->key;
+    LRUEntry *e = find_entry(key);
+    ldpp_dout(dpp, 20) << "LRUPolicy::" << __func__ << "(): Top entry: " << e->key << " of size: " << e->total_size << dendl;
+  }
 }
 
-void LRUHeapPolicy::updateObj(const DoutPrefixProvider* dpp, std::string& key, std::string version, bool dirty, uint64_t size, time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name, const rgw_obj_key& obj_key, optional_yield y)
+void LRUPolicy::updateObj(const DoutPrefixProvider* dpp, std::string& key, std::string version, bool dirty, uint64_t size, time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name, const rgw_obj_key& obj_key, optional_yield y)
 {
   using handle_type = boost::heap::fibonacci_heap<ObjEntry*, boost::heap::compare<ObjectComparator<ObjEntry>>>::handle_type;
   ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Before acquiring lock." << dendl;
-  const std::lock_guard l(lfuda_cleaning_lock);
+  const std::lock_guard l(cleaning_lock);
   ObjEntry *e = new ObjEntry{key, version, dirty, size, creationTime, user, etag, bucket_name, obj_key};
   handle_type handle = object_heap.push(e);
   e->set_handle(handle);
@@ -931,15 +898,15 @@ void LRUHeapPolicy::updateObj(const DoutPrefixProvider* dpp, std::string& key, s
 }
 
 
-bool LRUHeapPolicy::erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y)
+bool LRUPolicy::erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y)
 {
   const std::lock_guard l(lru_lock);
   return _erase(dpp, key, y);
 }
 
-bool LRUHeapPolicy::eraseObj(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y)
+bool LRUPolicy::eraseObj(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y)
 {
-  const std::lock_guard l(lfuda_cleaning_lock);
+  const std::lock_guard l(cleaning_lock);
   auto p = o_entries_map.find(key);
   if (p == o_entries_map.end()) {
     return false;
@@ -953,7 +920,7 @@ bool LRUHeapPolicy::eraseObj(const DoutPrefixProvider* dpp, const std::string& k
   return true;
 }
 
-bool LRUHeapPolicy::_erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y)
+bool LRUPolicy::_erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y)
 {
   auto p = entries_map.find(key);
   if (p == entries_map.end()) {
