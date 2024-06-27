@@ -260,7 +260,8 @@ if(WITH_RADOSGW_D4N)
         rgw_ssd_driver.cc
         driver/d4n/d4n_directory.cc
         driver/d4n/d4n_policy.cc
-        driver/d4n/rgw_sal_d4n.cc)
+        driver/d4n/rgw_sal_d4n.cc
+        driver/d4n/d4n_local.cc)
 endif()
 
 add_library(rgw_common STATIC ${librgw_common_srcs})
