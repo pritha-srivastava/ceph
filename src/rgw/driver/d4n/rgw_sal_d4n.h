@@ -25,6 +25,7 @@
 
 #include "driver/d4n/d4n_directory.h"
 #include "driver/d4n/d4n_policy.h"
+#include "driver/d4n/d4n_cache_strategy_manager.h"
 
 #include <boost/intrusive/list.hpp>
 #include <boost/asio/io_context.hpp>
@@ -32,6 +33,7 @@
 #include <boost/redis/connection.hpp>
 
 namespace rgw::d4n {
+  class CacheStrategyManager;
   class PolicyDriver;
 }
 
@@ -47,6 +49,7 @@ class D4NFilterDriver : public FilterDriver {
     rgw::d4n::BlockDirectory* blockDir;
     rgw::d4n::PolicyDriver* policyDriver;
     boost::asio::io_context& io_context;
+    rgw::d4n::CacheStrategyManager* strategy;
 
   public:
     D4NFilterDriver(Driver* _next, boost::asio::io_context& io_context);
@@ -68,6 +71,7 @@ class D4NFilterDriver : public FilterDriver {
     rgw::d4n::ObjectDirectory* get_obj_dir() { return objDir; }
     rgw::d4n::BlockDirectory* get_block_dir() { return blockDir; }
     rgw::d4n::PolicyDriver* get_policy_driver() { return policyDriver; }
+    rgw::d4n::CacheStrategyManager* get_strategy_manager() { return strategy; }
 };
 
 class D4NFilterUser : public FilterUser {
@@ -103,9 +107,10 @@ class D4NFilterObject : public FilterObject {
     std::string version;
     std::string prefix;
     rgw_obj obj;
-    rgw::sal::Object* dest_object{nullptr}; //for copy-object
-    rgw::sal::Bucket* dest_bucket{nullptr}; //for copy-object
-    std::string dest_version;
+    D4NFilterObject* dest_object{nullptr}; //for copy-object
+    rgw::sal::Bucket* dest_bucket;
+    time_t creationTime;
+    std::string etag;
   public:
     struct D4NFilterReadOp : FilterReadOp {
       public:
@@ -114,8 +119,8 @@ class D4NFilterObject : public FilterObject {
 	    D4NFilterDriver* filter;
 	    D4NFilterObject* source;
 	    RGWGetDataCB* client_cb;
-	    int64_t ofs = 0, len = 0;
-      int64_t adjusted_start_ofs{0};
+	    uint64_t ofs = 0, len = 0;
+      uint64_t adjusted_start_ofs{0};
 	    bufferlist bl_rem;
 	    bool last_part{false};
 	    bool write_to_cache{true};
@@ -226,6 +231,10 @@ class D4NFilterObject : public FilterObject {
     bool check_head_exists_in_cache_get_oid(const DoutPrefixProvider* dpp, std::string& head_oid_in_cache, rgw::sal::Attrs& attrs, optional_yield y);
     rgw::sal::Bucket* get_destination_bucket(const DoutPrefixProvider* dpp) { return dest_bucket;}
     rgw::sal::Object* get_destination_object(const DoutPrefixProvider* dpp) { return dest_object; }
+    void set_creation_time(const DoutPrefixProvider* dpp, time_t creationTime) { this->creationTime = creationTime; }
+    time_t get_creation_time(const DoutPrefixProvider* dpp) { return creationTime; }
+    void set_etag(const DoutPrefixProvider* dpp, const std::string& etag) { this->etag = etag; }
+    std::string& get_etag(const DoutPrefixProvider* dpp) { return etag; }
 };
 
 class D4NFilterWriter : public FilterWriter {
@@ -263,6 +272,22 @@ class D4NFilterWriter : public FilterWriter {
                        uint32_t flags) override;
    bool is_atomic() { return atomic; };
    const DoutPrefixProvider* get_dpp() { return this->dpp; } 
+};
+
+struct D4NFilterBlock {
+  D4NFilterObject* object;
+  std::string version;
+  bool dirty{false};
+  bufferlist& bl;
+  uint64_t len;
+  uint64_t offset;
+  rgw::sal::Attrs& attrs;
+  bool is_head{false};
+  bool is_latest_version{false};
+
+  D4NFilterBlock(D4NFilterObject* object, const std::string& version, bool dirty, bufferlist& bl, uint64_t len, uint64_t offset, rgw::sal::Attrs& attrs, bool is_head, bool is_latest_version):
+      object(object), version(version), dirty(dirty), bl(bl), len(len), offset(offset), attrs(attrs), is_head(is_head), is_latest_version(is_latest_version) {}
+
 };
 
 } } // namespace rgw::sal

@@ -342,7 +342,7 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
   return 0;
 }
 
-void LFUDAPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, uint64_t total_size, optional_yield y)
+void LFUDAPolicy::update(const DoutPrefixProvider* dpp, const std::string& key, uint64_t offset, uint64_t len, const std::string& version, bool dirty, uint64_t total_size, optional_yield y)
 {
   using handle_type = boost::heap::fibonacci_heap<LFUDAEntry*, boost::heap::compare<EntryComparator<LFUDAEntry>>>::handle_type;
   const std::lock_guard l(lfuda_lock);
@@ -380,7 +380,7 @@ void LFUDAPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64
   weightSum += ((localWeight < 0) ? 0 : localWeight);
 }
 
-void LFUDAPolicy::updateObj(const DoutPrefixProvider* dpp, std::string& key, std::string version, bool dirty, uint64_t size, time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name, const rgw_obj_key& obj_key, optional_yield y)
+void LFUDAPolicy::updateObj(const DoutPrefixProvider* dpp, const std::string& key, const std::string& version, bool dirty, uint64_t size, time_t creationTime, const rgw_user user, const std::string& etag, const std::string& bucket_name, const rgw_obj_key& obj_key, optional_yield y)
 {
   using handle_type = boost::heap::fibonacci_heap<ObjEntry*, boost::heap::compare<ObjectComparator<ObjEntry>>>::handle_type;
   ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Before acquiring lock." << dendl;
@@ -526,6 +526,7 @@ void CachePolicy::cleaning(const DoutPrefixProvider* dpp)
       }
 
       std::string prefix = b_name + "_" + e->version + "_" + c_obj->get_name();
+      ldpp_dout(dpp, 20) << __func__ << "(): entry size =" << e->size << dendl;
       off_t lst = e->size;
       off_t fst = 0;
       off_t ofs = 0;
@@ -839,7 +840,7 @@ int LRUPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_y
   return 0;
 }
 
-void LRUPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, uint64_t total_size, optional_yield y)
+void LRUPolicy::update(const DoutPrefixProvider* dpp, const std::string& key, uint64_t offset, uint64_t len, const std::string& version, bool dirty, uint64_t total_size, optional_yield y)
 {
   using handle_type = boost::heap::fibonacci_heap<LRUEntry*, boost::heap::compare<EntryComparator<LRUEntry>>>::handle_type;
   const std::lock_guard l(lru_lock);
@@ -870,7 +871,6 @@ void LRUPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64_t
   } else {
     ldpp_dout(dpp, 20) << "LRUPolicy::" << __func__ << "(): is_dirty: " << is_dirty << " dirty: " << dirty << dendl;
     if (is_dirty && !dirty) {//if the entry was dirty, and the flag is being reset, then the block now belongs to read-cache
-      cur_write_cache_size -= total_size;
       cur_read_cache_size += total_size;
     } //no changes to sizes otherwise
   }
@@ -885,7 +885,7 @@ void LRUPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64_t
   }
 }
 
-void LRUPolicy::updateObj(const DoutPrefixProvider* dpp, std::string& key, std::string version, bool dirty, uint64_t size, time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name, const rgw_obj_key& obj_key, optional_yield y)
+void LRUPolicy::updateObj(const DoutPrefixProvider* dpp, const std::string& key, const std::string& version, bool dirty, uint64_t size, time_t creationTime, const rgw_user user, const std::string& etag, const std::string& bucket_name, const rgw_obj_key& obj_key, optional_yield y)
 {
   using handle_type = boost::heap::fibonacci_heap<ObjEntry*, boost::heap::compare<ObjectComparator<ObjEntry>>>::handle_type;
   ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Before acquiring lock." << dendl;
