@@ -24,6 +24,7 @@
 #include "rgw_redis_driver.h"
 
 #include "driver/d4n/d4n_directory.h"
+#include "driver/d4n/d4n_cache_space_manager.h"
 #include "driver/d4n/d4n_policy.h"
 
 #include <boost/intrusive/list.hpp>
@@ -45,6 +46,7 @@ class D4NFilterDriver : public FilterDriver {
     rgw::cache::CacheDriver* cacheDriver;
     rgw::d4n::ObjectDirectory* objDir;
     rgw::d4n::BlockDirectory* blockDir;
+    rgw::d4n::CacheSpaceManager* cacheSpaceManager;
     rgw::d4n::PolicyDriver* policyDriver;
     boost::asio::io_context& io_context;
 
@@ -68,6 +70,7 @@ class D4NFilterDriver : public FilterDriver {
     rgw::d4n::ObjectDirectory* get_obj_dir() { return objDir; }
     rgw::d4n::BlockDirectory* get_block_dir() { return blockDir; }
     rgw::d4n::PolicyDriver* get_policy_driver() { return policyDriver; }
+    rgw::d4n::CacheSpaceManager* get_cache_space_manager() { return cacheSpaceManager; }
 };
 
 class D4NFilterUser : public FilterUser {

@@ -7,22 +7,6 @@
 
 namespace rgw { namespace d4n {
 
-bool CachePolicy::is_write_space_available(const DoutPrefixProvider* dpp, uint64_t size)
-{
-  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "() cur_write_cache_size: " << cur_write_cache_size << dendl;
-  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "() max_write_cache_size: " << max_write_cache_size << dendl;
-  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "() size: " << size << dendl;
-  return (cur_write_cache_size + size) <= max_write_cache_size;
-}
-
-bool CachePolicy::is_read_space_available(const DoutPrefixProvider* dpp, uint64_t size)
-{
-  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "() cur_read_cache_size: " << cur_read_cache_size << dendl;
-  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "() max_read_cache_size: " << max_read_cache_size << dendl;
-  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "() size: " << size << dendl;
-  return (cur_read_cache_size + size) <= max_read_cache_size;
-}
-
 // initiate a call to async_exec() on the connection's executor
 struct initiate_exec {
   std::shared_ptr<boost::redis::connection> conn;
@@ -64,8 +48,8 @@ void redis_exec(std::shared_ptr<connection> conn,
   }
 }
 
-int LFUDAPolicy::init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver) {
-  CachePolicy::init(cct, dpp, io_context, _driver);
+int LFUDAPolicy::init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver, rgw::d4n::CacheSpaceManager* cacheSpaceManager) {
+  CachePolicy::init(cct, dpp, io_context, _driver, cacheSpaceManager);
   response<int, int, int, int> resp;
 
   try {
@@ -433,23 +417,11 @@ bool LFUDAPolicy::eraseObj(const DoutPrefixProvider* dpp, const std::string& key
   return true;
 }
 
-int CachePolicy::init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver)
+int CachePolicy::init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver, rgw::d4n::CacheSpaceManager* cacheSpaceManager)
 {
   this->cacheDriver = cacheDriver;
   this->driver = _driver;
-  float readcache_to_cachesize_ratio = dpp->get_cct()->_conf->rgw_d4n_readcache_to_cachesize_ratio;
-  //initialize total cache size, write-back cache size and read cache size
-  total_cache_size = cacheDriver->get_free_space(dpp);
-  //total_cache_size = 10485760;
-  max_read_cache_size = readcache_to_cachesize_ratio*total_cache_size;
-  max_write_cache_size = total_cache_size - max_read_cache_size;
-
-  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "(): total_cache_size: " << total_cache_size << dendl;
-  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "(): max_read_cache_size: " << max_read_cache_size << dendl;
-  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "(): max_write_cache_size: " << max_write_cache_size << dendl;
-
-  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "(): cur_read_cache_size: " << cur_read_cache_size << dendl;
-  ldpp_dout(dpp, 20) << "CachePolicy::" << __func__ << "(): cur_write_cache_size: " << cur_write_cache_size << dendl;
+  this->cacheSpaceManager = cacheSpaceManager;
   tc = std::thread(&CachePolicy::cleaning, this, dpp);
   tc.detach();
 
@@ -744,9 +716,9 @@ void CachePolicy::cleaning(const DoutPrefixProvider* dpp)
   } //end-while true
 }
 
-int LRUPolicy::init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver* _driver)
+int LRUPolicy::init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver* _driver, rgw::d4n::CacheSpaceManager* cacheSpaceManager)
 {
-  CachePolicy::init(cct, dpp, io_context, _driver);
+  CachePolicy::init(cct, dpp, io_context, _driver, cacheSpaceManager);
   return 0;
 } 
 
@@ -761,11 +733,18 @@ int LRUPolicy::exist_key(std::string key)
 
 int LRUPolicy::evict_top_element(const DoutPrefixProvider* dpp)
 {
-  std::string key = entries_heap.top()->key;
-  LRUEntry *e = find_entry(key);
-  if (!e) {
+  std::string key;
+  LRUEntry *e;
+  if(entries_heap.size()) {
+    key = entries_heap.top()->key;
+    e = find_entry(key);
+    if (!e) {
+      return -ENOENT;
+    }
+  } else {
     return -ENOENT;
   }
+  
   uint64_t entry_size = e->total_size;
   ldpp_dout(dpp, 20) << "LRUPolicy::" << __func__ << "(): Top entry to be evicted: " << e->key << " of size: " << e->total_size << dendl;
   // check dirty flag of entry to be evicted, if the flag is dirty, all entries on the local node are dirty (this most likely won't happen)
@@ -787,7 +766,7 @@ int LRUPolicy::evict_top_element(const DoutPrefixProvider* dpp)
 int LRUPolicy::evict_for_clean_block(const DoutPrefixProvider* dpp, std::string key, uint64_t total_size)
 {
   const std::lock_guard l(lru_lock);
-  if (is_read_space_available(dpp, total_size)) {
+  if (cacheSpaceManager->is_read_space_available(dpp, total_size)) {
     return 0;
   }
 
@@ -803,7 +782,7 @@ int LRUPolicy::evict_for_clean_block(const DoutPrefixProvider* dpp, std::string 
     return -ENOENT;
   }
 
-  uint64_t free_read_cache_size = max_read_cache_size - cur_read_cache_size;
+  uint64_t free_read_cache_size = cacheSpaceManager->get_free_read_cache_size(dpp);
   while(free_read_cache_size < total_size) {
     //if access time of the cleaned block is less than the access time of the top element, evict the block itself
     if (top_entry->access_time > entry->access_time) {
@@ -817,19 +796,18 @@ int LRUPolicy::evict_for_clean_block(const DoutPrefixProvider* dpp, std::string 
       return ret;
     }
 
-    free_read_cache_size = free_read_cache_size + ret;
+    cacheSpaceManager->decrease_read_cache_size(dpp, ret);
+    free_read_cache_size = cacheSpaceManager->get_free_read_cache_size(dpp);
   }
 
-  cur_read_cache_size = max_read_cache_size - free_read_cache_size;
-  ldpp_dout(dpp, 20) << __func__ << "(): cur_read_cache_size = " << cur_read_cache_size << dendl;
+  ldpp_dout(dpp, 20) << __func__ << "(): cur_read_cache_size = " << cacheSpaceManager->get_cur_read_cache_size(dpp) << dendl;
   return 0;
 }
 
 int LRUPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y)
 {
   const std::lock_guard l(lru_lock);
-  uint64_t free_read_cache_size = max_read_cache_size - cur_read_cache_size;
-
+  uint64_t free_read_cache_size = cacheSpaceManager->get_free_read_cache_size(dpp);
   ldpp_dout(dpp, 20) << __func__ << "(): free_read_cache_size = " << free_read_cache_size << ", size = " << size << dendl;
   while (free_read_cache_size < size) {
     //evict top element
@@ -839,11 +817,10 @@ int LRUPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_y
       return ret;
     }
 
-    free_read_cache_size = free_read_cache_size + ret;
+    cacheSpaceManager->decrease_read_cache_size(dpp, ret);
+    free_read_cache_size = cacheSpaceManager->get_free_read_cache_size(dpp);
   }
 
-  cur_read_cache_size = max_read_cache_size - free_read_cache_size;
-  ldpp_dout(dpp, 20) << __func__ << "(): cur_read_cache_size = " << cur_read_cache_size << dendl;
   return 0;
 }
 
@@ -871,20 +848,18 @@ void LRUPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64_t
   if (!is_existing_entry) {
     ldpp_dout(dpp, 20) << "LRUPolicy::" << __func__ << "(): new entry: " << key << dendl;
     if (!dirty) {
-      cur_read_cache_size += total_size; //non-dirty blocks belong to the read cache
+      cacheSpaceManager->increase_read_cache_size(dpp, total_size);
     } else {
-      cur_write_cache_size += total_size; //dirty blocks belong to the write-back cache
+      cacheSpaceManager->increase_write_cache_size(dpp, total_size);
     }
   } else {
     ldpp_dout(dpp, 20) << "LRUPolicy::" << __func__ << "(): is_dirty: " << is_dirty << " dirty: " << dirty << dendl;
     if (is_dirty && !dirty) {//if the entry was dirty, and the flag is being reset, then the block now belongs to read-cache
-      cur_write_cache_size -= total_size;
-      cur_read_cache_size += total_size;
+      cacheSpaceManager->decrease_write_cache_size(dpp, total_size);
+      cacheSpaceManager->increase_read_cache_size(dpp, total_size);
     } //no changes to sizes otherwise
   }
 
-  ldpp_dout(dpp, 20) << "LRUPolicy::" << __func__ << "(): cur_read_cache_size: " << cur_read_cache_size << dendl;
-  ldpp_dout(dpp, 20) << "LRUPolicy::" << __func__ << "(): cur_write_cache_size: " << cur_write_cache_size << dendl;
   //for debugging only
   {
     std::string key = entries_heap.top()->key;
@@ -917,9 +892,9 @@ bool LRUPolicy::erase(const DoutPrefixProvider* dpp, const std::string& key, opt
   bool dirty = p->second->dirty;
 
   if (dirty) {
-    cur_write_cache_size += total_size;
+    cacheSpaceManager->decrease_write_cache_size(dpp, total_size);
   } else {
-    cur_read_cache_size += total_size;
+    cacheSpaceManager->decrease_read_cache_size(dpp, total_size);
   }
 
   return _erase(dpp, key, y);

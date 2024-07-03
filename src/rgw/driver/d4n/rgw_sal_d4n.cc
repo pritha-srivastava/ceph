@@ -48,6 +48,7 @@ D4NFilterDriver::D4NFilterDriver(Driver* _next, boost::asio::io_context& io_cont
   cacheDriver = new rgw::cache::SSDDriver(partition_info);
   objDir = new rgw::d4n::ObjectDirectory(conn);
   blockDir = new rgw::d4n::BlockDirectory(conn);
+  cacheSpaceManager = new rgw::d4n::CacheSpaceManager();
   policyDriver = new rgw::d4n::PolicyDriver(conn, cacheDriver, "lru");
 }
 
@@ -58,8 +59,9 @@ D4NFilterDriver::~D4NFilterDriver()
 
   delete cacheDriver;
   delete objDir; 
-  delete blockDir; 
+  delete blockDir;
   delete policyDriver;
+  delete cacheSpaceManager;
 }
 
 int D4NFilterDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
@@ -83,7 +85,8 @@ int D4NFilterDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
   FilterDriver::initialize(cct, dpp);
 
   cacheDriver->initialize(dpp);
-  policyDriver->get_cache_policy()->init(cct, dpp, io_context, next);
+  cacheSpaceManager->initialize(cct, dpp, cacheDriver->get_free_space(dpp));
+  policyDriver->get_cache_policy()->init(cct, dpp, io_context, next, cacheSpaceManager);
 
   return 0;
 }
@@ -207,7 +210,7 @@ int D4NFilterObject::copy_object(const ACLOwner& owner,
     bufferlist bl_data;
     std::string key = dest_bucket->get_name() + "_" + this->dest_version + "_" + dest_object->get_name();
     std::string head_oid_in_cache = "D_" + key; //same as key, as there is no len or offset attached to head oid in cache
-    if (driver->get_policy_driver()->get_cache_policy()->is_write_space_available(dpp, baseAttrs.size())) {
+    if (driver->get_cache_space_manager()->is_write_space_available(dpp, baseAttrs.size())) {
       auto ret = driver->get_cache_driver()->put(dpp, head_oid_in_cache, bl_data, 0, baseAttrs, y);
       baseAttrs.erase("user.rgw.mtime");
       baseAttrs.erase("user.rgw.object_size");
@@ -903,7 +906,7 @@ int D4NFilterObject::D4NFilterReadOp::flush(const DoutPrefixProvider* dpp, rgw::
         std::string key = source->dest_bucket->get_name() + "_" + source->dest_version + "_" + source->dest_object->get_name() +
                                         "_" + std::to_string(ofs) + "_" + std::to_string(len);
         std::string dest_oid_in_cache = "D_" + key;
-        if (source->driver->get_policy_driver()->get_cache_policy()->is_write_space_available(dpp, dest_block.size)) {
+        if (source->driver->get_cache_space_manager()->is_write_space_available(dpp, dest_block.size)) {
           rgw::sal::Attrs attrs;
           ldpp_dout(dpp, 20) << "D4NFilterObject::" << __func__ << " destination object version in update method is: " << source->dest_version << dendl;
           auto ret = source->driver->get_cache_driver()->put(dpp, dest_oid_in_cache, bl, bl.length(), attrs, y);
@@ -1784,7 +1787,7 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
       block.cacheObj.hostsList.insert(dpp->get_cct()->_conf->rgw_local_cache_address);
       block.version = version;
       dirty = true;
-      if (driver->get_policy_driver()->get_cache_policy()->is_write_space_available(dpp,block.size)) {     
+      if (driver->get_cache_space_manager()->is_write_space_available(dpp,block.size)) {
 	if (bl.length() > 0) {          
           ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): key is: " << key << dendl;
           ret = driver->get_cache_driver()->put(dpp, key, bl, bl.length(), obj->get_attrs(), y);
@@ -1862,7 +1865,7 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
     object->set_obj_state_attrs(dpp, y, state, attrs);
     bufferlist bl;
     std::string head_oid_in_cache = "D_" + key; //same as key, as there is no len or offset attached to head oid in cache
-    if (driver->get_policy_driver()->get_cache_policy()->is_write_space_available(dpp, attrs.size())) {
+    if (driver->get_cache_space_manager()->is_write_space_available(dpp, attrs.size())) {
       ret = driver->get_cache_driver()->put(dpp, head_oid_in_cache, bl, 0, attrs, y);
       uint64_t attrs_size = attrs.size();
       attrs.erase("user.rgw.mtime");

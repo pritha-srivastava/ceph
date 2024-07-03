@@ -9,6 +9,7 @@
 #include "d4n_directory.h"
 #include "rgw_sal_d4n.h"
 #include "rgw_cache_driver.h"
+#include "d4n_cache_space_manager.h"
 
 namespace rgw::sal {
   class D4NFilterObject;
@@ -30,11 +31,7 @@ class CachePolicy {
     std::condition_variable cond;
     bool quit{false};
     std::thread tc;
-    uint64_t cur_read_cache_size{0};
-    uint64_t cur_write_cache_size{0};
-    uint64_t total_cache_size{0};
-    uint64_t max_read_cache_size{0};
-    uint64_t max_write_cache_size{0};
+    rgw::d4n::CacheSpaceManager* cacheSpaceManager;
     struct Entry : public boost::intrusive::list_base_hook<> {
       std::string key;
       uint64_t offset;
@@ -89,7 +86,7 @@ class CachePolicy {
       cond.notify_all();
     }
 
-    virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver);
+    virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver, rgw::d4n::CacheSpaceManager* cacheSpaceManager);
     virtual int exist_key(std::string key) = 0;
     virtual int eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) = 0;
     virtual void update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, uint64_t total_size, optional_yield y) = 0;
@@ -99,8 +96,6 @@ class CachePolicy {
     virtual bool erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) = 0;
     virtual bool eraseObj(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) = 0;
     virtual void cleaning(const DoutPrefixProvider* dpp);
-    virtual bool is_write_space_available(const DoutPrefixProvider* dpp, uint64_t size);
-    virtual bool is_read_space_available(const DoutPrefixProvider* dpp, uint64_t size);
 };
 
 class LFUDAPolicy : public CachePolicy {
@@ -173,7 +168,7 @@ class LFUDAPolicy : public CachePolicy {
       delete objDir;
     } 
 
-    virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver);
+    virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver, rgw::d4n::CacheSpaceManager* cacheSpaceManager);
     virtual int exist_key(std::string key) override;
     virtual int eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) override;
     virtual void update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, uint64_t total_size, optional_yield y) override;
@@ -251,7 +246,7 @@ class LRUPolicy : public CachePolicy {
       delete blockDir;
       delete objDir;
     }
-    virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver* _driver); 
+    virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver* _driver, rgw::d4n::CacheSpaceManager* cacheSpaceManager); 
     virtual int exist_key(std::string key) override;
     virtual int eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) override;
     virtual void update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, uint64_t total_size, optional_yield y) override;
