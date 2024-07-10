@@ -230,7 +230,7 @@ TEST_F(LFUDAPolicyFixture, RemoteGetBlockYield)
     policyDriver->get_cache_policy()->init(env->cct, env->dpp, io, driver);
 
     ASSERT_EQ(0, dir->set(env->dpp, &victim, optional_yield{yield}));
-    std::string victimKey = victim.cacheObj.bucketName + "_" + victim.cacheObj.objName + "_" + std::to_string(victim.blockID) + "_" + std::to_string(victim.size);
+    std::string victimKey = victim.cacheObj.bucketName + "_version_" + victim.cacheObj.objName + "_" + std::to_string(victim.blockID) + "_" + std::to_string(victim.size);
     ASSERT_EQ(0, cacheDriver->put(env->dpp, victimKey, bl, bl.length(), attrs, optional_yield{yield}));
     policyDriver->get_cache_policy()->update(env->dpp, victimKey, 0, bl.length(), "", false, optional_yield{yield});
 

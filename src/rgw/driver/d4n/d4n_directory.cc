@@ -666,7 +666,7 @@ int BlockDirectory::remove_host(const DoutPrefixProvider* dpp, CacheBlock* block
       }
 
       if (result.length() == 0) /* Last host, delete entirely */
-	return del(dpp, block, y);
+	return del(dpp, block, y); 
 
       delValue = result;
     }

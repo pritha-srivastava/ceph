@@ -1710,7 +1710,7 @@ int D4NFilterWriter::prepare(optional_yield y)
 
   d4n_writecache = g_conf()->d4n_writecache_enabled;
   if (d4n_writecache == false) {
-    ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): calling next iterate" << dendl;
+    ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): calling next iterate" << dendl;
     return next->prepare(y);
   }
 
@@ -1723,10 +1723,10 @@ int D4NFilterWriter::prepare(optional_yield y)
       char buf[OBJ_INSTANCE_LEN + 1];
       gen_rand_alphanumeric_no_underscore(dpp->get_cct(), buf, OBJ_INSTANCE_LEN);
       this->version = buf; // using gen_rand_alphanumeric_no_underscore for the time being
-      ldpp_dout(dpp, 20) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): generating version: " << version << dendl;
+      ldpp_dout(dpp, 20) << "D4NFilterWriter::" << __func__ << "(): generating version: " << version << dendl;
     }
   } else {
-    ldpp_dout(dpp, 20) << "D4NFilterWriter::" << __func__ << "(): " << "version is: " << object->get_instance() << dendl;
+    ldpp_dout(dpp, 20) << "D4NFilterWriter::" << __func__ << "(): version is: " << object->get_instance() << dendl;
   }
 
   return 0;
@@ -1760,7 +1760,7 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
     int ret = 0;
 
     if (d4n_writecache == false) {
-      ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): calling next process" << dendl;
+      ldpp_dout(dpp, 10) << "D4NFilterWriter::" << __func__ << "(): calling next process" << dendl;
       ret = next->process(std::move(data), offset);
     } else {
       std::string oid = prefix + "_" + std::to_string(ofs);
@@ -1775,10 +1775,10 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
       ret = driver->get_policy_driver()->get_cache_policy()->eviction(dpp, block.size, y);
       if (ret == 0) {     
 	if (bl.length() > 0) {          
-          ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): key is: " << key << dendl;
+          ldpp_dout(dpp, 10) << "D4NFilterWriter::" << __func__ << "(): key is: " << key << dendl;
           ret = driver->get_cache_driver()->put(dpp, key, bl, bl.length(), obj->get_attrs(), y);
           if (ret == 0) {
-            ldpp_dout(dpp, 10) << "D4NFilterObject::D4NFilterWriteOp::" << __func__ << "(): oid_in_cache is: " << oid_in_cache << dendl;
+            ldpp_dout(dpp, 10) << "D4NFilterWriter::" << __func__ << "(): oid_in_cache is: " << oid_in_cache << dendl;
  	    driver->get_policy_driver()->get_cache_policy()->update(dpp, oid_in_cache, ofs, bl.length(), version, dirty, y);
 
 	    /* Store block in directory */
@@ -1794,12 +1794,12 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
 	      block.cacheObj.hostsList.insert(dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address); 
 
 	      if ((ret = blockDir->set(dpp, &block, y)) < 0)
-		ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
+		ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
 	    } else {
 	      ldpp_dout(dpp, 0) << "Failed to fetch existing block for: " << existing_block.cacheObj.objName << " blockID: " << existing_block.blockID << " block size: " << existing_block.size << ", ret=" << ret << dendl;
 	    }
           } else {
-            ldpp_dout(dpp, 0) << "D4NFilterObject::D4NFilterWriteOp::process" << __func__ << "(): ERROR: writting data to the cache failed, ret=" << ret << dendl;
+            ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): ERROR: writting data to the cache failed, ret=" << ret << dendl;
 	    return ret;
 	  }
 	}
@@ -1856,7 +1856,7 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
     object->set_object_version(version);
     if (ret == 0) {
       object->set_attrs(attrs);
-      ldpp_dout(dpp, 20) << "D4NFilterWriter::" << __func__ << " version stored in update method is: " << version << dendl;
+      ldpp_dout(dpp, 20) << "D4NFilterWriter::" << __func__ << "(): version stored in update method is: " << version << dendl;
       driver->get_policy_driver()->get_cache_policy()->update(dpp, key, 0, bl.length(), version, dirty, y);
       ret = object->set_head_obj_dir_entry(dpp, y, true, true);
       if (ret < 0) {
@@ -1881,8 +1881,8 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
       }
     } else { //if get_cache_driver()->put()
       write_to_backend_store = true;
-      ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << " put failed for head_oid_in_cache, ret=" << ret << dendl;
-      ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << " calling complete of backend store: " << dendl;
+      ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): put failed for head_oid_in_cache, ret=" << ret << dendl;
+      ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): calling complete of backend store: " << dendl;
     }
   } else { // if d4n_writecache = true
     write_to_backend_store = true;
@@ -1893,7 +1893,7 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
                             delete_at, if_match, if_nomatch, user_data, zones_trace,
                             canceled, rctx, flags);
     if (ret < 0) {
-      ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): Writing to backend store failed, ret=" << ret << dendl;
+      ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): writing to backend store failed, ret=" << ret << dendl;
     }
   }
 
