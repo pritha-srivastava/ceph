@@ -9,8 +9,223 @@ int DistributedStrategy::initialize(CephContext *cct, const DoutPrefixProvider* 
   return 0;
 }
 
-int DistributedStrategy::get(const DoutPrefixProvider* dpp, const std::string& key, uint64_t offset, uint64_t len, optional_yield y) 
+void DistributedStrategy::cancel(rgw::Aio* aio) {
+  aio->drain();
+}
+
+int DistributedStrategy::drain(const DoutPrefixProvider* dpp, rgw::Aio* aio, rgw::sal::D4NFilterObject* object, RGWGetDataCB* cb, optional_yield y) {
+  auto c = aio->drain();
+  int r = flush(dpp, std::move(c), object, cb, y);
+  if (r < 0) {
+    cancel(aio);
+    return r;
+  }
+  return 0;
+}
+
+int DistributedStrategy::flush(const DoutPrefixProvider* dpp, rgw::AioResultList&& results, rgw::sal::D4NFilterObject* object, RGWGetDataCB* cb, optional_yield y) {
+  int r = rgw::check_for_errors(results);
+
+  if (r < 0) {
+    return r;
+  }
+
+  std::list<bufferlist> bl_list;
+
+  auto cmp = [](const auto& lhs, const auto& rhs) { return lhs.id < rhs.id; };
+  results.sort(cmp); // merge() requires results to be sorted first
+  completed.merge(results, cmp); // merge results in sorted order
+
+  ldpp_dout(dpp, 20) << "D4NFilterObject::In flush:: " << dendl;
+
+  while (!completed.empty() && completed.front().id == offset) {
+    auto bl = std::move(completed.front().data);
+
+    ldpp_dout(dpp, 20) << "D4NFilterObject::flush:: calling handle_data for offset: " << offset << " bufferlist length: " << bl.length() << dendl;
+
+    bl_list.push_back(bl);
+    if (cb) {
+      int r = cb->handle_data(bl, 0, bl.length());
+      if (r < 0) {
+        return r;
+      }
+    }
+    auto it = blocks_info.find(offset);
+    if (it != blocks_info.end()) {
+      std::string version = object->get_object_version();
+      std::string prefix = object->get_prefix();
+      std::pair<uint64_t, uint64_t> ofs_len_pair = it->second;
+      uint64_t ofs = ofs_len_pair.first;
+      uint64_t len = ofs_len_pair.second;
+      bool dirty = false;
+
+      rgw::d4n::CacheBlock block;
+      block.cacheObj.objName = object->get_key().get_oid();
+      block.cacheObj.bucketName = object->get_bucket()->get_name();
+      block.blockID = ofs;
+      block.size = len;
+
+      std::string oid_in_cache = prefix + "_" + std::to_string(ofs) + "_" + std::to_string(len);
+
+      if (blockDir->get(dpp, &block, y) == 0){
+        if (block.dirty == true){ 
+          dirty = true;
+        }
+      }
+
+      ldpp_dout(dpp, 20) << "DistributedStrategy::" << __func__ << " calling update for offset: " << offset << " adjusted offset: " << ofs  << " length: " << len << " oid_in_cache: " << oid_in_cache << dendl;
+      ldpp_dout(dpp, 20) << "DistributedStrategy::" << __func__ << " version stored in update method is: " << version << " " << object->get_object_version() << dendl;
+      policyDriver->get_cache_policy()->update(dpp, oid_in_cache, ofs, len, version, dirty, len, y);
+      rgw::sal::D4NFilterObject* dest_object = object->get_destination_object(dpp);
+      if (dest_object) {
+        std::string key = dest_object->get_name() + "_" + dest_object->get_object_version() + "_" + dest_object->get_name() +
+                                        "_" + std::to_string(ofs) + "_" + std::to_string(len);
+        rgw::sal::Attrs attrs;
+        rgw::sal::D4NFilterBlock blk = rgw::sal::D4NFilterBlock {
+          .object = dest_object,
+          .version = dest_object->get_object_version(),
+          .dirty = true,
+          .bl = bl,
+          .len = bl.length(),
+          .offset = ofs,
+          .attrs = attrs,
+          .is_head = false,
+          .is_latest_version = false
+        };
+        auto ret = put(dpp, &blk, key, y);
+        if (ret < 0) {
+          ldpp_dout(dpp, 0) << "DistributedStrategy::" << __func__ << "(): put for block failed, ret=" << ret << dendl;
+          return ret;
+        }
+      }
+      blocks_info.erase(it);
+    } else {
+      ldpp_dout(dpp, 0) << "DistributedStrategy::" << __func__ << " offset not found: " << offset << dendl;
+    }
+  
+    offset += bl.length();
+    completed.pop_front_and_dispose(std::default_delete<rgw::AioResultEntry>{});
+  }
+
+  ldpp_dout(dpp, 20) << "DistributedStrategy::returning from flush:: " << dendl;
+  return 0;
+}
+
+int DistributedStrategy::get(const DoutPrefixProvider* dpp, rgw::sal::D4NFilterBlock* block, rgw::Aio* aio, RGWGetDataCB* cb, uint64_t read_offset, uint64_t read_len, optional_yield y) 
 {
+  rgw::sal::D4NFilterObject* object = block->object;
+  rgw::d4n::CacheObj cache_obj = rgw::d4n::CacheObj{
+        .objName = object->get_oid(), //version-enabled buckets will not have version for latest version, so this will work even when versio is not provided in input
+        .bucketName = object->get_bucket()->get_name(),
+        };
+
+  rgw::d4n::CacheBlock blk = rgw::d4n::CacheBlock{
+          .cacheObj = cache_obj,
+          .blockID = block->offset,
+          .size = block->len,
+          };
+
+  std::string key_in_cache, key;
+  int ret;
+  //if the block corresponding to head object does not exist in directory, implies it is not cached
+  if ((ret = blockDir->get(dpp, &blk, y) == 0)) {
+    if(block->is_head) {
+      block->version = blk.version;
+      block->dirty = blk.dirty;
+      key = object->get_bucket()->get_name() + "_" + block->version + "_" + object->get_name();
+    } else {
+      block->dirty = blk.dirty;
+      key = object->get_bucket()->get_name() + "_" + block->version + "_" + object->get_name() + "_" + std::to_string(block->offset) + "_" + std::to_string(block->len);
+    }
+
+    ldpp_dout(dpp, 10) << "DistributedStrategy::" << __func__ << "(): Is block dirty: " << block->dirty << dendl;
+    if (block->dirty) {
+      key_in_cache = "D_" + key;
+    } else {
+      key_in_cache = key;
+    }
+    if (block->is_head) {
+      //for distributed cache-the blockHostsList can be used to determine if the head block resides on the localhost, then get the block from localhost, whether or not the block is dirty
+      //can be determined using the block entry.
+      ldpp_dout(dpp, 10) << "DistributedStrategy::" << __func__ << "(): Fetching attrs from cache for key: " << key_in_cache << dendl;
+      auto ret = cacheDriver->get_attrs(dpp, key_in_cache, block->attrs, y);
+      if (ret < 0) {
+        ldpp_dout(dpp, 10) << "DistributedStrategy::" << __func__ << "(): CacheDriver get_attrs method failed." << dendl;
+        return -ENOENT;
+      }
+    } else { // data blocks
+      auto it = find(blk.hostsList.begin(), blk.hostsList.end(), dpp->get_cct()->_conf->rgw_local_cache_address);
+      if (it != blk.hostsList.end()) { /* Local copy */
+	      ldpp_dout(dpp, 20) << "DistributedStrategy::" << __func__ << "(): Block found in directory: " << key_in_cache << dendl;
+	      if (blk.version == block->version) {
+          ldpp_dout(dpp, 20) << "DistributedStrategy::" << __func__ << "(): READ FROM CACHE: key_in_cache = " << key_in_cache << dendl;
+	        if (policyDriver->get_cache_policy()->exist_key(key) > 0) {
+            // Read From Cache
+            uint64_t cost = read_len;
+            uint64_t id = block->offset;
+            if (read_offset != 0) {
+              id += read_offset;
+            }
+            if(!is_offset_set) {
+              this->offset = id;
+              is_offset_set = true;
+            }
+
+            auto completed = cacheDriver->get_async(dpp, y, aio, key_in_cache, read_offset, read_len, cost, id); 
+
+	          this->blocks_info.insert(std::make_pair(id, std::make_pair(block->offset, block->len)));
+
+	          ldpp_dout(dpp, 20) << "DistributedStrategy::" << __func__ << "(): Info: flushing data for key: " << key_in_cache << dendl;
+	          auto r = flush(dpp, std::move(completed), object, cb, y);
+            if (r < 0) {
+              drain(dpp, aio, object, cb, y);
+              ldpp_dout(dpp, 0) << "DistributedStrategy::" << __func__ << "(): Error: failed to drain, ret=" << r << dendl;
+              return r;
+            }
+          // end-if (source->driver->get_policy_driver()->get_cache_policy()->exist_key(oid_in_cache) > 0) 
+	        } else {
+            int r = -1;
+            if ((r = blockDir->remove_host(dpp, &blk, dpp->get_cct()->_conf->rgw_local_cache_address, y)) < 0) {
+              ldpp_dout(dpp, 0) << "DistributedStrategy::" << __func__ << "(): Error: failed to remove incorrect host from block with key=" << key_in_cache <<", ret=" << r << dendl;
+            }
+            if ((blk.hostsList.size() - 1) > 0 && r == 0) { /* Remote copy */
+              ldpp_dout(dpp, 20) << "DistributedStrategy::" << __func__ << "(): Block with key=" << key_in_cache << " found in remote cache." << dendl;
+              // TODO: Retrieve remotely
+              // Policy decision: should we cache remote blocks locally?
+            } else {
+              ldpp_dout(dpp, 20) << "DistributedStrategy::" << __func__ << "(): Info: draining data for key: " << key_in_cache << dendl;
+              auto r = drain(dpp, aio, object, cb, y);
+              if (r < 0) {
+                ldpp_dout(dpp, 0) << "DistributedStrategy::" << __func__ << "(): Error: failed to drain, ret=" << r << dendl;
+                return r;
+              }
+            }
+	        }
+        // end-if (block.version == version)
+        } else {
+          // TODO: If data has already been returned for any older versioned block, then return ‘retry’ error, else
+          ldpp_dout(dpp, 20) << "DistributedStrategy::" << __func__ << "(): Info: draining data for key: " << key_in_cache << dendl;
+          auto r = drain(dpp, aio, object, cb, y);
+          if (r < 0) {
+            ldpp_dout(dpp, 0) << "DistributedStrategy::" << __func__ << "(): Error: failed to drain, ret=" << r << dendl;
+            return r;
+          }
+        }
+        // end-if (it != block.hostsList.end())
+      }
+    }
+  } else {
+    ldpp_dout(dpp, 10) << "DistributedStrategy::" << __func__ << "(): Block not found in BlockDirectory." << dendl;
+    if (!block->is_head) {
+      auto r = drain(dpp, aio, object, cb, y);
+      if (r < 0) {
+        ldpp_dout(dpp, 0) << "DistributedStrategy::" << __func__ << "(): Error: failed to drain, ret=" << r << dendl;
+        return r;
+      }
+    }
+    return -ENOENT;
+  }
+
   return 0;
 }
 

@@ -3,6 +3,8 @@
 #include "d4n_cache_strategy.h"
 #include "rgw_cache_driver.h"
 
+class RGWGetDataCB;
+
 namespace rgw::sal {
   class D4NFilterObject;
   struct D4NFilterBlock;
@@ -32,7 +34,7 @@ namespace rgw { namespace d4n {
     public:
       LocalStrategy(rgw::cache::CacheDriver* cacheDriver, rgw::d4n::PolicyDriver* policyDriver) : cacheDriver(cacheDriver), policyDriver(policyDriver) {}
       virtual int initialize(CephContext *cct, const DoutPrefixProvider* dpp) override;
-      virtual int get(const DoutPrefixProvider* dpp, const std::string& key, uint64_t offset, uint64_t len, optional_yield y) override;
+      virtual int get(const DoutPrefixProvider* dpp, rgw::sal::D4NFilterBlock* block, rgw::Aio* aio, RGWGetDataCB* cb, uint64_t read_offset, uint64_t read_len, optional_yield y) override;
       virtual int put(const DoutPrefixProvider* dpp, rgw::sal::D4NFilterBlock* block, const std::string& key, optional_yield y) override;
       virtual int del(const DoutPrefixProvider* dpp, rgw::sal::D4NFilterObject* object, const std::string& key, optional_yield y) override;
       virtual int get_attrs(const DoutPrefixProvider* dpp, const std::string& key, const rgw::sal::Attrs& attrs, optional_yield y) override;

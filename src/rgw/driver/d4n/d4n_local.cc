@@ -9,8 +9,37 @@ int LocalStrategy::initialize(CephContext *cct, const DoutPrefixProvider* dpp)
   return 0;
 }
 
-int LocalStrategy::get(const DoutPrefixProvider* dpp, const std::string& key, uint64_t offset, uint64_t len, optional_yield y) 
+int LocalStrategy::get(const DoutPrefixProvider* dpp, rgw::sal::D4NFilterBlock* block, rgw::Aio* aio, RGWGetDataCB* cb, uint64_t read_offset, uint64_t read_len, optional_yield y) 
 {
+  rgw::sal::D4NFilterObject* object = block->object;
+  std::string key_in_map = object->get_bucket()->get_name() + "_" + object->get_name();
+
+  std::string key_in_cache;
+  const auto& it = head_entry_map.find(key_in_map);
+  if (it != head_entry_map.end()) {
+    block->version = it->second.version;
+    block->dirty = it->second.dirty;
+
+    ldpp_dout(dpp, 10) << "LocalStrategy::" << __func__ << "(): Is block dirty: " << block->dirty << dendl;
+
+    if (block->dirty) {
+      key_in_cache = "D_" + object->get_bucket()->get_name() + "_" + block->version + "_" + object->get_name();
+    } else {
+      key_in_cache = object->get_bucket()->get_name() + "_" + block->version + "_" + object->get_name();
+    }
+    if (block->is_head) {
+      ldpp_dout(dpp, 10) << "LocalStrategy::" << __func__ << "(): Fetching attrs from cache for key: " << key_in_cache << dendl;
+      auto ret = cacheDriver->get_attrs(dpp, key_in_cache, block->attrs, y);
+      if (ret < 0) {
+        ldpp_dout(dpp, 10) << "LocalStrategy::" << __func__ << "(): CacheDriver get_attrs method failed." << dendl;
+        return -ENOENT;
+      }
+    }
+  } else {
+    ldpp_dout(dpp, 10) << "LocalStrategy::" << __func__ << "(): Block not found in Head Map." << dendl;
+    return -ENOENT;
+  }
+
   return 0;
 }
 

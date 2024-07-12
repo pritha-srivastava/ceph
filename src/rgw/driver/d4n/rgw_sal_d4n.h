@@ -230,7 +230,7 @@ class D4NFilterObject : public FilterObject {
     int set_head_obj_dir_entry(const DoutPrefixProvider* dpp, optional_yield y, bool is_latest_version = true, bool dirty = false);
     bool check_head_exists_in_cache_get_oid(const DoutPrefixProvider* dpp, std::string& head_oid_in_cache, rgw::sal::Attrs& attrs, optional_yield y);
     rgw::sal::Bucket* get_destination_bucket(const DoutPrefixProvider* dpp) { return dest_bucket;}
-    rgw::sal::Object* get_destination_object(const DoutPrefixProvider* dpp) { return dest_object; }
+    rgw::sal::D4NFilterObject* get_destination_object(const DoutPrefixProvider* dpp) { return dest_object; }
     void set_creation_time(const DoutPrefixProvider* dpp, time_t creationTime) { this->creationTime = creationTime; }
     time_t get_creation_time(const DoutPrefixProvider* dpp) { return creationTime; }
     void set_etag(const DoutPrefixProvider* dpp, const std::string& etag) { this->etag = etag; }
@@ -284,10 +284,6 @@ struct D4NFilterBlock {
   rgw::sal::Attrs& attrs;
   bool is_head{false};
   bool is_latest_version{false};
-
-  D4NFilterBlock(D4NFilterObject* object, const std::string& version, bool dirty, bufferlist& bl, uint64_t len, uint64_t offset, rgw::sal::Attrs& attrs, bool is_head, bool is_latest_version):
-      object(object), version(version), dirty(dirty), bl(bl), len(len), offset(offset), attrs(attrs), is_head(is_head), is_latest_version(is_latest_version) {}
-
 };
 
 } } // namespace rgw::sal

@@ -214,7 +214,17 @@ int D4NFilterObject::copy_object(const ACLOwner& owner,
     bufferlist bl_data;
     std::string key = this->dest_bucket->get_name() + "_" + this->dest_object->get_object_version() + "_" + this->dest_object->get_name();
     rgw::d4n::CacheStrategyManager* strategy_manager = this->driver->get_strategy_manager();
-    D4NFilterBlock blk{this->dest_object, this->dest_object->get_object_version(), true, bl_data, 0, 0, baseAttrs, true, true};
+    D4NFilterBlock blk = D4NFilterBlock {
+      .object = this->dest_object,
+      .version = this->dest_object->get_object_version(),
+      .dirty = true,
+      .bl = bl_data,
+      .len = 0,
+      .offset = 0,
+      .attrs = baseAttrs,
+      .is_head = true,
+      .is_latest_version = true
+    };
     auto ret = strategy_manager->get_cache_strategy()->put(dpp, &blk, key, y);
     if (ret < 0) {
       ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): strategy->put for object failed, ret=" << ret << dendl;
@@ -455,50 +465,23 @@ int D4NFilterObject::set_head_obj_dir_entry(const DoutPrefixProvider* dpp, optio
 
 bool D4NFilterObject::check_head_exists_in_cache_get_oid(const DoutPrefixProvider* dpp, std::string& head_oid_in_cache, rgw::sal::Attrs& attrs, optional_yield y)
 {
-  rgw::d4n::BlockDirectory* blockDir = this->driver->get_block_dir();
-  rgw::d4n::CacheObj object = rgw::d4n::CacheObj{
-        .objName = this->get_oid(), //version-enabled buckets will not have version for latest version, so this will work even when versio is not provided in input
-        .bucketName = this->get_bucket()->get_name(),
-        };
-
-  rgw::d4n::CacheBlock block = rgw::d4n::CacheBlock{
-          .cacheObj = object,
-          .blockID = 0,
-          .size = 0
-          };
-
-  bool found_in_cache = true;
-  int ret = -1;
-  //if the block corresponding to head object does not exist in directory, implies it is not cached
-  if ((ret = blockDir->get(dpp, &block, y) == 0)) {
-    std::string version;
-    version = block.version;
-    this->set_object_version(version);
-
-    //for distributed cache-the blockHostsList can be used to determine if the head block resides on the localhost, then get the block from localhost, whether or not the block is dirty
-    //can be determined using the block entry.
-
-    //uniform name for versioned and non-versioned objects, since input for versioned objects might not contain version
-    ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): Is block dirty: " << block.dirty << dendl;
-    if (block.dirty) {
-      head_oid_in_cache = "D_" + get_bucket()->get_name() + "_" + version + "_" + get_name();
-    } else {
-      head_oid_in_cache = get_bucket()->get_name() + "_" + version + "_" + get_name();
-    }
-    ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): Fetching attrs from cache for head obj id: " << head_oid_in_cache << dendl;
-    auto ret = this->driver->get_cache_driver()->get_attrs(dpp, head_oid_in_cache, attrs, y);
-    if (ret < 0) {
-      found_in_cache = false;
-      ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): CacheDriver get_attrs method failed." << dendl;
-    }
-  } else if (ret == -ENOENT) { //if blockDir->get
-    found_in_cache = false;
-  } else {
-    found_in_cache = false;
-    ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): BlockDirectory get method failed, ret=" << ret << dendl;
+  bufferlist bl;
+  D4NFilterBlock head_blk = D4NFilterBlock {
+    .object = this,
+    .bl = bl,
+    .len = 0,
+    .offset = 0,
+    .attrs = attrs,
+    .is_head = true
+  };
+  rgw::d4n::CacheStrategyManager* strategy_manager = this->driver->get_strategy_manager();
+  auto ret = strategy_manager->get_cache_strategy()->get(dpp, &head_blk, nullptr, nullptr, 0, 0, y);
+  if (ret < 0) {
+    ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): Head block not found in cache, ret=" << ret << dendl;
+    return false;
   }
-
-  return found_in_cache;
+  this->set_object_version(head_blk.version);
+  return true;
 }
 
 int D4NFilterObject::get_obj_attrs(optional_yield y, const DoutPrefixProvider* dpp,
@@ -539,7 +522,17 @@ int D4NFilterObject::get_obj_attrs(optional_yield y, const DoutPrefixProvider* d
 
     bufferlist bl;
     rgw::d4n::CacheStrategyManager* strategy_manager = this->driver->get_strategy_manager();
-    D4NFilterBlock blk{this, version, false, bl, 0, 0, attrs, true, is_latest_version};
+    D4NFilterBlock blk = D4NFilterBlock {
+      .object = this,
+      .version = version,
+      .dirty = false,
+      .bl = bl,
+      .len = 0,
+      .offset = 0,
+      .attrs = attrs,
+      .is_head = true,
+      .is_latest_version = is_latest_version
+    };
     ret = strategy_manager->get_cache_strategy()->put(dpp, &blk, head_oid_in_cache, y);
     if (ret < 0) {
       ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): strategy->put for head block failed, ret=" << ret << dendl;
@@ -674,7 +667,17 @@ int D4NFilterObject::D4NFilterReadOp::prepare(optional_yield y, const DoutPrefix
     }
     bufferlist bl;
     rgw::d4n::CacheStrategyManager* strategy_manager = source->driver->get_strategy_manager();
-    D4NFilterBlock blk{source, version, false, bl, 0, 0, attrs, true, is_latest_version};
+    D4NFilterBlock blk = D4NFilterBlock {
+      .object = source,
+      .version = version,
+      .dirty = false,
+      .bl = bl,
+      .len = 0,
+      .offset = 0,
+      .attrs = attrs,
+      .is_head = true,
+      .is_latest_version = is_latest_version
+    };
     ret = strategy_manager->get_cache_strategy()->put(dpp, &blk, head_oid_in_cache, y);
     if (ret < 0) {
       ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): strategy->put for head block failed, ret=" << ret << dendl;
@@ -757,7 +760,17 @@ int D4NFilterObject::D4NFilterReadOp::flush(const DoutPrefixProvider* dpp, rgw::
                                         "_" + std::to_string(ofs) + "_" + std::to_string(len);
         rgw::sal::Attrs attrs;
         rgw::d4n::CacheStrategyManager* strategy_manager = source->driver->get_strategy_manager();
-        D4NFilterBlock blk{source->dest_object, source->dest_object->get_object_version(), true, bl, bl.length(), ofs, attrs, false, false};
+        D4NFilterBlock blk = D4NFilterBlock {
+          .object = source->dest_object,
+          .version = source->dest_object->get_object_version(),
+          .dirty = true,
+          .bl = bl,
+          .len = bl.length(),
+          .offset = ofs,
+          .attrs = attrs,
+          .is_head = false,
+          .is_latest_version = false
+        };
         auto ret = strategy_manager->get_cache_strategy()->put(dpp, &blk, key, y);
         if (ret < 0) {
           ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): strategy->put for head block failed, ret=" << ret << dendl;
@@ -840,13 +853,27 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
     block.size = part_len; 
 
     ceph::bufferlist bl;
+    rgw::sal::Attrs attrs;
     std::string oid_in_cache = prefix + "_" + std::to_string(adjusted_start_ofs) + "_" + std::to_string(part_len);
 
     ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): READ FROM CACHE: oid=" << oid_in_cache << " length to read is: " << len_to_read << " part num: " << start_part_num << 
     " read_ofs: " << read_ofs << " part len: " << part_len << dendl;
 
     int ret = -1;
-    if ((ret = source->driver->get_block_dir()->get(dpp, &block, y)) == 0) { 
+    D4NFilterBlock blk = D4NFilterBlock{
+      .object = source,
+      .version = version,
+      .bl = bl,
+      .len = part_len,
+      .offset = adjusted_start_ofs,
+      .attrs = attrs,
+      .is_head = false
+    };
+
+    rgw::d4n::CacheStrategyManager* strategy_manager = source->driver->get_strategy_manager();
+    if ((ret = strategy_manager->get_cache_strategy()->get(dpp, &blk, aio.get(), cb, read_ofs, len_to_read, y)) == 0) {
+      //continue;
+      #if 0
       auto it = find(block.hostsList.begin(), block.hostsList.end(), dpp->get_cct()->_conf->rgw_local_cache_address);
 
       if (it != block.hostsList.end()) { /* Local copy */
@@ -920,6 +947,7 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
 	// Policy decision: should we cache remote blocks locally?
       }
     // if ((ret = source->driver->get_block_dir()->get(dpp, &block, y)) == 0)  
+    #endif
     } else if (ret == -ENOENT) { 
       block.blockID = adjusted_start_ofs;
       block.size = obj_max_req_size;
@@ -1139,7 +1167,17 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
     if (bl.length() > 0 && last_part) { // if bl = bl_rem has data and this is the last part, write it to cache
       std::string oid = prefix + "_" + std::to_string(adjusted_start_ofs) + "_" + std::to_string(bl_len);
       if (!filter->get_policy_driver()->get_cache_policy()->exist_key(oid)) {
-        D4NFilterBlock blk{source, version, dirty, bl, bl.length(), adjusted_start_ofs, attrs, false, false};
+        D4NFilterBlock blk = D4NFilterBlock {
+          .object = source,
+          .version = version,
+          .dirty = dirty,
+          .bl = bl,
+          .len = bl.length(),
+          .offset = adjusted_start_ofs,
+          .attrs = attrs,
+          .is_head = false,
+          .is_latest_version = false
+        };
         auto ret = strategy_manager->get_cache_strategy()->put(dpp, &blk, oid, *y);
         if (ret < 0) {
           ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): strategy->put for block failed, ret=" << ret << dendl;
@@ -1148,7 +1186,17 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
       }
       if (source->dest_object) {
         std::string dest_oid = dest_prefix + "_" + std::to_string(adjusted_start_ofs) + "_" + std::to_string(bl_len);
-        D4NFilterBlock dest_blk{source->dest_object, source->dest_object->get_object_version(), true, bl, bl.length(), adjusted_start_ofs, attrs, false, false};
+        D4NFilterBlock dest_blk = D4NFilterBlock {
+          .object = source->dest_object,
+          .version = source->dest_object->get_object_version(),
+          .dirty = true,
+          .bl = bl,
+          .len = bl.length(),
+          .offset = adjusted_start_ofs,
+          .attrs = attrs,
+          .is_head = false,
+          .is_latest_version = false
+        };
         auto ret = strategy_manager->get_cache_strategy()->put(dpp, &dest_blk, dest_oid, *y);
         if (ret < 0) {
           ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): strategy->put for block failed, ret=" << ret << dendl;
@@ -1158,7 +1206,17 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
     } else if (bl.length() == rgw_get_obj_max_req_size && bl_rem.length() == 0) { // if bl is the same size as rgw_get_obj_max_req_size, write it to cache
       std::string oid = prefix + "_" + std::to_string(adjusted_start_ofs) + "_" + std::to_string(bl_len);
       if (!filter->get_policy_driver()->get_cache_policy()->exist_key(oid)) {
-        D4NFilterBlock blk{source, version, dirty, bl, bl.length(), adjusted_start_ofs, attrs, false, false};
+        D4NFilterBlock blk = D4NFilterBlock {
+          .object = source,
+          .version = version,
+          .dirty = dirty,
+          .bl = bl,
+          .len = bl.length(),
+          .offset = adjusted_start_ofs,
+          .attrs = attrs,
+          .is_head = false,
+          .is_latest_version = false
+        };
         auto ret = strategy_manager->get_cache_strategy()->put(dpp, &blk, oid, *y);
         if (ret < 0) {
           ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): strategy->put for block failed, ret=" << ret << dendl;
@@ -1167,7 +1225,17 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
       }
       if (source->dest_object) {
         std::string dest_oid = dest_prefix + "_" + std::to_string(adjusted_start_ofs) + "_" + std::to_string(bl_len);
-        D4NFilterBlock dest_blk{source->dest_object, source->dest_object->get_object_version(), true, bl, bl.length(), adjusted_start_ofs, attrs, false, false};
+        D4NFilterBlock dest_blk = D4NFilterBlock {
+          .object = source->dest_object,
+          .version = source->dest_object->get_object_version(),
+          .dirty = true,
+          .bl = bl,
+          .len = bl.length(),
+          .offset = adjusted_start_ofs,
+          .attrs = attrs,
+          .is_head = false,
+          .is_latest_version = false
+        };
         auto ret = strategy_manager->get_cache_strategy()->put(dpp, &dest_blk, dest_oid, *y);
         if (ret < 0) {
           ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): strategy->put for block failed, ret=" << ret << dendl;
@@ -1186,7 +1254,17 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
       if (bl_rem.length() == rgw_get_obj_max_req_size) {
         std::string oid = prefix + "_" + std::to_string(adjusted_start_ofs) + "_" + std::to_string(bl_rem.length());
         if (!filter->get_policy_driver()->get_cache_policy()->exist_key(oid)) {
-          D4NFilterBlock blk{source, version, dirty, bl_rem, bl_rem.length(), adjusted_start_ofs, attrs, false, false};
+          D4NFilterBlock blk = D4NFilterBlock {
+            .object = source,
+            .version = version,
+            .dirty = dirty,
+            .bl = bl_rem,
+            .len = bl_rem.length(),
+            .offset = adjusted_start_ofs,
+            .attrs = attrs,
+            .is_head = false,
+            .is_latest_version = false
+          };
           auto ret = strategy_manager->get_cache_strategy()->put(dpp, &blk, oid, *y);
           if (ret < 0) {
             ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): strategy->put for block failed, ret=" << ret << dendl;
@@ -1195,7 +1273,17 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
         }
         if (source->dest_object) {
           std::string dest_oid = dest_prefix + "_" + std::to_string(adjusted_start_ofs) + "_" + std::to_string(bl_rem.length());
-          D4NFilterBlock dest_blk{source->dest_object, source->dest_object->get_object_version(), true, bl_rem, bl_rem.length(), adjusted_start_ofs, attrs, false, false};
+          D4NFilterBlock dest_blk = D4NFilterBlock {
+            .object = source->dest_object,
+            .version = source->dest_object->get_object_version(),
+            .dirty = true,
+            .bl = bl_rem,
+            .len = bl_rem.length(),
+            .offset = adjusted_start_ofs,
+            .attrs = attrs,
+            .is_head = false,
+            .is_latest_version = false
+          };
           auto ret = strategy_manager->get_cache_strategy()->put(dpp, &dest_blk, dest_oid, *y);
           if (ret < 0) {
             ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): strategy->put for block failed, ret=" << ret << dendl;
@@ -1312,7 +1400,17 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
       std::string oid = prefix + "_" + std::to_string(offset) + "_" + std::to_string(bl_len);
       if (bl_len > 0) {
         rgw::d4n::CacheStrategyManager* strategy_manager = this->driver->get_strategy_manager();
-        D4NFilterBlock blk{object, version, dirty, bl, bl_len, offset, obj->get_attrs(), false, false};
+        D4NFilterBlock blk = D4NFilterBlock {
+          .object = object,
+          .version = version,
+          .dirty = dirty,
+          .bl = bl,
+          .len = bl_len,
+          .offset = offset,
+          .attrs = obj->get_attrs(),
+          .is_head = false,
+          .is_latest_version = false
+        };
         ret = strategy_manager->get_cache_strategy()->put(dpp, &blk, oid, y);
         if (ret < 0) {
           ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): strategy->put for block failed, ret=" << ret << dendl;
@@ -1365,7 +1463,17 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
     object->set_etag(dpp, etag);
     bufferlist bl;
     rgw::d4n::CacheStrategyManager* strategy_manager = this->driver->get_strategy_manager();
-    D4NFilterBlock blk{object, version, dirty, bl, 0, 0, attrs, true, true};
+    D4NFilterBlock blk = D4NFilterBlock {
+      .object = object,
+      .version = version,
+      .dirty = dirty,
+      .bl = bl,
+      .len = 0,
+      .offset = 0,
+      .attrs = attrs,
+      .is_head = true,
+      .is_latest_version = true
+    };
     ret = strategy_manager->get_cache_strategy()->put(dpp, &blk, key, y);
     if (ret < 0) {
       ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): strategy->put for object failed, ret=" << ret << dendl;
