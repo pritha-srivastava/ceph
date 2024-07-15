@@ -1714,7 +1714,7 @@ int D4NFilterWriter::prepare(optional_yield y)
 
   d4n_writecache = g_conf()->d4n_writecache_enabled;
   if (d4n_writecache == false) {
-    ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): calling next iterate" << dendl;
+    ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): calling next process" << dendl;
     return next->prepare(y);
   }
 
@@ -1765,7 +1765,7 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
 
     if (d4n_writecache == false) {
       ldpp_dout(dpp, 10) << "D4NFilterWriter::" << __func__ << "(): calling next process" << dendl;
-      ret = next->process(std::move(data), offset);
+      return next->process(std::move(data), offset);
     } else {
       std::string oid = prefix + "_" + std::to_string(ofs);
       std::string key = "D_" + oid + "_" + std::to_string(bl_len);
