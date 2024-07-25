@@ -1800,9 +1800,15 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
       deleteBlock = block;
       deleteBlock.cacheObj.objName = "_:" + deleteBlock.version + "_" + deleteBlock.cacheObj.objName; // since the request has no instance,
 												      // the oid does not contain the version
-
       if ((ret = blockDir->set(dpp, &deleteBlock, y)) == 0) {
-	if ((ret = blockDir->set(dpp, &block, y)) < 0) {
+	if ((ret = blockDir->set(dpp, &block, y)) == 0) {
+	  next->params = params;
+	  ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): calling next delete_obj" << dendl;
+	  ret = next->delete_obj(dpp, y, flags);
+	  result = next->result;
+	  result.delete_marker = true;
+	  return ret;
+        } else {
 	  ldpp_dout(dpp, 0) << "Failed to set head object in block directory for: " << source->get_key().get_oid() << ", ret=" << ret << dendl;
 	  return ret;
 	}
