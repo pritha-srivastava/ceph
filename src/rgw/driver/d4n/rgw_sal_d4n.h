@@ -59,7 +59,6 @@ class D4NFilterDriver : public FilterDriver {
     virtual std::unique_ptr<Bucket> get_bucket(const RGWBucketInfo& i) override;
     int load_bucket(const DoutPrefixProvider* dpp, const rgw_bucket& b,
                   std::unique_ptr<Bucket>* bucket, optional_yield y) override;
-
     virtual std::unique_ptr<Writer> get_atomic_writer(const DoutPrefixProvider *dpp,
 				  optional_yield y,
 				  rgw::sal::Object* obj,
@@ -112,7 +111,7 @@ class D4NFilterObject : public FilterObject {
     rgw_obj obj;
     rgw::sal::Object* dest_object{nullptr}; //for copy-object
     rgw::sal::Bucket* dest_bucket{nullptr}; //for copy-object
-    std::string dest_version;
+    bool multipart{false};
 
   public:
     struct D4NFilterReadOp : FilterReadOp {
@@ -235,6 +234,7 @@ class D4NFilterObject : public FilterObject {
     bool check_head_exists_in_cache_get_oid(const DoutPrefixProvider* dpp, std::string& head_oid_in_cache, rgw::sal::Attrs& attrs, rgw::d4n::CacheBlock& blk, optional_yield y);
     rgw::sal::Bucket* get_destination_bucket(const DoutPrefixProvider* dpp) { return dest_bucket;}
     rgw::sal::Object* get_destination_object(const DoutPrefixProvider* dpp) { return dest_object; }
+    bool is_multipart() { return multipart; }
 };
 
 class D4NFilterWriter : public FilterWriter {
