@@ -1829,7 +1829,7 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
     }    
 
     if (block.deleteMarker == false) { // provided version is not a delete marker and contains data
-      if (source->get_bucket()->versioned()) { 
+      if (source->get_bucket()->versioned() && block.cacheObj.objName != source->get_name()) { 
 	if (blockDir->del(dpp, &block, y) == 0) { // delete versioned head object
 	  if ((ret = source->driver->get_cache_driver()->delete_data(dpp, head_oid_in_cache, y)) == 0) { // Sam: do we want del or delete_data here? 
 	    if (!(ret = source->driver->get_policy_driver()->get_cache_policy()->erase(dpp, policy_prefix, y))) {
