@@ -142,6 +142,7 @@ class D4NFilterObject : public FilterObject {
             }
 	    void set_ofs(uint64_t ofs) { this->ofs = ofs; }
       void set_adjusted_start_ofs(uint64_t adjusted_start_ofs) { this->adjusted_start_ofs = adjusted_start_ofs; }
+      void set_part_num(uint64_t part_num) { this->part_count = part_num; }
 	    int flush_last_part();
 	    void bypass_cache_write() { this->write_to_cache = false; }
 	};
@@ -221,6 +222,7 @@ class D4NFilterObject : public FilterObject {
 
     virtual std::unique_ptr<ReadOp> get_read_op() override;
     virtual std::unique_ptr<DeleteOp> get_delete_op() override;
+    //virtual int get_obj_state(const DoutPrefixProvider* dpp, RGWObjState **pstate, optional_yield y, bool follow_olh = true) override;
 
     void set_object_version(const std::string& version) { this->version = version; }
     const std::string get_object_version() { return this->version; }
