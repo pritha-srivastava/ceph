@@ -446,6 +446,33 @@ int D4NFilterObject::get_obj_attrs_from_cache(const DoutPrefixProvider* dpp, opt
   return found_in_cache;
 }
 
+int D4NFilterObject::set_attr_crypt_parts(const DoutPrefixProvider* dpp, optional_yield y, rgw::sal::Attrs& attrs)
+{
+  if (attrs.count(RGW_ATTR_CRYPT_MODE)) {
+    std::vector<size_t> parts_len;
+    uint64_t obj_size = this->get_size();
+    uint64_t obj_max_req_size = dpp->get_cct()->_conf->rgw_get_obj_max_req_size;
+    uint64_t num_parts = (obj_size%obj_max_req_size) == 0 ? obj_size/obj_max_req_size : (obj_size/obj_max_req_size) + 1;
+    size_t remainder_size = obj_size;
+    for (uint64_t part = 0; part < num_parts; part++) {
+      size_t part_len;
+      if (part == (num_parts - 1)) { //last part
+        part_len = remainder_size;
+      } else {
+        part_len = obj_max_req_size;
+      }
+      ldpp_dout(dpp, 20) << "D4NFilterObject::" << __func__ << "(): part_num: " << part << " part_len: " << part_len << dendl;
+      parts_len.emplace_back(part_len);
+      remainder_size -= part_len;
+    }
+
+    bufferlist parts_bl;
+    ceph::encode(parts_len, parts_bl);
+    attrs[RGW_ATTR_CRYPT_PARTS] = std::move(parts_bl);
+  }
+  return 0;
+}
+
 void D4NFilterObject::set_attrs_from_obj_state(const DoutPrefixProvider* dpp, optional_yield y, rgw::sal::Attrs& attrs)
 {
   bufferlist bl_val;
@@ -866,6 +893,8 @@ int D4NFilterObject::D4NFilterReadOp::prepare(optional_yield y, const DoutPrefix
     if (ret < 0 || version.empty()) {
       ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): version could not be calculated." << dendl;
     }
+
+    this->source->set_attr_crypt_parts(dpp, y, attrs);
 
     bufferlist bl;
     head_oid_in_cache = source->get_bucket()->get_name() + "_" + version + "_" + source->get_name();
@@ -1358,11 +1387,6 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
   Attrs obj_attrs;
   if (source->has_attrs()) {
     obj_attrs = source->get_attrs();
-  }
-
-  if (source->is_compressed() || obj_attrs.find(RGW_ATTR_CRYPT_MODE) != obj_attrs.end() || !y) {
-    ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): Skipping writing to cache" << dendl;
-    this->cb->bypass_cache_write();
   }
 
   this->cb->set_ofs(diff_ofs);
@@ -2029,6 +2053,7 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
     object->set_mtime(m_time);
     object->set_accounted_size(accounted_size);
     ldpp_dout(dpp, 20) << "D4NFilterWriter::" << __func__ << " size is: " << object->get_size() << dendl;
+    object->set_attr_crypt_parts(dpp, y, attrs);
     object->set_attrs(attrs);
     object->set_attrs_from_obj_state(dpp, y, attrs);
   } else {
