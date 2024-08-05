@@ -237,6 +237,7 @@ class D4NFilterObject : public FilterObject {
     rgw::sal::Bucket* get_destination_bucket(const DoutPrefixProvider* dpp) { return dest_bucket;}
     rgw::sal::Object* get_destination_object(const DoutPrefixProvider* dpp) { return dest_object; }
     bool is_multipart() { return multipart; }
+    int set_attr_crypt_parts(const DoutPrefixProvider* dpp, optional_yield y, rgw::sal::Attrs& attrs);
 };
 
 class D4NFilterWriter : public FilterWriter {
