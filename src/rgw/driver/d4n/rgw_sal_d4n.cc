@@ -166,8 +166,16 @@ int D4NFilterObject::copy_object(const ACLOwner& owner,
   bool write_to_cache = g_conf()->d4n_writecache_enabled;
   bool dirty{false};
   std::unique_ptr<rgw::sal::Object::ReadOp> read_op(this->get_read_op());
+  read_op->params.mod_ptr = mod_ptr;
+  read_op->params.unmod_ptr = unmod_ptr;
+  read_op->params.high_precision_time = high_precision_time;
+  read_op->params.if_match = if_match;
+  read_op->params.if_nomatch = if_nomatch;
   if (auto ret = read_op->prepare(y, dpp); ret < 0) {
     ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): prepare method failed with ret: " << ret << dendl;
+    if (ret == -ERR_NOT_MODIFIED) {
+      ret = ERR_PRECONDITION_FAILED;
+    }
     return ret;
   }
 
@@ -615,6 +623,95 @@ int D4NFilterObject::set_head_obj_dir_entry(const DoutPrefixProvider* dpp, optio
   }
 
   return ret;
+}
+
+int D4NFilterObject::set_data_block_dir_entries(const DoutPrefixProvider* dpp, optional_yield y, std::string& version, bool dirty)
+{
+  rgw::d4n::BlockDirectory* blockDir = driver->get_block_dir();
+
+  //update data block entries in directory
+  off_t lst = this->get_obj_size();
+  ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): Object size =" << lst << dendl;
+  off_t fst = 0;
+  do {
+    rgw::d4n::CacheBlock block, existing_block;
+    if (fst >= lst){
+      break;
+    }
+    off_t cur_size = std::min<off_t>(fst + dpp->get_cct()->_conf->rgw_max_chunk_size, lst);
+    off_t cur_len = cur_size - fst;
+    block.cacheObj.bucketName = this->get_bucket()->get_name();
+    block.cacheObj.objName = this->get_key().get_oid();
+    block.cacheObj.dirty = dirty;
+    block.cacheObj.hostsList.insert(dpp->get_cct()->_conf->rgw_local_cache_address);
+    existing_block.cacheObj.objName = block.cacheObj.objName;
+    existing_block.cacheObj.bucketName = block.cacheObj.bucketName;
+
+    block.size = cur_len;
+    block.blockID = fst;
+    block.version = version;
+
+    /* Store block in directory */
+    existing_block.blockID = block.blockID;
+    existing_block.size = block.size;
+
+    int ret;
+    if ((ret = blockDir->get(dpp, &existing_block, y)) == 0 || ret == -ENOENT) {
+      if (ret == 0) { //new versioned block will have new version, hostsList etc, how about globalWeight?
+        block = existing_block;
+        block.version = version;
+      }
+
+      block.cacheObj.hostsList.insert(dpp->get_cct()->_conf->rgw_local_cache_address);
+
+      if ((ret = blockDir->set(dpp, &block, y)) < 0) {
+        ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
+        return ret;
+      }
+    } else {
+      ldpp_dout(dpp, 0) << "Failed to fetch existing block for: " << existing_block.cacheObj.objName << " blockID: " << existing_block.blockID << " block size: " << existing_block.size << ", ret=" << ret << dendl;
+      return ret;
+    }
+    fst += cur_len;
+  } while(fst < lst);
+
+  return 0;
+}
+
+int D4NFilterObject::delete_data_block_cache_entries(const DoutPrefixProvider* dpp, optional_yield y, std::string& version, bool dirty)
+{
+  //delete cache entries
+  off_t lst = this->get_obj_size();
+  ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): Object size =" << lst << dendl;
+  off_t fst = 0;
+  do {
+    if (fst >= lst){
+      break;
+    }
+    off_t cur_size = std::min<off_t>(fst + dpp->get_cct()->_conf->rgw_max_chunk_size, lst);
+    off_t cur_len = cur_size - fst;
+
+    std::string key = get_bucket()->get_name() + "_" + version + "_" + get_name() + "_" + std::to_string(fst) + "_" + std::to_string(cur_len);
+    std::string key_in_cache;
+    if (dirty) {
+      key_in_cache = "D_" + key;
+    } else {
+      key_in_cache = key;
+    }
+    int ret;
+    if ((ret = driver->get_cache_driver()->delete_data(dpp, key_in_cache, y)) == 0) {
+	    if (!(ret = driver->get_policy_driver()->get_cache_policy()->erase(dpp, key, y))) {
+	      ldpp_dout(dpp, 0) << "Failed to delete policy entry for: " << key << ", ret=" << ret << dendl;
+	      return ret;
+	    }
+	  } else {
+      ldpp_dout(dpp, 0) << "Failed to delete cache entry for: " << key_in_cache << ", ret=" << ret << dendl;
+	    return ret;
+    }
+    fst += cur_len;
+  } while(fst < lst);
+
+  return 0;
 }
 
 bool D4NFilterObject::check_head_exists_in_cache_get_oid(const DoutPrefixProvider* dpp, std::string& head_oid_in_cache, rgw::sal::Attrs& attrs, rgw::d4n::CacheBlock& blk, optional_yield y)
@@ -1953,6 +2050,7 @@ int D4NFilterWriter::prepare(optional_yield y)
     version = object->get_instance();
   }
   object->set_object_version(version);
+  this->version = version;
 
   return 0;
 }
@@ -1963,62 +2061,30 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
     off_t bl_len = bl.length();
     off_t ofs = offset;
     bool dirty = true;
-    rgw::d4n::CacheBlock block, existing_block;
 
     std::string version = object->get_object_version();
     std::string prefix;
 
     prefix = obj->get_bucket()->get_name() + "_" + version + "_" + obj->get_name();
-    rgw::d4n::BlockDirectory* blockDir = driver->get_block_dir();
-
-    block.cacheObj.bucketName = obj->get_bucket()->get_name();
-    block.cacheObj.objName = obj->get_key().get_oid();
-    block.cacheObj.dirty = dirty;
-    block.cacheObj.hostsList.insert(dpp->get_cct()->_conf->rgw_local_cache_address);
-    existing_block.cacheObj.objName = block.cacheObj.objName;
-    existing_block.cacheObj.bucketName = block.cacheObj.bucketName;
-
     int ret = 0;
 
     if (d4n_writecache == false) {
       ldpp_dout(dpp, 10) << "D4NFilterWriter::" << __func__ << "(): calling next process" << dendl;
       return next->process(std::move(data), offset);
     } else {
+      rgw::sal::Attrs attrs;
       std::string oid = prefix + "_" + std::to_string(ofs);
       std::string key = "D_" + oid + "_" + std::to_string(bl_len);
       std::string oid_in_cache = oid + "_" + std::to_string(bl_len);
-      block.size = bl.length();
-      block.blockID = ofs;
-      block.cacheObj.dirty = true;
-      block.cacheObj.hostsList.insert(dpp->get_cct()->_conf->rgw_local_cache_address);
-      block.version = version;
       dirty = true;
-      ret = driver->get_policy_driver()->get_cache_policy()->eviction(dpp, block.size, y);
+      ret = driver->get_policy_driver()->get_cache_policy()->eviction(dpp, bl.length(), y);
       if (ret == 0) {     
 	if (bl.length() > 0) {          
           ldpp_dout(dpp, 10) << "D4NFilterWriter::" << __func__ << "(): key is: " << key << dendl;
-          ret = driver->get_cache_driver()->put(dpp, key, bl, bl.length(), obj->get_attrs(), y);
+          ret = driver->get_cache_driver()->put(dpp, key, bl, bl.length(), attrs, y);
           if (ret == 0) {
             ldpp_dout(dpp, 10) << "D4NFilterWriter::" << __func__ << "(): oid_in_cache is: " << oid_in_cache << dendl;
  	    driver->get_policy_driver()->get_cache_policy()->update(dpp, oid_in_cache, ofs, bl.length(), version, dirty, y);
-
-	    /* Store block in directory */
-	    existing_block.blockID = block.blockID;
-	    existing_block.size = block.size;
-
-	    if ((ret = blockDir->get(dpp, &existing_block, y)) == 0 || ret == -ENOENT) {
-	      if (ret == 0) { //new versioned block will have new version, hostsList etc, how about globalWeight?
-		block = existing_block;
-                block.version = version;
-              }
-
-	      block.cacheObj.hostsList.insert(dpp->get_cct()->_conf->rgw_local_cache_address); 
-
-	      if ((ret = blockDir->set(dpp, &block, y)) < 0)
-		ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
-	    } else {
-	      ldpp_dout(dpp, 0) << "Failed to fetch existing block for: " << existing_block.cacheObj.objName << " blockID: " << existing_block.blockID << " block size: " << existing_block.size << ", ret=" << ret << dendl;
-	    }
           } else {
             ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): ERROR: writting data to the cache failed, ret=" << ret << dendl;
 	    return ret;
@@ -2049,12 +2115,68 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
   // the head will not be marked dirty and the entire object will written to backend store also. In case write-back
   // cache is enabled, the head will be cached as dirty.
   if (d4n_writecache == true) {
+    auto ret = object->get_obj_attrs(y, dpp);
+    if (if_match) {
+      if (strcmp(if_match, "*") == 0) {
+        if (ret == -ENOENT) {
+          object->delete_data_block_cache_entries(dpp, y, this->version, true);
+          return -ERR_PRECONDITION_FAILED;
+        }
+      } else {
+        rgw::sal::Attrs attrs = object->get_attrs();
+        bufferlist bl;
+        auto iter = attrs.find(RGW_ATTR_ETAG);
+        if (iter == attrs.end()) {
+          object->delete_data_block_cache_entries(dpp, y, this->version, true);
+          return -ERR_PRECONDITION_FAILED;
+        } else {
+          bl = iter->second;
+        }
+        if (strncmp(if_match, bl.c_str(), bl.length()) != 0) {
+          object->delete_data_block_cache_entries(dpp, y, this->version, true);
+          return -ERR_PRECONDITION_FAILED;
+        }
+      }
+    }
+    if (if_nomatch) {
+      if (strcmp(if_nomatch, "*") == 0) {
+        if (ret != -ENOENT) {
+          object->delete_data_block_cache_entries(dpp, y, this->version, true);
+          return -ERR_PRECONDITION_FAILED;
+        }
+      } else {
+        rgw::sal::Attrs attrs = object->get_attrs();
+        bufferlist bl;
+        auto iter = attrs.find(RGW_ATTR_ETAG);
+        if (iter == attrs.end()) {
+          object->delete_data_block_cache_entries(dpp, y, this->version, true);
+          return -ERR_PRECONDITION_FAILED;
+        } else {
+          bl = iter->second;
+        }
+        if (strncmp(if_nomatch, bl.c_str(), bl.length()) == 0) {
+          object->delete_data_block_cache_entries(dpp, y, this->version, true);
+          return -ERR_PRECONDITION_FAILED;
+        }
+      }
+    }
+    //get_obj_attrs will override object version with an older version, hence setting it here again
+    object->set_object_version(this->version);
+    //update data block entries in directory
+    ret = object->set_data_block_dir_entries(dpp, y, this->version, true);
+    if (ret < 0) {
+      return ret;
+    }
+
     RGWObjState state;
     dirty = true;
-    if (mtime) {
-      state.mtime = *mtime;
-    } else {
+    if (real_clock::is_zero(set_mtime)) {
       state.mtime = real_clock::now();
+    } else {
+      state.mtime = set_mtime;
+    }
+    if (mtime) {
+      *mtime = state.mtime;
     }
     state.obj = object->get_obj();
     state.size = accounted_size;
