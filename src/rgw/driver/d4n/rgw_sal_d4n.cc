@@ -459,15 +459,15 @@ int D4NFilterObject::set_attr_crypt_parts(const DoutPrefixProvider* dpp, optiona
   if (attrs.count(RGW_ATTR_CRYPT_MODE)) {
     std::vector<size_t> parts_len;
     uint64_t obj_size = this->get_size();
-    uint64_t obj_max_req_size = dpp->get_cct()->_conf->rgw_get_obj_max_req_size;
-    uint64_t num_parts = (obj_size%obj_max_req_size) == 0 ? obj_size/obj_max_req_size : (obj_size/obj_max_req_size) + 1;
+    uint64_t obj_max_chunk_size = dpp->get_cct()->_conf->rgw_max_chunk_size;
+    uint64_t num_parts = (obj_size%obj_max_chunk_size) == 0 ? obj_size/obj_max_chunk_size : (obj_size/obj_max_chunk_size) + 1;
     size_t remainder_size = obj_size;
     for (uint64_t part = 0; part < num_parts; part++) {
       size_t part_len;
       if (part == (num_parts - 1)) { //last part
         part_len = remainder_size;
       } else {
-        part_len = obj_max_req_size;
+        part_len = obj_max_chunk_size;
       }
       ldpp_dout(dpp, 20) << "D4NFilterObject::" << __func__ << "(): part_num: " << part << " part_len: " << part_len << dendl;
       parts_len.emplace_back(part_len);
@@ -1222,18 +1222,18 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
   this->cb->set_client_cb(cb, dpp, &y);
   source->set_prefix(prefix);
 
-  /* This algorithm stores chunks for ranged requests also in the cache, which might be smaller than obj_max_req_size
-     One simplification could be to overwrite the smaller chunks with a bigger chunk of obj_max_req_size, and to serve requests for smaller
-     chunks using the larger chunk, but all corner cases need to be considered like the last chunk which might be smaller than obj_max_req_size
-     and also ranged requests where a smaller chunk is overwritten by a larger chunk size != obj_max_req_size */
+  /* This algorithm stores chunks for ranged requests also in the cache, which might be smaller than max_chunk_size
+     One simplification could be to overwrite the smaller chunks with a bigger chunk of max_chunk_size, and to serve requests for smaller
+     chunks using the larger chunk, but all corner cases need to be considered like the last chunk which might be smaller than max_chunk_size
+     and also ranged requests where a smaller chunk is overwritten by a larger chunk size != max_chunk_size */
 
-  uint64_t obj_max_req_size = g_conf()->rgw_get_obj_max_req_size;
+  uint64_t max_chunk_size = g_conf()->rgw_max_chunk_size;
   uint64_t start_part_num = 0;
-  uint64_t part_num = ofs/obj_max_req_size; //part num of ofs wrt start of the object
-  uint64_t adjusted_start_ofs = part_num*obj_max_req_size; //in case of ranged request, adjust the start offset to the beginning of a chunk/ part
+  uint64_t part_num = ofs/max_chunk_size; //part num of ofs wrt start of the object
+  uint64_t adjusted_start_ofs = part_num*max_chunk_size; //in case of ranged request, adjust the start offset to the beginning of a chunk/ part
   uint64_t diff_ofs = ofs - adjusted_start_ofs; //difference between actual offset and adjusted offset
   off_t len = (end - adjusted_start_ofs) + 1;
-  uint64_t num_parts = (len%obj_max_req_size) == 0 ? len/obj_max_req_size : (len/obj_max_req_size) + 1; //calculate num parts based on adjusted offset
+  uint64_t num_parts = (len%max_chunk_size) == 0 ? len/max_chunk_size : (len/max_chunk_size) + 1; //calculate num parts based on adjusted offset
   //len_to_read is the actual length read from a part/ chunk in cache, while part_len is the length of the chunk/ part in cache 
   uint64_t cost = 0, len_to_read = 0, part_len = 0;
 
@@ -1242,7 +1242,7 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
   if ((params.part_num && !source->is_multipart()) || !params.part_num) {
     aio = rgw::make_throttle(window_size, y);
 
-    ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << "obj_max_req_size " << obj_max_req_size << " num_parts " << num_parts << dendl;
+    ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << "max_chunk_size " << max_chunk_size << " num_parts " << num_parts << dendl;
 
     this->offset = ofs;
 
@@ -1257,9 +1257,9 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
         part_len = len;
         cost = len;
       } else {
-        len_to_read = obj_max_req_size;
-        cost = obj_max_req_size;
-        part_len = obj_max_req_size;
+        len_to_read = max_chunk_size;
+        cost = max_chunk_size;
+        part_len = max_chunk_size;
       }
       if (start_part_num == 0) {
         len_to_read -= diff_ofs;
@@ -1355,10 +1355,10 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
       } else if (ret == -ENOENT) {
         block.blockID = adjusted_start_ofs;
         uint64_t obj_size = source->get_size(), chunk_size = 0;
-        if (obj_size < obj_max_req_size) {
+        if (obj_size < max_chunk_size) {
           chunk_size = obj_size;
         } else {
-          chunk_size = obj_max_req_size;
+          chunk_size = max_chunk_size;
         }
         block.size = chunk_size;
 
@@ -1472,11 +1472,11 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
         ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): Info: draining data for oid: " << oid_in_cache << dendl;
         return drain(dpp, y);
       } else {
-        adjusted_start_ofs += obj_max_req_size;
+        adjusted_start_ofs += max_chunk_size;
       }
 
       start_part_num += 1;
-      len -= obj_max_req_size;
+      len -= max_chunk_size;
     } while (start_part_num < num_parts);
   }
   ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): Fetching object from backend store" << dendl;
@@ -1494,7 +1494,7 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
   //calculate the number of blocks read from backend store, and increment the perfcounter using that
   if(perfcounter) {
     uint64_t len_to_read_from_store = ((end - adjusted_start_ofs) + 1);
-    uint64_t num_blocks = (len_to_read_from_store%obj_max_req_size) == 0 ? len_to_read_from_store/obj_max_req_size : (len_to_read_from_store/obj_max_req_size) + 1;
+    uint64_t num_blocks = (len_to_read_from_store%max_chunk_size) == 0 ? len_to_read_from_store/max_chunk_size : (len_to_read_from_store/max_chunk_size) + 1;
     perfcounter->inc(l_rgw_d4n_cache_misses, num_blocks);
   }
   
@@ -1538,14 +1538,14 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::flush_last_part()
 
 int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl, off_t bl_ofs, off_t bl_len)
 {
-  auto rgw_get_obj_max_req_size = g_conf()->rgw_get_obj_max_req_size;
+  auto rgw_max_chunk_size = g_conf()->rgw_max_chunk_size;
   ldpp_dout(dpp, 20) << __func__ << ": bl_ofs is: " << bl_ofs << " bl_len is: " << bl_len << " ofs is: " << ofs << " part_count: " << part_count << dendl;
-  if (!last_part && bl.length() <= rgw_get_obj_max_req_size) {
+  if (!last_part && bl.length() <= rgw_max_chunk_size) {
     if (client_cb) {
       int r = 0;
       //ranged request
       if (bl_ofs != ofs && part_count == 0) {
-        if (ofs < bl_len) { // this can happen in case of multipart where each chunk returned is not always of size rgw_get_obj_max_req_size
+        if (ofs < bl_len) { // this can happen in case of multipart where each chunk returned is not always of size rgw_max_chunk_size
           off_t bl_part_len = bl_len - ofs;
           ldpp_dout(dpp, 20) << __func__ << ": bl_part_len is: " << bl_part_len << dendl;
           bufferlist bl_part;
@@ -1569,7 +1569,7 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
     }
   }
 
-  //Accumulating data from backend store into rgw_get_obj_max_req_size sized chunks and then writing to cache
+  //Accumulating data from backend store into rgw_max_chunk_size sized chunks and then writing to cache
   if (write_to_cache) {
     Attrs attrs; // empty attrs for cache sets
     std::string version = source->get_object_version();
@@ -1667,7 +1667,7 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
           }
         }
       }
-    } else if (bl.length() == rgw_get_obj_max_req_size && bl_rem.length() == 0) { // if bl is the same size as rgw_get_obj_max_req_size, write it to cache
+    } else if (bl.length() == rgw_max_chunk_size && bl_rem.length() == 0) { // if bl is the same size as rgw_max_chunk_size, write it to cache
       std::string oid = prefix + "_" + std::to_string(adjusted_start_ofs) + "_" + std::to_string(bl_len);
       block.blockID = adjusted_start_ofs;
       block.size = bl.length();
@@ -1718,15 +1718,15 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
         }
       }
       adjusted_start_ofs += bl_len;
-    } else { //copy data from incoming bl to bl_rem till it is rgw_get_obj_max_req_size, and then write it to cache
-      uint64_t rem_space = rgw_get_obj_max_req_size - bl_rem.length();
+    } else { //copy data from incoming bl to bl_rem till it is rgw_max_chunk_size, and then write it to cache
+      uint64_t rem_space = rgw_max_chunk_size - bl_rem.length();
       uint64_t len_to_copy = rem_space > bl.length() ? bl.length() : rem_space;
       bufferlist bl_copy;
 
       bl.splice(0, len_to_copy, &bl_copy);
       bl_rem.claim_append(bl_copy);
 
-      if (bl_rem.length() == rgw_get_obj_max_req_size) {
+      if (bl_rem.length() == rgw_max_chunk_size) {
         std::string oid = prefix + "_" + std::to_string(adjusted_start_ofs) + "_" + std::to_string(bl_rem.length());
           if (!filter->get_policy_driver()->get_cache_policy()->exist_key(oid)) {
           block.blockID = adjusted_start_ofs;
@@ -1798,6 +1798,10 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
 int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp,
                                                    optional_yield y, uint32_t flags)
 {
+  next->params = params;
+  auto ret = next->delete_obj(dpp, y, flags);
+  result = next->result;
+  return ret;
   // TODO: 
   // 1. Send delete request to cache nodes with remote copies
   // 2. See if we can derive dirty flag from the head block 
