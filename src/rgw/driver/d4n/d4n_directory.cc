@@ -150,7 +150,6 @@ int ObjectDirectory::get(const DoutPrefixProvider* dpp, CacheObj* object, option
 {
   std::string key = build_index(object);
   std::vector<std::string> fields;
-
   ldpp_dout(dpp, 10) << "ObjectDirectory::" << __func__ << "(): index is: " << key << dendl;
 
   fields.push_back("objName");
@@ -354,6 +353,7 @@ int BlockDirectory::set(const DoutPrefixProvider* dpp, CacheBlock* block, option
   /* For existing keys, call get method beforehand. 
      Sets completely overwrite existing values. */
   std::string key = build_index(block);
+  ldpp_dout(dpp, 10) << "BlockDirectory::" << __func__ << "(): index is: " << key << dendl;
     
   std::string entries;
   std::list<std::string> redisValues;
@@ -443,7 +443,6 @@ int BlockDirectory::get(const DoutPrefixProvider* dpp, CacheBlock* block, option
 {
   std::string key = build_index(block);
   std::vector<std::string> fields;
-
   ldpp_dout(dpp, 10) << "BlockDirectory::" << __func__ << "(): index is: " << key << dendl;
 
   fields.push_back("blockID");
