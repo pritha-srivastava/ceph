@@ -389,7 +389,7 @@ TEST_F(RedisDriverFixture, RenameYield)
     }
 
     conn->cancel();
-  });
+  }, rethrow);
 
   io.run();
 }
