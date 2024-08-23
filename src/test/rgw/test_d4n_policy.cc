@@ -73,7 +73,6 @@ class LFUDAPolicyFixture : public ::testing::Test {
       ASSERT_NE(policyDriver, nullptr);
       ASSERT_NE(conn, nullptr);
 
-      dir->init(env->cct);
       env->cct->_conf->rgw_d4n_l1_datacache_address = "127.0.0.1:6379";
       cacheDriver->initialize(env->dpp);
 
@@ -193,7 +192,7 @@ TEST_F(LFUDAPolicyFixture, LocalGetBlockYield)
     
     delete policyDriver; 
     policyDriver = nullptr;
-  });
+  }, rethrow);
 
   io.run();
 }
@@ -278,7 +277,7 @@ TEST_F(LFUDAPolicyFixture, RemoteGetBlockYield)
     
     delete policyDriver; 
     policyDriver = nullptr;
-  });
+  }, rethrow);
 
   io.run(); 
 }
@@ -306,7 +305,7 @@ TEST_F(LFUDAPolicyFixture, BackendGetBlockYield)
 
     delete policyDriver; 
     policyDriver = nullptr;
-  });
+  }, rethrow);
 
   io.run();
 }
