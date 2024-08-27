@@ -1028,8 +1028,9 @@ int D4NFilterObject::D4NFilterReadOp::prepare(optional_yield y, const DoutPrefix
       }
     }
     bufferlist etag_bl;
-    if (get_attr(dpp, RGW_ATTR_ETAG, etag_bl, y) < 0) {
-      return -EINVAL;
+    if ((ret = get_attr(dpp, RGW_ATTR_ETAG, etag_bl, y)) < 0) {
+      ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): get_attr failed, ret=" << ret << dendl;
+      return ret;
     }
 
     if (params.mod_ptr || params.unmod_ptr) {
@@ -1769,10 +1770,6 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
 int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp,
                                                    optional_yield y, uint32_t flags)
 {
-  next->params = params;
-  auto ret = next->delete_obj(dpp, y, flags);
-  result = next->result;
-  return ret;
   // TODO: 
   // 1. Send delete request to cache nodes with remote copies
   // 2. See if we can derive dirty flag from the head block 
@@ -1956,7 +1953,7 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
 	}
       }
       
-      off_t lst = source->get_obj_size(); // uint64_t has a bigger max than off_t; how to solve? -Sam
+      off_t lst = source->get_size(); // uint64_t has a bigger max than off_t; how to solve? -Sam
       off_t fst = 0;
 
       do {
