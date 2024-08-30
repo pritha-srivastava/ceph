@@ -267,7 +267,7 @@ int D4NFilterObject::copy_object(const ACLOwner& owner,
     creationTime = ceph::real_clock::to_time_t(dest_mtime);
     dest_object->set_mtime(dest_mtime);
     dest_object->set_obj_size(this->get_size());
-    dest_object->set_accounted_size(this->get_size());
+    dest_object->set_accounted_size(this->get_accounted_size());
     ldpp_dout(dpp, 20) << "D4NFilterObject::" << __func__ << " size is: " << dest_object->get_size() << dendl;
     d4n_dest_object->set_attrs_from_obj_state(dpp, y, baseAttrs);
   } else {
@@ -1809,7 +1809,7 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
         } else {
 	  tempBlock.cacheObj.objName = "_:null_" + block.cacheObj.objName;
 	  ret = blockDir->get(dpp, &tempBlock, y); // check if null delete marker block already exists; if so, delete
-	  if (ret == 0) {
+	  if (ret == 0 && tempBlock.deleteMarker) {
 	    version = "null";
 	  } else if (ret == -ENOENT) { // if there is no null delete marker block to delete, add one
 	    block.prevVersion = std::pair<std::string, bool>(block.version, block.deleteMarker);
@@ -2163,6 +2163,11 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
   std::unordered_set<std::string> hostsList = {};
   auto creationTime = startTime;
   std::string objEtag = etag;
+  auto size = object->get_size();
+  std::string instance;
+  if (object->have_instance()) {
+    instance = object->get_instance();
+  }
   int ret;
   
   // for cache coherence, we are going to cache the head even in case when read-only cache is enabled, just that
@@ -2214,8 +2219,11 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
         }
       }
     }
-    //get_obj_attrs will override object version with an older version, hence setting it here again
+    //get_obj_attrs will override object version and size with older values, hence setting it here again
     object->set_object_version(this->version);
+    object->set_instance(instance);
+    object->set_obj_size(size);
+
     //update data block entries in directory
     ret = object->set_data_block_dir_entries(dpp, y, this->version, true);
     if (ret < 0) {
