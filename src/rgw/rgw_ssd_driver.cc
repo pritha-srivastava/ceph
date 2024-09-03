@@ -13,8 +13,6 @@ namespace efs = std::filesystem;
 
 namespace rgw { namespace cache {
 
-constexpr std::string_view ATTR_PREFIX = "user.rgw.";
-
 int SSDDriver::initialize(const DoutPrefixProvider* dpp)
 {
     if(partition_info.location.back() != '/') {
@@ -136,16 +134,16 @@ int SSDDriver::restore_dirty_objects(const DoutPrefixProvider* dpp, std::functio
             time_t creationTime = time_t(nullptr);
             rgw_user user;
             rgw_obj_key obj_key;
-            if (attrs.find("user.rgw.etag") != attrs.end()) {
-                etag = attrs["user.rgw.etag"].to_str();
+            if (attrs.find(RGW_ATTR_ETAG) != attrs.end()) {
+                etag = attrs[RGW_ATTR_ETAG].to_str();
                 ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): etag: " << etag << dendl;
             }
-            if (attrs.find("user.rgw.object_size") != attrs.end()) {
-                size = std::stoull(attrs["user.rgw.object_size"].to_str());
+            if (attrs.find(RGW_CACHE_ATTR_OBJECT_SIZE) != attrs.end()) {
+                size = std::stoull(attrs[RGW_CACHE_ATTR_OBJECT_SIZE].to_str());
                 ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): size: " << size << dendl;
             }
-            if (attrs.find("user.rgw.mtime") != attrs.end()) {
-                creationTime = ceph::real_clock::to_time_t(ceph::real_clock::from_double(std::stod(attrs["user.rgw.mtime"].to_str())));
+            if (attrs.find(RGW_CACHE_ATTR_MTIME) != attrs.end()) {
+                creationTime = ceph::real_clock::to_time_t(ceph::real_clock::from_double(std::stod(attrs[RGW_CACHE_ATTR_MTIME].to_str())));
                 ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): creationTime: " << creationTime << dendl;
             }
             if (attrs.find(RGW_ATTR_ACL) != attrs.end()) {
@@ -162,18 +160,18 @@ int SSDDriver::restore_dirty_objects(const DoutPrefixProvider* dpp, std::functio
                 ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): rgw_user: " << user.to_str() << dendl;
             }
             obj_key.name = obj_name;
-            if (attrs.find("user.rgw.version_id") != attrs.end()) {
-                std::string instance = attrs["user.rgw.version_id"].to_str();
+            if (attrs.find(RGW_CACHE_ATTR_VERSION_ID) != attrs.end()) {
+                std::string instance = attrs[RGW_CACHE_ATTR_VERSION_ID].to_str();
                 if (instance != "null") {
                     obj_key.instance = instance;
                 }
             }
-            if (attrs.find("user.rgw.object_ns") != attrs.end()) {
-                obj_key.ns = attrs["user.rgw.object_ns"].to_str();
+            if (attrs.find(RGW_CACHE_ATTR_OBJECT_NS) != attrs.end()) {
+                obj_key.ns = attrs[RGW_CACHE_ATTR_OBJECT_NS].to_str();
             }
             ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): rgw_obj_key: " << obj_key.get_oid() << dendl;
-            if (attrs.find("user.rgw.bucket_name") != attrs.end()) {
-                bucket_name = attrs["user.rgw.bucket_name"].to_str();
+            if (attrs.find(RGW_CACHE_ATTR_BUCKET_NAME) != attrs.end()) {
+                bucket_name = attrs[RGW_CACHE_ATTR_BUCKET_NAME].to_str();
                 ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): bucket_name: " << bucket_name << dendl;
             }
 
@@ -619,7 +617,7 @@ int SSDDriver::get_attrs(const DoutPrefixProvider* dpp, const std::string& key, 
 
         keylen = strlen(keyptr) + 1;
         std::string attr_name(keyptr);
-        std::string::size_type prefixloc = attr_name.find(ATTR_PREFIX);
+        std::string::size_type prefixloc = attr_name.find(RGW_ATTR_PREFIX);
         buflen -= keylen;
         keyptr += keylen;
         if (prefixloc == std::string::npos) {

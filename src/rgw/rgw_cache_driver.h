@@ -3,6 +3,17 @@
 #include "rgw_common.h"
 #include "rgw_aio.h"
 
+constexpr char RGW_CACHE_ATTR_MTIME[] = "user.rgw.mtime";
+constexpr char RGW_CACHE_ATTR_EPOCH[] = "user.rgw.epoch";
+constexpr char RGW_CACHE_ATTR_OBJECT_SIZE[] = "user.rgw.object_size";
+constexpr char RGW_CACHE_ATTR_ACCOUNTED_SIZE[] = "user.rgw.accounted_size";
+constexpr char RGW_CACHE_ATTR_MULTIPART[] = "user.rgw.multipart";
+constexpr char RGW_CACHE_ATTR_OBJECT_NS[] = "user.rgw.object_ns";
+constexpr char RGW_CACHE_ATTR_BUCKET_NAME[] = "user.rgw.bucket_name";
+constexpr char RGW_CACHE_ATTR_VERSION_ID[] = "user.rgw.version_id";
+constexpr char RGW_CACHE_ATTR_SOURC_ZONE[] = "user.rgw.source_zone";
+constexpr char RGW_CACHE_ATTR_LOCAL_WEIGHT[] = "user.rgw.localWeight";
+
 namespace rgw { namespace cache {
 
 struct Partition {

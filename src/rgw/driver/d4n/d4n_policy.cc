@@ -304,7 +304,7 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
         (*it->second->handle)->localWeight = it->second->localWeight;
 	entries_heap.decrease(it->second->handle); // larger value means node must be decreased to maintain min heap 
 
-	if (int ret = cacheDriver->set_attr(dpp, key, "user.rgw.localWeight", std::to_string(it->second->localWeight), y) < 0) { 
+	if (int ret = cacheDriver->set_attr(dpp, key, RGW_CACHE_ATTR_LOCAL_WEIGHT, std::to_string(it->second->localWeight), y) < 0) { 
 	  delete victim;
 	  return ret;
         }
@@ -382,7 +382,7 @@ void LFUDAPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64
 
   if (updateLocalWeight) {
     int ret = -1;
-    if ((ret = cacheDriver->set_attr(dpp, oid_in_cache, "user.rgw.localWeight", std::to_string(localWeight), y)) < 0) 
+    if ((ret = cacheDriver->set_attr(dpp, oid_in_cache, RGW_CACHE_ATTR_LOCAL_WEIGHT, std::to_string(localWeight), y)) < 0) 
       ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "(): CacheDriver set_attr method failed, ret=" << ret << dendl;
   }
 
@@ -510,10 +510,10 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
       ldpp_dout(dpp, 10) << __func__ << "(): new_head_oid_in_cache=" << new_head_oid_in_cache << dendl;
       bufferlist bl;
       cacheDriver->get_attrs(dpp, head_oid_in_cache, obj_attrs, null_yield); //get obj attrs from head
-      obj_attrs.erase("user.rgw.mtime");
-      obj_attrs.erase("user.rgw.object_size");
-      obj_attrs.erase("user.rgw.accounted_size");
-      obj_attrs.erase("user.rgw.epoch");
+      obj_attrs.erase(RGW_CACHE_ATTR_MTIME);
+      obj_attrs.erase(RGW_CACHE_ATTR_OBJECT_SIZE);
+      obj_attrs.erase(RGW_CACHE_ATTR_ACCOUNTED_SIZE);
+      obj_attrs.erase(RGW_CACHE_ATTR_EPOCH);
 
       do {
         ceph::bufferlist data;
