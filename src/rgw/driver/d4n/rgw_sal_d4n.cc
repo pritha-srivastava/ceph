@@ -309,6 +309,8 @@ int D4NFilterObject::copy_object(const ACLOwner& owner,
     baseAttrs.erase("user.rgw.accounted_size");
     baseAttrs.erase("user.rgw.epoch");
     baseAttrs.erase("user.rgw.multipart");
+    baseAttrs.erase("user.rgw.object_ns");
+    baseAttrs.erase("user.rgw.bucket_name");
     if (ret == 0) {
       ldpp_dout(dpp, 20) << "D4NFilterObject::" << __func__ << " version stored in update method is: " << dest_version << dendl;
       bufferlist bl;
@@ -438,6 +440,8 @@ int D4NFilterObject::get_obj_attrs_from_cache(const DoutPrefixProvider* dpp, opt
     attrs.erase("user.rgw.accounted_size");
     attrs.erase("user.rgw.epoch");
     attrs.erase("user.rgw.multipart");
+    attrs.erase("user.rgw.object_ns");
+    attrs.erase("user.rgw.bucket_name");
     /* Set attributes locally */
     auto ret = this->set_attrs(attrs);
     if (ret < 0) {
@@ -497,6 +501,12 @@ void D4NFilterObject::set_attrs_from_obj_state(const DoutPrefixProvider* dpp, op
 
   bl_val.append(std::to_string(this->get_accounted_size()));
   attrs["user.rgw.accounted_size"] = std::move(bl_val); // will this get updated?
+
+  bl_val.append(this->get_key().ns);
+  attrs["user.rgw.object_ns"] = std::move(bl_val);
+
+  bl_val.append(this->get_bucket()->get_name());
+  attrs["user.rgw.bucket_name"] = std::move(bl_val);
 
   return;
 }
@@ -1950,7 +1960,6 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
 
 int D4NFilterWriter::prepare(optional_yield y) 
 {
-  startTime = time(NULL);
   d4n_writecache = g_conf()->d4n_writecache_enabled;
 
   if (d4n_writecache == false) {
@@ -2042,7 +2051,6 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
 {
   bool dirty = false;
   std::unordered_set<std::string> hostsList = {};
-  auto creationTime = startTime;
   std::string objEtag = etag;
   auto size = object->get_size();
   std::string instance;
@@ -2115,6 +2123,9 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
     ceph::real_time m_time;
     dirty = true;
     if (mtime) {
+      if (real_clock::is_zero(*mtime)) {
+        *mtime = real_clock::now();
+      }
       m_time = *mtime;
     } else {
       m_time = real_clock::now();
@@ -2165,6 +2176,8 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
     attrs.erase("user.rgw.accounted_size");
     attrs.erase("user.rgw.epoch");
     attrs.erase("user.rgw.multipart");
+    attrs.erase("user.rgw.object_ns");
+    attrs.erase("user.rgw.bucket_name");
     object->set_object_version(version);
     if (ret == 0) {
       ldpp_dout(dpp, 20) << "D4NFilterWriter::" << __func__ << "(): version stored in update method is: " << version << dendl;
@@ -2177,6 +2190,7 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
       if (dirty) {
         //using object oid here so that version is automatically picked for versioned buckets, and for non-versioned buckets the old version is replaced by the latest version
         std::string object_key = obj->get_bucket()->get_bucket_id() + "_" + obj->get_oid();
+        auto creationTime = ceph::real_clock::to_time_t(object->get_mtime());
         ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): object_key=" << object_key << dendl;
         driver->get_policy_driver()->get_cache_policy()->update_dirty_object(dpp, object_key, version, dirty, accounted_size, creationTime, std::get<rgw_user>(obj->get_bucket()->get_owner()), objEtag, obj->get_bucket()->get_name(), obj->get_bucket()->get_bucket_id(), obj->get_key(), y);
       }

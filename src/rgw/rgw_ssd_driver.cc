@@ -92,6 +92,99 @@ int SSDDriver::initialize(const DoutPrefixProvider* dpp)
     return 0;
 }
 
+int SSDDriver::restore_dirty_objects(const DoutPrefixProvider* dpp, std::function<void(const DoutPrefixProvider* dpp, std::string& key, std::string version, bool dirty, uint64_t size, 
+			    time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name, const std::string& bucket_id,
+			    const rgw_obj_key& obj_key, optional_yield y)> func)
+{
+    if (dpp->get_cct()->_conf->rgw_d4n_l1_evict_cache_on_start) {
+        return 0; //don't do anything as the cache directory must have been evicted during start-up
+    }
+    for (auto const& dir_entry : std::filesystem::directory_iterator{partition_info.location}) {
+        ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): dir_entry.path: " << dir_entry.path() << dendl;
+        std::string file_name = dir_entry.path().filename();
+        std::vector<std::string> parts;
+        std::string part;
+        ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): filename: " << file_name << dendl;
+        std::stringstream ss(file_name);
+        while (std::getline(ss, part, '_')) {
+            parts.push_back(part);
+        }
+        ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): parts.size(): " << parts.size() << " parts[0]: " << parts[0] << dendl;
+        if (parts.size() != 4 || parts[0] != "D") {//prefix "D", bucket_id, version, object_name in head block
+            continue;
+        }
+        std::string prefix = "D_";
+        if (file_name.starts_with(prefix)) {
+            std::string key = file_name.substr(prefix.length());
+            ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key: " << key << dendl;
+
+            rgw::sal::Attrs attrs;
+            get_attrs(dpp, file_name, attrs, null_yield);
+            bool dirty = true;
+
+            std::string bucket_id = parts[1];
+            ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): bucket_id: " << bucket_id << dendl;
+
+            std::string version = parts[2];
+            ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): version: " << version << dendl;
+
+            std::string obj_name = parts[3];
+            ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): obj_name: " << obj_name << dendl;
+
+            std::string etag, bucket_name;
+            uint64_t size = 0;
+            time_t creationTime = time_t(nullptr);
+            rgw_user user;
+            rgw_obj_key obj_key;
+            if (attrs.find("user.rgw.etag") != attrs.end()) {
+                etag = attrs["user.rgw.etag"].to_str();
+                ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): etag: " << etag << dendl;
+            }
+            if (attrs.find("user.rgw.object_size") != attrs.end()) {
+                size = std::stoull(attrs["user.rgw.object_size"].to_str());
+                ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): size: " << size << dendl;
+            }
+            if (attrs.find("user.rgw.mtime") != attrs.end()) {
+                creationTime = ceph::real_clock::to_time_t(ceph::real_clock::from_double(std::stod(attrs["user.rgw.mtime"].to_str())));
+                ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): creationTime: " << creationTime << dendl;
+            }
+            if (attrs.find(RGW_ATTR_ACL) != attrs.end()) {
+                bufferlist bl_acl = attrs[RGW_ATTR_ACL];
+                RGWAccessControlPolicy policy;
+                auto iter = bl_acl.cbegin();
+                try {
+                    policy.decode(iter);
+                } catch (buffer::error& err) {
+                    ldpp_dout(dpp, 0) << "ERROR: could not decode policy, caught buffer::error" << dendl;
+                    continue;
+                }
+                user = std::get<rgw_user>(policy.get_owner().id);
+                ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): rgw_user: " << user.to_str() << dendl;
+            }
+            obj_key.name = obj_name;
+            if (attrs.find("user.rgw.version_id") != attrs.end()) {
+                std::string instance = attrs["user.rgw.version_id"].to_str();
+                if (instance != "null") {
+                    obj_key.instance = instance;
+                }
+            }
+            if (attrs.find("user.rgw.object_ns") != attrs.end()) {
+                obj_key.ns = attrs["user.rgw.object_ns"].to_str();
+            }
+            ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): rgw_obj_key: " << obj_key.get_oid() << dendl;
+            if (attrs.find("user.rgw.bucket_name") != attrs.end()) {
+                bucket_name = attrs["user.rgw.bucket_name"].to_str();
+                ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): bucket_name: " << bucket_name << dendl;
+            }
+
+            ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): calling func for: " << key << dendl;
+            func(dpp, key, version, dirty, size, creationTime, user, etag, bucket_name, bucket_id, obj_key, null_yield);
+        }
+    }
+
+    return 0;
+}
+
 int SSDDriver::put(const DoutPrefixProvider* dpp, const std::string& key, const bufferlist& bl, uint64_t len, const rgw::sal::Attrs& attrs, optional_yield y)
 {
     ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << key << dendl;

@@ -47,7 +47,10 @@ class RedisDriver : public CacheDriver {
     virtual int set_attr(const DoutPrefixProvider* dpp, const std::string& key, const std::string& attr_name, const std::string& attr_val, optional_yield y) override;
     virtual int get_attr(const DoutPrefixProvider* dpp, const std::string& key, const std::string& attr_name, std::string& attr_val, optional_yield y) override;
     void shutdown();
-     
+
+    virtual int restore_dirty_objects(const DoutPrefixProvider* dpp, std::function<void(const DoutPrefixProvider* dpp, std::string& key, std::string version, bool dirty, uint64_t size, 
+			    time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name, const std::string& bucket_id,
+			    const rgw_obj_key& obj_key, optional_yield y)> func) override { return 0; }
   private:
     std::shared_ptr<connection> conn;
     Partition partition_info;

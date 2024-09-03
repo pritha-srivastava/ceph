@@ -6,10 +6,10 @@
 namespace rgw { namespace cache {
 
 struct Partition {
-    std::string name;
-    std::string type;
-    std::string location;
-    uint64_t size;
+  std::string name;
+  std::string type;
+  std::string location;
+  uint64_t size;
 };
 
 class CacheDriver {
@@ -36,6 +36,11 @@ class CacheDriver {
     /* Partition */
     virtual Partition get_current_partition_info(const DoutPrefixProvider* dpp) = 0;
     virtual uint64_t get_free_space(const DoutPrefixProvider* dpp) = 0;
+
+    /* Data Recovery from Cache */
+    virtual int restore_dirty_objects(const DoutPrefixProvider* dpp, std::function<void(const DoutPrefixProvider* dpp, std::string& key, std::string version, bool dirty, uint64_t size, 
+			    time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name, const std::string& bucket_id,
+			    const rgw_obj_key& obj_key, optional_yield y)> func) = 0;
 };
 
 } } // namespace rgw::cache
