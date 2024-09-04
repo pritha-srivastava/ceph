@@ -51,13 +51,20 @@ void redis_exec(std::shared_ptr<connection> conn,
 
 int LFUDAPolicy::init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver) {
   response<int, int, int, int> resp;
-  static auto callback_static = [this](
+  static auto obj_callback = [this](
           const DoutPrefixProvider* dpp, std::string& key, std::string version, bool dirty, uint64_t size, 
 			    time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name, const std::string& bucket_id,
 			    const rgw_obj_key& obj_key, optional_yield y) {
     update_dirty_object(dpp, key, version, dirty, size, creationTime, user, etag, bucket_name, bucket_id, obj_key, y);
   };
-  cacheDriver->restore_dirty_objects(dpp, callback_static);
+
+  static auto block_callback = [this](
+          const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, optional_yield y, std::string& restore_val) {
+    update(dpp, key, offset, len, version, dirty, y, restore_val);
+  };
+
+  cacheDriver->restore_blocks_objects(dpp, obj_callback, block_callback);
+
   driver = _driver;
   if (dpp->get_cct()->_conf->d4n_writecache_enabled) {
     tc = std::thread(&CachePolicy::cleaning, this, dpp);
@@ -351,13 +358,26 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
   return 0;
 }
 
-void LFUDAPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, optional_yield y)
+void LFUDAPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, optional_yield y, std::string& restore_val)
 {
+  ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): updating entry: " << key << dendl;
   using handle_type = boost::heap::fibonacci_heap<LFUDAEntry*, boost::heap::compare<EntryComparator<LFUDAEntry>>>::handle_type;
   const std::lock_guard l(lfuda_lock);
   int localWeight = age;
   auto entry = find_entry(key);
   bool updateLocalWeight = true;
+
+  std::string oid_in_cache = key;
+  if (dirty == true) {
+    oid_in_cache = "D_" + key;
+  }
+
+  if (!restore_val.empty()) {
+    updateLocalWeight = false;
+    localWeight = std::stoull(restore_val);
+    ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): restored localWeight is: " << localWeight << dendl;
+  }
+
   // check the dirty flag in the existing entry for the key and the incoming dirty flag. If the
   // incoming dirty flag is false, that means update() is invoked as part of cleaning process,
   // so we must not update its localWeight.
@@ -374,11 +394,6 @@ void LFUDAPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64
   handle_type handle = entries_heap.push(e);
   e->set_handle(handle);
   entries_map.emplace(key, e);
-
-  std::string oid_in_cache = key;
-  if (dirty == true) {
-    oid_in_cache = "D_" + key;
-  }
 
   if (updateLocalWeight) {
     int ret = -1;
@@ -662,7 +677,7 @@ int LRUPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_y
   return 0;
 }
 
-void LRUPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, optional_yield y)
+void LRUPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64_t offset, uint64_t len, std::string version, bool dirty, optional_yield y, std::string& restore_val)
 {
   const std::lock_guard l(lru_lock);
   _erase(dpp, key, y);
