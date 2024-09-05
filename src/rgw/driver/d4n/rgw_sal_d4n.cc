@@ -612,6 +612,42 @@ int D4NFilterObject::set_head_obj_dir_entry(const DoutPrefixProvider* dpp, optio
     } else {
       ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): BlockDirectory get method failed for head object with ret: " << ret << dendl;
     }
+  } else if (!this->get_bucket()->versioned()) {
+    rgw::d4n::CacheObj null_object = rgw::d4n::CacheObj{
+      .objName = "_:null_" + this->get_name(),
+      .bucketName = this->get_bucket()->get_name(),
+      .dirty = dirty,
+      .hostsList = { dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address },
+    };
+
+    rgw::d4n::CacheBlock null_block = rgw::d4n::CacheBlock{
+      .cacheObj = null_object,
+      .blockID = 0,
+      .version = this->get_object_version(),
+      .prevVersion = block.prevVersion,
+      .size = 0,
+    };
+
+    ret = blockDir->get(dpp, &null_block, y);
+    if (ret == -ENOENT) {
+      ret = blockDir->set(dpp, &null_block, y);
+      if (ret < 0) {
+	ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): BlockDirectory set method failed for head object with ret: " << ret << dendl;
+      }
+    } else if (ret == 0) { // head object exists; update instead of overwrite
+      null_block.prevVersion = {null_block.version, null_block.deleteMarker};
+      null_block.version = this->get_object_version();
+      null_block.deleteMarker = false;
+      null_block.cacheObj.dirty = dirty;
+      null_block.cacheObj.hostsList.insert({ dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address });
+
+      ret = blockDir->set(dpp, &null_block, y);
+      if (ret < 0) {
+	ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): BlockDirectory set method failed for head object with ret: " << ret << dendl;
+      }
+    } else {
+      ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): BlockDirectory get method failed for head object with ret: " << ret << dendl;
+    }
   }
 
   return ret;
@@ -1854,6 +1890,10 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
       block = tempBlock; 
     } else {
       version = source->get_instance();
+      
+      if (version == "null") {
+        block.cacheObj.objName = "_:null_" + source->get_name();
+      }
     }
 
     policy_prefix = head_oid_in_cache;
