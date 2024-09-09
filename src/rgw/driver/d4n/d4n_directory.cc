@@ -150,6 +150,7 @@ int ObjectDirectory::get(const DoutPrefixProvider* dpp, CacheObj* object, option
 {
   std::string key = build_index(object);
   std::vector<std::string> fields;
+  ldpp_dout(dpp, 10) << "ObjectDirectory::" << __func__ << "(): index is: " << key << dendl;
 
   fields.push_back("objName");
   fields.push_back("bucketName");
@@ -231,6 +232,7 @@ int ObjectDirectory::copy(const DoutPrefixProvider* dpp, CacheObj* object, std::
 int ObjectDirectory::del(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) 
 {
   std::string key = build_index(object);
+  ldpp_dout(dpp, 10) << "ObjectDirectory::" << __func__ << "(): index is: " << key << dendl;
 
   try {
     boost::system::error_code ec;
@@ -448,7 +450,7 @@ int BlockDirectory::exist_key(const DoutPrefixProvider* dpp, CacheBlock* block, 
 {
   std::string key = build_index(block);
   response<int> resp;
-  ldpp_dout(dpp, 10) << __func__ << "(): index is: " << key << dendl;
+
   try {
     boost::system::error_code ec;
     request req;
@@ -473,6 +475,7 @@ int BlockDirectory::set(const DoutPrefixProvider* dpp, CacheBlock* block, option
   /* For existing keys, call get method beforehand. 
      Sets completely overwrite existing values. */
   std::string key = build_index(block);
+  ldpp_dout(dpp, 10) << "BlockDirectory::" << __func__ << "(): index is: " << key << dendl;
     
   std::string entries;
   std::list<std::string> redisValues;
@@ -562,8 +565,7 @@ int BlockDirectory::get(const DoutPrefixProvider* dpp, CacheBlock* block, option
 {
   std::string key = build_index(block);
   std::vector<std::string> fields;
-
-  ldpp_dout(dpp, 10) << __func__ << "(): index is: " << key << dendl;
+  ldpp_dout(dpp, 10) << "BlockDirectory::" << __func__ << "(): index is: " << key << dendl;
 
   fields.push_back("blockID");
   fields.push_back("version");
@@ -592,7 +594,7 @@ int BlockDirectory::get(const DoutPrefixProvider* dpp, CacheBlock* block, option
     }
 
     if (std::get<0>(resp).value().value().empty()) {
-      ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "(): No values returned." << dendl;
+      ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "(): No values returned for key=" << key << dendl;
       return -ENOENT;
     } 
 
@@ -663,6 +665,7 @@ int BlockDirectory::copy(const DoutPrefixProvider* dpp, CacheBlock* block, std::
 int BlockDirectory::del(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) 
 {
   std::string key = build_index(block);
+  ldpp_dout(dpp, 10) << "BlockDirectory::" << __func__ << "(): index is: " << key << dendl;
 
   try {
     boost::system::error_code ec;
@@ -673,7 +676,7 @@ int BlockDirectory::del(const DoutPrefixProvider* dpp, CacheBlock* block, option
     redis_exec(conn, ec, req, resp, y);
 
     if (!std::get<0>(resp).value()) {
-      ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "(): No values deleted." << dendl;
+      ldpp_dout(dpp, 0) << "BlockDirectory::" << __func__ << "(): No values deleted for key=" << key << dendl;
       return -ENOENT;
     }
 
