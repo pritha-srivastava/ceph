@@ -751,7 +751,11 @@ bool D4NFilterObject::check_head_exists_in_cache_get_oid(const DoutPrefixProvide
       found_in_cache = false;
       ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): CacheDriver get_attrs method failed." << dendl;
     }
-    std::string key = head_oid_in_cache.erase(0, 2); // Remove dirty prefix
+    std::string key = head_oid_in_cache;
+    if (block.cacheObj.dirty) {
+      // Remove dirty prefix
+      key = key.erase(0, 2);
+    }
     this->driver->get_policy_driver()->get_cache_policy()->update(dpp, key, 0, 0, version, block.cacheObj.dirty, y);
   } else if (ret == -ENOENT) { //if blockDir->get
     found_in_cache = false;
