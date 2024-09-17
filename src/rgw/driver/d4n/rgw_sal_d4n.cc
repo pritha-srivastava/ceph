@@ -658,6 +658,7 @@ int D4NFilterObject::set_data_block_dir_entries(const DoutPrefixProvider* dpp, o
       if (ret == 0) { //new versioned block will have new version, hostsList etc, how about globalWeight?
         block = existing_block;
         block.version = version;
+        block.cacheObj.dirty = dirty;
       }
 
       block.cacheObj.hostsList.insert(dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address);
@@ -1986,15 +1987,13 @@ int D4NFilterWriter::prepare(optional_yield y)
   std::string version;
   if (!object->have_instance()) {
     if (object->get_bucket()->versioned() && !object->get_bucket()->versioning_enabled()) { //if versioning is suspended
-      version = "null";
-      object->set_instance(version);
-    } else {
-      enum { OBJ_INSTANCE_LEN = 32 };
-      char buf[OBJ_INSTANCE_LEN + 1];
-      gen_rand_alphanumeric_no_underscore(dpp->get_cct(), buf, OBJ_INSTANCE_LEN);
-      version = buf; // using gen_rand_alphanumeric_no_underscore for the time being
-      ldpp_dout(dpp, 20) << "D4NFilterWriter::" << __func__ << "(): generating version: " << version << dendl;
+      object->set_instance("null");
     }
+    enum { OBJ_INSTANCE_LEN = 32 };
+    char buf[OBJ_INSTANCE_LEN + 1];
+    gen_rand_alphanumeric_no_underscore(dpp->get_cct(), buf, OBJ_INSTANCE_LEN);
+    version = buf; // using gen_rand_alphanumeric_no_underscore for the time being
+    ldpp_dout(dpp, 20) << "D4NFilterWriter::" << __func__ << "(): generating version: " << version << dendl;
   } else {
     ldpp_dout(dpp, 20) << "D4NFilterWriter::" << __func__ << "(): version is: " << object->get_instance() << dendl;
     version = object->get_instance();
