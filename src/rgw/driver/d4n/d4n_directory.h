@@ -52,6 +52,8 @@ class ObjectDirectory: public Directory {
     int zrange(const DoutPrefixProvider* dpp, CacheObj* object, int start, int stop, std::vector<std::string>& members, optional_yield y);
     int zrevrange(const DoutPrefixProvider* dpp, CacheObj* object, int start, int stop, std::vector<std::string>& members, optional_yield y);
     int zrem(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& member, optional_yield y);
+    //Return value is the incremented value, else return error
+    int incr(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y);
 
   private:
     std::shared_ptr<connection> conn;
@@ -75,6 +77,8 @@ class BlockDirectory: public Directory {
     int zrange(const DoutPrefixProvider* dpp, CacheBlock* block, int start, int stop, std::vector<std::string>& members, optional_yield y);
     int zrevrange(const DoutPrefixProvider* dpp, CacheBlock* block, int start, int stop, std::vector<std::string>& members, optional_yield y);
     int zrem(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& member, optional_yield y);
+    int watch(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y);
+    int exec(const DoutPrefixProvider* dpp, optional_yield y);
 
   private:
     std::shared_ptr<connection> conn;

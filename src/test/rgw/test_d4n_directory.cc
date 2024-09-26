@@ -585,6 +585,89 @@ TEST_F(BlockDirectoryFixture, RemoveHostYield)
   io.run();
 }
 
+TEST_F(BlockDirectoryFixture, WatchExecuteYield)
+{
+  boost::asio::spawn(io, [this] (boost::asio::yield_context yield) {
+  {
+    boost::system::error_code ec;
+    request req;
+    req.push("WATCH", "testBucket");
+    response<std::string> resp;
+
+    conn->async_exec(req, resp, yield[ec]);
+    ASSERT_EQ((bool)ec, false);
+
+    // The number of members added
+    EXPECT_EQ(std::get<0>(resp).value(), "OK");
+  }
+
+  {
+      boost::system::error_code ec;
+      request req;
+      req.push("HSET", "testBucket", "objName", "newoid");
+      response<int> resp;
+
+      conn->async_exec(req, resp, yield[ec]);
+
+      ASSERT_EQ((bool)ec, false);
+      EXPECT_EQ(std::get<0>(resp).value(), 1);
+  }
+
+  {
+      boost::system::error_code ec;
+      request req;
+      req.push("EXEC");
+      response<std::vector<std::string> > resp;
+
+      conn->async_exec(req, resp, yield[ec]);
+
+      ASSERT_EQ((bool)ec, false);
+  }
+
+  {
+      boost::system::error_code ec;
+      request req;
+      req.push("FLUSHALL");
+      response<boost::redis::ignore_t> resp;
+
+      conn->async_exec(req, resp, yield[ec]);
+    }
+
+  conn->cancel();
+  }, rethrow);
+
+  io.run();
+}
+
+TEST_F(BlockDirectoryFixture, IncrYield)
+{
+  boost::asio::spawn(io, [this] (boost::asio::yield_context yield) {
+    for (int i = 0; i < 10; i++) {
+      {
+        boost::system::error_code ec;
+        request req;
+        req.push("INCR", "testObject");
+        response<std::string> resp;
+
+        conn->async_exec(req, resp, yield[ec]);
+        ASSERT_EQ((bool)ec, false);
+        std::cout << "thread id: " << std::this_thread::get_id() << std::endl;
+        std::cout << "INCR value: " << std::get<0>(resp).value() << std::endl;
+      }
+    }
+    boost::asio::post(conn->get_executor(), [c = conn] { c->cancel(); });
+  }, rethrow);
+
+  std::vector<std::thread> threads;
+
+  for (int i = 0; i < 10; ++i) {
+    threads.emplace_back([&] { io.run(); });
+  }
+  for (auto& thread : threads) {
+    thread.join();
+  }
+}
+
 int main(int argc, char *argv[]) {
   ::testing::InitGoogleTest(&argc, argv);
 
