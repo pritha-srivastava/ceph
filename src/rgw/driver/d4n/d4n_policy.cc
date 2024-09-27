@@ -366,27 +366,50 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
       return ret;
     }
 #endif
-    //erase also updates weightSum, is the following needed?
-    weightSum = (avgWeight * entries_map.size()) - it->second->localWeight;
-
-    age = std::max(it->second->localWeight, age);
-    _erase(dpp, key, y);
-
-    l.unlock();
 
     //Need to get and then update the host atomically in a remote setup
+    auto localWeight = it->second->localWeight;
+    _erase(dpp, key, y);
+    l.unlock();
+
+    bool deleted = false; // if head block gets deleted
     if ((ret = blockDir->remove_host(dpp, victim, dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address, y)) < 0) {
+      delete victim;
+      return ret;
+    } else if (ret == 1) {
+      deleted = true;
+    }
+
+    if ((ret = cacheDriver->delete_data(dpp, key, y)) < 0) {
       delete victim;
       return ret;
     }
 
-    delete victim;
+    ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Block " << key << " has been evicted." << dendl;
 
-    if ((ret = cacheDriver->delete_data(dpp, key, y)) < 0) {
-      return ret;
+    if (deleted) { // last data block
+      std::string head_oid_in_cache = victim->cacheObj.bucketName + CACHE_DELIM + victim->version + CACHE_DELIM + victim->cacheObj.objName;
+      delete victim;
+
+      ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Deleting head object " << head_oid_in_cache << "." << dendl;
+
+      // delete head object in cache
+      if ((ret = cacheDriver->delete_data(dpp, head_oid_in_cache, y)) == 0) { 
+	if (!(ret = erase(dpp, head_oid_in_cache + "#0#0", y))) { // TODO: Is a lock needed here when one is in the erase method already?
+	  ldpp_dout(dpp, 0) << "Failed to delete head policy entry for: " << head_oid_in_cache << ", ret=" << ret << dendl;
+	  return -EINVAL;
+	}
+      } else {
+	ldpp_dout(dpp, 0) << "Failed to delete head object for: " << head_oid_in_cache << ", ret=" << ret << dendl;
+	return -EINVAL;
+      }
     }
 
-    ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Block " << key << " has been evicted." << dendl;
+    if (entries_map.size()) {
+      //erase also updates weightSum, is the following needed?
+      weightSum = (avgWeight * entries_map.size()) - localWeight;
+    } // TODO: else, no change?
+    age = std::max(localWeight, age);
 
     if (perfcounter) {
       perfcounter->inc(l_rgw_d4n_cache_evictions);

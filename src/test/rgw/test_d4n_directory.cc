@@ -564,7 +564,9 @@ TEST_F(BlockDirectoryFixture, RemoveHostYield)
       EXPECT_EQ(std::get<1>(resp).value(), "127.0.0.1:6000");
     }
 
-    ASSERT_EQ(0, dir->remove_host(env->dpp, block, "127.0.0.1:6000", optional_yield{yield}));
+    // A return value of 1 indicates that the block was fully deleted because the host that was
+    // removed was the block's last host.
+    ASSERT_EQ(1, dir->remove_host(env->dpp, block, "127.0.0.1:6000", optional_yield{yield}));
 
     {
       boost::system::error_code ec;
