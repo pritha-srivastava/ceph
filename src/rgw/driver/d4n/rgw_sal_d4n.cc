@@ -1814,22 +1814,6 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
   return 0;
 }
 
-int D4NFilterObject::D4NFilterDeleteOp::delete_from_cache_and_policy(const DoutPrefixProvider* dpp, std::string oid, 
-								     std::string prefix, optional_yield y)
-{
-  int ret = -1;
-
-  if ((ret = source->driver->get_cache_driver()->delete_data(dpp, oid, y)) == 0) { // Sam: do we want del or delete_data here? 
-    if (!(ret = source->driver->get_policy_driver()->get_cache_policy()->erase(dpp, prefix, y))) {
-      ldpp_dout(dpp, 0) << "Failed to delete head policy entry for: " << source->get_key().get_oid() << ", ret=" << ret << dendl;
-    }
-  } else {
-    ldpp_dout(dpp, 0) << "Failed to delete head object for: " << source->get_key().get_oid() << ", ret=" << ret << dendl;
-  }
-
-  return ret;
-}
-
 int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp,
                                                    optional_yield y, uint32_t flags)
 {
@@ -1842,6 +1826,7 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
   std::string head_oid_in_cache;
   rgw::d4n::CacheBlock block;
   int ret = -1;
+  bool invalid;
 
   // check_head_exists_in_cache_get_oid also returns false if the head object is in the cache, but is a delete marker.
   // As a result, the below check guarantees the head object is not in the cache.  
@@ -1860,39 +1845,6 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
     if (objDirty) { // head object dirty flag represents object dirty flag
       policy_prefix.erase(0, 2); // remove "D_" prefix from policy key since the policy keys do not hold this information
     }    
-
-    // Versioned buckets - this will delete the head object indexed by version-id (even null)
-    if (source->get_bucket()->versioned()) {
-        //1. clean objects - no latest head entry as latest entry to be retrieved from backend now
-        // hence delete only versioned head object
-        if (!objDirty) {
-          if (source->have_instance()) {
-            if ((ret = blockDir->del(dpp, &block, y)) < 0) {
-              ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): Failed to delete head object in block directory for: " << block.cacheObj.objName << ", ret=" << ret << dendl; 
-              return ret;
-            }
-          }
-          // if versioning is suspended, we might have a latest head entry created from when bucket was non-versioned
-          // don't return error as that could already be deleted by set_head_obj_dir_entry
-          if (!source->get_bucket()->versioning_enabled()) {
-            block.cacheObj.objName = source->get_name();
-            if ((ret = blockDir->del(dpp, &block, y)) < 0) {
-      ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): Failed to delete head object in block directory for: " << block.cacheObj.objName << ", ret=" << ret << dendl;
-            }
-          }
-        } else if (objDirty) { //2. dirty objects - TBD for now
-          if ((ret = blockDir->del(dpp, &block, y)) == 0) { // delete head object
-            if (objDirty) {
-        if ((ret = delete_from_cache_and_policy(dpp, head_oid_in_cache, policy_prefix, y)) < 0) {
-          return ret;
-        }
-            }
-          } else if (ret < 0 && ret != -ENOENT) {
-            ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): Failed to delete head object in block directory for: " << block.cacheObj.objName << ", ret=" << ret << dendl;
-            return ret;
-          }
-        }
-    } //end-if versioned buckets
 
     //Non-versioned buckets - we will delete the latest entry and the "null" entry
     //do we need to add "watch" here on the latest entry?
@@ -1920,13 +1872,17 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
       }
       std::vector<std::string> responses;
       ret = blockDir->exec(dpp, responses, y);
-      if (ret < 0) {
+      if (ret < 0 && ret != -ENOENT) {
         ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): Failed to execute exec in block directory: " << "ret= " << ret << dendl;
         return ret;
       }
       if (objDirty) {
-        if ((ret = delete_from_cache_and_policy(dpp, head_oid_in_cache, policy_prefix, y)) < 0) {
-          return ret;
+	if (!source->driver->get_policy_driver()->get_cache_policy()->invalidate_dirty_object(dpp, policy_prefix)) {
+	  next->params = params;
+	  ret = next->delete_obj(dpp, y, flags);
+	  result = next->result;
+	} else {
+          invalid = true;
         }
       }
     } //end-if non-versioned buckets
@@ -1952,7 +1908,7 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
       do { // loop through the data blocks
         std::string prefix = get_cache_block_prefix(source, version, false);
         if (fst >= lst) {
-    break;
+	  break;
         }
         //data blocks have cacheObj.objName set to oid always
         block.cacheObj.objName = source->get_oid();
@@ -1961,37 +1917,34 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
         block.blockID = static_cast<uint64_t>(fst);
         block.size = static_cast<uint64_t>(cur_len);
 
-        if ((ret = blockDir->get(dpp, &block, y)) < 0) {
-    if (ret == -ENOENT) {
-      ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): Directory entry for: " << source->get_name() << " blockid: " << fst << " block size: " << cur_len << " does not exist; continuing" << dendl;
-      fst += cur_len;
-      if (fst >= lst) {
-        break;
-      }
-      continue;
-    } else {
-      ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): Failed to retrieve directory entry for: " << source->get_name() << " blockid: " << fst << " block size: " << cur_len << ", ret=" << ret << dendl;
-      return ret;
-    }
-        }
+	if ((ret = blockDir->get(dpp, &block, y)) < 0) {
+	  if (ret == -ENOENT) {
+	    ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): Directory entry for: " << source->get_name() << " blockid: " << fst << " block size: " << cur_len << " does not exist; continuing" << dendl;
+	    fst += cur_len;
+	    if (fst >= lst) {
+	      break;
+	    }
+	    continue;
+	  } else {
+	    ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): Failed to retrieve directory entry for: " << source->get_name() << " blockid: " << fst << " block size: " << cur_len << ", ret=" << ret << dendl;
+	    return ret;
+	  }
+	}
 
-        if ((ret = blockDir->del(dpp, &block, y)) == 0) { 
-    prefix = DIRTY_BLOCK_PREFIX + prefix;
-    std::string oid_in_cache = prefix + CACHE_DELIM + std::to_string(fst) + CACHE_DELIM + std::to_string(cur_len);
-
-    if (objDirty) {
-      std::string key = policy_prefix + CACHE_DELIM + std::to_string(fst) + CACHE_DELIM + std::to_string(cur_len);
-      if ((ret = delete_from_cache_and_policy(dpp, oid_in_cache, key, y)) < 0) {
-        ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): ERROR for block " << source->get_name() << " blockID: " << fst << " block size: " << cur_len << ", ret=" << ret << dendl;
-        return ret;
-      }
-    }
-        } else if (ret == -ENOENT) {
-    continue;
-        } else {
-    ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): Failed to delete directory entry for: " << source->get_name() << " blockid: " << fst << " block size: " << cur_len << ", ret=" << ret << dendl;
-    return ret;
-        }
+	if ((ret = blockDir->del(dpp, &block, y)) == 0) { 
+	  if (objDirty) {
+	    if (!invalid) {
+	      next->params = params;
+	      ret = next->delete_obj(dpp, y, flags);
+	      result = next->result;
+	    } // else, the data blocks will be deleted during cleaning
+	  }
+	} else if (ret == -ENOENT) {
+	  continue;
+	} else {
+	  ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): Failed to delete directory entry for: " << source->get_name() << " blockid: " << fst << " block size: " << cur_len << ", ret=" << ret << dendl;
+	  return ret;
+	}
 
         fst += cur_len;
       } while (fst < lst);
@@ -2004,14 +1957,9 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
       ret = next->delete_obj(dpp, y, flags);
       result = next->result;
       return ret;
-    } else {
-      if (!(ret = source->driver->get_policy_driver()->get_cache_policy()->erase_dirty_object(dpp, key, y))) {
-	ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): Failed to delete policy object entry for: " << source->get_name() << ", ret=" << ret << dendl;
-	return -ENOENT;
-      } else {
-	return 0;
-      }
     }
+    
+    return 0;
   }
 }
 
