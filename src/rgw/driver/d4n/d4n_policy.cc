@@ -368,6 +368,7 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
       return ret;
     }
 
+    auto localWeight = it->second->localWeight;
     bool deleted = false; // if head block gets deleted
     if ((ret = blockDir->remove_host(dpp, victim, dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address, y)) < 0) {
       delete victim;
@@ -403,8 +404,10 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
     }
     delete victim;    
 
-    weightSum = (avgWeight * entries_map.size()) - it->second->localWeight;
-    age = std::max(it->second->localWeight, age);
+    if (entries_map.size()) {
+      weightSum = (avgWeight * entries_map.size()) - it->second->localWeight;
+    } // else, no change? -Sam
+    age = std::max(localWeight, age);
 
     if (perfcounter) {
       perfcounter->inc(l_rgw_d4n_cache_evictions);
