@@ -312,7 +312,8 @@ public:
 				    RGWCompressionInfo& cs_info, off_t& ofs,
 				    std::string& tag, ACLOwner& owner,
 				    uint64_t olh_epoch,
-				    rgw::sal::Object* target_obj) override;
+				    rgw::sal::Object* target_obj,
+            prefix_map_t& processed_prefixes) override;
 };
 
 } } // namespace rgw::sal

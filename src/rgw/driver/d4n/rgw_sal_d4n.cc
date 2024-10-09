@@ -2566,12 +2566,13 @@ int D4NFilterMultipartUpload::complete(const DoutPrefixProvider *dpp,
 				    RGWCompressionInfo& cs_info, off_t& ofs,
 				    std::string& tag, ACLOwner& owner,
 				    uint64_t olh_epoch,
-				    rgw::sal::Object* target_obj)
+				    rgw::sal::Object* target_obj,
+            prefix_map_t& processed_prefixes)
 {
   //call next->complete to complete writing the object to the backend store
   auto ret = next->complete(dpp, y, cct, part_etags, remove_objs, accounted_size,
 			compressed, cs_info, ofs, tag, owner, olh_epoch,
-			nextObject(target_obj));
+			nextObject(target_obj), processed_prefixes);
   if (ret < 0) {
     return ret;
   }
