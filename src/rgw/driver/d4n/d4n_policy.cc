@@ -632,8 +632,8 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
           continue;
         }
         ll.unlock();
-        if ((ret = cacheDriver->delete_data(dpp, e->key, y)) == 0) { // Sam: do we want del or delete_data here?
-          if (!(ret = erase(dpp, e->key, y))) {
+        if ((ret = cacheDriver->delete_data(dpp, e->key, null_yield)) == 0) { // Sam: do we want del or delete_data here?
+          if (!(ret = erase(dpp, e->key, null_yield))) {
             ldpp_dout(dpp, 0) << "Failed to delete head policy entry for: " << e->key << ", ret=" << ret << dendl; // TODO: what must occur during failure?
           }
               } else {
@@ -645,7 +645,7 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
       }
 
 	if (!e->delete_marker) {
-	  ret = delete_data_blocks(dpp, e, y);
+	  ret = delete_data_blocks(dpp, e, null_yield);
 	  if (ret == 0) {
 	    erase_dirty_object(dpp, e->key, null_yield);
 	  } else if (ret == -EBUSY) {
@@ -821,14 +821,14 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
 	    std::string oid_in_cache = head_oid_in_cache + CACHE_DELIM + std::to_string(fst) + CACHE_DELIM + std::to_string(cur_len);
 	    ldpp_dout(dpp, 20) << __func__ << "(): oid_in_cache =" << oid_in_cache << dendl;
 	    //Update in-memory data structure for each block
-	    this->update(dpp, oid_in_cache, 0, 0, e->version, false, 0, y);
+	    this->update(dpp, oid_in_cache, 0, 0, e->version, false, 0, null_yield);
 
 	    rgw::d4n::CacheBlock block;
 	    block.cacheObj.bucketName = c_obj->get_bucket()->get_bucket_id();
 	    block.cacheObj.objName = c_obj->get_key().get_oid();
 	    block.size = cur_len;
 	    block.blockID = fst;
-            if ((op_ret = cacheDriver->set_attr(dpp, oid_in_cache, RGW_CACHE_ATTR_DIRTY, "0", y)) == 0) {
+            if ((op_ret = cacheDriver->set_attr(dpp, oid_in_cache, RGW_CACHE_ATTR_DIRTY, "0", null_yield)) == 0) {
 		op_ret = blockDir->update_field(dpp, &block, "dirty", "false", null_yield);
 		if (op_ret < 0) {
 		    ldpp_dout(dpp, 0) << __func__ << "updating dirty flag in block directory failed, ret=" << op_ret << dendl;
@@ -842,9 +842,9 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
 	} //end-else if delete_marker
 
 	//invoke update() with dirty flag set to false, to update in-memory metadata for head
-	this->update(dpp, head_oid_in_cache, 0, 0, e->version, false, 0, y);
+	this->update(dpp, head_oid_in_cache, 0, 0, e->version, false, 0, null_yield);
          
-        if ((ret = cacheDriver->set_attr(dpp, head_oid_in_cache, RGW_CACHE_ATTR_DIRTY, "0", y)) < 0) {
+        if ((ret = cacheDriver->set_attr(dpp, head_oid_in_cache, RGW_CACHE_ATTR_DIRTY, "0", null_yield)) < 0) {
 	  ldpp_dout(dpp, 0) << __func__ << "(): Failed to update dirty attr in cache, ret=" << op_ret << dendl;
         }
 
@@ -861,7 +861,7 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
 	//non-versioned case
 	if (!c_obj->have_instance()) {
 	  // hash entry for latest version
-	  op_ret = blockDir->get(dpp, &block, y);
+	  op_ret = blockDir->get(dpp, &block, null_yield);
 	  if (op_ret < 0) {
 	    ldpp_dout(dpp, 0) << __func__ << "(): Failed to get latest entry in block directory for: " << block.cacheObj.objName << ", ret=" << ret << dendl;
 	  } else {
@@ -871,7 +871,7 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
 	      null_block = block;
 	      null_block.cacheObj.objName = "_:null_" + c_obj->get_name();
 	      //hash entry for null block
-	      op_ret = blockDir->get(dpp, &null_block, y);
+	      op_ret = blockDir->get(dpp, &null_block, null_yield);
 	      if (op_ret < 0) {
 		      ldpp_dout(dpp, 0) << __func__ << "(): Failed to get latest entry in block directory for: " << null_block.cacheObj.objName << ", ret=" << ret << dendl;
 	      } else {
@@ -894,7 +894,7 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
 	  };
 	  //remove the entry from the ordered set using its score, as the object is already cleaned
 	  //need not be part of a transaction as it is being removed based on its score which is its creation time.
-	  ret = objDir->zremrangebyscore(dpp, &dir_obj, e->creationTime, e->creationTime, y);
+	  ret = objDir->zremrangebyscore(dpp, &dir_obj, e->creationTime, e->creationTime, null_yield);
 	  if (ret < 0) {
 	    ldpp_dout(dpp, 0) << __func__ << "(): Failed to remove object from ordered set with error: " << ret << dendl;
 	  }
@@ -920,7 +920,7 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
 	  while(retry) {
 	    retry--;
 	    //get latest entry
-	    ret = blockDir->get(dpp, &latest_block, y);
+	    ret = blockDir->get(dpp, &latest_block, null_yield);
 	    if (ret < 0) {
 	      ldpp_dout(dpp, 0) << __func__ << "(): Failed to get latest entry in block directory for: " << latest_block.cacheObj.objName << ", ret=" << ret << dendl;
 	    }
@@ -946,7 +946,7 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
 	      .objName = c_obj->get_name(),
 	      .bucketName = c_obj->get_bucket()->get_bucket_id(),
 	    };
-	    ret = objDir->zremrangebyscore(dpp, &dir_obj, e->creationTime, e->creationTime, y, true);
+	    ret = objDir->zremrangebyscore(dpp, &dir_obj, e->creationTime, e->creationTime, null_yield, true);
 	    if (ret < 0) {
 	      ldpp_dout(dpp, 0) << __func__ << "(): Failed to remove object from ordered set with error: " << ret << dendl;
 	      continue;
