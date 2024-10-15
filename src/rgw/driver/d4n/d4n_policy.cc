@@ -54,8 +54,8 @@ int LFUDAPolicy::init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_
   static auto obj_callback = [this](
           const DoutPrefixProvider* dpp, std::string& key, std::string version, bool dirty, uint64_t size, 
 			    time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name, const std::string& bucket_id,
-			    const rgw_obj_key& obj_key, optional_yield y) {
-    update_dirty_object(dpp, key, version, dirty, size, creationTime, user, etag, bucket_name, bucket_id, obj_key, y);
+			    const rgw_obj_key& obj_key, optional_yield y, std::string& restore_val) {
+    update_dirty_object(dpp, key, version, dirty, size, creationTime, user, etag, bucket_name, bucket_id, obj_key, y, restore_val);
   };
 
   static auto block_callback = [this](
@@ -243,6 +243,40 @@ asio::awaitable<void> LFUDAPolicy::redis_sync(const DoutPrefixProvider* dpp, opt
   }
 }
 
+// Changes state to INVALID for dirty objects. An INVALID state indicates that a delete request has been
+// issued on an object and it must be deleted rather than written to the backend. This lazy deletion occurs
+// in the Cleaning method and prevents data races during concurrent requests. The method below returns "false"
+// if the state has not been set to INVALID, and "true" if it has. The state is not set to INVALID when
+// cleaning is in progress, a process which writes the object to the backend store.
+bool LFUDAPolicy::invalidate_dirty_object(const DoutPrefixProvider* dpp, std::string& key) {
+  std::unique_lock<std::mutex> l(lfuda_cleaning_lock);
+
+  if (o_entries_map.empty())
+    return false;
+
+  auto p = o_entries_map.find(key);
+  if (p == o_entries_map.end()) {
+    ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): key=" << key << " not found" << dendl;
+    return false;
+  }
+
+  if (p->second.second == State::INIT) {
+    ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Setting State::INVALID for key=" << key << dendl;
+    p->second.second = State::INVALID;
+    int ret = cacheDriver->set_attr(dpp, DIRTY_BLOCK_PREFIX + key, RGW_CACHE_ATTR_INVALID, "1", y);
+    if (ret < 0) {
+      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "(): Failed to set xattr, ret=" << ret << dendl;
+      return false;
+    }
+
+    return true;
+  } else if (p->second.second == State::IN_PROGRESS) {
+    state_cond.wait(l, [this, &key]{ return (o_entries_map.find(key) == o_entries_map.end()); });
+  }
+
+  return false;
+}
+
 CacheBlock* LFUDAPolicy::get_victim_block(const DoutPrefixProvider* dpp, optional_yield y) {
   const std::lock_guard l(lfuda_lock);
   if (entries_heap.empty())
@@ -252,13 +286,15 @@ CacheBlock* LFUDAPolicy::get_victim_block(const DoutPrefixProvider* dpp, optiona
   std::string key = entries_heap.top()->key;
   CacheBlock* victim = new CacheBlock();
 
-  victim->cacheObj.bucketName = key.substr(0, key.find('_')); 
-  key.erase(0, key.find('_') + 1);
-  victim->version = key.substr(0, key.find('_'));
-  key.erase(0, key.find('_') + 1);
-  victim->cacheObj.objName = key.substr(0, key.find('_'));
-  victim->blockID = entries_heap.top()->offset;
-  victim->size = entries_heap.top()->len;
+  victim->cacheObj.bucketName = key.substr(0, key.find('#')); 
+  key.erase(0, key.find('#') + 1);
+  victim->version = key.substr(0, key.find('#'));
+  key.erase(0, key.find('#') + 1);
+  victim->cacheObj.objName = key.substr(0, key.find('#'));
+  key.erase(0, key.find('#') + 1);
+  victim->blockID = std::stoull(key.substr(0, key.find('#')));
+  key.erase(0, key.find('#') + 1);
+  victim->size = std::stoull(key.substr(0, key.find('#'))); // TODO: size not being set correctly in heap
 
   if (blockDir->get(dpp, victim, y) < 0) {
     return nullptr;
@@ -280,6 +316,7 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
   if (entries_heap.empty())
     return 0;
 
+  int ret = -1;
   uint64_t freeSpace = cacheDriver->get_free_space(dpp);
 
   while (freeSpace < size) { // TODO: Think about parallel reads and writes; can this turn into an infinite loop? 
@@ -288,7 +325,7 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
     if (victim == nullptr) {
       ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "(): Could not retrieve victim block." << dendl;
       delete victim;
-      return 0; // not necessarily an error? -Sam
+      return -ENOSPC;
     }
 
     const std::lock_guard l(lfuda_lock);
@@ -301,7 +338,7 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
     // check dirty flag of entry to be evicted, if the flag is dirty, all entries on the local node are dirty
     if (it->second->dirty) {
       ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "(): Top entry in min heap is dirty, no entry is available for eviction!" << dendl;
-      return 0;
+      return -ENOSPC;
     }
     int avgWeight = weightSum / entries_map.size();
 
@@ -311,7 +348,7 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
         (*it->second->handle)->localWeight = it->second->localWeight;
 	entries_heap.decrease(it->second->handle); // larger value means node must be decreased to maintain min heap 
 
-	if (int ret = cacheDriver->set_attr(dpp, key, RGW_CACHE_ATTR_LOCAL_WEIGHT, std::to_string(it->second->localWeight), y) < 0) { 
+	if ((ret = cacheDriver->set_attr(dpp, key, RGW_CACHE_ATTR_LOCAL_WEIGHT, std::to_string(it->second->localWeight), y)) < 0) { 
 	  delete victim;
 	  return ret;
         }
@@ -326,20 +363,21 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
     }
 
     victim->globalWeight += it->second->localWeight;
-    if (int ret = blockDir->update_field(dpp, victim, "globalWeight", std::to_string(victim->globalWeight), y) < 0) {
+    if ((ret = blockDir->update_field(dpp, victim, "globalWeight", std::to_string(victim->globalWeight), y)) < 0) {
       delete victim;
       return ret;
     }
 
-    if (int ret = blockDir->remove_host(dpp, victim, dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address, y) < 0) {
+    if ((ret = blockDir->remove_host(dpp, victim, dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address, y)) < 0) {
       delete victim;
       return ret;
     }
 
     delete victim;
 
-    if (int ret = cacheDriver->del(dpp, key, y) < 0) 
+    if ((ret = cacheDriver->delete_data(dpp, key, y)) < 0) {
       return ret;
+    }
 
     ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Block " << key << " has been evicted." << dendl;
 
@@ -404,15 +442,24 @@ void LFUDAPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64
   weightSum += ((localWeight < 0) ? 0 : localWeight);
 }
 
-void LFUDAPolicy::update_dirty_object(const DoutPrefixProvider* dpp, std::string& key, std::string version, bool deleteMarker, uint64_t size, time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name, const std::string& bucket_id, const rgw_obj_key& obj_key, optional_yield y)
+void LFUDAPolicy::update_dirty_object(const DoutPrefixProvider* dpp, std::string& key, std::string version, bool deleteMarker, uint64_t size, time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name, const std::string& bucket_id, const rgw_obj_key& obj_key, optional_yield y, std::string& restore_val)
 {
   using handle_type = boost::heap::fibonacci_heap<LFUDAObjEntry*, boost::heap::compare<ObjectComparator<LFUDAObjEntry>>>::handle_type;
+  State state{State::INIT};
   ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Before acquiring lock, adding entry: " << key << dendl;
+
+  if (!restore_val.empty() && restore_val == "1") { // No need to set the xattr because this case only occurs when the state has
+    state = State::INVALID;                         // been retrieved from the xattr itself.
+    ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): State restored to INVALID." << dendl;
+  } else {
+    state = State::INIT;
+  }
+
   const std::lock_guard l(lfuda_cleaning_lock);
   LFUDAObjEntry *e = new LFUDAObjEntry{key, version, deleteMarker, size, creationTime, user, etag, bucket_name, bucket_id, obj_key};
   handle_type handle = object_heap.push(e);
   e->set_handle(handle);
-  o_entries_map.emplace(key, e);
+  o_entries_map.emplace(key, std::make_pair(e, state));
   cond.notify_one();
 }
 
@@ -441,12 +488,43 @@ bool LFUDAPolicy::erase_dirty_object(const DoutPrefixProvider* dpp, const std::s
     return false;
   }
 
-  object_heap.erase(p->second->handle);
+  object_heap.erase(p->second.first->handle);
   o_entries_map.erase(p);
-  delete p->second;
-  p->second = nullptr;
+  delete p->second.first;
+  p->second.first = nullptr;
+  state_cond.notify_one();
 
   return true;
+}
+
+int LFUDAPolicy::delete_data_blocks(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, optional_yield y) {
+  off_t lst = e->size, fst = 0, ofs = 0;
+  uint64_t len = 0;
+
+  do {
+    if (fst >= lst) {
+      break;
+    }
+    off_t cur_size = std::min<off_t>(fst + dpp->get_cct()->_conf->rgw_max_chunk_size, lst);
+    off_t cur_len = cur_size - fst;
+    std::string prefix = e->key + CACHE_DELIM + std::to_string(fst) + CACHE_DELIM + std::to_string(cur_len);
+    std::string oid_in_cache = DIRTY_BLOCK_PREFIX + prefix;
+
+    int ret = -1;
+    if ((ret = cacheDriver->delete_data(dpp, oid_in_cache, y)) == 0) { // Sam: do we want del or delete_data here?
+      if (!(ret = erase(dpp, prefix, y))) {
+	ldpp_dout(dpp, 0) << "Failed to delete policy entry for: " << oid_in_cache << ", ret=" << ret << dendl;
+        return -EINVAL;
+      }
+    } else {
+      ldpp_dout(dpp, 0) << "Failed to delete data block " << oid_in_cache << ", ret=" << ret << dendl;
+      return -EINVAL;
+    }
+
+    ofs += len;
+  } while (len > 0);
+
+  return 0;
 }
 
 void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
@@ -456,6 +534,7 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
     ldpp_dout(dpp, 20) << __func__ << " : " << " Cache cleaning!" << dendl;
     uint64_t len = 0;
     rgw::sal::Attrs obj_attrs;
+    bool invalid = false;
   
     ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__ << "" << __LINE__ << "(): Before acquiring cleaning-lock" << dendl;
     std::unique_lock<std::mutex> l(lfuda_cleaning_lock);
@@ -473,9 +552,47 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
     ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->bucket_id=" << e->bucket_id << dendl;
     ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->user=" << e->user << dendl;
     ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->obj_key=" << e->obj_key << dendl;
+
+    auto p = o_entries_map.find(e->key);
+    if (p == o_entries_map.end()) {
+      l.unlock();
+      continue;
+    }
+    if (p->second.second == State::INVALID) {
+      invalid = true;
+    }
     l.unlock();
-    if (!e->key.empty() && (std::difftime(time(NULL), e->creationTime) > interval)) { //if block is dirty and written more than interval seconds ago
-      rgw_user c_rgw_user = e->user;
+
+    // If the state is invalid, the blocks must be deleted from the cache rather than written to the backend.
+    if (invalid) {
+      ldpp_dout(dpp, 10) << __func__ << "(): State is INVALID; deleting object." << dendl;
+      int ret = -1;
+      if ((ret = cacheDriver->delete_data(dpp, DIRTY_BLOCK_PREFIX + e->key, y)) == 0) { // Sam: do we want del or delete_data here?
+	if (!(ret = erase(dpp, e->key, y))) {
+	  ldpp_dout(dpp, 0) << "Failed to delete head policy entry for: " << e->key << ", ret=" << ret << dendl; // TODO: what must occur during failure?
+	}
+      } else {
+	ldpp_dout(dpp, 0) << "Failed to delete head object for: " << e->key << ", ret=" << ret << dendl;
+      }
+
+      if (!e->delete_marker) {
+        ret = delete_data_blocks(dpp, e, y);
+	if (ret == 0) {
+	  erase_dirty_object(dpp, e->key, null_yield);
+	} else {
+	  ldpp_dout(dpp, 0) << "Failed to delete blocks for: " << e->key << ", ret=" << ret << dendl;
+	}
+      }
+
+      continue; // continue onto the next entry in the heap
+    }
+
+    if (!e->key.empty() && (std::difftime(time(NULL), e->creationTime) > interval)) { // if block is dirty and written more than interval seconds ago
+      l.lock();
+      p->second.second = State::IN_PROGRESS;
+      l.unlock();
+
+      rgw_user c_rgw_user = e->user; 
       //writing data to the backend
       //we need to create an atomic_writer
       std::unique_ptr<rgw::sal::User> c_user = driver->get_user(c_rgw_user);
@@ -743,7 +860,7 @@ void LRUPolicy::update(const DoutPrefixProvider* dpp, std::string& key, uint64_t
 }
 
 void LRUPolicy::update_dirty_object(const DoutPrefixProvider* dpp, std::string& key, std::string version, bool dirty, uint64_t size, time_t creationTime, const rgw_user user, std::string& etag, const std::string& bucket_name, const std::string& bucket_id,
-const rgw_obj_key& obj_key, optional_yield y)
+const rgw_obj_key& obj_key, optional_yield y, std::string& restore_val)
 {
   const std::lock_guard l(lru_lock);
   ObjEntry *e = new ObjEntry(key, version, dirty, size, creationTime, user, etag, bucket_name, bucket_id, obj_key);
