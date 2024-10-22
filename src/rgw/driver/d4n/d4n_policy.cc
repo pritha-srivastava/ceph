@@ -534,7 +534,6 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
     ldpp_dout(dpp, 20) << __func__ << " : " << " Cache cleaning!" << dendl;
     uint64_t len = 0;
     rgw::sal::Attrs obj_attrs;
-    bool invalid = false;
   
     ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__ << "" << __LINE__ << "(): Before acquiring cleaning-lock" << dendl;
     std::unique_lock<std::mutex> l(lfuda_cleaning_lock);
@@ -553,43 +552,48 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
     ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->user=" << e->user << dendl;
     ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->obj_key=" << e->obj_key << dendl;
 
-    auto p = o_entries_map.find(e->key);
-    if (p == o_entries_map.end()) {
-      l.unlock();
-      continue;
-    }
-    if (p->second.second == State::INVALID) {
-      invalid = true;
-    }
     l.unlock();
 
-    // If the state is invalid, the blocks must be deleted from the cache rather than written to the backend.
-    if (invalid) {
-      ldpp_dout(dpp, 10) << __func__ << "(): State is INVALID; deleting object." << dendl;
-      int ret = -1;
-      if ((ret = cacheDriver->delete_data(dpp, DIRTY_BLOCK_PREFIX + e->key, y)) == 0) { // Sam: do we want del or delete_data here?
-	if (!(ret = erase(dpp, e->key, y))) {
-	  ldpp_dout(dpp, 0) << "Failed to delete head policy entry for: " << e->key << ", ret=" << ret << dendl; // TODO: what must occur during failure?
-	}
-      } else {
-	ldpp_dout(dpp, 0) << "Failed to delete head object for: " << e->key << ", ret=" << ret << dendl;
+    if (!e->key.empty() && (std::difftime(time(NULL), e->creationTime) > interval)) { // if block is dirty and written more than interval seconds ago
+      bool invalid = false;
+      l.lock();
+      auto p = o_entries_map.find(e->key);
+      if (p == o_entries_map.end()) {
+        l.unlock();
+        continue;
       }
+      if (p->second.second == State::INVALID) {
+        invalid = true;
+      }
+      l.unlock();
+
+      // If the state is invalid, the blocks must be deleted from the cache rather than written to the backend.
+      if (invalid) {
+        ldpp_dout(dpp, 10) << __func__ << "(): State is INVALID; deleting object." << dendl;
+        int ret = -1;
+        if ((ret = cacheDriver->delete_data(dpp, DIRTY_BLOCK_PREFIX + e->key, y)) == 0) { // Sam: do we want del or delete_data here?
+          if (!(ret = erase(dpp, e->key, y))) {
+            ldpp_dout(dpp, 0) << "Failed to delete head policy entry for: " << e->key << ", ret=" << ret << dendl; // TODO: what must occur during failure?
+          }
+        } else {
+          ldpp_dout(dpp, 0) << "Failed to delete head object for: " << e->key << ", ret=" << ret << dendl;
+        }
 
       if (!e->delete_marker) {
         ret = delete_data_blocks(dpp, e, y);
-	if (ret == 0) {
-	  erase_dirty_object(dpp, e->key, null_yield);
-	} else {
-	  ldpp_dout(dpp, 0) << "Failed to delete blocks for: " << e->key << ", ret=" << ret << dendl;
-	}
+        if (ret == 0) {
+          erase_dirty_object(dpp, e->key, null_yield);
+        } else {
+          ldpp_dout(dpp, 0) << "Failed to delete blocks for: " << e->key << ", ret=" << ret << dendl;
+        }
       }
 
-      continue; // continue onto the next entry in the heap
-    }
+        continue; // continue onto the next entry in the heap
+      }            
 
-    if (!e->key.empty() && (std::difftime(time(NULL), e->creationTime) > interval)) { // if block is dirty and written more than interval seconds ago
+
       l.lock();
-      p->second.second = State::IN_PROGRESS;
+      p->second.second = State::IN_PROGRESS;  
       l.unlock();
 
       rgw_user c_rgw_user = e->user; 
