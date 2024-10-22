@@ -368,11 +368,12 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
       return ret;
     }
 
+    auto localWeight = it->second->localWeight;
+    bool deleted = false; // if head block gets deleted
     if ((ret = blockDir->remove_host(dpp, victim, dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address, y)) < 0) {
       delete victim;
       return ret;
     }
-
     delete victim;
 
     if ((ret = cacheDriver->delete_data(dpp, key, y)) < 0) {
@@ -381,9 +382,26 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
 
     ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Block " << key << " has been evicted." << dendl;
 
-    weightSum = (avgWeight * entries_map.size()) - it->second->localWeight;
+    if (deleted) { // last data block
+      std::string head_oid_in_cache = victim->cacheObj.bucketName + CACHE_DELIM + victim->version + CACHE_DELIM + victim->cacheObj.objName + CACHE_DELIM + "0#0";
+      ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Deleting head object " << head_oid_in_cache << "." << dendl;
 
-    age = std::max(it->second->localWeight, age);
+      // delete head object in cache
+      if ((ret = cacheDriver->delete_data(dpp, head_oid_in_cache, y)) == 0) { 
+	if (!(ret = erase(dpp, head_oid_in_cache, y))) {
+	  ldpp_dout(dpp, 0) << "Failed to delete head policy entry for: " << head_oid_in_cache << ", ret=" << ret << dendl;
+	  return -EINVAL;
+	}
+      } else {
+	ldpp_dout(dpp, 0) << "Failed to delete head object for: " << head_oid_in_cache << ", ret=" << ret << dendl;
+	return -EINVAL;
+      }
+    }
+
+    if (entries_map.size()) {
+      weightSum = (avgWeight * entries_map.size()) - it->second->localWeight;
+    } // else, no change? -Sam
+    age = std::max(localWeight, age);
 
     erase(dpp, key, y);
 
