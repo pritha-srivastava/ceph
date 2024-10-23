@@ -556,7 +556,7 @@ void SSDDriver::put_async(const DoutPrefixProvider *dpp, const Executor& ex, con
     ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): ::aio_write(), r=" << r << dendl;
     if(r < 0) {
         auto ec = boost::system::error_code{-r, boost::system::system_category()};
-        ceph::async::post(std::move(p), ec);
+        ceph::async::dispatch(std::move(p), ec);
     } else {
         (void)p.release();
     }
