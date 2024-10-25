@@ -380,6 +380,18 @@ int SSDDriver::restore_blocks_objects(const DoutPrefixProvider* dpp, ObjectDataC
     return 0;
 }
 
+uint64_t SSDDriver::get_free_space(const DoutPrefixProvider* dpp)
+{
+    efs::space_info space = efs::space(partition_info.location);
+    return space.available;
+}
+
+void SSDDriver::set_free_space(const DoutPrefixProvider* dpp, uint64_t free_space)
+{
+    std::lock_guard l(cache_lock);
+    this->free_space = free_space;
+}
+
 int SSDDriver::put(const DoutPrefixProvider* dpp, const std::string& key, const bufferlist& bl, uint64_t len, const rgw::sal::Attrs& attrs, optional_yield y)
 {
     ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << key << dendl;
@@ -467,7 +479,7 @@ int SSDDriver::append_data(const DoutPrefixProvider* dpp, const::std::string& ke
         ldpp_dout(dpp, 0) << "ERROR: append_data::fclose file has return error, errno=" << errno << dendl;
         return -errno;
     }
-
+    std::lock_guard l(cache_lock);
     efs::space_info space = efs::space(partition_info.location);
     this->free_space = space.available;
 
@@ -642,6 +654,7 @@ int SSDDriver::delete_data(const DoutPrefixProvider* dpp, const::std::string& ke
             }
         }
     }
+
     efs::space_info space = efs::space(partition_info.location);
     this->free_space = space.available;
 
@@ -792,6 +805,7 @@ int SSDDriver::update_attrs(const DoutPrefixProvider* dpp, const std::string& ke
             return ret;
         }
     }
+
     efs::space_info space = efs::space(partition_info.location);
     this->free_space = space.available;
     return 0;
