@@ -20,6 +20,8 @@ struct CacheObj {
   std::string creationTime; /* Creation time of the S3 Object */
   bool dirty{false};
   std::unordered_set<std::string> hostsList; /* List of hostnames <ip:port> of object locations for multiple backends */
+  std::string etag; //etag needed for list objects
+  uint64_t size; //total object size (and not block size), needed for list objects
 };
 
 struct CacheBlock {
@@ -35,6 +37,19 @@ struct CacheBlock {
 class Directory {
   public:
     Directory() {}
+};
+
+class BucketDirectory: public Directory {
+  public:
+    BucketDirectory(std::shared_ptr<connection>& conn) : conn(conn) {}
+    int zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, double score, const std::string& member, optional_yield y, bool multi=false);
+    int zrem(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& member, optional_yield y, bool multi=false);
+    int zrange(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start, const std::string& stop, uint64_t offset, uint64_t count, std::vector<std::string>& members, optional_yield y);
+    int zscan(const DoutPrefixProvider* dpp, const std::string& bucket_id, uint64_t cursor, const std::string& pattern, uint64_t count, std::vector<std::string>& members, uint64_t next_cursor, optional_yield y);
+    int zrank(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& member, uint64_t& rank, optional_yield y);
+
+  private:
+    std::shared_ptr<connection> conn;
 };
 
 class ObjectDirectory: public Directory {
@@ -70,6 +85,8 @@ class BlockDirectory: public Directory {
 
     int set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y);
     int get(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y);
+    //Pipelined version of get for list bucket
+    int get(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y);
     int copy(const DoutPrefixProvider* dpp, CacheBlock* block, std::string copyName, std::string copyBucketName, optional_yield y);
     int del(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, bool multi=false);
     int update_field(const DoutPrefixProvider* dpp, CacheBlock* block, std::string field, std::string value, optional_yield y);
