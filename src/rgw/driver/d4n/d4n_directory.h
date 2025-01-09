@@ -22,6 +22,8 @@ struct CacheObj {
   std::unordered_set<std::string> hostsList; /* List of hostnames <ip:port> of object locations for multiple backends */
   std::string etag; //etag needed for list objects
   uint64_t size; //total object size (and not block size), needed for list objects
+  std::string user_id; // id of user, needed for list object versions
+  std::string display_name; // display name of owner, needed for list object versions
 };
 
 struct CacheBlock {
@@ -65,9 +67,10 @@ class ObjectDirectory: public Directory {
     int update_field(const DoutPrefixProvider* dpp, CacheObj* object, std::string field, std::string value, optional_yield y);
     int zadd(const DoutPrefixProvider* dpp, CacheObj* object, double score, const std::string& member, optional_yield y, bool multi=false);
     int zrange(const DoutPrefixProvider* dpp, CacheObj* object, int start, int stop, std::vector<std::string>& members, optional_yield y);
-    int zrevrange(const DoutPrefixProvider* dpp, CacheObj* object, int start, int stop, std::vector<std::string>& members, optional_yield y);
+    int zrevrange(const DoutPrefixProvider* dpp, CacheObj* object, std::string start, std::string stop, std::vector<std::string>& members, optional_yield y);
     int zrem(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& member, optional_yield y, bool multi=false);
     int zremrangebyscore(const DoutPrefixProvider* dpp, CacheObj* object, double min, double max, optional_yield y, bool multi=false);
+    int zrank(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& member, std::string& index, optional_yield y);
     //Return value is the incremented value, else return error
     int incr(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y);
 

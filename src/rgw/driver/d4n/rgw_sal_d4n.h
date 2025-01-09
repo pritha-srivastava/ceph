@@ -87,6 +87,10 @@ class D4NFilterUser : public FilterUser {
 
 class D4NFilterBucket : public FilterBucket {
   private:
+    struct rgw_bucket_list_entries{
+      rgw_obj_key key;
+      uint16_t flags;
+    };
     D4NFilterDriver* filter;
 
   public:
