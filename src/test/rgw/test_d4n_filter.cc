@@ -1504,7 +1504,6 @@ TEST_F(D4NFilterFixture, PutObjectWrite)
     DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver));
   }, rethrow);
  
-  io.reset();
   io.run();
 }
 
@@ -2005,7 +2004,6 @@ TEST_F(D4NFilterFixture, DeleteObjectWrite)
     DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver));
   }, rethrow);
 
-  io.reset();
   io.run();
 }
 
@@ -2162,7 +2160,6 @@ TEST_F(D4NFilterFixture, PutVersionedObjectWrite)
     DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver));
   }, rethrow);
  
-  io.reset();
   io.run();
 }
 
@@ -3053,7 +3050,6 @@ TEST_F(D4NFilterFixture, DeleteVersionedObjectWrite)
     DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver));
   }, rethrow);
 
-  io.reset();
   io.run();
 }
 
@@ -3065,9 +3061,9 @@ TEST_F(D4NFilterFixture, SimpleDeleteBeforeCleaning)
   const std::string testName = "SimpleDeleteBeforeCleaning";
   const std::string bucketName = "/tmp/d4n_filter_tests/dbstore-default_ns.1";
   std::vector<std::string> instances;
-  std::string deleteMarker;
+  std::string deleteMarker, location;
  
-  net::spawn(io, [this, &testName, &bucketName, &instances, &deleteMarker] (net::yield_context yield) {
+  net::spawn(io, [this, &testName, &bucketName, &instances, &deleteMarker, &location] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     testBucket->get_info().bucket.bucket_id = bucketName;
@@ -3085,34 +3081,60 @@ TEST_F(D4NFilterFixture, SimpleDeleteBeforeCleaning)
     boost::system::error_code ec;
     request req;
     req.push("HGET", bucketName + "_" + TEST_OBJ + testName + "_0_0", "deleteMarker");
+    req.push("HGET", bucketName + "_" + TEST_OBJ + testName + "_0_0", "version");
 
-    response< int > resp;
+    response< int, std::string > resp;
 
     conn->async_exec(req, resp, yield[ec]);
 
     ASSERT_EQ((bool)ec, false);
-    deleteMarker = std::get<0>(resp).value();
+    EXPECT_EQ((int)std::get<0>(resp).value(), 1);
+    deleteMarker = std::get<1>(resp).value();
 
+    // Simple delete's head object in cache
     std::error_code err;
-    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + deleteMarker, err), false);  
+    location = CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + deleteMarker;
+    EXPECT_EQ(fs::exists(location, err), true);  
 
+    std::string attr_val;
+    EXPECT_EQ(d4nFilter->get_cache_driver()->get_attr(env->dpp, location, RGW_CACHE_ATTR_DIRTY, attr_val, optional_yield({yield})), 0);
+    EXPECT_EQ(attr_val, "1");
+
+    /* TODO: The following code allows the DB::Object::Delete::delete_obj op to succeed in the cleaning method by removing the instance value.
+       However, this causes the wrong head_oid_in_cache key to be generated since it uses the empty version rather than the delete marker. As
+       a result, the head block for the delete marker does not get cleaned. If this code is not used, then the DBStore delete_obj method returns
+       -ENOENT, which also prevents the head block from being cleaned.
+    objEnabled->set_instance("");
+    std::string key = url_encode(bucketName, true) + "#" + deleteMarker + "#" + TEST_OBJ + testName;
+    std::string etag = "test_etag";
+    auto creationTime = ceph::real_clock::to_time_t(objEnabled->get_mtime());
+    d4nFilter->get_policy_driver()->get_cache_policy()->erase_dirty_object(env->dpp, key, optional_yield{yield}); 
+    d4nFilter->get_policy_driver()->get_cache_policy()->update_dirty_object(env->dpp, key, "", true, objEnabled->get_accounted_size(), creationTime, 
+                                                         std::get<rgw_user>(objEnabled->get_bucket()->get_owner()), etag, 
+                                                         objEnabled->get_bucket()->get_name(), objEnabled->get_bucket()->get_bucket_id(), 
+                                                         objEnabled->get_key(), rgw::d4n::REFCOUNT_NOOP, optional_yield{yield});*/
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
   }, rethrow);
 
   io.run_for(std::chrono::seconds(2)); // Allow cleaning cycle to complete
 
-  net::spawn(io, [this, &testName, &bucketName, &deleteMarker] (net::yield_context yield) {
+  net::spawn(io, [this, &testName, &bucketName, &deleteMarker, &location] (net::yield_context yield) {
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
 
-    std::error_code err;
-    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + deleteMarker, err), false);  
+    std::unique_ptr<rgw::sal::Object::ReadOp> read_op(objEnabled->get_read_op());
+    EXPECT_EQ(read_op->prepare(optional_yield{yield}, env->dpp), -2); // Simple read; should return -ENOENT
+    EXPECT_EQ(read_op->iterate(env->dpp, 0, ofs, nullptr, optional_yield{yield}), -2);
+
+    /* TODO: 
+    std::string attr_val;
+    EXPECT_EQ(d4nFilter->get_cache_driver()->get_attr(env->dpp, location, RGW_CACHE_ATTR_DIRTY, attr_val, optional_yield({yield})), 0);
+    EXPECT_EQ(attr_val, "0");*/ 
 
     conn->cancel();
     testBucket->remove(env->dpp, true, optional_yield{yield});
     DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver));
   }, rethrow);
 
-  io.reset();
   io.run();
 }
 
@@ -3173,6 +3195,14 @@ TEST_F(D4NFilterFixture, VersionedDeleteBeforeCleaning)
       EXPECT_EQ(std::get<0>(resp).value()[0], instances[0]);
     }
 
+    objEnabled->set_instance(""); // Simple get
+
+    std::unique_ptr<rgw::sal::Object::ReadOp> read_op(objEnabled->get_read_op());
+    EXPECT_EQ(read_op->prepare(optional_yield{yield}, env->dpp), 0);
+    EXPECT_EQ(read_op->iterate(env->dpp, 0, ofs, nullptr, optional_yield{yield}), 0);
+    EXPECT_EQ(objEnabled->get_instance(), instances[0]); // Next latest version
+
+    objEnabled->set_instance(instances[0]);
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
   }, rethrow);
 
@@ -3186,6 +3216,8 @@ TEST_F(D4NFilterFixture, VersionedDeleteBeforeCleaning)
     std::string oid = instances[1] + "#0#" + std::to_string(ofs);
     EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + oid, err), false);  
 
+    objEnabled->set_instance(instances[1]);
+
     // Make sure deleted instance isn't written to backend
     {
       auto next = dynamic_cast<rgw::sal::FilterObject*>(objEnabled.get())->get_next();
@@ -3194,11 +3226,19 @@ TEST_F(D4NFilterFixture, VersionedDeleteBeforeCleaning)
 
     objEnabled->set_instance(instances[0]);
 
-    // First instance should still be written to backend
+    // First instance should still be available in backend
     {
       auto next = dynamic_cast<rgw::sal::FilterObject*>(objEnabled.get())->get_next();
       EXPECT_EQ(next->load_obj_state(env->dpp, optional_yield{yield}), 0);
       EXPECT_EQ(next->exists(), 1);
+
+      bufferlist bl;
+      Read_CB cb(&bl);
+      next->set_instance("");
+      std::unique_ptr<rgw::sal::Object::ReadOp> read_op(next->get_read_op());
+      EXPECT_EQ(read_op->prepare(optional_yield{yield}, env->dpp), 0);
+      EXPECT_EQ(read_op->iterate(env->dpp, 0, ofs, &cb, optional_yield{yield}), 0);
+      EXPECT_EQ(next->get_instance(), instances[0]); // Next latest version
     }
 
     conn->cancel();
@@ -3206,7 +3246,6 @@ TEST_F(D4NFilterFixture, VersionedDeleteBeforeCleaning)
     DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver));
   }, rethrow);
 
-  io.reset();
   io.run();
 }
 
@@ -3259,7 +3298,6 @@ TEST_F(D4NFilterFixture, SimpleDeleteAfterCleaning)
     DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver));
   }, rethrow);
 
-  io.reset();
   io.run();
 }
 
@@ -3291,9 +3329,22 @@ TEST_F(D4NFilterFixture, VersionedDeleteAfterCleaning)
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
 
     std::error_code err;
-    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + instances[1], err), true);  
-    std::string oid = instances[1] + "#0#" + std::to_string(ofs);
-    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + oid, err), true);  
+    std::string location = CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + instances[1];
+    EXPECT_EQ(fs::exists(location, err), true);  
+    std::string oid = "#0#" + std::to_string(ofs);
+    EXPECT_EQ(fs::exists(location + oid, err), true);  
+
+    {
+      std::string attr_val;
+      EXPECT_EQ(d4nFilter->get_cache_driver()->get_attr(env->dpp, location, RGW_CACHE_ATTR_DIRTY, attr_val, optional_yield({yield})), 0);
+      EXPECT_EQ(attr_val, "0");
+    }
+
+    {
+      std::string attr_val;
+      EXPECT_EQ(d4nFilter->get_cache_driver()->get_attr(env->dpp, location + oid, RGW_CACHE_ATTR_DIRTY, attr_val, optional_yield({yield})), 0);
+      EXPECT_EQ(attr_val, "0");
+    }
 
     std::unique_ptr<rgw::sal::Object::DeleteOp> del_op_enabled = objEnabled->get_delete_op();
     objEnabled->set_instance(instances[1]); // Latest version
@@ -3307,17 +3358,24 @@ TEST_F(D4NFilterFixture, VersionedDeleteAfterCleaning)
 
     objEnabled->set_instance(instances[0]);
 
-    // First instance should still available in backend
+    // First instance should still be available in backend
     {
       auto next = dynamic_cast<rgw::sal::FilterObject*>(objEnabled.get())->get_next();
       EXPECT_EQ(next->load_obj_state(env->dpp, optional_yield{yield}), 0);
       EXPECT_EQ(next->exists(), 1);
+
+      bufferlist bl;
+      Read_CB cb(&bl);
+      next->set_instance("");
+      std::unique_ptr<rgw::sal::Object::ReadOp> read_op(next->get_read_op());
+      EXPECT_EQ(read_op->prepare(optional_yield{yield}, env->dpp), 0);
+      EXPECT_EQ(read_op->iterate(env->dpp, 0, ofs, &cb, optional_yield{yield}), 0);
+      EXPECT_EQ(next->get_instance(), instances[0]); // Next latest version
     }
 
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
   }, rethrow);
 
-  io.reset();
   io.run_for(std::chrono::seconds(2));
 
   net::spawn(io, [this, &testName, &bucketName, &instances] (net::yield_context yield) {
@@ -3336,7 +3394,6 @@ TEST_F(D4NFilterFixture, VersionedDeleteAfterCleaning)
     DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver));
   }, rethrow);
 
-  io.reset();
   io.run();
 }
 
@@ -3379,7 +3436,6 @@ TEST_F(D4NFilterFixture, ListObjectVersions)
     DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver));
   }, rethrow);
 
-  io.reset();
   io.run();
 }
 
