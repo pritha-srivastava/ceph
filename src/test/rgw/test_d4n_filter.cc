@@ -329,8 +329,8 @@ TEST_F(D4NFilterFixture, PutObjectRead)
     ASSERT_EQ((bool)ec, false);
     EXPECT_EQ((int)std::get<0>(resp).value(), 1);
     EXPECT_EQ((int)std::get<1>(resp).value(), 1);
-    EXPECT_EQ(std::get<2>(resp).value().size(), 10);
-    EXPECT_EQ(std::get<3>(resp).value().size(), 10);
+    EXPECT_EQ(std::get<2>(resp).value().size(), 14);
+    EXPECT_EQ(std::get<3>(resp).value().size(), 14);
 
     std::string version = std::get<4>(resp).value();
     std::error_code err;
@@ -382,9 +382,9 @@ TEST_F(D4NFilterFixture, GetObjectRead)
     EXPECT_EQ((int)std::get<0>(resp).value(), 1);
     EXPECT_EQ((int)std::get<1>(resp).value(), 1);
     EXPECT_EQ((int)std::get<2>(resp).value(), 1);
-    EXPECT_EQ(std::get<3>(resp).value().size(), 10);
-    EXPECT_EQ(std::get<4>(resp).value().size(), 10);
-    EXPECT_EQ(std::get<5>(resp).value().size(), 10);
+    EXPECT_EQ(std::get<3>(resp).value().size(), 14);
+    EXPECT_EQ(std::get<4>(resp).value().size(), 14);
+    EXPECT_EQ(std::get<5>(resp).value().size(), 14);
 
     std::string version = std::get<6>(resp).value();
     std::error_code err;
@@ -484,8 +484,8 @@ TEST_F(D4NFilterFixture, CopyNoneObjectRead)
     ASSERT_EQ((bool)ec, false);
     EXPECT_EQ((int)std::get<0>(resp).value(), 1);
     EXPECT_EQ((int)std::get<1>(resp).value(), 1);
-    EXPECT_EQ(std::get<2>(resp).value().size(), 10);
-    EXPECT_EQ(std::get<3>(resp).value().size(), 10);
+    EXPECT_EQ(std::get<2>(resp).value().size(), 14);
+    EXPECT_EQ(std::get<3>(resp).value().size(), 14);
 
     std::error_code err;
     std::string version = "test_version"; // Expected version for copy object
@@ -594,8 +594,8 @@ TEST_F(D4NFilterFixture, CopyMergeObjectRead)
     ASSERT_EQ((bool)ec, false);
     EXPECT_EQ((int)std::get<0>(resp).value(), 1);
     EXPECT_EQ((int)std::get<1>(resp).value(), 1);
-    EXPECT_EQ(std::get<2>(resp).value().size(), 10);
-    EXPECT_EQ(std::get<3>(resp).value().size(), 10);
+    EXPECT_EQ(std::get<2>(resp).value().size(), 14);
+    EXPECT_EQ(std::get<3>(resp).value().size(), 14);
 
     std::error_code err;
     std::string version = "dest_object_version"; // Expected version for copy object
@@ -680,8 +680,8 @@ TEST_F(D4NFilterFixture, CopyReplaceObjectRead)
     ASSERT_EQ((bool)ec, false);
     EXPECT_EQ((int)std::get<0>(resp).value(), 1);
     EXPECT_EQ((int)std::get<1>(resp).value(), 1);
-    EXPECT_EQ(std::get<2>(resp).value().size(), 10);
-    EXPECT_EQ(std::get<3>(resp).value().size(), 10);
+    EXPECT_EQ(std::get<2>(resp).value().size(), 14);
+    EXPECT_EQ(std::get<3>(resp).value().size(), 14);
 
     std::error_code err;
     std::string version = "dest_object_version"; // Expected version for copy object
@@ -793,8 +793,8 @@ TEST_F(D4NFilterFixture, PutVersionedObjectRead)
     ASSERT_EQ((bool)ec, false);
     EXPECT_EQ((int)std::get<0>(resp).value(), 1);
     EXPECT_EQ((int)std::get<1>(resp).value(), 1);
-    EXPECT_EQ(std::get<2>(resp).value().size(), 10);
-    EXPECT_EQ(std::get<3>(resp).value().size(), 10);
+    EXPECT_EQ(std::get<2>(resp).value().size(), 14);
+    EXPECT_EQ(std::get<3>(resp).value().size(), 14);
 
     conn->cancel();
     testBucket->remove(env->dpp, true, optional_yield{yield});
@@ -847,7 +847,7 @@ TEST_F(D4NFilterFixture, GetVersionedObjectRead)
     EXPECT_EQ((int)std::get<0>(resp).value(), 1);
     EXPECT_EQ((int)std::get<1>(resp).value(), 1);
     EXPECT_EQ((int)std::get<2>(resp).value(), 1);
-    EXPECT_EQ(std::get<3>(resp).value().size(), 10);
+    EXPECT_EQ(std::get<3>(resp).value().size(), 14);
 
     std::string version = std::get<4>(resp).value();
     std::error_code err;
@@ -959,7 +959,7 @@ TEST_F(D4NFilterFixture, CopyNoneVersionedObjectRead)
 
       ASSERT_EQ((bool)ec, false);
       EXPECT_EQ((int)std::get<0>(resp).value(), 1);
-      EXPECT_EQ(std::get<1>(resp).value().size(), 10);
+      EXPECT_EQ(std::get<1>(resp).value().size(), 14);
 
       std::error_code err;
       EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameEnabled + "/" + instance, err), true);  
@@ -1013,7 +1013,7 @@ TEST_F(D4NFilterFixture, CopyNoneVersionedObjectRead)
 
       ASSERT_EQ((bool)ec, false);
       EXPECT_EQ((int)std::get<0>(resp).value(), 1);
-      EXPECT_EQ(std::get<1>(resp).value().size(), 10);
+      EXPECT_EQ(std::get<1>(resp).value().size(), 14);
 
       std::error_code err;
       EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameSuspended + "/test_version", err), true);  
@@ -1097,7 +1097,7 @@ TEST_F(D4NFilterFixture, CopyMergeVersionedObjectRead)
 
       ASSERT_EQ((bool)ec, false);
       EXPECT_EQ((int)std::get<0>(resp).value(), 1);
-      EXPECT_EQ(std::get<1>(resp).value().size(), 10);
+      EXPECT_EQ(std::get<1>(resp).value().size(), 14);
 
       std::error_code err;
       EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameEnabled + "/" + instance, err), true);  
@@ -1151,7 +1151,7 @@ TEST_F(D4NFilterFixture, CopyMergeVersionedObjectRead)
 
       ASSERT_EQ((bool)ec, false);
       EXPECT_EQ((int)std::get<0>(resp).value(), 1);
-      EXPECT_EQ(std::get<1>(resp).value().size(), 10);
+      EXPECT_EQ(std::get<1>(resp).value().size(), 14);
 
       std::error_code err;
       EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameSuspended + "/dest_object_version", err), true);  
@@ -1235,7 +1235,7 @@ TEST_F(D4NFilterFixture, CopyReplaceVersionedObjectRead)
 
       ASSERT_EQ((bool)ec, false);
       EXPECT_EQ((int)std::get<0>(resp).value(), 1);
-      EXPECT_EQ(std::get<1>(resp).value().size(), 10);
+      EXPECT_EQ(std::get<1>(resp).value().size(), 14);
 
       std::error_code err;
       EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameEnabled + "/" + instance, err), true);  
@@ -1289,7 +1289,7 @@ TEST_F(D4NFilterFixture, CopyReplaceVersionedObjectRead)
 
       ASSERT_EQ((bool)ec, false);
       EXPECT_EQ((int)std::get<0>(resp).value(), 1);
-      EXPECT_EQ(std::get<1>(resp).value().size(), 10);
+      EXPECT_EQ(std::get<1>(resp).value().size(), 14);
 
       std::error_code err;
       EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameSuspended + "/dest_object_version", err), true);  
@@ -1397,7 +1397,7 @@ TEST_F(D4NFilterFixture, DeleteVersionedObjectRead)
 TEST_F(D4NFilterFixture, PutObjectWrite)
 {
   env->cct->_conf->d4n_writecache_enabled = true;
-  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0.5;
+  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0;
   const std::string testName = "PutObjectWrite";
   const std::string bucketName = "/tmp/d4n_filter_tests/dbstore-default_ns.1";
   std::string version;
@@ -1438,9 +1438,9 @@ TEST_F(D4NFilterFixture, PutObjectWrite)
       EXPECT_EQ((int)std::get<2>(resp).value(), 1);
       EXPECT_EQ((int)std::get<3>(resp).value(), 1);
       EXPECT_EQ(std::get<4>(resp).value()[0], "null");
-      EXPECT_EQ(std::get<5>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<6>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<7>(resp).value().size(), 10);
+      EXPECT_EQ(std::get<5>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<6>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<7>(resp).value().size(), 14);
       EXPECT_EQ(std::get<8>(resp).value(), "1");
 
       version = std::get<9>(resp).value();
@@ -1470,7 +1470,7 @@ TEST_F(D4NFilterFixture, PutObjectWrite)
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
   }, rethrow);
 
-  io.run_for(std::chrono::seconds(2)); // Allow cleaning cycle to complete
+  io.run_for(std::chrono::seconds(1)); // Allow cleaning cycle to complete
 
   net::spawn(io, [this, &testName, &bucketName, &version] (net::yield_context yield) {
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
@@ -1504,6 +1504,7 @@ TEST_F(D4NFilterFixture, PutObjectWrite)
     DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver));
   }, rethrow);
  
+  io.reset();
   io.run();
 }
 
@@ -1550,9 +1551,9 @@ TEST_F(D4NFilterFixture, GetObjectWrite)
     EXPECT_EQ((int)std::get<2>(resp).value(), 1);
     EXPECT_EQ((int)std::get<3>(resp).value(), 1);
     EXPECT_EQ(std::get<4>(resp).value()[0], "null");
-    EXPECT_EQ(std::get<5>(resp).value().size(), 10);
-    EXPECT_EQ(std::get<6>(resp).value().size(), 10);
-    EXPECT_EQ(std::get<7>(resp).value().size(), 10);
+    EXPECT_EQ(std::get<5>(resp).value().size(), 14);
+    EXPECT_EQ(std::get<6>(resp).value().size(), 14);
+    EXPECT_EQ(std::get<7>(resp).value().size(), 14);
 
     std::string version = std::get<8>(resp).value();
     std::error_code err;
@@ -1662,9 +1663,9 @@ TEST_F(D4NFilterFixture, CopyNoneObjectWrite)
     EXPECT_EQ((int)std::get<2>(resp).value(), 1);
     EXPECT_EQ((int)std::get<3>(resp).value(), 1);
     EXPECT_EQ(std::get<4>(resp).value()[0], "null");
-    EXPECT_EQ(std::get<5>(resp).value().size(), 10);
-    EXPECT_EQ(std::get<6>(resp).value().size(), 10);
-    EXPECT_EQ(std::get<7>(resp).value().size(), 10);
+    EXPECT_EQ(std::get<5>(resp).value().size(), 14);
+    EXPECT_EQ(std::get<6>(resp).value().size(), 14);
+    EXPECT_EQ(std::get<7>(resp).value().size(), 14);
 
     std::string version = std::get<8>(resp).value();
     std::error_code err;
@@ -1778,9 +1779,9 @@ TEST_F(D4NFilterFixture, CopyMergeObjectWrite)
     EXPECT_EQ((int)std::get<2>(resp).value(), 1);
     EXPECT_EQ((int)std::get<3>(resp).value(), 1);
     EXPECT_EQ(std::get<4>(resp).value()[0], "null");
-    EXPECT_EQ(std::get<5>(resp).value().size(), 10);
-    EXPECT_EQ(std::get<6>(resp).value().size(), 10);
-    EXPECT_EQ(std::get<7>(resp).value().size(), 10);
+    EXPECT_EQ(std::get<5>(resp).value().size(), 14);
+    EXPECT_EQ(std::get<6>(resp).value().size(), 14);
+    EXPECT_EQ(std::get<7>(resp).value().size(), 14);
 
     std::string version = std::get<8>(resp).value();
     std::error_code err;
@@ -1894,9 +1895,9 @@ TEST_F(D4NFilterFixture, CopyReplaceObjectWrite)
     EXPECT_EQ((int)std::get<2>(resp).value(), 1);
     EXPECT_EQ((int)std::get<3>(resp).value(), 1);
     EXPECT_EQ(std::get<4>(resp).value()[0], "null");
-    EXPECT_EQ(std::get<5>(resp).value().size(), 10);
-    EXPECT_EQ(std::get<6>(resp).value().size(), 10);
-    EXPECT_EQ(std::get<7>(resp).value().size(), 10);
+    EXPECT_EQ(std::get<5>(resp).value().size(), 14);
+    EXPECT_EQ(std::get<6>(resp).value().size(), 14);
+    EXPECT_EQ(std::get<7>(resp).value().size(), 14);
 
     std::string version = std::get<8>(resp).value();
     std::error_code err;
@@ -1930,7 +1931,7 @@ TEST_F(D4NFilterFixture, CopyReplaceObjectWrite)
 TEST_F(D4NFilterFixture, DeleteObjectWrite)
 {
   env->cct->_conf->d4n_writecache_enabled = true;
-  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0.5;
+  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0;
   const std::string testName = "DeleteObjectWrite";
   std::string version;
  
@@ -1971,7 +1972,7 @@ TEST_F(D4NFilterFixture, DeleteObjectWrite)
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
   }, rethrow);
 
-  io.run_for(std::chrono::seconds(2)); // Allow cleaning cycle to complete
+  io.run_for(std::chrono::seconds(1)); // Allow cleaning cycle to complete
 
   net::spawn(io, [this, &testName, &version] (net::yield_context yield) {
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
@@ -2011,7 +2012,7 @@ TEST_F(D4NFilterFixture, DeleteObjectWrite)
 TEST_F(D4NFilterFixture, PutVersionedObjectWrite)
 {
   env->cct->_conf->d4n_writecache_enabled = true;
-  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0.5;
+  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0;
   const std::string testName = "PutVersionedObjectWrite";
   const std::string bucketName = "/tmp/d4n_filter_tests/dbstore-default_ns.1";
   std::string version, instance;
@@ -2063,11 +2064,11 @@ TEST_F(D4NFilterFixture, PutVersionedObjectWrite)
       EXPECT_EQ((int)std::get<5>(resp).value(), 1);
       EXPECT_EQ(std::get<6>(resp).value()[0], "null");
       EXPECT_EQ(std::get<6>(resp).value()[1], instance);
-      EXPECT_EQ(std::get<7>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<8>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<9>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<10>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<11>(resp).value().size(), 10);
+      EXPECT_EQ(std::get<7>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<8>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<9>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<10>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<11>(resp).value().size(), 14);
       EXPECT_EQ(std::get<12>(resp).value(), "1");
       EXPECT_EQ(std::get<13>(resp).value(), "1");
 
@@ -2110,7 +2111,7 @@ TEST_F(D4NFilterFixture, PutVersionedObjectWrite)
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
   }, rethrow);
 
-  io.run_for(std::chrono::seconds(2)); // Allow cleaning cycle to complete
+  io.run_for(std::chrono::seconds(1)); // Allow cleaning cycle to complete
 
   net::spawn(io, [this, &testName, &bucketName, &version, &instance] (net::yield_context yield) {
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
@@ -2206,9 +2207,9 @@ TEST_F(D4NFilterFixture, GetVersionedObjectWrite)
       EXPECT_EQ((int)std::get<2>(resp).value(), 1);
       EXPECT_EQ((int)std::get<3>(resp).value(), 1);
       EXPECT_EQ(std::get<4>(resp).value()[0], instance);
-      EXPECT_EQ(std::get<5>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<6>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<7>(resp).value().size(), 10);
+      EXPECT_EQ(std::get<5>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<6>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<7>(resp).value().size(), 14);
 
       std::error_code err;
       std::string testData; 
@@ -2277,9 +2278,9 @@ TEST_F(D4NFilterFixture, GetVersionedObjectWrite)
       EXPECT_EQ((int)std::get<2>(resp).value(), 1);
       EXPECT_EQ((int)std::get<3>(resp).value(), 1);
       EXPECT_EQ(std::get<4>(resp).value()[0], "null");
-      EXPECT_EQ(std::get<5>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<6>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<7>(resp).value().size(), 10);
+      EXPECT_EQ(std::get<5>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<6>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<7>(resp).value().size(), 14);
 
       std::string version = std::get<8>(resp).value();
 
@@ -2398,9 +2399,9 @@ TEST_F(D4NFilterFixture, CopyNoneVersionedObjectWrite)
       EXPECT_EQ((int)std::get<2>(resp).value(), 1);
       EXPECT_EQ((int)std::get<3>(resp).value(), 1);
       EXPECT_EQ(std::get<4>(resp).value()[0], instance);
-      EXPECT_EQ(std::get<5>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<6>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<7>(resp).value().size(), 10);
+      EXPECT_EQ(std::get<5>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<6>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<7>(resp).value().size(), 14);
      
       std::error_code err;
       std::string testData; 
@@ -2489,9 +2490,9 @@ TEST_F(D4NFilterFixture, CopyNoneVersionedObjectWrite)
       EXPECT_EQ((int)std::get<2>(resp).value(), 1);
       EXPECT_EQ((int)std::get<3>(resp).value(), 1);
       EXPECT_EQ(std::get<4>(resp).value()[0], "null");
-      EXPECT_EQ(std::get<5>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<6>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<7>(resp).value().size(), 10);
+      EXPECT_EQ(std::get<5>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<6>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<7>(resp).value().size(), 14);
 
       std::string version = std::get<8>(resp).value();
       std::error_code err;
@@ -2610,9 +2611,9 @@ TEST_F(D4NFilterFixture, CopyMergeVersionedObjectWrite)
       EXPECT_EQ((int)std::get<2>(resp).value(), 1);
       EXPECT_EQ((int)std::get<3>(resp).value(), 1);
       EXPECT_EQ(std::get<4>(resp).value()[0], instance);
-      EXPECT_EQ(std::get<5>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<6>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<7>(resp).value().size(), 10);
+      EXPECT_EQ(std::get<5>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<6>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<7>(resp).value().size(), 14);
      
       std::error_code err;
       std::string testData; 
@@ -2701,9 +2702,9 @@ TEST_F(D4NFilterFixture, CopyMergeVersionedObjectWrite)
       EXPECT_EQ((int)std::get<2>(resp).value(), 1);
       EXPECT_EQ((int)std::get<3>(resp).value(), 1);
       EXPECT_EQ(std::get<4>(resp).value()[0], "null");
-      EXPECT_EQ(std::get<5>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<6>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<7>(resp).value().size(), 10);
+      EXPECT_EQ(std::get<5>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<6>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<7>(resp).value().size(), 14);
 
       std::string version = std::get<8>(resp).value();
       std::error_code err;
@@ -2822,9 +2823,9 @@ TEST_F(D4NFilterFixture, CopyReplaceVersionedObjectWrite)
       EXPECT_EQ((int)std::get<2>(resp).value(), 1);
       EXPECT_EQ((int)std::get<3>(resp).value(), 1);
       EXPECT_EQ(std::get<4>(resp).value()[0], instance);
-      EXPECT_EQ(std::get<5>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<6>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<7>(resp).value().size(), 10);
+      EXPECT_EQ(std::get<5>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<6>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<7>(resp).value().size(), 14);
      
       std::error_code err;
       std::string testData; 
@@ -2913,9 +2914,9 @@ TEST_F(D4NFilterFixture, CopyReplaceVersionedObjectWrite)
       EXPECT_EQ((int)std::get<2>(resp).value(), 1);
       EXPECT_EQ((int)std::get<3>(resp).value(), 1);
       EXPECT_EQ(std::get<4>(resp).value()[0], "null");
-      EXPECT_EQ(std::get<5>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<6>(resp).value().size(), 10);
-      EXPECT_EQ(std::get<7>(resp).value().size(), 10);
+      EXPECT_EQ(std::get<5>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<6>(resp).value().size(), 14);
+      EXPECT_EQ(std::get<7>(resp).value().size(), 14);
 
       std::string version = std::get<8>(resp).value();
       std::error_code err;
@@ -2952,7 +2953,7 @@ TEST_F(D4NFilterFixture, CopyReplaceVersionedObjectWrite)
 TEST_F(D4NFilterFixture, DeleteVersionedObjectWrite)
 {
   env->cct->_conf->d4n_writecache_enabled = true;
-  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0.5;
+  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0;
   const std::string testName = "DeleteVersionedObjectRead";
   const std::string bucketName = "/tmp/d4n_filter_tests/dbstore-default_ns.1";
   std::string version, instance;
@@ -3009,7 +3010,7 @@ TEST_F(D4NFilterFixture, DeleteVersionedObjectWrite)
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
   }, rethrow);
 
-  io.run_for(std::chrono::seconds(2)); // Allow cleaning cycle to complete
+  io.run_for(std::chrono::seconds(1)); // Allow cleaning cycle to complete
 
   net::spawn(io, [this, &testName, &bucketName, &version, &instance] (net::yield_context yield) {
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
@@ -3057,7 +3058,7 @@ TEST_F(D4NFilterFixture, DeleteVersionedObjectWrite)
 TEST_F(D4NFilterFixture, SimpleDeleteBeforeCleaning)
 {
   env->cct->_conf->d4n_writecache_enabled = true;
-  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0.5;
+  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0;
   const std::string testName = "SimpleDeleteBeforeCleaning";
   const std::string bucketName = "/tmp/d4n_filter_tests/dbstore-default_ns.1";
   std::vector<std::string> instances;
@@ -3113,10 +3114,11 @@ TEST_F(D4NFilterFixture, SimpleDeleteBeforeCleaning)
                                                          std::get<rgw_user>(objEnabled->get_bucket()->get_owner()), etag, 
                                                          objEnabled->get_bucket()->get_name(), objEnabled->get_bucket()->get_bucket_id(), 
                                                          objEnabled->get_key(), rgw::d4n::REFCOUNT_NOOP, optional_yield{yield});*/
+    objEnabled->set_instance(deleteMarker); // Simple delete
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
   }, rethrow);
 
-  io.run_for(std::chrono::seconds(2)); // Allow cleaning cycle to complete
+  io.run_for(std::chrono::seconds(1)); // Allow cleaning cycle to complete
 
   net::spawn(io, [this, &testName, &bucketName, &deleteMarker, &location] (net::yield_context yield) {
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
@@ -3128,7 +3130,7 @@ TEST_F(D4NFilterFixture, SimpleDeleteBeforeCleaning)
     /* TODO: 
     std::string attr_val;
     EXPECT_EQ(d4nFilter->get_cache_driver()->get_attr(env->dpp, location, RGW_CACHE_ATTR_DIRTY, attr_val, optional_yield({yield})), 0);
-    EXPECT_EQ(attr_val, "0");*/ 
+    EXPECT_EQ(attr_val, "0"); */ 
 
     conn->cancel();
     testBucket->remove(env->dpp, true, optional_yield{yield});
@@ -3141,7 +3143,7 @@ TEST_F(D4NFilterFixture, SimpleDeleteBeforeCleaning)
 TEST_F(D4NFilterFixture, VersionedDeleteBeforeCleaning)
 {
   env->cct->_conf->d4n_writecache_enabled = true;
-  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0.5;
+  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0;
   const std::string testName = "VersionedDeleteBeforeCleaning";
   const std::string bucketName = "/tmp/d4n_filter_tests/dbstore-default_ns.1";
   std::vector<std::string> instances;
@@ -3206,7 +3208,7 @@ TEST_F(D4NFilterFixture, VersionedDeleteBeforeCleaning)
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
   }, rethrow);
 
-  io.run_for(std::chrono::seconds(2)); // Allow cleaning cycle to complete
+  io.run_for(std::chrono::seconds(1)); // Allow cleaning cycle to complete
 
   net::spawn(io, [this, &testName, &bucketName, &instances] (net::yield_context yield) {
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
@@ -3252,7 +3254,7 @@ TEST_F(D4NFilterFixture, VersionedDeleteBeforeCleaning)
 TEST_F(D4NFilterFixture, SimpleDeleteAfterCleaning)
 {
   env->cct->_conf->d4n_writecache_enabled = true;
-  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0.5;
+  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0;
   const std::string testName = "SimpleDeleteAfterCleaning";
   const std::string bucketName = "/tmp/d4n_filter_tests/dbstore-default_ns.1";
   std::vector<std::string> instances;
@@ -3271,7 +3273,7 @@ TEST_F(D4NFilterFixture, SimpleDeleteAfterCleaning)
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
   }, rethrow);
 
-  io.run_for(std::chrono::seconds(2)); // Allow cleaning cycle to complete
+  io.run_for(std::chrono::seconds(1)); // Allow cleaning cycle to complete
 
   net::spawn(io, [this, &testName, &bucketName] (net::yield_context yield) {
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
@@ -3304,7 +3306,7 @@ TEST_F(D4NFilterFixture, SimpleDeleteAfterCleaning)
 TEST_F(D4NFilterFixture, VersionedDeleteAfterCleaning)
 {
   env->cct->_conf->d4n_writecache_enabled = true;
-  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0.5;
+  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0;
   const std::string testName = "VersionedDeleteAfterCleaning";
   const std::string bucketName = "/tmp/d4n_filter_tests/dbstore-default_ns.1";
   std::vector<std::string> instances;
@@ -3323,7 +3325,7 @@ TEST_F(D4NFilterFixture, VersionedDeleteAfterCleaning)
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
   }, rethrow);
 
-  io.run_for(std::chrono::seconds(2)); // Allow cleaning cycle to complete
+  io.run_for(std::chrono::seconds(1)); // Allow cleaning cycle to complete
 
   net::spawn(io, [this, &testName, &bucketName, &instances] (net::yield_context yield) {
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
@@ -3376,7 +3378,7 @@ TEST_F(D4NFilterFixture, VersionedDeleteAfterCleaning)
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
   }, rethrow);
 
-  io.run_for(std::chrono::seconds(2));
+  io.run_for(std::chrono::seconds(1));
 
   net::spawn(io, [this, &testName, &bucketName, &instances] (net::yield_context yield) {
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
@@ -3400,7 +3402,6 @@ TEST_F(D4NFilterFixture, VersionedDeleteAfterCleaning)
 TEST_F(D4NFilterFixture, ListObjectVersions)
 {
   env->cct->_conf->d4n_writecache_enabled = true;
-  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0.5;
   const std::string testName = "ListObjectVersions";
   const std::string bucketName = "/tmp/d4n_filter_tests/dbstore-default_ns.1";
   std::string instance;
@@ -3416,7 +3417,7 @@ TEST_F(D4NFilterFixture, ListObjectVersions)
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
   }, rethrow);
 
-  io.run_for(std::chrono::seconds(2)); // Allow cleaning cycle to complete
+  io.run_for(std::chrono::seconds(1)); // Allow cleaning cycle to complete
 
   net::spawn(io, [this, &instance] (net::yield_context yield) {
     dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
