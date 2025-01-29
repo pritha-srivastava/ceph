@@ -194,7 +194,6 @@ class LFUDAPolicy : public CachePolicy {
       delete blockDir;
       delete objDir;
       quit = true;
-      std::lock_guard l(lfuda_cleaning_lock);
       cond.notify_all();
       if (tc.joinable()) { tc.join(); }
     } 
