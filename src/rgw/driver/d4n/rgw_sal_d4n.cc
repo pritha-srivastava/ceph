@@ -1003,7 +1003,7 @@ int D4NFilterObject::calculate_version(const DoutPrefixProvider* dpp, optional_y
   ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): object name: " << this->get_name() << " instance: " << this->have_instance() << dendl;
   if (! this->have_instance() && version.empty()) {
     bufferlist bl = attrs[RGW_ATTR_ID_TAG];
-    version = bl.to_str();
+    version = bl.c_str();
     if (!version.empty()) {
       ldpp_dout(dpp, 20) << __func__ << " id tag version is: " << version << dendl;
     }

@@ -14,6 +14,7 @@
 #include "rgw_sal_store.h"
 #include "driver/dbstore/common/dbstore.h"
 #include "rgw_sal_d4n.h"
+#include "rgw_sal_filter.h"
 
 #define dout_subsys ceph_subsys_rgw
 
@@ -39,6 +40,10 @@ std::string getTestDir() {
   return test_dir.string();
 }
 
+void rethrow(std::exception_ptr eptr) {
+  if (eptr) std::rethrow_exception(eptr);
+}
+
 class Environment* env;
 
 class Environment : public ::testing::Environment {
@@ -48,10 +53,6 @@ class Environment : public ::testing::Environment {
     virtual ~Environment() {}
 
     void SetUp() override {
-      fs::current_path(fs::temp_directory_path());
-      fs::remove_all(TEST_DIR);
-      fs::create_directory(TEST_DIR);
-
       std::vector<const char*> args;
       cct = global_init(nullptr, args, CEPH_ENTITY_TYPE_CLIENT,
 			CODE_ENVIRONMENT_UTILITY,
@@ -75,15 +76,32 @@ class Environment : public ::testing::Environment {
     DoutPrefixProvider* dpp;
 };
 
+class Read_CB : public RGWGetDataCB
+{
+public:
+  bufferlist *save_bl;
+  explicit Read_CB(bufferlist *_bl) : save_bl(_bl) {}
+  ~Read_CB() override {}
+
+  int handle_data(bufferlist& bl, off_t bl_ofs, off_t bl_len) override {
+    save_bl->append(bl);
+    return 0;
+  }
+};
+
 class D4NFilterFixture: public ::testing::Test {
   protected:
     virtual void SetUp() {
+      fs::current_path(fs::temp_directory_path());
+      fs::remove_all(TEST_DIR);
+      fs::create_directory(TEST_DIR);
+
       env->cct->_conf->rgw_d4n_cache_cleaning_interval = 1;
       rgw_user uid{"test_tenant", "test_filter"};
       owner = uid;
       acl_owner.id = owner; 
 
-      conn = new connection{boost::asio::make_strand(io)};
+      conn = new connection{net::make_strand(io)};
       ASSERT_NE(conn, nullptr);
 
       /* Run fixture's connection */
@@ -104,20 +122,29 @@ class D4NFilterFixture: public ::testing::Test {
       rgw::sal::Driver* next = filterDriver;
       driver = newD4NFilter(next, io);
       d4nFilter = dynamic_cast<rgw::sal::D4NFilterDriver*>(driver);
+
+      /* Reset Redis state */
+      net::spawn(io, [this] (net::yield_context yield) {
+	boost::system::error_code ec;
+	request req;
+	req.push("FLUSHALL");
+	response<boost::redis::ignore_t> resp;
+	conn->async_exec(req, resp, yield[ec]);
+      }, rethrow);
     } 
 
     virtual void TearDown() {
       delete conn;
     }
 
-    void init_driver(boost::asio::yield_context yield) {
+    void init_driver(net::yield_context yield) {
       dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
       driver->initialize(env->cct.get(), env->dpp);
 
       ASSERT_NE(driver, nullptr);
     }
 
-    void create_user(boost::asio::yield_context yield) {
+    void create_user(net::yield_context yield) {
       rgw_user u("test_tenant", "test_user", "ns");
 
       testUser = driver->get_user(u);
@@ -126,7 +153,7 @@ class D4NFilterFixture: public ::testing::Test {
       ASSERT_EQ(testUser->store_user(env->dpp, optional_yield{yield}, false), 0);
     }
 
-    void create_bucket(std::string name, boost::asio::yield_context yield) {
+    void create_bucket(std::string name, net::yield_context yield) {
       rgw::sal::Bucket::CreateParams createParams;
       rgw_bucket b;
       init_bucket(&b, "test_tenant", "test_name", "test_data_pool", "test_index_pool", "test_marker", "test_id");
@@ -136,7 +163,7 @@ class D4NFilterFixture: public ::testing::Test {
       testBucket->get_info().bucket.bucket_id = "test_bucket_" + name;
     }
 
-    void put_object(std::string name, boost::asio::yield_context yield) {
+    void put_object(std::string name, net::yield_context yield) {
       std::string object_name = "test_object_" + name;
       obj = testBucket->get_object(rgw_obj_key(object_name));
       ASSERT_NE(obj.get(), nullptr);
@@ -154,14 +181,14 @@ class D4NFilterFixture: public ::testing::Test {
       ceph::real_time mtime; 
 
       buffer::list bl;
-      bl.append("test_version");
-      rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, bl}};
-      bl.clear();
+      bl.append("test_version\0", 13);
+      // DBStore does not provide the RGW_ATTR_ID_TAG attr, so it is being manually written 
+      // here since D4N cache backend versioning relies on it. 
+      rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, std::move(bl)}};
       bl.append("test_etag");
-      attrs.insert({RGW_ATTR_ETAG, bl});
+      attrs.insert({RGW_ATTR_ETAG, std::move(bl)});
 
-      bl.clear();
-      bl.append("test data");
+      bl.append("test data", 9);
       ASSERT_EQ(testWriter->prepare(optional_yield{yield}), 0);
       ASSERT_EQ(testWriter->process(std::move(bl), 0), 0);
       ASSERT_EQ(testWriter->complete(ofs, etag,
@@ -172,7 +199,7 @@ class D4NFilterFixture: public ::testing::Test {
 				     nullptr, nullptr, rctx, 0), 0);
     }
 
-    void put_version_enabled_object(std::string name, std::string& instance, boost::asio::yield_context yield) {
+    void put_version_enabled_object(std::string name, std::string& instance, net::yield_context yield) {
       testBucket->get_info().flags |= BUCKET_VERSIONED;
       std::string object_name = "test_object_" + name;
       objEnabled = testBucket->get_object(rgw_obj_key(object_name));
@@ -193,14 +220,12 @@ class D4NFilterFixture: public ::testing::Test {
       ceph::real_time mtime; 
 
       buffer::list bl;
-      bl.append("test_version");
-      rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, bl}};
-      bl.clear();
+      bl.append("test_version\0", 13);
+      rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, std::move(bl)}};
       bl.append("test_etag");
-      attrs.insert({RGW_ATTR_ETAG, bl});
+      attrs.insert({RGW_ATTR_ETAG, std::move(bl)});
 
-      bl.clear();
-      bl.append("test data");
+      bl.append("test data", 9);
       ASSERT_EQ(testWriter->prepare(optional_yield{yield}), 0);
       ASSERT_EQ(testWriter->process(std::move(bl), 0), 0);
       ASSERT_EQ(testWriter->complete(ofs, etag,
@@ -211,7 +236,7 @@ class D4NFilterFixture: public ::testing::Test {
 				     nullptr, nullptr, rctx, 0), 0);
     }
 
-    void put_version_suspended_object(std::string name, boost::asio::yield_context yield) {
+    void put_version_suspended_object(std::string name, net::yield_context yield) {
       testBucket->get_info().flags |= BUCKET_VERSIONS_SUSPENDED;
       std::string object_name = "test_object_" + name;
       objSuspended = testBucket->get_object(rgw_obj_key(object_name));
@@ -230,14 +255,12 @@ class D4NFilterFixture: public ::testing::Test {
       ceph::real_time mtime; 
 
       buffer::list bl;
-      bl.append("test_version");
-      rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, bl}};
-      bl.clear();
+      bl.append("test_version\0", 13);
+      rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, std::move(bl)}};
       bl.append("test_etag");
-      attrs.insert({RGW_ATTR_ETAG, bl});
+      attrs.insert({RGW_ATTR_ETAG, std::move(bl)});
 
-      bl.clear();
-      bl.append("test data");
+      bl.append("test data", 9);
       ASSERT_EQ(testWriter->prepare(optional_yield{yield}), 0);
       ASSERT_EQ(testWriter->process(std::move(bl), 0), 0);
       ASSERT_EQ(testWriter->complete(ofs, etag,
@@ -267,10 +290,6 @@ class D4NFilterFixture: public ::testing::Test {
     std::unique_ptr<rgw::sal::Writer> testWriter = nullptr;
 };
 
-void rethrow(std::exception_ptr eptr) {
-  if (eptr) std::rethrow_exception(eptr);
-}
-
 class DriverDestructor {
   rgw::sal::Driver* driver;
 
@@ -286,7 +305,7 @@ TEST_F(D4NFilterFixture, PutObjectRead)
 {
   const std::string testName = "PutObjectRead";
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     put_object(testName, yield);
@@ -298,12 +317,12 @@ TEST_F(D4NFilterFixture, PutObjectRead)
     req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + TEST_OBJ + testName + "_0_0");
     req.push("HGETALL", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0");
     req.push("HGETALL", TEST_BUCKET + testName + "__:null_" + TEST_OBJ + testName + "_0_0");
-    req.push("FLUSHALL");
+    req.push("HGET", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0", "version"); // To check cache block(s)
 
     response< int, int, 
              std::map<std::string, std::string>,
              std::map<std::string, std::string>,
-	      boost::redis::ignore_t > resp;
+             std::string > resp;
 
     conn->async_exec(req, resp, yield[ec]);
 
@@ -313,7 +332,10 @@ TEST_F(D4NFilterFixture, PutObjectRead)
     EXPECT_EQ(std::get<2>(resp).value().size(), 10);
     EXPECT_EQ(std::get<3>(resp).value().size(), 10);
 
-    // TODO: add check for cache head block    
+    std::string version = std::get<4>(resp).value();
+    std::error_code err;
+
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + version, err), true);  
 
     conn->cancel();
     testBucket->remove(env->dpp, true, optional_yield{yield});
@@ -327,31 +349,32 @@ TEST_F(D4NFilterFixture, GetObjectRead)
 {
   const std::string testName = "GetObjectRead";
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     put_object(testName, yield);
 
+    bufferlist bl;
+    Read_CB cb(&bl);
     std::unique_ptr<rgw::sal::Object::ReadOp> read_op(obj->get_read_op());
     EXPECT_EQ(read_op->prepare(optional_yield{yield}, env->dpp), 0);
-    EXPECT_EQ(read_op->iterate(env->dpp, 0, ofs, nullptr, optional_yield{yield}), 0);
+    EXPECT_EQ(read_op->iterate(env->dpp, 0, ofs, &cb, optional_yield{yield}), 0);
     
     boost::system::error_code ec;
     request req;
     req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0");
     req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + TEST_OBJ + testName + "_0_0");
-    req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_9"); // Data block entry
+    req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs)); // Data block entry
     req.push("HGETALL", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0");
     req.push("HGETALL", TEST_BUCKET + testName + "__:null_" + TEST_OBJ + testName + "_0_0");
-    req.push("HGETALL", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_9");
+    req.push("HGETALL", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
     req.push("HGET", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0", "version"); // To check cache contents
-    req.push("FLUSHALL");
 
     response< int, int, int, 
              std::map<std::string, std::string>,
              std::map<std::string, std::string>,
              std::map<std::string, std::string>,
-             std::string, boost::redis::ignore_t > resp;
+             std::string > resp;
 
     conn->async_exec(req, resp, yield[ec]);
 
@@ -375,12 +398,16 @@ TEST_F(D4NFilterFixture, GetObjectRead)
     testFile.open(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + oid);
     ASSERT_EQ(testFile.is_open(), true);
     getline(testFile, testData);
+    ASSERT_EQ(testData.empty(), false);
     EXPECT_EQ(testData, "test data");
+ 
+    // Ensure data returned from GET op matches cached data
+    EXPECT_EQ(testData, cb.save_bl->to_str());
 
     testFile.close();
     conn->cancel();
     testBucket->remove(env->dpp, true, optional_yield{yield});
-    DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver)); // TODO: use d4nFilter?
+    DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver)); 
   }, rethrow);
 
   io.run();
@@ -390,7 +417,7 @@ TEST_F(D4NFilterFixture, CopyNoneObjectRead)
 {
   const std::string testName = "CopyNoneObjectRead";
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     put_object(testName, yield);
@@ -400,11 +427,13 @@ TEST_F(D4NFilterFixture, CopyNoneObjectRead)
     rgw_zone_id zone;
     rgw_placement_rule placement;
     ceph::real_time mtime;
+
     buffer::list bl;
-    bl.append("dest_object_version");
-    rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, bl}};
+    bl.append("dest_object_version\0", 20);
+    rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, std::move(bl)}};
+
     std::string tag;
-    
+
     std::string destName = "dest_object";
     std::unique_ptr<rgw::sal::Object> destObj = testBucket->get_object(rgw_obj_key(destName));
     EXPECT_NE(destObj.get(), nullptr);
@@ -445,12 +474,10 @@ TEST_F(D4NFilterFixture, CopyNoneObjectRead)
     req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + destName + "_0_0");
     req.push("HGETALL", TEST_BUCKET + testName + "_" + destName + "_0_0");
     req.push("HGETALL", TEST_BUCKET + testName + "__:null_" + destName + "_0_0");
-    req.push("FLUSHALL");
 
     response< int, int, 
 	     std::map<std::string, std::string>,
-	     std::map<std::string, std::string>,
-	     boost::redis::ignore_t > resp;
+	     std::map<std::string, std::string> > resp;
 
     conn->async_exec(req, resp, yield[ec]);
 
@@ -461,7 +488,32 @@ TEST_F(D4NFilterFixture, CopyNoneObjectRead)
     EXPECT_EQ(std::get<3>(resp).value().size(), 10);
 
     std::error_code err;
-    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destName + "/test_version", err), true);  
+    std::string version = "test_version"; // Expected version for copy object
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destName + "/" + version, err), true);  
+
+    /* TODO: DBStore has no copy_object implementation, so the below code will fail if uncommented. Once it is implemented, the following
+       should be uncommented and added to the other copy_object unit tests for the read cache. */
+    /*
+    // Read copy object
+    Read_CB cb(&bl);
+    std::unique_ptr<rgw::sal::Object::ReadOp> read_op(destObj->get_read_op());
+    EXPECT_EQ(read_op->prepare(optional_yield{yield}, env->dpp), 0);
+    EXPECT_EQ(read_op->iterate(env->dpp, 0, ofs, &cb, optional_yield{yield}), 0);
+
+    // Check cache contents for copy object
+    std::string testData; 
+    std::ifstream testFile; 
+    std::string oid = version + "#0#" + std::to_string(ofs);
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + destName + "/" + oid, err), true);     
+    testFile.open(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + destName + "/" + oid);
+    ASSERT_EQ(testFile.is_open(), true);
+    getline(testFile, testData);
+    ASSERT_EQ(testData.empty(), false);
+    EXPECT_EQ(testData, "test data");
+ 
+    // Ensure data returned from GET op matches copy object's cached data
+    EXPECT_EQ(testData, cb.save_bl->to_str());
+    */    
 
     conn->cancel();
     testBucket->remove(env->dpp, true, optional_yield{yield});
@@ -475,7 +527,7 @@ TEST_F(D4NFilterFixture, CopyMergeObjectRead)
 {
   const std::string testName = "CopyMergeObjectRead";
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     put_object(testName, yield);
@@ -485,9 +537,11 @@ TEST_F(D4NFilterFixture, CopyMergeObjectRead)
     rgw_zone_id zone;
     rgw_placement_rule placement;
     ceph::real_time mtime;
+
     buffer::list bl;
-    bl.append("dest_object_version");
-    rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, bl}};
+    bl.append("dest_object_version\0", 20);
+    rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, std::move(bl)}};
+
     std::string tag;
 
     std::string destName = "dest_object";
@@ -530,12 +584,10 @@ TEST_F(D4NFilterFixture, CopyMergeObjectRead)
     req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + destName + "_0_0");
     req.push("HGETALL", TEST_BUCKET + testName + "_" + destName + "_0_0");
     req.push("HGETALL", TEST_BUCKET + testName + "__:null_" + destName + "_0_0");
-    req.push("FLUSHALL");
 
     response< int, int, 
 	     std::map<std::string, std::string>,
-	     std::map<std::string, std::string>,
-	     boost::redis::ignore_t > resp;
+	     std::map<std::string, std::string> > resp;
 
     conn->async_exec(req, resp, yield[ec]);
 
@@ -546,7 +598,8 @@ TEST_F(D4NFilterFixture, CopyMergeObjectRead)
     EXPECT_EQ(std::get<3>(resp).value().size(), 10);
 
     std::error_code err;
-    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destName + "/dest_object_version", err), true);  
+    std::string version = "dest_object_version"; // Expected version for copy object
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destName + "/" + version, err), true);  
 
     conn->cancel();
     testBucket->remove(env->dpp, true, optional_yield{yield});
@@ -560,7 +613,7 @@ TEST_F(D4NFilterFixture, CopyReplaceObjectRead)
 {
   const std::string testName = "CopyReplaceObjectRead";
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     put_object(testName, yield);
@@ -570,9 +623,11 @@ TEST_F(D4NFilterFixture, CopyReplaceObjectRead)
     rgw_zone_id zone;
     rgw_placement_rule placement;
     ceph::real_time mtime;
+
     buffer::list bl;
-    bl.append("dest_object_version");
-    rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, bl}};
+    bl.append("dest_object_version\0", 20);
+    rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, std::move(bl)}};
+
     std::string tag;
     
     std::string destName = "dest_object";
@@ -615,12 +670,10 @@ TEST_F(D4NFilterFixture, CopyReplaceObjectRead)
     req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + destName + "_0_0");
     req.push("HGETALL", TEST_BUCKET + testName + "_" + destName + "_0_0");
     req.push("HGETALL", TEST_BUCKET + testName + "__:null_" + destName + "_0_0");
-    req.push("FLUSHALL");
 
     response< int, int, 
 	     std::map<std::string, std::string>,
-	     std::map<std::string, std::string>,
-	     boost::redis::ignore_t > resp;
+	     std::map<std::string, std::string> > resp;
 
     conn->async_exec(req, resp, yield[ec]);
 
@@ -631,7 +684,8 @@ TEST_F(D4NFilterFixture, CopyReplaceObjectRead)
     EXPECT_EQ(std::get<3>(resp).value().size(), 10);
 
     std::error_code err;
-    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destName + "/dest_object_version", err), true);  
+    std::string version = "dest_object_version"; // Expected version for copy object
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destName + "/" + version, err), true);  
 
     conn->cancel();
     testBucket->remove(env->dpp, true, optional_yield{yield});
@@ -645,7 +699,7 @@ TEST_F(D4NFilterFixture, DeleteObjectRead)
 {
   const std::string testName = "DeleteObjectRead";
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     put_object(testName, yield);
@@ -660,7 +714,7 @@ TEST_F(D4NFilterFixture, DeleteObjectRead)
       request req;
       req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0");
       req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + TEST_OBJ + testName + "_0_0");
-      req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_9");
+      req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
       req.push("HGET", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0", "version"); 
 
       response< int, int, int, std::string > resp;
@@ -687,10 +741,9 @@ TEST_F(D4NFilterFixture, DeleteObjectRead)
       request req;
       req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0");
       req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + TEST_OBJ + testName + "_0_0");
-      req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_9");
-      req.push("FLUSHALL");
+      req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
 
-      response< int, int, int, boost::redis::ignore_t > resp;
+      response< int, int, int > resp;
 
       conn->async_exec(req, resp, yield[ec]);
       ASSERT_EQ((bool)ec, false);
@@ -717,26 +770,23 @@ TEST_F(D4NFilterFixture, PutVersionedObjectRead)
 {
   const std::string testName = "PutVersionedObjectRead";
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     std::string instance;
     put_version_enabled_object(testName, instance, yield);
     put_version_suspended_object(testName, yield);
 
-    // TODO: No unversioned head object set in redis, is this intended?
     boost::system::error_code ec;
     request req;
     req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_0");
     req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + TEST_OBJ + testName + "_0_0");
     req.push("HGETALL", TEST_BUCKET + testName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_0");
     req.push("HGETALL", TEST_BUCKET + testName + "__:null_" + TEST_OBJ + testName + "_0_0");
-    req.push("FLUSHALL");
 
     response< int, int, 
               std::map<std::string, std::string>,
-              std::map<std::string, std::string>,
-	      boost::redis::ignore_t > resp;
+              std::map<std::string, std::string> > resp;
 
     conn->async_exec(req, resp, yield[ec]);
 
@@ -758,7 +808,7 @@ TEST_F(D4NFilterFixture, GetVersionedObjectRead)
 {
   const std::string testName = "GetVersionedObjectRead";
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     std::string instance;
@@ -766,28 +816,30 @@ TEST_F(D4NFilterFixture, GetVersionedObjectRead)
     put_version_suspended_object(testName, yield);
 
     // For version enabled object
+    bufferlist blEnabled;
+    Read_CB cbEnabled(&blEnabled);
     std::unique_ptr<rgw::sal::Object::ReadOp> read_op_enabled(objEnabled->get_read_op());
     EXPECT_EQ(read_op_enabled->prepare(optional_yield{yield}, env->dpp), 0);
-    EXPECT_EQ(read_op_enabled->iterate(env->dpp, 0, ofs, nullptr, optional_yield{yield}), 0);
+    EXPECT_EQ(read_op_enabled->iterate(env->dpp, 0, ofs, &cbEnabled, optional_yield{yield}), 0);
 
     // For version suspended object
+    bufferlist blSuspended;
+    Read_CB cbSuspended(&blSuspended);
     std::unique_ptr<rgw::sal::Object::ReadOp> read_op_suspended(objSuspended->get_read_op());
     EXPECT_EQ(read_op_suspended->prepare(optional_yield{yield}, env->dpp), 0);
-    EXPECT_EQ(read_op_suspended->iterate(env->dpp, 0, ofs, nullptr, optional_yield{yield}), 0);
+    EXPECT_EQ(read_op_suspended->iterate(env->dpp, 0, ofs, &cbSuspended, optional_yield{yield}), 0);
 
-    // TODO: data block set without version in key, is this intended?
     boost::system::error_code ec;
     request req;
     req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_0");
-    req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_9");
+    req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
     req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + TEST_OBJ + testName + "_0_0");
-    req.push("HGETALL", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_9");
+    req.push("HGETALL", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
     req.push("HGET", TEST_BUCKET + testName + "__:null_" + TEST_OBJ + testName + "_0_0", "version");
-    req.push("FLUSHALL");
 
     response< int, int, int, 
-              std::map<std::string, std::string>,
-	      std::string, boost::redis::ignore_t > resp;
+              std::map<std::string, std::string>, 
+              std::string > resp;
 
     conn->async_exec(req, resp, yield[ec]);
 
@@ -808,7 +860,12 @@ TEST_F(D4NFilterFixture, GetVersionedObjectRead)
     testFile.open(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + oid);
     ASSERT_EQ(testFile.is_open(), true);
     getline(testFile, testData);
+    ASSERT_EQ(testData.empty(), false);
     EXPECT_EQ(testData, "test data");
+ 
+    // Ensure data returned from GET op matches cached data
+    EXPECT_EQ(testData, cbEnabled.save_bl->to_str());
+
     testFile.close();
 
     EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + version, err), true);  
@@ -817,7 +874,11 @@ TEST_F(D4NFilterFixture, GetVersionedObjectRead)
     testFile.open(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + oid);
     ASSERT_EQ(testFile.is_open(), true);
     getline(testFile, testData);
+    ASSERT_EQ(testData.empty(), false);
     EXPECT_EQ(testData, "test data");
+ 
+    // Ensure data returned from GET op matches cached data
+    EXPECT_EQ(testData, cbSuspended.save_bl->to_str());
 
     testFile.close();
     conn->cancel();
@@ -832,7 +893,7 @@ TEST_F(D4NFilterFixture, CopyNoneVersionedObjectRead)
 {
   const std::string testName = "CopyNoneVersionedObjectRead";
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     std::string instance;
@@ -843,9 +904,11 @@ TEST_F(D4NFilterFixture, CopyNoneVersionedObjectRead)
     rgw_zone_id zone;
     rgw_placement_rule placement;
     ceph::real_time mtime;
+
     buffer::list bl;
-    bl.append("dest_object_version");
-    rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, bl}};
+    bl.append("dest_object_version\0", 20);
+    rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, std::move(bl)}};
+
     std::string tag;
     
     {
@@ -941,12 +1004,10 @@ TEST_F(D4NFilterFixture, CopyNoneVersionedObjectRead)
 
       boost::system::error_code ec;
       request req;
-      req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0"); // TODO: no non-versioned head object, expected?
+      req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0");
       req.push("HGETALL", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0");
-      req.push("FLUSHALL");
 
-      response< int, std::map<std::string, std::string>,
-	       boost::redis::ignore_t > resp;
+      response< int, std::map<std::string, std::string> > resp;
 
       conn->async_exec(req, resp, yield[ec]);
 
@@ -970,7 +1031,7 @@ TEST_F(D4NFilterFixture, CopyMergeVersionedObjectRead)
 {
   const std::string testName = "CopyMergeVersionedObjectRead";
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     std::string instance;
@@ -981,9 +1042,11 @@ TEST_F(D4NFilterFixture, CopyMergeVersionedObjectRead)
     rgw_zone_id zone;
     rgw_placement_rule placement;
     ceph::real_time mtime;
+
     buffer::list bl;
-    bl.append("dest_object_version");
-    rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, bl}};
+    bl.append("dest_object_version\0", 20);
+    rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, std::move(bl)}};
+
     std::string tag;
     
     {
@@ -1008,7 +1071,7 @@ TEST_F(D4NFilterFixture, CopyMergeVersionedObjectRead)
 	       false,
 	       nullptr,
 	       nullptr,
-	       rgw::sal::ATTRSMOD_NONE,
+	       rgw::sal::ATTRSMOD_MERGE,
 	       false,
 	       attrs, 
 	       RGWObjCategory::Main,
@@ -1079,12 +1142,10 @@ TEST_F(D4NFilterFixture, CopyMergeVersionedObjectRead)
 
       boost::system::error_code ec;
       request req;
-      req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0"); // TODO: no non-versioned head object, expected?
+      req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0");
       req.push("HGETALL", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0");
-      req.push("FLUSHALL");
 
-      response< int, std::map<std::string, std::string>,
-	       boost::redis::ignore_t > resp;
+      response< int, std::map<std::string, std::string> > resp;
 
       conn->async_exec(req, resp, yield[ec]);
 
@@ -1108,7 +1169,7 @@ TEST_F(D4NFilterFixture, CopyReplaceVersionedObjectRead)
 {
   const std::string testName = "CopyReplaceVersionedObjectRead";
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     std::string instance;
@@ -1119,9 +1180,11 @@ TEST_F(D4NFilterFixture, CopyReplaceVersionedObjectRead)
     rgw_zone_id zone;
     rgw_placement_rule placement;
     ceph::real_time mtime;
+
     buffer::list bl;
-    bl.append("dest_object_version");
-    rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, bl}};
+    bl.append("dest_object_version\0", 20);
+    rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, std::move(bl)}};
+
     std::string tag;
     
     {
@@ -1217,12 +1280,10 @@ TEST_F(D4NFilterFixture, CopyReplaceVersionedObjectRead)
 
       boost::system::error_code ec;
       request req;
-      req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0"); // TODO: no non-versioned head object, expected?
+      req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0");
       req.push("HGETALL", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0");
-      req.push("FLUSHALL");
 
-      response< int, std::map<std::string, std::string>,
-	       boost::redis::ignore_t > resp;
+      response< int, std::map<std::string, std::string> > resp;
 
       conn->async_exec(req, resp, yield[ec]);
 
@@ -1246,7 +1307,7 @@ TEST_F(D4NFilterFixture, DeleteVersionedObjectRead)
 {
   const std::string testName = "DeleteVersionedObjectRead";
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     std::string instance;
@@ -1265,7 +1326,7 @@ TEST_F(D4NFilterFixture, DeleteVersionedObjectRead)
       boost::system::error_code ec;
       request req;
       req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_0");
-      req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_9");
+      req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
       req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + TEST_OBJ + testName + "_0_0");
       req.push("HGET", TEST_BUCKET + testName + "__:null_" + TEST_OBJ + testName + "_0_0", "version");
 
@@ -1286,7 +1347,7 @@ TEST_F(D4NFilterFixture, DeleteVersionedObjectRead)
     std::string oid = version + "#0#" + std::to_string(ofs);
     EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + oid, err), true);     
     oid = instance + "#0#" + std::to_string(ofs);
-    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + instance, err), true);     
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + oid, err), true);     
 
     // For version enabled object
     std::unique_ptr<rgw::sal::Object::DeleteOp> del_op_enabled = objEnabled->get_delete_op();
@@ -1300,13 +1361,12 @@ TEST_F(D4NFilterFixture, DeleteVersionedObjectRead)
       boost::system::error_code ec;
       request req;
       req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0");
-      req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_9");
+      req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
       req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_0");
-      req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_9");
+      req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
       req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + TEST_OBJ + testName + "_0_0");
-      req.push("FLUSHALL");
 
-      response< int, int, int, int, int, boost::redis::ignore_t > resp;
+      response< int, int, int, int, int > resp;
 
       conn->async_exec(req, resp, yield[ec]);
       ASSERT_EQ((bool)ec, false);
@@ -1342,11 +1402,11 @@ TEST_F(D4NFilterFixture, PutObjectWrite)
   const std::string bucketName = "/tmp/d4n_filter_tests/dbstore-default_ns.1";
   std::string version;
  
-  boost::asio::spawn(io, [this, &testName, &bucketName, &version] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName, &bucketName, &version] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     // Overwrite testName because the cleaning method derives the bucket name differently from other ops.
-    testBucket->get_info().bucket.bucket_id = "/tmp/d4n_filter_tests/dbstore-default_ns.1";
+    testBucket->get_info().bucket.bucket_id = bucketName;
     put_object(testName, yield);
 
     {
@@ -1355,11 +1415,11 @@ TEST_F(D4NFilterFixture, PutObjectWrite)
       req.push("EXISTS", bucketName + "_" + TEST_OBJ + testName); // obj dir entry
       req.push("EXISTS", bucketName + "_" + TEST_OBJ + testName + "_0_0");
       req.push("EXISTS", bucketName + "__:null_" + TEST_OBJ + testName + "_0_0");
-      req.push("EXISTS", bucketName + "_" + TEST_OBJ + testName + "_0_9");
-      req.push("ZRANGE", bucketName + "_" + TEST_OBJ + testName, "0", "10000000000");
+      req.push("EXISTS", bucketName + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
+      req.push("ZREVRANGE", bucketName + "_" + TEST_OBJ + testName, "0", "-1");
       req.push("HGETALL", bucketName + "_" + TEST_OBJ + testName + "_0_0");
       req.push("HGETALL", bucketName + "__:null_"  + TEST_OBJ + testName + "_0_0");
-      req.push("HGETALL", bucketName + "_" + TEST_OBJ + testName + "_0_9");
+      req.push("HGETALL", bucketName + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
       req.push("HGET", bucketName + "_" + TEST_OBJ + testName + "_0_0", "dirty");
       req.push("HGET", bucketName + "_" + TEST_OBJ + testName + "_0_0", "version");
 
@@ -1402,13 +1462,19 @@ TEST_F(D4NFilterFixture, PutObjectWrite)
     testFile.open(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + oid);
     ASSERT_EQ(testFile.is_open(), true);
     getline(testFile, testData);
+    ASSERT_EQ(testData.empty(), false);
     EXPECT_EQ(testData, "test data");
     testFile.close();
+
+    // The cleaning method must use a yield that is not out of scope, so set back to null_yield before exiting this coroutine
+    dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
   }, rethrow);
 
   io.run_for(std::chrono::seconds(2)); // Allow cleaning cycle to complete
 
-  boost::asio::spawn(io, [this, &testName, &bucketName, &version] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName, &bucketName, &version] (net::yield_context yield) {
+    dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
+
     {
       boost::system::error_code ec;
       request req;
@@ -1422,24 +1488,16 @@ TEST_F(D4NFilterFixture, PutObjectWrite)
       EXPECT_EQ(std::get<0>(resp).value(), "0");
     }
 
-    // TODO: check if written to backend
+    // Ensure object is written to backend
+    auto next = dynamic_cast<rgw::sal::FilterObject*>(obj.get())->get_next();
+    EXPECT_EQ(next->load_obj_state(env->dpp, optional_yield{yield}), 0);
+    EXPECT_EQ(next->exists(), 1);
+
     std::string oid = version + "#0#" + std::to_string(ofs);
     std::string location = CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + oid;
     std::string attr_val;
     EXPECT_EQ(d4nFilter->get_cache_driver()->get_attr(env->dpp, location, RGW_CACHE_ATTR_DIRTY, attr_val, optional_yield({yield})), 0);
     EXPECT_EQ(attr_val, "0");
-
-    {
-      boost::system::error_code ec;
-      request req;
-      req.push("FLUSHALL");
-
-      response< boost::redis::ignore_t > resp;
-
-      conn->async_exec(req, resp, yield[ec]);
-
-      ASSERT_EQ((bool)ec, false);
-    } 
 
     conn->cancel();
     testBucket->remove(env->dpp, true, optional_yield{yield});
@@ -1455,34 +1513,35 @@ TEST_F(D4NFilterFixture, GetObjectWrite)
   env->cct->_conf->d4n_writecache_enabled = true;
   const std::string testName = "GetObjectWrite";
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     put_object(testName, yield);
 
+    bufferlist bl;
+    Read_CB cb(&bl);
     std::unique_ptr<rgw::sal::Object::ReadOp> read_op(obj->get_read_op());
     EXPECT_EQ(read_op->prepare(optional_yield{yield}, env->dpp), 0);
-    EXPECT_EQ(read_op->iterate(env->dpp, 0, ofs, nullptr, optional_yield{yield}), 0);
+    EXPECT_EQ(read_op->iterate(env->dpp, 0, ofs, &cb, optional_yield{yield}), 0);
     
     boost::system::error_code ec;
     request req;
     req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName);
     req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0");
     req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + TEST_OBJ + testName + "_0_0");
-    req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_9");
-    req.push("ZRANGE", TEST_BUCKET + testName + "_" + TEST_OBJ + testName, "0", "10000000000");
+    req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
+    req.push("ZREVRANGE", TEST_BUCKET + testName + "_" + TEST_OBJ + testName, "0", "-1");
     req.push("HGETALL", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0");
     req.push("HGETALL", TEST_BUCKET + testName + "__:null_"  + TEST_OBJ + testName + "_0_0");
-    req.push("HGETALL", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_9");
+    req.push("HGETALL", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
     req.push("HGET", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0", "version");
-    req.push("FLUSHALL");
 
     response< int, int, int, int, 
               std::vector<std::string>,
               std::map<std::string, std::string>,
               std::map<std::string, std::string>,
               std::map<std::string, std::string>,
-	      std::string, boost::redis::ignore_t > resp;
+              std::string > resp;
 
     conn->async_exec(req, resp, yield[ec]);
 
@@ -1508,6 +1567,9 @@ TEST_F(D4NFilterFixture, GetObjectWrite)
     ASSERT_EQ(testFile.is_open(), true);
     getline(testFile, testData);
     EXPECT_EQ(testData, "test data");
+ 
+    // Ensure data returned from GET op matches cached data
+    EXPECT_EQ(testData, cb.save_bl->c_str());
 
     testFile.close();
     conn->cancel();
@@ -1523,7 +1585,7 @@ TEST_F(D4NFilterFixture, CopyNoneObjectWrite)
   env->cct->_conf->d4n_writecache_enabled = true;
   const std::string testName = "CopyNoneObjectWrite";
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     put_object(testName, yield);
@@ -1533,9 +1595,11 @@ TEST_F(D4NFilterFixture, CopyNoneObjectWrite)
     rgw_zone_id zone;
     rgw_placement_rule placement;
     ceph::real_time mtime;
+
     buffer::list bl;
-    bl.append("dest_object_version");
-    rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, bl}};
+    bl.append("copy_etag", 9);
+    rgw::sal::Attrs attrs{{RGW_ATTR_ETAG, std::move(bl)}};
+    
     std::string tag;
     
     std::string destName = "dest_object";
@@ -1577,20 +1641,19 @@ TEST_F(D4NFilterFixture, CopyNoneObjectWrite)
     req.push("EXISTS", TEST_BUCKET + testName + "_" + destName);
     req.push("EXISTS", TEST_BUCKET + testName + "_" + destName + "_0_0");
     req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + destName + "_0_0");
-    req.push("EXISTS", TEST_BUCKET + testName + "_" + destName + "_0_9");
-    req.push("ZRANGE", TEST_BUCKET + testName + "_" + destName, "0", "10000000000");
+    req.push("EXISTS", TEST_BUCKET + testName + "_" + destName + "_0_" + std::to_string(ofs));
+    req.push("ZREVRANGE", TEST_BUCKET + testName + "_" + destName, "0", "-1");
     req.push("HGETALL", TEST_BUCKET + testName + "_" + destName + "_0_0");
     req.push("HGETALL", TEST_BUCKET + testName + "__:null_" + destName + "_0_0");
-    req.push("HGETALL", TEST_BUCKET + testName + "_" + destName + "_0_9");
+    req.push("HGETALL", TEST_BUCKET + testName + "_" + destName + "_0_" + std::to_string(ofs));
     req.push("HGET", TEST_BUCKET + testName + "_" + destName + "_0_0", "version");
-    req.push("FLUSHALL");
 
     response< int, int, int, int, 
               std::vector<std::string>,
               std::map<std::string, std::string>,
               std::map<std::string, std::string>,
               std::map<std::string, std::string>,
-	      std::string, boost::redis::ignore_t > resp;
+              std::string > resp;
 
     conn->async_exec(req, resp, yield[ec]);
 
@@ -1609,13 +1672,20 @@ TEST_F(D4NFilterFixture, CopyNoneObjectWrite)
     std::string testData; 
     std::ifstream testFile; 
 
-    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destName + "/" + version, err), true); // TODO: version here isn't original version, is this expected? 
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destName + "/" + version, err), true);
     std::string oid = version + "#0#" + std::to_string(ofs);
     EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destName + "/" + oid, err), true);     
     testFile.open(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destName + "/" + oid);
     ASSERT_EQ(testFile.is_open(), true);
     getline(testFile, testData);
     EXPECT_EQ(testData, "test data");
+
+    // Ensure etag is not modified
+    rgw_obj copyObj = destObj->get_obj();
+    ASSERT_EQ(destObj->get_obj_attrs(optional_yield{yield}, env->dpp, &copyObj), 0);
+    rgw::sal::Attrs copyAttrs = destObj->get_attrs();
+    buffer::list etag = copyAttrs[RGW_ATTR_ETAG];
+    EXPECT_EQ(etag.to_str(), "test_etag");  
 
     testFile.close();
     conn->cancel();
@@ -1631,7 +1701,7 @@ TEST_F(D4NFilterFixture, CopyMergeObjectWrite)
   env->cct->_conf->d4n_writecache_enabled = true;
   const std::string testName = "CopyMergeObjectWrite";
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     put_object(testName, yield);
@@ -1641,9 +1711,11 @@ TEST_F(D4NFilterFixture, CopyMergeObjectWrite)
     rgw_zone_id zone;
     rgw_placement_rule placement;
     ceph::real_time mtime;
+
     buffer::list bl;
-    bl.append("dest_object_version");
-    rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, bl}};
+    bl.append("copy_etag", 9);
+    rgw::sal::Attrs attrs{{RGW_ATTR_ETAG, std::move(bl)}};
+    
     std::string tag;
 
     std::string destName = "dest_object";
@@ -1685,20 +1757,19 @@ TEST_F(D4NFilterFixture, CopyMergeObjectWrite)
     req.push("EXISTS", TEST_BUCKET + testName + "_" + destName);
     req.push("EXISTS", TEST_BUCKET + testName + "_" + destName + "_0_0");
     req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + destName + "_0_0");
-    req.push("EXISTS", TEST_BUCKET + testName + "_" + destName + "_0_9");
-    req.push("ZRANGE", TEST_BUCKET + testName + "_" + destName, "0", "10000000000");
+    req.push("EXISTS", TEST_BUCKET + testName + "_" + destName + "_0_" + std::to_string(ofs));
+    req.push("ZREVRANGE", TEST_BUCKET + testName + "_" + destName, "0", "-1");
     req.push("HGETALL", TEST_BUCKET + testName + "_" + destName + "_0_0");
     req.push("HGETALL", TEST_BUCKET + testName + "__:null_" + destName + "_0_0");
-    req.push("HGETALL", TEST_BUCKET + testName + "_" + destName + "_0_9");
+    req.push("HGETALL", TEST_BUCKET + testName + "_" + destName + "_0_" + std::to_string(ofs));
     req.push("HGET", TEST_BUCKET + testName + "_" + destName + "_0_0", "version");
-    req.push("FLUSHALL");
 
     response< int, int, int, int, 
               std::vector<std::string>,
               std::map<std::string, std::string>,
               std::map<std::string, std::string>,
               std::map<std::string, std::string>,
-	      std::string, boost::redis::ignore_t > resp;
+              std::string > resp;
 
     conn->async_exec(req, resp, yield[ec]);
 
@@ -1717,13 +1788,20 @@ TEST_F(D4NFilterFixture, CopyMergeObjectWrite)
     std::string testData; 
     std::ifstream testFile; 
 
-    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destName + "/" + version, err), true); // TODO: version here isn't dest version, is this expected? 
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destName + "/" + version, err), true);
     std::string oid = version + "#0#" + std::to_string(ofs);
     EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destName + "/" + oid, err), true);     
     testFile.open(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destName + "/" + oid);
     ASSERT_EQ(testFile.is_open(), true);
     getline(testFile, testData);
     EXPECT_EQ(testData, "test data");
+
+    // Ensure etag is merged 
+    rgw_obj copyObj = destObj->get_obj();
+    ASSERT_EQ(destObj->get_obj_attrs(optional_yield{yield}, env->dpp, &copyObj), 0);
+    rgw::sal::Attrs copyAttrs = destObj->get_attrs();
+    buffer::list etag = copyAttrs[RGW_ATTR_ETAG];
+    EXPECT_EQ(etag.to_str(), "copy_etag");  
 
     testFile.close();
     conn->cancel();
@@ -1739,7 +1817,7 @@ TEST_F(D4NFilterFixture, CopyReplaceObjectWrite)
   env->cct->_conf->d4n_writecache_enabled = true;
   const std::string testName = "CopyReplaceObjectWrite";
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     put_object(testName, yield);
@@ -1749,9 +1827,11 @@ TEST_F(D4NFilterFixture, CopyReplaceObjectWrite)
     rgw_zone_id zone;
     rgw_placement_rule placement;
     ceph::real_time mtime;
+
     buffer::list bl;
-    bl.append("dest_object_version");
-    rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, bl}};
+    bl.append("copy_etag", 9);
+    rgw::sal::Attrs attrs{{RGW_ATTR_ETAG, std::move(bl)}};
+    
     std::string tag;
     
     std::string destName = "dest_object";
@@ -1793,20 +1873,19 @@ TEST_F(D4NFilterFixture, CopyReplaceObjectWrite)
     req.push("EXISTS", TEST_BUCKET + testName + "_" + destName);
     req.push("EXISTS", TEST_BUCKET + testName + "_" + destName + "_0_0");
     req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + destName + "_0_0");
-    req.push("EXISTS", TEST_BUCKET + testName + "_" + destName + "_0_9");
-    req.push("ZRANGE", TEST_BUCKET + testName + "_" + destName, "0", "10000000000");
+    req.push("EXISTS", TEST_BUCKET + testName + "_" + destName + "_0_" + std::to_string(ofs));
+    req.push("ZREVRANGE", TEST_BUCKET + testName + "_" + destName, "0", "-1");
     req.push("HGETALL", TEST_BUCKET + testName + "_" + destName + "_0_0");
     req.push("HGETALL", TEST_BUCKET + testName + "__:null_" + destName + "_0_0");
-    req.push("HGETALL", TEST_BUCKET + testName + "_" + destName + "_0_9");
+    req.push("HGETALL", TEST_BUCKET + testName + "_" + destName + "_0_" + std::to_string(ofs));
     req.push("HGET", TEST_BUCKET + testName + "_" + destName + "_0_0", "version");
-    req.push("FLUSHALL");
 
     response< int, int, int, int, 
               std::vector<std::string>,
               std::map<std::string, std::string>,
               std::map<std::string, std::string>,
               std::map<std::string, std::string>,
-	      std::string, boost::redis::ignore_t > resp;
+              std::string > resp;
 
     conn->async_exec(req, resp, yield[ec]);
 
@@ -1825,13 +1904,20 @@ TEST_F(D4NFilterFixture, CopyReplaceObjectWrite)
     std::string testData; 
     std::ifstream testFile; 
 
-    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destName + "/" + version, err), true); // TODO: version here isn't dest version, is this expected? 
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destName + "/" + version, err), true); 
     std::string oid = version + "#0#" + std::to_string(ofs);
     EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destName + "/" + oid, err), true);     
     testFile.open(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destName + "/" + oid);
     ASSERT_EQ(testFile.is_open(), true);
     getline(testFile, testData);
     EXPECT_EQ(testData, "test data");
+    
+    // Ensure etag is replaced
+    rgw_obj copyObj = destObj->get_obj();
+    ASSERT_EQ(destObj->get_obj_attrs(optional_yield{yield}, env->dpp, &copyObj), 0);
+    rgw::sal::Attrs copyAttrs = destObj->get_attrs();
+    buffer::list etag = copyAttrs[RGW_ATTR_ETAG];
+    EXPECT_EQ(etag.to_str(), "copy_etag");  
 
     testFile.close();
     conn->cancel();
@@ -1845,21 +1931,22 @@ TEST_F(D4NFilterFixture, CopyReplaceObjectWrite)
 TEST_F(D4NFilterFixture, DeleteObjectWrite)
 {
   env->cct->_conf->d4n_writecache_enabled = true;
+  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0.5;
   const std::string testName = "DeleteObjectWrite";
+  std::string version;
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName, &version] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     put_object(testName, yield);
 
-    std::string version;
     {
       boost::system::error_code ec;
       request req;
       req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName);
       req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0");
       req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + TEST_OBJ + testName + "_0_0");
-      req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_9");
+      req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
       req.push("HGET", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0", "version"); 
 
       response< int, int, int, int, std::string > resp;
@@ -1881,7 +1968,14 @@ TEST_F(D4NFilterFixture, DeleteObjectWrite)
 
     std::unique_ptr<rgw::sal::Object::DeleteOp> del_op = obj->get_delete_op();
     EXPECT_EQ(del_op->delete_obj(env->dpp, optional_yield{yield}, rgw::sal::FLAG_LOG_OP), 0);
-    std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
+  }, rethrow);
+
+  io.run_for(std::chrono::seconds(2)); // Allow cleaning cycle to complete
+
+  net::spawn(io, [this, &testName, &version] (net::yield_context yield) {
+    dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
 
     {
       boost::system::error_code ec;
@@ -1889,10 +1983,9 @@ TEST_F(D4NFilterFixture, DeleteObjectWrite)
       req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName);
       req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0");
       req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + TEST_OBJ + testName + "_0_0");
-      req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_9");
-      req.push("FLUSHALL");
+      req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
 
-      response< int, int, int, int, boost::redis::ignore_t > resp;
+      response< int, int, int, int > resp;
 
       conn->async_exec(req, resp, yield[ec]);
       ASSERT_EQ((bool)ec, false);
@@ -1902,7 +1995,9 @@ TEST_F(D4NFilterFixture, DeleteObjectWrite)
       EXPECT_EQ((int)std::get<3>(resp).value(), 0);
     }
 
+    std::error_code err;
     EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + version, err), false);  
+    std::string oid = version + "#0#" + std::to_string(ofs);
     EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + oid, err), false);     
 
     conn->cancel();
@@ -1910,6 +2005,7 @@ TEST_F(D4NFilterFixture, DeleteObjectWrite)
     DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver));
   }, rethrow);
 
+  io.reset();
   io.run();
 }
 
@@ -1922,11 +2018,10 @@ TEST_F(D4NFilterFixture, PutVersionedObjectWrite)
   const std::string bucketName = "/tmp/d4n_filter_tests/dbstore-default_ns.1";
   std::string version, instance;
  
-  boost::asio::spawn(io, [this, &testName, &bucketName, &version, &instance] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName, &bucketName, &version, &instance] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
-    // Overwrite testName because the cleaning method derives the bucket name differently from other ops.
-    testBucket->get_info().bucket.bucket_id = "/tmp/d4n_filter_tests/dbstore-default_ns.1";
+    testBucket->get_info().bucket.bucket_id = bucketName;
     put_version_enabled_object(testName, instance, yield);
     put_version_suspended_object(testName, yield);
 
@@ -1935,15 +2030,15 @@ TEST_F(D4NFilterFixture, PutVersionedObjectWrite)
       request req;
       req.push("EXISTS", bucketName + "_" + TEST_OBJ + testName);
       req.push("EXISTS", bucketName + "_" + TEST_OBJ + testName + "_0_0");
-      req.push("EXISTS", bucketName + "_" + TEST_OBJ + testName + "_0_9");
+      req.push("EXISTS", bucketName + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
       req.push("EXISTS", bucketName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_0");
-      req.push("EXISTS", bucketName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_9");
+      req.push("EXISTS", bucketName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
       req.push("EXISTS", bucketName + "__:null_"  + TEST_OBJ + testName + "_0_0");
-      req.push("ZRANGE", bucketName + "_" + TEST_OBJ + testName, "0", "10000000000");
+      req.push("ZREVRANGE", bucketName + "_" + TEST_OBJ + testName, "0", "-1");
       req.push("HGETALL", bucketName + "_" + TEST_OBJ + testName + "_0_0");
-      req.push("HGETALL", bucketName + "_" + TEST_OBJ + testName + "_0_9");
+      req.push("HGETALL", bucketName + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
       req.push("HGETALL", bucketName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_0");
-      req.push("HGETALL", bucketName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_9");
+      req.push("HGETALL", bucketName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
       req.push("HGETALL", bucketName + "__:null_"  + TEST_OBJ + testName + "_0_0");
       req.push("HGET", bucketName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_0", "dirty");
       req.push("HGET", bucketName + "__:null_" + TEST_OBJ + testName + "_0_0", "dirty");
@@ -1968,7 +2063,8 @@ TEST_F(D4NFilterFixture, PutVersionedObjectWrite)
       EXPECT_EQ((int)std::get<3>(resp).value(), 1);
       EXPECT_EQ((int)std::get<4>(resp).value(), 1);
       EXPECT_EQ((int)std::get<5>(resp).value(), 1);
-      EXPECT_EQ(std::get<6>(resp).value()[0], instance);
+      EXPECT_EQ(std::get<6>(resp).value()[0], "null");
+      EXPECT_EQ(std::get<6>(resp).value()[1], instance);
       EXPECT_EQ(std::get<7>(resp).value().size(), 10);
       EXPECT_EQ(std::get<8>(resp).value().size(), 10);
       EXPECT_EQ(std::get<9>(resp).value().size(), 10);
@@ -2012,11 +2108,15 @@ TEST_F(D4NFilterFixture, PutVersionedObjectWrite)
     getline(testFile, testData);
     EXPECT_EQ(testData, "test data");
     testFile.close();
+
+    dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
   }, rethrow);
 
-  io.run_for(std::chrono::seconds(4)); // Allow cleaning cycle to complete
+  io.run_for(std::chrono::seconds(2)); // Allow cleaning cycle to complete
 
-  boost::asio::spawn(io, [this, &testName, &bucketName, &version, &instance] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName, &bucketName, &version, &instance] (net::yield_context yield) {
+    dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
+
     {
       boost::system::error_code ec;
       request req;
@@ -2032,7 +2132,20 @@ TEST_F(D4NFilterFixture, PutVersionedObjectWrite)
       EXPECT_EQ(std::get<1>(resp).value(), "0");
     }
 
-    // TODO: check if written to backend
+    // Ensure object with versioning enabled is written to backend
+    {
+      auto next = dynamic_cast<rgw::sal::FilterObject*>(objEnabled.get())->get_next();
+      EXPECT_EQ(next->load_obj_state(env->dpp, optional_yield{yield}), 0);
+      EXPECT_EQ(next->exists(), 1);
+    }
+
+    // Ensure object with versioning suspended is written to backend
+    {
+      auto next = dynamic_cast<rgw::sal::FilterObject*>(objSuspended.get())->get_next();
+      EXPECT_EQ(next->load_obj_state(env->dpp, optional_yield{yield}), 0);
+      EXPECT_EQ(next->exists(), 1);
+    }
+
     std::string attr_val;
     std::string oid = instance + "#0#" + std::to_string(ofs);
     std::string location = CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + oid;
@@ -2043,18 +2156,6 @@ TEST_F(D4NFilterFixture, PutVersionedObjectWrite)
     location = CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + oid;
     EXPECT_EQ(d4nFilter->get_cache_driver()->get_attr(env->dpp, location, RGW_CACHE_ATTR_DIRTY, attr_val, optional_yield({yield})), 0);
     EXPECT_EQ(attr_val, "0");
-
-    {
-      boost::system::error_code ec;
-      request req;
-      req.push("FLUSHALL");
-
-      response< boost::redis::ignore_t > resp;
-
-      conn->async_exec(req, resp, yield[ec]);
-
-      ASSERT_EQ((bool)ec, false);
-    } 
 
     conn->cancel();
     testBucket->remove(env->dpp, true, optional_yield{yield});
@@ -2070,93 +2171,143 @@ TEST_F(D4NFilterFixture, GetVersionedObjectWrite)
   env->cct->_conf->d4n_writecache_enabled = true;
   const std::string testName = "GetVersionedObjectWrite";
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     std::string instance;
     put_version_enabled_object(testName, instance, yield);
+
+    {
+      bufferlist bl;
+      Read_CB cb(&bl);
+      std::unique_ptr<rgw::sal::Object::ReadOp> read_op_enabled(objEnabled->get_read_op());
+      EXPECT_EQ(read_op_enabled->prepare(optional_yield{yield}, env->dpp), 0);
+      EXPECT_EQ(read_op_enabled->iterate(env->dpp, 0, ofs, &cb, optional_yield{yield}), 0);
+
+      boost::system::error_code ec;
+      request req;
+      req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName);
+      req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0");
+      req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_0");
+      req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
+      req.push("ZREVRANGE", TEST_BUCKET + testName + "_" + TEST_OBJ + testName, "0", "-1");
+      req.push("HGETALL", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0");
+      req.push("HGETALL", TEST_BUCKET + testName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_0");
+      req.push("HGETALL", TEST_BUCKET + testName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
+
+      response< int, int, int, int, 
+		std::vector<std::string>, 
+		std::map<std::string, std::string>,
+		std::map<std::string, std::string>,
+		std::map<std::string, std::string> > resp;
+
+      conn->async_exec(req, resp, yield[ec]);
+
+      ASSERT_EQ((bool)ec, false);
+      EXPECT_EQ((int)std::get<0>(resp).value(), 1);
+      EXPECT_EQ((int)std::get<1>(resp).value(), 1);
+      EXPECT_EQ((int)std::get<2>(resp).value(), 1);
+      EXPECT_EQ((int)std::get<3>(resp).value(), 1);
+      EXPECT_EQ(std::get<4>(resp).value()[0], instance);
+      EXPECT_EQ(std::get<5>(resp).value().size(), 10);
+      EXPECT_EQ(std::get<6>(resp).value().size(), 10);
+      EXPECT_EQ(std::get<7>(resp).value().size(), 10);
+
+      std::error_code err;
+      std::string testData; 
+      std::ifstream testFile; 
+
+      EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + instance, err), true);  
+      std::string oid = instance + "#0#" + std::to_string(ofs);
+      std::string location = CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + oid;
+      EXPECT_EQ(fs::exists(location, err), true);     
+
+      testFile.open(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + oid);
+      ASSERT_EQ(testFile.is_open(), true);
+      getline(testFile, testData);
+      EXPECT_EQ(testData, "test data");
+ 
+      // Ensure data returned from GET op matches cached data
+      EXPECT_EQ(testData, cb.save_bl->c_str());
+
+      testFile.close();
+    }
+
+    // Remove object entry so the sorted set order will not interfere with the checks for objSuspended
+    {
+      boost::system::error_code ec;
+      request req;
+      req.push("DEL", TEST_BUCKET + testName + "_" + TEST_OBJ + testName);
+      response<int> resp;
+      conn->async_exec(req, resp, yield[ec]);
+      ASSERT_EQ((bool)ec, false);
+      EXPECT_EQ((int)std::get<0>(resp).value(), 1);
+    }
+
     put_version_suspended_object(testName, yield);
 
-    std::unique_ptr<rgw::sal::Object::ReadOp> read_op_enabled(objEnabled->get_read_op());
-    EXPECT_EQ(read_op_enabled->prepare(optional_yield{yield}, env->dpp), 0);
-    EXPECT_EQ(read_op_enabled->iterate(env->dpp, 0, ofs, nullptr, optional_yield{yield}), 0);
-    
-    std::unique_ptr<rgw::sal::Object::ReadOp> read_op_suspended(objSuspended->get_read_op());
-    EXPECT_EQ(read_op_suspended->prepare(optional_yield{yield}, env->dpp), 0);
-    EXPECT_EQ(read_op_suspended->iterate(env->dpp, 0, ofs, nullptr, optional_yield{yield}), 0);
+    {
+      bufferlist bl;
+      Read_CB cb(&bl);
+      std::unique_ptr<rgw::sal::Object::ReadOp> read_op_suspended(objSuspended->get_read_op());
+      EXPECT_EQ(read_op_suspended->prepare(optional_yield{yield}, env->dpp), 0);
+      EXPECT_EQ(read_op_suspended->iterate(env->dpp, 0, ofs, &cb, optional_yield{yield}), 0);
 
-    boost::system::error_code ec;
-    request req;
-    req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName);
-    req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0");
-    req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_9");
-    req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_0");
-    req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_9");
-    req.push("EXISTS", TEST_BUCKET + testName + "__:null_"  + TEST_OBJ + testName + "_0_0");
-    req.push("ZRANGE", TEST_BUCKET + testName + "_" + TEST_OBJ + testName, "0", "10000000000");
-    req.push("HGETALL", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0");
-    req.push("HGETALL", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_9");
-    req.push("HGETALL", TEST_BUCKET + testName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_0");
-    req.push("HGETALL", TEST_BUCKET + testName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_9");
-    req.push("HGETALL", TEST_BUCKET + testName + "__:null_"  + TEST_OBJ + testName + "_0_0");
-    req.push("HGET", TEST_BUCKET + testName + "__:null_" + TEST_OBJ + testName + "_0_0", "version");
-    req.push("FLUSHALL");
+      boost::system::error_code ec;
+      request req;
+      req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName);
+      req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0");
+      req.push("EXISTS", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
+      req.push("EXISTS", TEST_BUCKET + testName + "__:null_"  + TEST_OBJ + testName + "_0_0");
+      req.push("ZREVRANGE", TEST_BUCKET + testName + "_" + TEST_OBJ + testName, "0", "-1");
+      req.push("HGETALL", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_0");
+      req.push("HGETALL", TEST_BUCKET + testName + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
+      req.push("HGETALL", TEST_BUCKET + testName + "__:null_"  + TEST_OBJ + testName + "_0_0");
+      req.push("HGET", TEST_BUCKET + testName + "__:null_" + TEST_OBJ + testName + "_0_0", "version");
 
-    response< int, int, int, int, int, int, 
-	      std::vector<std::string>, 
-	      std::map<std::string, std::string>,
-	      std::map<std::string, std::string>,
-	      std::map<std::string, std::string>,
-	      std::map<std::string, std::string>,
-	      std::map<std::string, std::string>,
-	      std::string,
-	      boost::redis::ignore_t > resp;
+      response< int, int, int, int, 
+		std::vector<std::string>, 
+		std::map<std::string, std::string>,
+		std::map<std::string, std::string>,
+		std::map<std::string, std::string>,
+		std::string > resp;
 
-    conn->async_exec(req, resp, yield[ec]);
+      conn->async_exec(req, resp, yield[ec]);
 
-    ASSERT_EQ((bool)ec, false);
-    EXPECT_EQ((int)std::get<0>(resp).value(), 1);
-    EXPECT_EQ((int)std::get<1>(resp).value(), 1);
-    EXPECT_EQ((int)std::get<2>(resp).value(), 1);
-    EXPECT_EQ((int)std::get<3>(resp).value(), 1);
-    EXPECT_EQ((int)std::get<4>(resp).value(), 1);
-    EXPECT_EQ((int)std::get<5>(resp).value(), 1);
-    EXPECT_EQ(std::get<6>(resp).value()[0], instance);
-    EXPECT_EQ(std::get<6>(resp).value()[1], "null");
-    EXPECT_EQ(std::get<7>(resp).value().size(), 10);
-    EXPECT_EQ(std::get<8>(resp).value().size(), 10);
-    EXPECT_EQ(std::get<9>(resp).value().size(), 10);
-    EXPECT_EQ(std::get<10>(resp).value().size(), 10);
-    EXPECT_EQ(std::get<11>(resp).value().size(), 10);
+      ASSERT_EQ((bool)ec, false);
+      EXPECT_EQ((int)std::get<0>(resp).value(), 1);
+      EXPECT_EQ((int)std::get<1>(resp).value(), 1);
+      EXPECT_EQ((int)std::get<2>(resp).value(), 1);
+      EXPECT_EQ((int)std::get<3>(resp).value(), 1);
+      EXPECT_EQ(std::get<4>(resp).value()[0], "null");
+      EXPECT_EQ(std::get<5>(resp).value().size(), 10);
+      EXPECT_EQ(std::get<6>(resp).value().size(), 10);
+      EXPECT_EQ(std::get<7>(resp).value().size(), 10);
 
-    std::string version = std::get<12>(resp).value();
-    std::error_code err;
-    std::string testData; 
-    std::ifstream testFile; 
+      std::string version = std::get<8>(resp).value();
 
-    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + instance, err), true);  
-    std::string oid = instance + "#0#" + std::to_string(ofs);
-    std::string location = CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + oid;
-    EXPECT_EQ(fs::exists(location, err), true);     
+      std::error_code err;
+      std::string testData; 
+      std::ifstream testFile; 
 
-    testFile.open(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + oid);
-    ASSERT_EQ(testFile.is_open(), true);
-    getline(testFile, testData);
-    EXPECT_EQ(testData, "test data");
-    testFile.close();
+      EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + instance, err), true);  
 
-    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + version, err), true);  
-    oid = version + "#0#" + std::to_string(ofs);
-    location = CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + oid;
-    EXPECT_EQ(fs::exists(location, err), true);     
-    
-    testFile.open(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + oid);
-    ASSERT_EQ(testFile.is_open(), true);
-    getline(testFile, testData);
-    EXPECT_EQ(testData, "test data");
-    testFile.close();
+      EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + version, err), true);  
+      std::string oid = version + "#0#" + std::to_string(ofs);
+      std::string location = CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + oid;
+      EXPECT_EQ(fs::exists(location, err), true);     
+      
+      testFile.open(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + TEST_OBJ + testName + "/" + oid);
+      ASSERT_EQ(testFile.is_open(), true);
+      getline(testFile, testData);
+      EXPECT_EQ(testData, "test data");
+ 
+      // Ensure data returned from GET op matches cached data
+      EXPECT_EQ(testData, cb.save_bl->c_str());
 
-    testFile.close();
+      testFile.close();
+    }
+
     conn->cancel();
     testBucket->remove(env->dpp, true, optional_yield{yield});
     DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver));
@@ -2165,12 +2316,12 @@ TEST_F(D4NFilterFixture, GetVersionedObjectWrite)
   io.run();
 }
 
-TEST_F(D4NFilterFixture, CopyNoneVersionedObjectWrite) // TODO: check version value if it's expected
+TEST_F(D4NFilterFixture, CopyNoneVersionedObjectWrite)
 {
   env->cct->_conf->d4n_writecache_enabled = true;
   const std::string testName = "CopyNoneVersionedObjectWrite";
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     std::string instance; 
@@ -2181,9 +2332,11 @@ TEST_F(D4NFilterFixture, CopyNoneVersionedObjectWrite) // TODO: check version va
     rgw_zone_id zone;
     rgw_placement_rule placement;
     ceph::real_time mtime;
+
     buffer::list bl;
-    bl.append("dest_object_version");
-    rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, bl}};
+    bl.append("copy_etag", 9);
+    rgw::sal::Attrs attrs{{RGW_ATTR_ETAG, std::move(bl)}};
+    
     std::string tag;
     
     {
@@ -2228,11 +2381,11 @@ TEST_F(D4NFilterFixture, CopyNoneVersionedObjectWrite) // TODO: check version va
       req.push("EXISTS", TEST_BUCKET + testName + "_" + destNameEnabled);
       req.push("EXISTS", TEST_BUCKET + testName + "_" + destNameEnabled + "_0_0");
       req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_0");
-      req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_9");
-      req.push("ZRANGE", TEST_BUCKET + testName + "_" + destNameEnabled, "0", "10000000000");
+      req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_" + std::to_string(ofs));
+      req.push("ZREVRANGE", TEST_BUCKET + testName + "_" + destNameEnabled, "0", "-1");
+      req.push("HGETALL", TEST_BUCKET + testName + "_" + destNameEnabled + "_0_0");
       req.push("HGETALL", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_0");
-      req.push("HGETALL", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_0");
-      req.push("HGETALL", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_9");
+      req.push("HGETALL", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_" + std::to_string(ofs));
 
       response< int, int, int, int,
                 std::vector<std::string>,
@@ -2259,6 +2412,13 @@ TEST_F(D4NFilterFixture, CopyNoneVersionedObjectWrite) // TODO: check version va
       EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameEnabled + "/" + instance, err), true);  
       std::string oid = instance + "#0#" + std::to_string(ofs);
       EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameEnabled + "/" + oid, err), true);  
+
+      // Ensure etag is replaced
+      rgw_obj copyObj = destObjEnabled->get_obj();
+      ASSERT_EQ(destObjEnabled->get_obj_attrs(optional_yield{yield}, env->dpp, &copyObj), 0);
+      rgw::sal::Attrs copyAttrs = destObjEnabled->get_attrs();
+      buffer::list etag = copyAttrs[RGW_ATTR_ETAG];
+      EXPECT_EQ(etag.to_str(), "test_etag");  
 
       testFile.open(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameEnabled + "/" + oid);
       ASSERT_EQ(testFile.is_open(), true);
@@ -2310,21 +2470,19 @@ TEST_F(D4NFilterFixture, CopyNoneVersionedObjectWrite) // TODO: check version va
       req.push("EXISTS", TEST_BUCKET + testName + "_" + destNameSuspended);
       req.push("EXISTS", TEST_BUCKET + testName + "_" + destNameSuspended + "_0_0");
       req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0");
-      req.push("EXISTS", TEST_BUCKET + testName + "_" + destNameSuspended + "_0_9");
-      req.push("ZRANGE", TEST_BUCKET + testName + "_" + destNameSuspended, "0", "10000000000");
+      req.push("EXISTS", TEST_BUCKET + testName + "_" + destNameSuspended + "_0_" + std::to_string(ofs));
+      req.push("ZREVRANGE", TEST_BUCKET + testName + "_" + destNameSuspended, "0", "-1");
+      req.push("HGETALL", TEST_BUCKET + testName + "_" + destNameSuspended + "_0_0");
       req.push("HGETALL", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0");
-      req.push("HGETALL", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0");
-      req.push("HGETALL", TEST_BUCKET + testName + "_" + destNameSuspended + "_0_9");
+      req.push("HGETALL", TEST_BUCKET + testName + "_" + destNameSuspended + "_0_" + std::to_string(ofs));
       req.push("HGET", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0", "version");
-      req.push("FLUSHALL");
 
       response< int, int, int, int,
                 std::vector<std::string>,
                 std::map<std::string, std::string>,
                 std::map<std::string, std::string>,
                 std::map<std::string, std::string>,
-                std::string,
-                boost::redis::ignore_t > resp;
+                std::string > resp;
 
       conn->async_exec(req, resp, yield[ec]);
 
@@ -2346,6 +2504,13 @@ TEST_F(D4NFilterFixture, CopyNoneVersionedObjectWrite) // TODO: check version va
       EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameSuspended + "/" + version, err), true);  
       std::string oid = version + "#0#" + std::to_string(ofs);
       EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameSuspended + "/" + oid, err), true);  
+
+      // Ensure etag is replaced
+      rgw_obj copyObj = destObjSuspended->get_obj();
+      ASSERT_EQ(destObjSuspended->get_obj_attrs(optional_yield{yield}, env->dpp, &copyObj), 0);
+      rgw::sal::Attrs copyAttrs = destObjSuspended->get_attrs();
+      buffer::list etag = copyAttrs[RGW_ATTR_ETAG];
+      EXPECT_EQ(etag.to_str(), "test_etag");  
 
       testFile.open(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameSuspended + "/" + oid);
       ASSERT_EQ(testFile.is_open(), true);
@@ -2368,7 +2533,7 @@ TEST_F(D4NFilterFixture, CopyMergeVersionedObjectWrite)
   env->cct->_conf->d4n_writecache_enabled = true;
   const std::string testName = "CopyMergeVersionedObjectWrite";
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     std::string instance; 
@@ -2379,9 +2544,11 @@ TEST_F(D4NFilterFixture, CopyMergeVersionedObjectWrite)
     rgw_zone_id zone;
     rgw_placement_rule placement;
     ceph::real_time mtime;
+
     buffer::list bl;
-    bl.append("dest_object_version");
-    rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, bl}};
+    bl.append("copy_etag", 9);
+    rgw::sal::Attrs attrs{{RGW_ATTR_ETAG, std::move(bl)}};
+    
     std::string tag;
     
     {
@@ -2426,11 +2593,11 @@ TEST_F(D4NFilterFixture, CopyMergeVersionedObjectWrite)
       req.push("EXISTS", TEST_BUCKET + testName + "_" + destNameEnabled);
       req.push("EXISTS", TEST_BUCKET + testName + "_" + destNameEnabled + "_0_0");
       req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_0");
-      req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_9");
-      req.push("ZRANGE", TEST_BUCKET + testName + "_" + destNameEnabled, "0", "10000000000");
+      req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_" + std::to_string(ofs));
+      req.push("ZREVRANGE", TEST_BUCKET + testName + "_" + destNameEnabled, "0", "-1");
+      req.push("HGETALL", TEST_BUCKET + testName + "_" + destNameEnabled + "_0_0");
       req.push("HGETALL", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_0");
-      req.push("HGETALL", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_0");
-      req.push("HGETALL", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_9");
+      req.push("HGETALL", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_" + std::to_string(ofs));
 
       response< int, int, int, int,
                 std::vector<std::string>,
@@ -2457,6 +2624,13 @@ TEST_F(D4NFilterFixture, CopyMergeVersionedObjectWrite)
       EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameEnabled + "/" + instance, err), true);  
       std::string oid = instance + "#0#" + std::to_string(ofs);
       EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameEnabled + "/" + oid, err), true);  
+
+      // Ensure etag is replaced
+      rgw_obj copyObj = destObjEnabled->get_obj();
+      ASSERT_EQ(destObjEnabled->get_obj_attrs(optional_yield{yield}, env->dpp, &copyObj), 0);
+      rgw::sal::Attrs copyAttrs = destObjEnabled->get_attrs();
+      buffer::list etag = copyAttrs[RGW_ATTR_ETAG];
+      EXPECT_EQ(etag.to_str(), "copy_etag");  
 
       testFile.open(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameEnabled + "/" + oid);
       ASSERT_EQ(testFile.is_open(), true);
@@ -2508,21 +2682,19 @@ TEST_F(D4NFilterFixture, CopyMergeVersionedObjectWrite)
       req.push("EXISTS", TEST_BUCKET + testName + "_" + destNameSuspended);
       req.push("EXISTS", TEST_BUCKET + testName + "_" + destNameSuspended + "_0_0");
       req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0");
-      req.push("EXISTS", TEST_BUCKET + testName + "_" + destNameSuspended + "_0_9");
-      req.push("ZRANGE", TEST_BUCKET + testName + "_" + destNameSuspended, "0", "10000000000");
+      req.push("EXISTS", TEST_BUCKET + testName + "_" + destNameSuspended + "_0_" + std::to_string(ofs));
+      req.push("ZREVRANGE", TEST_BUCKET + testName + "_" + destNameSuspended, "0", "-1");
+      req.push("HGETALL", TEST_BUCKET + testName + "_" + destNameSuspended + "_0_0");
       req.push("HGETALL", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0");
-      req.push("HGETALL", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0");
-      req.push("HGETALL", TEST_BUCKET + testName + "_" + destNameSuspended + "_0_9");
+      req.push("HGETALL", TEST_BUCKET + testName + "_" + destNameSuspended + "_0_" + std::to_string(ofs));
       req.push("HGET", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0", "version");
-      req.push("FLUSHALL");
 
       response< int, int, int, int,
                 std::vector<std::string>,
                 std::map<std::string, std::string>,
                 std::map<std::string, std::string>,
                 std::map<std::string, std::string>,
-                std::string,
-                boost::redis::ignore_t > resp;
+                std::string > resp;
 
       conn->async_exec(req, resp, yield[ec]);
 
@@ -2544,6 +2716,13 @@ TEST_F(D4NFilterFixture, CopyMergeVersionedObjectWrite)
       EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameSuspended + "/" + version, err), true);  
       std::string oid = version + "#0#" + std::to_string(ofs);
       EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameSuspended + "/" + oid, err), true);  
+
+      // Ensure etag is replaced
+      rgw_obj copyObj = destObjSuspended->get_obj();
+      ASSERT_EQ(destObjSuspended->get_obj_attrs(optional_yield{yield}, env->dpp, &copyObj), 0);
+      rgw::sal::Attrs copyAttrs = destObjSuspended->get_attrs();
+      buffer::list etag = copyAttrs[RGW_ATTR_ETAG];
+      EXPECT_EQ(etag.to_str(), "copy_etag");  
 
       testFile.open(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameSuspended + "/" + oid);
       ASSERT_EQ(testFile.is_open(), true);
@@ -2566,7 +2745,7 @@ TEST_F(D4NFilterFixture, CopyReplaceVersionedObjectWrite)
   env->cct->_conf->d4n_writecache_enabled = true;
   const std::string testName = "CopyReplaceVersionedObjectWrite";
  
-  boost::asio::spawn(io, [this, &testName] (boost::asio::yield_context yield) {
+  net::spawn(io, [this, &testName] (net::yield_context yield) {
     init_driver(yield);
     create_bucket(testName, yield);
     std::string instance; 
@@ -2577,9 +2756,11 @@ TEST_F(D4NFilterFixture, CopyReplaceVersionedObjectWrite)
     rgw_zone_id zone;
     rgw_placement_rule placement;
     ceph::real_time mtime;
+
     buffer::list bl;
-    bl.append("dest_object_version");
-    rgw::sal::Attrs attrs{{RGW_ATTR_ID_TAG, bl}};
+    bl.append("copy_etag", 9);
+    rgw::sal::Attrs attrs{{RGW_ATTR_ETAG, std::move(bl)}};
+    
     std::string tag;
     
     {
@@ -2624,11 +2805,11 @@ TEST_F(D4NFilterFixture, CopyReplaceVersionedObjectWrite)
       req.push("EXISTS", TEST_BUCKET + testName + "_" + destNameEnabled);
       req.push("EXISTS", TEST_BUCKET + testName + "_" + destNameEnabled + "_0_0");
       req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_0");
-      req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_9");
-      req.push("ZRANGE", TEST_BUCKET + testName + "_" + destNameEnabled, "0", "10000000000");
+      req.push("EXISTS", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_" + std::to_string(ofs));
+      req.push("ZREVRANGE", TEST_BUCKET + testName + "_" + destNameEnabled, "0", "-1");
+      req.push("HGETALL", TEST_BUCKET + testName + "_" + destNameEnabled + "_0_0");
       req.push("HGETALL", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_0");
-      req.push("HGETALL", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_0");
-      req.push("HGETALL", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_9");
+      req.push("HGETALL", TEST_BUCKET + testName + "__:" + instance + "_" + destNameEnabled + "_0_" + std::to_string(ofs));
 
       response< int, int, int, int,
                 std::vector<std::string>,
@@ -2655,6 +2836,13 @@ TEST_F(D4NFilterFixture, CopyReplaceVersionedObjectWrite)
       EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameEnabled + "/" + instance, err), true);  
       std::string oid = instance + "#0#" + std::to_string(ofs);
       EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameEnabled + "/" + oid, err), true);  
+
+      // Ensure etag is replaced
+      rgw_obj copyObj = destObjEnabled->get_obj();
+      ASSERT_EQ(destObjEnabled->get_obj_attrs(optional_yield{yield}, env->dpp, &copyObj), 0);
+      rgw::sal::Attrs copyAttrs = destObjEnabled->get_attrs();
+      buffer::list etag = copyAttrs[RGW_ATTR_ETAG];
+      EXPECT_EQ(etag.to_str(), "copy_etag");  
 
       testFile.open(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameEnabled + "/" + oid);
       ASSERT_EQ(testFile.is_open(), true);
@@ -2706,21 +2894,19 @@ TEST_F(D4NFilterFixture, CopyReplaceVersionedObjectWrite)
       req.push("EXISTS", TEST_BUCKET + testName + "_" + destNameSuspended);
       req.push("EXISTS", TEST_BUCKET + testName + "_" + destNameSuspended + "_0_0");
       req.push("EXISTS", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0");
-      req.push("EXISTS", TEST_BUCKET + testName + "_" + destNameSuspended + "_0_9");
-      req.push("ZRANGE", TEST_BUCKET + testName + "_" + destNameSuspended, "0", "10000000000");
+      req.push("EXISTS", TEST_BUCKET + testName + "_" + destNameSuspended + "_0_" + std::to_string(ofs));
+      req.push("ZREVRANGE", TEST_BUCKET + testName + "_" + destNameSuspended, "0", "-1");
+      req.push("HGETALL", TEST_BUCKET + testName + "_" + destNameSuspended + "_0_0");
       req.push("HGETALL", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0");
-      req.push("HGETALL", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0");
-      req.push("HGETALL", TEST_BUCKET + testName + "_" + destNameSuspended + "_0_9");
+      req.push("HGETALL", TEST_BUCKET + testName + "_" + destNameSuspended + "_0_" + std::to_string(ofs));
       req.push("HGET", TEST_BUCKET + testName + "__:null_" + destNameSuspended + "_0_0", "version");
-      req.push("FLUSHALL");
 
       response< int, int, int, int,
                 std::vector<std::string>,
                 std::map<std::string, std::string>,
                 std::map<std::string, std::string>,
                 std::map<std::string, std::string>,
-                std::string,
-                boost::redis::ignore_t > resp;
+                std::string > resp;
 
       conn->async_exec(req, resp, yield[ec]);
 
@@ -2743,6 +2929,13 @@ TEST_F(D4NFilterFixture, CopyReplaceVersionedObjectWrite)
       std::string oid = version + "#0#" + std::to_string(ofs);
       EXPECT_EQ(fs::exists(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameSuspended + "/" + oid, err), true);  
 
+      // Ensure etag is replaced
+      rgw_obj copyObj = destObjSuspended->get_obj();
+      ASSERT_EQ(destObjSuspended->get_obj_attrs(optional_yield{yield}, env->dpp, &copyObj), 0);
+      rgw::sal::Attrs copyAttrs = destObjSuspended->get_attrs();
+      buffer::list etag = copyAttrs[RGW_ATTR_ETAG];
+      EXPECT_EQ(etag.to_str(), "copy_etag");  
+
       testFile.open(CACHE_DIR + "/" + TEST_BUCKET + testName + "/" + destNameSuspended + "/" + oid);
       ASSERT_EQ(testFile.is_open(), true);
       getline(testFile, testData);
@@ -2756,6 +2949,437 @@ TEST_F(D4NFilterFixture, CopyReplaceVersionedObjectWrite)
     DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver));
   }, rethrow);
 
+  io.run();
+}
+
+TEST_F(D4NFilterFixture, DeleteVersionedObjectWrite)
+{
+  env->cct->_conf->d4n_writecache_enabled = true;
+  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0.5;
+  const std::string testName = "DeleteVersionedObjectRead";
+  const std::string bucketName = "/tmp/d4n_filter_tests/dbstore-default_ns.1";
+  std::string version, instance;
+ 
+  net::spawn(io, [this, &testName, &bucketName, &version, &instance] (net::yield_context yield) {
+    init_driver(yield);
+    create_bucket(testName, yield);
+    testBucket->get_info().bucket.bucket_id = bucketName;
+    put_version_enabled_object(testName, instance, yield);
+    put_version_suspended_object(testName, yield);
+
+    boost::system::error_code ec;
+    request req;
+    req.push("EXISTS", bucketName + "_" + TEST_OBJ + testName);
+    req.push("EXISTS", bucketName + "_" + TEST_OBJ + testName + "_0_0");
+    req.push("EXISTS", bucketName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_0");
+    req.push("EXISTS", bucketName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
+    req.push("EXISTS", bucketName + "__:null_" + TEST_OBJ + testName + "_0_0");
+    req.push("EXISTS", bucketName + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
+    req.push("HGET", bucketName + "__:null_" + TEST_OBJ + testName + "_0_0", "version");
+
+    response< int, int, int, int, 
+	      int, int, std::string > resp;
+
+    conn->async_exec(req, resp, yield[ec]);
+
+    ASSERT_EQ((bool)ec, false);
+    EXPECT_EQ((int)std::get<0>(resp).value(), 1);
+    EXPECT_EQ((int)std::get<1>(resp).value(), 1);
+    EXPECT_EQ((int)std::get<2>(resp).value(), 1);
+    EXPECT_EQ((int)std::get<3>(resp).value(), 1);
+    EXPECT_EQ((int)std::get<4>(resp).value(), 1);
+    EXPECT_EQ((int)std::get<5>(resp).value(), 1);
+    
+    version = std::get<6>(resp).value();
+
+    std::error_code err;
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + instance, err), true);  
+    std::string oid = instance + "#0#" + std::to_string(ofs);
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + oid, err), true);  
+
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + version, err), true);  
+    oid = version + "#0#" + std::to_string(ofs);
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + oid, err), true);  
+
+    // For version enabled object
+    std::unique_ptr<rgw::sal::Object::DeleteOp> del_op_enabled = objEnabled->get_delete_op();
+    EXPECT_EQ(del_op_enabled->delete_obj(env->dpp, optional_yield{yield}, rgw::sal::FLAG_LOG_OP), 0);
+
+    // For version suspended object
+    std::unique_ptr<rgw::sal::Object::DeleteOp> del_op_suspended = objSuspended->get_delete_op();
+    EXPECT_EQ(del_op_suspended->delete_obj(env->dpp, optional_yield{yield}, rgw::sal::FLAG_LOG_OP), 0);
+
+    dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
+  }, rethrow);
+
+  io.run_for(std::chrono::seconds(2)); // Allow cleaning cycle to complete
+
+  net::spawn(io, [this, &testName, &bucketName, &version, &instance] (net::yield_context yield) {
+    dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
+
+    boost::system::error_code ec;
+    request req;
+    req.push("EXISTS", bucketName + "_" + TEST_OBJ + testName);
+    req.push("EXISTS", bucketName + "_" + TEST_OBJ + testName + "_0_0");
+    req.push("EXISTS", bucketName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_0");
+    req.push("EXISTS", bucketName + "__:" + instance + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
+    req.push("EXISTS", bucketName + "__:null_" + TEST_OBJ + testName + "_0_0");
+    req.push("EXISTS", bucketName + "_" + TEST_OBJ + testName + "_0_" + std::to_string(ofs));
+
+    response< int, int, int, int, 
+	      int, int, std::string > resp;
+
+    conn->async_exec(req, resp, yield[ec]);
+
+    ASSERT_EQ((bool)ec, false);
+    //EXPECT_EQ((int)std::get<0>(resp).value(), 0); // TODO: Object entry is not deleted
+    EXPECT_EQ((int)std::get<1>(resp).value(), 0);
+    EXPECT_EQ((int)std::get<2>(resp).value(), 0);
+    EXPECT_EQ((int)std::get<3>(resp).value(), 0);
+    EXPECT_EQ((int)std::get<4>(resp).value(), 0);
+    EXPECT_EQ((int)std::get<5>(resp).value(), 0);
+
+    std::error_code err;
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + instance, err), false);  
+    std::string oid = instance + "#0#" + std::to_string(ofs);
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + oid, err), false);  
+
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + version, err), false);  
+    oid = version + "#0#" + std::to_string(ofs);
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + oid, err), false);  
+
+    conn->cancel();
+    testBucket->remove(env->dpp, true, optional_yield{yield});
+    DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver));
+  }, rethrow);
+
+  io.reset();
+  io.run();
+}
+
+// Additional workflow tests
+TEST_F(D4NFilterFixture, SimpleDeleteBeforeCleaning)
+{
+  env->cct->_conf->d4n_writecache_enabled = true;
+  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0.5;
+  const std::string testName = "SimpleDeleteBeforeCleaning";
+  const std::string bucketName = "/tmp/d4n_filter_tests/dbstore-default_ns.1";
+  std::vector<std::string> instances;
+  std::string deleteMarker;
+ 
+  net::spawn(io, [this, &testName, &bucketName, &instances, &deleteMarker] (net::yield_context yield) {
+    init_driver(yield);
+    create_bucket(testName, yield);
+    testBucket->get_info().bucket.bucket_id = bucketName;
+    
+    for (int i = 0; i <= 1; ++i) {
+      std::string instance;
+      put_version_enabled_object(testName, instance, yield); // Upload two versions 
+      instances.push_back(instance);
+    }
+
+    std::unique_ptr<rgw::sal::Object::DeleteOp> del_op_enabled = objEnabled->get_delete_op();
+    objEnabled->set_instance(""); // Simple delete
+    EXPECT_EQ(del_op_enabled->delete_obj(env->dpp, optional_yield{yield}, rgw::sal::FLAG_LOG_OP), 0);
+
+    boost::system::error_code ec;
+    request req;
+    req.push("HGET", bucketName + "_" + TEST_OBJ + testName + "_0_0", "deleteMarker");
+
+    response< int > resp;
+
+    conn->async_exec(req, resp, yield[ec]);
+
+    ASSERT_EQ((bool)ec, false);
+    deleteMarker = std::get<0>(resp).value();
+
+    std::error_code err;
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + deleteMarker, err), false);  
+
+    dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
+  }, rethrow);
+
+  io.run_for(std::chrono::seconds(2)); // Allow cleaning cycle to complete
+
+  net::spawn(io, [this, &testName, &bucketName, &deleteMarker] (net::yield_context yield) {
+    dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
+
+    std::error_code err;
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + deleteMarker, err), false);  
+
+    conn->cancel();
+    testBucket->remove(env->dpp, true, optional_yield{yield});
+    DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver));
+  }, rethrow);
+
+  io.reset();
+  io.run();
+}
+
+TEST_F(D4NFilterFixture, VersionedDeleteBeforeCleaning)
+{
+  env->cct->_conf->d4n_writecache_enabled = true;
+  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0.5;
+  const std::string testName = "VersionedDeleteBeforeCleaning";
+  const std::string bucketName = "/tmp/d4n_filter_tests/dbstore-default_ns.1";
+  std::vector<std::string> instances;
+ 
+  net::spawn(io, [this, &testName, &bucketName, &instances] (net::yield_context yield) {
+    init_driver(yield);
+    create_bucket(testName, yield);
+    testBucket->get_info().bucket.bucket_id = bucketName;
+    
+    for (int i = 0; i <= 1; ++i) {
+      std::string instance;
+      put_version_enabled_object(testName, instance, yield); // Upload two versions 
+      instances.push_back(instance);
+    }
+
+    {
+      boost::system::error_code ec;
+      request req;
+      req.push("ZREVRANGE", bucketName + "_" + TEST_OBJ + testName, "0", "-1");
+
+      response< std::vector<std::string> > resp;
+
+      conn->async_exec(req, resp, yield[ec]);
+
+      ASSERT_EQ((bool)ec, false);
+      EXPECT_EQ(std::get<0>(resp).value().size(), 2);
+      EXPECT_EQ(std::get<0>(resp).value()[0], instances[1]);
+      EXPECT_EQ(std::get<0>(resp).value()[1], instances[0]);
+    }
+
+    std::error_code err;
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + instances[1], err), true);  
+    std::string oid = instances[1] + "#0#" + std::to_string(ofs);
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + oid, err), true);  
+
+    std::unique_ptr<rgw::sal::Object::DeleteOp> del_op_enabled = objEnabled->get_delete_op();
+    objEnabled->set_instance(instances[1]); // Latest version
+    EXPECT_EQ(del_op_enabled->delete_obj(env->dpp, optional_yield{yield}, rgw::sal::FLAG_LOG_OP), 0);
+
+    {
+      boost::system::error_code ec;
+      request req;
+      req.push("ZREVRANGE", bucketName + "_" + TEST_OBJ + testName, "0", "-1");
+
+      response< std::vector<std::string> > resp;
+
+      conn->async_exec(req, resp, yield[ec]);
+
+      ASSERT_EQ((bool)ec, false);
+      EXPECT_EQ(std::get<0>(resp).value().size(), 1);
+      EXPECT_EQ(std::get<0>(resp).value()[0], instances[0]);
+    }
+
+    dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
+  }, rethrow);
+
+  io.run_for(std::chrono::seconds(2)); // Allow cleaning cycle to complete
+
+  net::spawn(io, [this, &testName, &bucketName, &instances] (net::yield_context yield) {
+    dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
+
+    std::error_code err;
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + instances[1], err), false);  
+    std::string oid = instances[1] + "#0#" + std::to_string(ofs);
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + oid, err), false);  
+
+    // Make sure deleted instance isn't written to backend
+    {
+      auto next = dynamic_cast<rgw::sal::FilterObject*>(objEnabled.get())->get_next();
+      EXPECT_EQ(next->load_obj_state(env->dpp, optional_yield{yield}), -2);
+    }
+
+    objEnabled->set_instance(instances[0]);
+
+    // First instance should still be written to backend
+    {
+      auto next = dynamic_cast<rgw::sal::FilterObject*>(objEnabled.get())->get_next();
+      EXPECT_EQ(next->load_obj_state(env->dpp, optional_yield{yield}), 0);
+      EXPECT_EQ(next->exists(), 1);
+    }
+
+    conn->cancel();
+    testBucket->remove(env->dpp, true, optional_yield{yield});
+    DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver));
+  }, rethrow);
+
+  io.reset();
+  io.run();
+}
+
+TEST_F(D4NFilterFixture, SimpleDeleteAfterCleaning)
+{
+  env->cct->_conf->d4n_writecache_enabled = true;
+  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0.5;
+  const std::string testName = "SimpleDeleteAfterCleaning";
+  const std::string bucketName = "/tmp/d4n_filter_tests/dbstore-default_ns.1";
+  std::vector<std::string> instances;
+ 
+  net::spawn(io, [this, &testName, &bucketName, &instances] (net::yield_context yield) {
+    init_driver(yield);
+    create_bucket(testName, yield);
+    testBucket->get_info().bucket.bucket_id = bucketName;
+    
+    for (int i = 0; i <= 1; ++i) {
+      std::string instance;
+      put_version_enabled_object(testName, instance, yield); // Upload two versions 
+      instances.push_back(instance);
+    }
+
+    dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
+  }, rethrow);
+
+  io.run_for(std::chrono::seconds(2)); // Allow cleaning cycle to complete
+
+  net::spawn(io, [this, &testName, &bucketName] (net::yield_context yield) {
+    dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
+
+    std::unique_ptr<rgw::sal::Object::DeleteOp> del_op_enabled = objEnabled->get_delete_op();
+    objEnabled->set_instance(""); // Simple delete
+    EXPECT_EQ(del_op_enabled->delete_obj(env->dpp, optional_yield{yield}, rgw::sal::FLAG_LOG_OP), 0);
+    
+    // Retrieve delete marker
+    std::string deleteMarker = objEnabled->get_instance();
+
+    // Ensure delete marker head block is written to cache
+    std::error_code err;
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + deleteMarker, err), true);  
+
+    // Make sure delete marker is written to backend
+    objEnabled->set_instance(deleteMarker);
+    auto next = dynamic_cast<rgw::sal::FilterObject*>(objEnabled.get())->get_next();
+    EXPECT_EQ(next->load_obj_state(env->dpp, optional_yield{yield}), 0);
+    EXPECT_EQ(next->exists(), 1);
+
+    conn->cancel();
+    testBucket->remove(env->dpp, true, optional_yield{yield});
+    DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver));
+  }, rethrow);
+
+  io.reset();
+  io.run();
+}
+
+TEST_F(D4NFilterFixture, VersionedDeleteAfterCleaning)
+{
+  env->cct->_conf->d4n_writecache_enabled = true;
+  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0.5;
+  const std::string testName = "VersionedDeleteAfterCleaning";
+  const std::string bucketName = "/tmp/d4n_filter_tests/dbstore-default_ns.1";
+  std::vector<std::string> instances;
+ 
+  net::spawn(io, [this, &testName, &bucketName, &instances] (net::yield_context yield) {
+    init_driver(yield);
+    create_bucket(testName, yield);
+    testBucket->get_info().bucket.bucket_id = bucketName;
+    
+    for (int i = 0; i <= 1; ++i) {
+      std::string instance;
+      put_version_enabled_object(testName, instance, yield); // Upload two versions 
+      instances.push_back(instance);
+    }
+
+    dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
+  }, rethrow);
+
+  io.run_for(std::chrono::seconds(2)); // Allow cleaning cycle to complete
+
+  net::spawn(io, [this, &testName, &bucketName, &instances] (net::yield_context yield) {
+    dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
+
+    std::error_code err;
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + instances[1], err), true);  
+    std::string oid = instances[1] + "#0#" + std::to_string(ofs);
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + oid, err), true);  
+
+    std::unique_ptr<rgw::sal::Object::DeleteOp> del_op_enabled = objEnabled->get_delete_op();
+    objEnabled->set_instance(instances[1]); // Latest version
+    EXPECT_EQ(del_op_enabled->delete_obj(env->dpp, optional_yield{yield}, rgw::sal::FLAG_LOG_OP), 0);
+    
+    // Make sure deleted instance is deleted from backend
+    {
+      auto next = dynamic_cast<rgw::sal::FilterObject*>(objEnabled.get())->get_next();
+      EXPECT_EQ(next->load_obj_state(env->dpp, optional_yield{yield}), -2);
+    }
+
+    objEnabled->set_instance(instances[0]);
+
+    // First instance should still available in backend
+    {
+      auto next = dynamic_cast<rgw::sal::FilterObject*>(objEnabled.get())->get_next();
+      EXPECT_EQ(next->load_obj_state(env->dpp, optional_yield{yield}), 0);
+      EXPECT_EQ(next->exists(), 1);
+    }
+
+    dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
+  }, rethrow);
+
+  io.reset();
+  io.run_for(std::chrono::seconds(2));
+
+  net::spawn(io, [this, &testName, &bucketName, &instances] (net::yield_context yield) {
+    dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
+
+    /* TODO: Cleaning method removes head object, so delete_obj calls after a cleaning cycle will not find the head object and will immediately call the backend's delete_obj,
+       resulting in the cache block not getting deleted properly
+    std::error_code err;
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + instances[1], err), false);  
+    std::string oid = instances[1] + "#0#" + std::to_string(ofs);
+    EXPECT_EQ(fs::exists(CACHE_DIR + "/" + url_encode(bucketName, true) + "/" + TEST_OBJ + testName + "/" + oid, err), false);  
+    */
+
+    conn->cancel();
+    testBucket->remove(env->dpp, true, optional_yield{yield});
+    DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver));
+  }, rethrow);
+
+  io.reset();
+  io.run();
+}
+
+TEST_F(D4NFilterFixture, ListObjectVersions)
+{
+  env->cct->_conf->d4n_writecache_enabled = true;
+  env->cct->_conf->rgw_d4n_cache_cleaning_interval = 0.5;
+  const std::string testName = "ListObjectVersions";
+  const std::string bucketName = "/tmp/d4n_filter_tests/dbstore-default_ns.1";
+  std::string instance;
+ 
+  net::spawn(io, [this, &testName, &bucketName, &instance] (net::yield_context yield) {
+    init_driver(yield);
+    create_bucket(testName, yield);
+    testBucket->get_info().bucket.bucket_id = bucketName;
+    put_object(testName, yield);
+    put_version_enabled_object(testName, instance, yield);
+    put_version_suspended_object(testName, yield);
+
+    dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(null_yield);
+  }, rethrow);
+
+  io.run_for(std::chrono::seconds(2)); // Allow cleaning cycle to complete
+
+  net::spawn(io, [this, &instance] (net::yield_context yield) {
+    dynamic_cast<rgw::d4n::LFUDAPolicy*>(d4nFilter->get_policy_driver()->get_cache_policy())->save_y(optional_yield{yield});
+
+    // Ensure versions are correctly ordered in backend
+    size_t max = env->dpp->get_cct()->_conf->rgw_list_buckets_max_chunk;
+    rgw::sal::Bucket::ListParams params;
+    params.list_versions = true;
+    rgw::sal::Bucket::ListResults results;
+
+    EXPECT_EQ(testBucket->list(env->dpp, params, max, results, optional_yield{yield}), 0);
+    EXPECT_EQ(results.objs[0].key.instance, "null");
+    EXPECT_EQ(results.objs[1].key.instance, instance);
+
+    conn->cancel();
+    testBucket->remove(env->dpp, true, optional_yield{yield});
+    DriverDestructor driver_destructor(static_cast<rgw::sal::D4NFilterDriver*>(driver));
+  }, rethrow);
+
+  io.reset();
   io.run();
 }
 
