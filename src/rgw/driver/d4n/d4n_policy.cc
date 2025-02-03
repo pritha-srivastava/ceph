@@ -276,14 +276,14 @@ bool LFUDAPolicy::invalidate_dirty_object(const DoutPrefixProvider* dpp, std::st
   return false;
 }
 
-CacheBlock* LFUDAPolicy::get_victim_block(const DoutPrefixProvider* dpp, optional_yield y) {
+int LFUDAPolicy::get_victim_block(const DoutPrefixProvider* dpp, CacheBlock* victim, std::string& entryKey, optional_yield y) {
   if (entries_heap.empty())
-    return nullptr;
+    return -ENOENT;
 
   /* Get victim cache block */
   LFUDAEntry* entry = entries_heap.top();
-  std::string key = entry->key;
-  CacheBlock* victim = new CacheBlock();
+  entryKey = entry->key;
+  std::string key = entryKey;
 
   victim->cacheObj.bucketName = key.substr(0, key.find('#')); 
   key.erase(0, key.find('#') + 1);
@@ -299,10 +299,10 @@ CacheBlock* LFUDAPolicy::get_victim_block(const DoutPrefixProvider* dpp, optiona
   // check refcount also, if refcount > 0 then no entries are available for eviction
   if (entry->dirty || entry->refcount > 0) {
     ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "(): Top entry in min heap is dirty or with positive refcount, no entry is available for eviction!" << dendl;
-    return nullptr;
+    return -ENOENT;
   }
 
-  return victim;
+  return 0;
 }
 
 int LFUDAPolicy::exist_key(std::string key) {
@@ -320,19 +320,18 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
 
   while (freeSpace < size) { // TODO: Think about parallel reads and writes; can this turn into an infinite loop?
     std::unique_lock<std::mutex> l(lfuda_lock);
-    CacheBlock* victim = get_victim_block(dpp, y);
+    CacheBlock victim;
+    std::string key;
+    ret = get_victim_block(dpp, &victim, key, y);
   
-    if (victim == nullptr) {
+    if (ret < 0) {
       ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "(): Could not retrieve victim block." << dendl;
-      delete victim;
       l.unlock();
       return -ENOSPC;
     }
 
-    std::string key = entries_heap.top()->key;
     auto it = entries_map.find(key);
     if (it == entries_map.end()) {
-      delete victim;
       l.unlock();
       return -ENOENT;
     }
@@ -341,17 +340,16 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
     //the following part takes care of updating the weight (globalWeight) of the block if this is the last copy in a remote setup
     //and is pushed out to a remote cache where space is available
 #if 0
-    if (victim->cacheObj.hostsList.size() == 1 && *(victim->cacheObj.hostsList.begin()) == dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address) { /* Last copy */
-      if (victim->globalWeight) {
-	it->second->localWeight += victim->globalWeight;
+    if (victim.cacheObj.hostsList.size() == 1 && *(victim.cacheObj.hostsList.begin()) == dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address) { /* Last copy */
+      if (victim.globalWeight) {
+	it->second->localWeight += victim.globalWeight;
         (*it->second->handle)->localWeight = it->second->localWeight;
 	entries_heap.decrease(it->second->handle); // larger value means node must be decreased to maintain min heap 
 	if ((ret = cacheDriver->set_attr(dpp, key, RGW_CACHE_ATTR_LOCAL_WEIGHT, std::to_string(it->second->localWeight), y)) < 0) { 
-	  delete victim;
 	  return ret;
         }
 
-	victim->globalWeight = 0;
+	victim.globalWeight = 0;
       }
 
       if (it->second->localWeight > avgWeight) {
@@ -360,9 +358,8 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
       }
     }
 
-    victim->globalWeight += it->second->localWeight;
-    if ((ret = blockDir->update_field(dpp, victim, "globalWeight", std::to_string(victim->globalWeight), y)) < 0) {
-      delete victim;
+    victim.globalWeight += it->second->localWeight;
+    if ((ret = blockDir->update_field(dpp, &victim, "globalWeight", std::to_string(victim.globalWeight), y)) < 0) {
       return ret;
     }
 #endif
@@ -373,23 +370,20 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
     l.unlock();
 
     bool deleted = false; // if head block gets deleted
-    if ((ret = blockDir->remove_host(dpp, victim, dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address, y)) < 0) {
-      delete victim;
+    if ((ret = blockDir->remove_host(dpp, &victim, dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address, y)) < 0) {
       return ret;
     } else if (ret == 1) {
       deleted = true;
     }
 
     if ((ret = cacheDriver->delete_data(dpp, key, y)) < 0) {
-      delete victim;
       return ret;
     }
 
     ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Block " << key << " has been evicted." << dendl;
 
     if (deleted) { // last data block
-      std::string head_oid_in_cache = victim->cacheObj.bucketName + CACHE_DELIM + victim->version + CACHE_DELIM + victim->cacheObj.objName;
-      delete victim;
+      std::string head_oid_in_cache = victim.cacheObj.bucketName + CACHE_DELIM + victim.version + CACHE_DELIM + victim.cacheObj.objName;
 
       ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Deleting head object " << head_oid_in_cache << "." << dendl;
 

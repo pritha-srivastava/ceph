@@ -160,7 +160,7 @@ class LFUDAPolicy : public CachePolicy {
     rgw::sal::Driver *driver;
     std::thread tc;
 
-    CacheBlock* get_victim_block(const DoutPrefixProvider* dpp, optional_yield y);
+    int get_victim_block(const DoutPrefixProvider* dpp, CacheBlock* victim, std::string& entryKey, optional_yield y);
     int age_sync(const DoutPrefixProvider* dpp, optional_yield y); 
     int local_weight_sync(const DoutPrefixProvider* dpp, optional_yield y); 
     asio::awaitable<void> redis_sync(const DoutPrefixProvider* dpp, optional_yield y);
