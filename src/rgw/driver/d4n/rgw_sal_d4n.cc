@@ -808,6 +808,25 @@ int D4NFilterObject::copy_object(const ACLOwner& owner,
   return 0;
 }
 
+int D4NFilterObject::load_obj_state(const DoutPrefixProvider *dpp, optional_yield y,
+                             bool follow_olh)
+{
+  rgw::sal::Attrs attrs;
+  std::string head_oid_in_cache;
+  rgw::d4n::CacheBlock block;
+  bool found_in_cache = false;
+  found_in_cache = check_head_exists_in_cache_get_oid(dpp, head_oid_in_cache, attrs, block, y);
+  if (!found_in_cache) {
+    //special case - for delete markers the above method returns false
+    if (block.deleteMarker) {
+      return -ENOENT;
+    } else {
+      return next->load_obj_state(dpp, y, follow_olh);
+    }
+  }
+
+  return 0;
+}
 int D4NFilterObject::set_obj_attrs(const DoutPrefixProvider* dpp, Attrs* setattrs,
                             Attrs* delattrs, optional_yield y, uint32_t flags)
 {
@@ -1432,6 +1451,7 @@ bool D4NFilterObject::check_head_exists_in_cache_get_oid(const DoutPrefixProvide
       }
       std::string key = head_oid_in_cache;
       this->driver->get_policy_driver()->get_cache_policy()->update(dpp, key, 0, 0, version, block.cacheObj.dirty, rgw::d4n::REFCOUNT_DECR, y);
+      this->exists_in_cache = true;
     } else {
       found_in_cache = false;
     }
