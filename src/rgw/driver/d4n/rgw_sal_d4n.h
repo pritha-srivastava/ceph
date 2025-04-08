@@ -84,6 +84,7 @@ class D4NFilterDriver : public FilterDriver {
     rgw::d4n::BlockDirectory* get_block_dir() { return blockDir; }
     rgw::d4n::BucketDirectory* get_bucket_dir() { return bucketDir; }
     rgw::d4n::PolicyDriver* get_policy_driver() { return policyDriver; }
+    void shutdown() override;
 };
 
 class D4NFilterUser : public FilterUser {
