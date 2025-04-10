@@ -6,5 +6,6 @@ overrides:
         setgroup: ceph
         debug rgw: 20
         rgw filter: d4n
+        rgw d4n l1 evict cache on start: false
   rgw:
     frontend: beast
