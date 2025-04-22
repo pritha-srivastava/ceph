@@ -23,7 +23,6 @@ import os
 import hashlib
 import string
 import random
-import shutil
 
 log.basicConfig(level=log.DEBUG)
 
@@ -149,9 +148,6 @@ def get_body(response):
     return got
 
 def test_small_object(r, client, s3):
-    shutil.rmtree('/tmp/rgw_d4n_datacache/')
-    os.mkdir('/tmp/rgw_d4n_datacache/')
-
     obj = s3.Object(bucket_name='bkt', key='test.txt')
     test_txt = 'test'
 
@@ -238,9 +234,6 @@ def test_small_object(r, client, s3):
     r.flushall()
 
 def test_large_object(r, client, s3):
-    shutil.rmtree('/tmp/rgw_d4n_datacache/')
-    os.mkdir('/tmp/rgw_d4n_datacache/')
-
     key="mymultipart"
     bucket_name="bkt"
     content_type='text/bla'
