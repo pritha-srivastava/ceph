@@ -1178,7 +1178,9 @@ int D4NFilterObject::set_head_obj_dir_entry(const DoutPrefixProvider* dpp, std::
 
     //dirty objects
     if (dirty) {
-      auto ret = blockDir->set(dpp, &block, y);
+      auto redis_conn = this->driver->get_conn();
+      rgw::d4n::Pipeline p = rgw::d4n::Pipeline(redis_conn);
+      auto ret = blockDir->set(dpp, &block, y, &p);
       if (ret < 0) {
         ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): BlockDirectory set method failed for head object with ret: " << ret << dendl;
         return ret;
@@ -1188,7 +1190,7 @@ int D4NFilterObject::set_head_obj_dir_entry(const DoutPrefixProvider* dpp, std::
          delete-obj with "null" as version-id deletes the latest version */
       if (!(this->get_bucket()->versioned())) {
         block.cacheObj.objName = "_:null_" + this->get_name();
-        ret = blockDir->set(dpp, &block, y);
+        ret = blockDir->set(dpp, &block, y, &p);
         if (ret < 0) {
           ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): BlockDirectory set method failed for null head object with ret: " << ret << dendl;
           return ret;
@@ -1205,37 +1207,40 @@ int D4NFilterObject::set_head_obj_dir_entry(const DoutPrefixProvider* dpp, std::
       auto score = ceph::real_clock::to_double(mtime);
       ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): Score of object name: "<< this->get_name() << " version: " << object_version << " is: "  << score << ret << dendl;
       rgw::d4n::ObjectDirectory* objDir = this->driver->get_obj_dir();
-      ret = objDir->zadd(dpp, &object, score, object_version, y);
+      ret = objDir->zadd(dpp, &object, score, object_version, y, &p);
       if (ret < 0) {
         ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): Failed to add version to ordered set with error: " << ret << dendl;
-        blockDir->discard(dpp, y);
         return ret;
       }
       //add an entry to ordered set containing objects for bucket listing, set score to 0 always to lexicographically order the objects
       rgw::d4n::BucketDirectory* bucketDir = this->driver->get_bucket_dir();
-      ret = bucketDir->zadd(dpp, this->get_bucket()->get_bucket_id(), 0, this->get_name(), y, true);
+      ret = bucketDir->zadd(dpp, this->get_bucket()->get_bucket_id(), 0, this->get_name(), y, &p);
       if (ret < 0) {
         ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): Failed to add object to ordered set with error: " << ret << dendl;
         return ret;
       }
+      p.execute(dpp, y);
     } else { //for clean/non-dirty objects
       rgw::d4n::CacheBlock latest = block;
       auto ret = blockDir->get(dpp, &latest, y);
       if (ret == -ENOENT) {
         if (!(this->get_bucket()->versioned())) {
+          auto redis_conn = this->driver->get_conn();
+          rgw::d4n::Pipeline p = rgw::d4n::Pipeline(redis_conn);
           //we can explore pipelining to send the two 'HSET' commands together
-          ret = blockDir->set(dpp, &block, y);
+          ret = blockDir->set(dpp, &block, y, &p);
           if (ret < 0) {
               ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): BlockDirectory set method failed for head object with ret: " << ret << dendl;
             return ret;
           }
           //bucket is non versioned, set a null instance
           block.cacheObj.objName = "_:null_" + this->get_name();
-          ret = blockDir->set(dpp, &block, y);
+          ret = blockDir->set(dpp, &block, y, &p);
           if (ret < 0) {
             ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): BlockDirectory set method failed for null head object with ret: " << ret << dendl;
             return ret;
           }
+          p.execute(dpp, y);
         }
       } else if (ret < 0) {
         ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): BlockDirectory get method failed for head object with ret: " << ret << dendl;
@@ -1252,18 +1257,21 @@ int D4NFilterObject::set_head_obj_dir_entry(const DoutPrefixProvider* dpp, std::
         /* even if the head block is found, overwrite existing values with new version in case of non-versioned bucket, clean objects
            and versioned and non-versioned buckets dirty objects */
         if (!(this->get_bucket()->versioned())) {
-          ret = blockDir->set(dpp, &block, y);
+          auto redis_conn = this->driver->get_conn();
+          rgw::d4n::Pipeline p = rgw::d4n::Pipeline(redis_conn);
+          ret = blockDir->set(dpp, &block, y, &p);
           if (ret < 0) {
             ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): BlockDirectory set method failed for head object with ret: " << ret << dendl;
             return ret;
           }
           //bucket is non versioned, set a null instance
           block.cacheObj.objName = "_:null_" + this->get_name();
-          ret = blockDir->set(dpp, &block, y);
+          ret = blockDir->set(dpp, &block, y, &p);
           if (ret < 0) {
             ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): BlockDirectory set method failed for null head object with ret: " << ret << dendl;
             return ret;
           }
+          p.execute(dpp, y);
         }//end-if !(this->get_bucket()->versioned())
       } //end-if ret = 0
     } //end-else
@@ -1317,6 +1325,8 @@ int D4NFilterObject::set_data_block_dir_entries(const DoutPrefixProvider* dpp, o
   off_t lst = this->get_size();
   ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): Object size =" << lst << dendl;
   off_t fst = 0;
+  auto redis_conn = this->driver->get_conn();
+  rgw::d4n::Pipeline p = rgw::d4n::Pipeline(redis_conn);
   do {
     rgw::d4n::CacheBlock block, existing_block;
     if (fst >= lst){
@@ -1349,7 +1359,7 @@ int D4NFilterObject::set_data_block_dir_entries(const DoutPrefixProvider* dpp, o
 
       block.cacheObj.hostsList.insert(dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address);
 
-      if ((ret = blockDir->set(dpp, &block, y)) < 0) {
+      if ((ret = blockDir->set(dpp, &block, y, &p)) < 0) {
         ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): BlockDirectory set() method failed, ret=" << ret << dendl;
         return ret;
       }
@@ -1359,6 +1369,8 @@ int D4NFilterObject::set_data_block_dir_entries(const DoutPrefixProvider* dpp, o
     }
     fst += cur_len;
   } while(fst < lst);
+
+  p.execute(dpp, y);
 
   return 0;
 }
