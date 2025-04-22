@@ -84,6 +84,7 @@ class D4NFilterDriver : public FilterDriver {
     rgw::d4n::BlockDirectory* get_block_dir() { return blockDir.get(); }
     rgw::d4n::BucketDirectory* get_bucket_dir() { return bucketDir.get(); }
     rgw::d4n::PolicyDriver* get_policy_driver() { return policyDriver.get(); }
+    std::shared_ptr<connection> get_conn() { return conn; }
     void shutdown() override;
 };
 
@@ -153,6 +154,7 @@ class D4NFilterObject : public FilterObject {
 	    const DoutPrefixProvider* dpp;
 	    optional_yield* y;
       int part_count{0};
+      std::vector<rgw::d4n::CacheBlock> blocks, dest_blocks;
 
 	  public:
 	    D4NFilterGetCB(D4NFilterDriver* _filter, D4NFilterObject* _source) : filter(_filter),
