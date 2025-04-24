@@ -179,19 +179,20 @@ def test_small_object(r, client, s3):
     output = subprocess.check_output(['md5sum', datacache_path + datacache]).decode('latin-1')
     assert(output.splitlines()[0].split()[0] == hashlib.md5("test".encode('utf-8')).hexdigest())
 
-    data = r.hgetall(bucketID + '_test.txt_0_4')
+    for entry in r.scan_iter("*_test.txt_0_4"):
+        data = r.hgetall(entry)
 
-    # directory entry comparisons
-    log.info("1. Directory data:") # TODO: Remove logs if no errors
-    log.info(data)
-    assert(data.get('blockID') == '0')
-    assert(data.get('deleteMarker') == '0')
-    assert(data.get('size') == '4')
-    assert(data.get('globalWeight') == '0')
-    assert(data.get('objName') == 'test.txt')
-    assert(data.get('bucketName') == bucketID)
-    assert(data.get('dirty') == '0')
-    assert(data.get('hosts') == '127.0.0.1:6379')
+        # directory entry comparisons
+        log.info("1. Directory data:") # TODO: Remove logs if no errors
+        log.info(data)
+        assert(data.get('blockID') == '0')
+        assert(data.get('deleteMarker') == '0')
+        assert(data.get('size') == '4')
+        assert(data.get('globalWeight') == '0')
+        assert(data.get('objName') == 'test.txt')
+        assert(data.get('bucketName') == bucketID)
+        assert(data.get('dirty') == '0')
+        assert(data.get('hosts') == '127.0.0.1:6379')
 
     # second get call
     response_get = obj.get()
@@ -217,19 +218,20 @@ def test_small_object(r, client, s3):
     output = subprocess.check_output(['md5sum', datacache_path + datacache]).decode('latin-1')
     assert(output.splitlines()[0].split()[0] == hashlib.md5("test".encode('utf-8')).hexdigest())
 
-    data = r.hgetall(bucketID + '_test.txt_0_4')
+    for entry in r.scan_iter("*_test.txt_0_4"):
+        data = r.hgetall(entry)
 
-    # directory entries should remain consistent
-    log.info("2. Directory data:") # TODO: Remove logs if no errors
-    log.info(data)
-    assert(data.get('blockID') == '0')
-    assert(data.get('deleteMarker') == '0')
-    assert(data.get('size') == '4')
-    assert(data.get('globalWeight') == '0')
-    assert(data.get('objName') == 'test.txt')
-    assert(data.get('bucketName') == bucketID)
-    assert(data.get('dirty') == '0')
-    assert(data.get('hosts') == '127.0.0.1:6379')
+        # directory entries should remain consistent
+        log.info("2. Directory data:") # TODO: Remove logs if no errors
+        log.info(data)
+        assert(data.get('blockID') == '0')
+        assert(data.get('deleteMarker') == '0')
+        assert(data.get('size') == '4')
+        assert(data.get('globalWeight') == '0')
+        assert(data.get('objName') == 'test.txt')
+        assert(data.get('bucketName') == bucketID)
+        assert(data.get('dirty') == '0')
+        assert(data.get('hosts') == '127.0.0.1:6379')
 
     r.flushall()
 
