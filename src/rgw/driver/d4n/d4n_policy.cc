@@ -470,13 +470,13 @@ void LFUDAPolicy::update(const DoutPrefixProvider* dpp, const std::string& key, 
   handle_type handle = entries_heap.push(e);
   e->set_handle(handle);
   entries_map.emplace(key, e);
-
+#if 0
   if (updateLocalWeight) {
     int ret = -1;
     if ((ret = cacheDriver->set_attr(dpp, key, RGW_CACHE_ATTR_LOCAL_WEIGHT, std::to_string(localWeight), y)) < 0) 
       ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "(): CacheDriver set_attr method failed, ret=" << ret << dendl;
   }
-
+#endif
   weightSum += ((localWeight < 0) ? 0 : localWeight);
 }
 
