@@ -1,6 +1,7 @@
 #include "common/async/completion.h"
 #include "common/errno.h"
 #include "common/async/blocked_completion.h"
+#include "rgw_aio_throttle.h"
 #include "rgw_ssd_driver.h"
 #if defined(__linux__)
 #include <features.h>
@@ -381,21 +382,38 @@ void SSDDriver::set_free_space(const DoutPrefixProvider* dpp, uint64_t free_spac
     this->free_space = free_space;
 }
 
+static int flush(const DoutPrefixProvider* dpp, rgw::AioResultList&& results)
+{
+    int r = rgw::check_for_errors(results);
+    if (r < 0) {
+      return r;
+    }
+    return 0;
+}
+
+static int drain(const DoutPrefixProvider* dpp, rgw::Aio* aio)
+{
+    auto c = aio->drain();
+    int r = flush(dpp, std::move(c));
+    if (r < 0) {
+        aio->drain();
+        return r;
+    }
+    return 0;
+}
 int SSDDriver::put(const DoutPrefixProvider* dpp, const std::string& key, const bufferlist& bl, uint64_t len, const rgw::sal::Attrs& attrs, optional_yield y)
 {
     ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << key << dendl;
-    boost::system::error_code ec;
-    if (y) {
-        using namespace boost::asio;
-        yield_context yield = y.get_yield_context();
-        auto ex = yield.get_executor();
-        this->put_async(dpp, ex, key, bl, len, attrs, yield[ec]);
-    } else {
-      auto ex = boost::asio::system_executor{};
-      this->put_async(dpp, ex, key, bl, len, attrs, ceph::async::use_blocked[ec]);
+    std::unique_ptr<rgw::Aio> aio = rgw::make_throttle(dpp->get_cct()->_conf->rgw_put_obj_min_window_size, y);
+    auto result = this->put_async(dpp, y, aio.get(), key, bl, len, attrs, bl.length(), 0);
+    auto r = flush(dpp, std::move(result));
+    if (r < 0) {
+        drain(dpp, aio.get());
+        return r;
     }
-    if (ec) {
-        return ec.value();
+    r = drain(dpp, aio.get());
+    if (r < 0) {
+        return r;
     }
     return 0;
 }
