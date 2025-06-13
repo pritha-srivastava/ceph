@@ -149,7 +149,7 @@ class Directory {
 
 class Pipeline {
   public:
-    Pipeline(std::shared_ptr<connection>& conn) : conn(conn) {}
+    Pipeline(std::shared_ptr<connection>& conn, std::shared_ptr<RedisPool> redis_pool) : conn(conn), redis_pool(redis_pool) {}
     void start() { pipeline_mode = true; }
     //executes all commands and sets pipeline mode to false
     int execute(const DoutPrefixProvider* dpp, optional_yield y);
@@ -158,6 +158,7 @@ class Pipeline {
 
   private:
     std::shared_ptr<connection> conn;
+    std::shared_ptr<RedisPool> redis_pool{nullptr};
     request req;
     bool pipeline_mode{false};
 };
