@@ -16,48 +16,31 @@ namespace rgw { namespace cache {
 static std::atomic<uint64_t> index{0};
 static std::atomic<uint64_t> dir_index{0};
 
-static std::vector<std::string> tokenize_key(std::string_view key)
-{
-    std::vector<std::string> tokens;
-    size_t start = 0, end = 0;
-    while ((end = key.find(CACHE_DELIM, start)) != std::string_view::npos) {
-        tokens.emplace_back(key.substr(start, end - start));
-        start = end + 1;
-    }
-    // Add the last token
-    if (start < key.length()) {
-        tokens.emplace_back(key.substr(start));
-    }
-    return tokens;
+static inline std::string get_key(const CacheKey& key) {
+  if (key.len == 0 && key.offset == 0) {
+    return fmt::format("{}{}{}{}{}", url_encode(key.bucket_id, true), CACHE_DELIM, url_encode(key.version, true), CACHE_DELIM, url_encode(key.obj_name, true));
+  } else {
+    return fmt::format("{}{}{}{}{}{}{}{}{}", url_encode(key.bucket_id, true), CACHE_DELIM, url_encode(key.version, true), CACHE_DELIM, url_encode(key.obj_name, true), CACHE_DELIM, std::to_string(key.offset), CACHE_DELIM, std::to_string(key.len));
+  }
 }
 
 /*
 * Parses key to return directory path and file name
 */
-static void parse_key(const DoutPrefixProvider* dpp, const std::string& location, const std::string& key, std::string& dir_path, std::string& file_name, bool temp = false) {
+static void parse_key(const DoutPrefixProvider* dpp, const std::string& location, const CacheKey& key, std::string& dir_path, std::string& file_name, bool temp = false) {
     ldpp_dout(dpp, 10) << __func__ << "() key is: " << key << dendl;
-    std::string bucket_id, object, version;
-    std::vector<std::string> parts = tokenize_key(key);
-
-    ldpp_dout(dpp, 10) << __func__ << "() parts.size() is " << parts.size() << dendl;
-
-    if (parts.size() == 3 || parts.size() == 5) {
-        bucket_id = parts[0];
-        ldpp_dout(dpp, 10) <<  __func__ << "() bucket_id is " << bucket_id << dendl;
-        object = parts[2];
-        ldpp_dout(dpp, 10) <<  __func__ << "() object is " << object << dendl;
-        version = parts[1];
-        if (parts.size() == 5) { //has offset and length
-            version += CACHE_DELIM + parts[3] + CACHE_DELIM + parts[4];
-        }
-        if (temp) {
-            version += "_" + std::to_string(index++);
-        }
-        ldpp_dout(dpp, 10) <<  __func__ << "() version is " << version << dendl;
-        dir_path = location + "/" + bucket_id + "/" + object;
-        file_name = version;
-        ldpp_dout(dpp, 10) <<  __func__ << "() dir_path is " << dir_path << dendl;
+    dir_path = location + "/" + url_encode(key.bucket_id, true) + "/" + url_encode(key.obj_name, true);
+    if (key.offset == 0 && key.len == 0) {
+        file_name = key.version;
+    } else {
+        file_name = key.version + CACHE_DELIM + std::to_string(key.offset) + CACHE_DELIM + std::to_string(key.len);
     }
+
+    if (temp) {
+        file_name += "_" + std::to_string(index++);
+    }
+    ldpp_dout(dpp, 10) <<  __func__ << "() dir_path is " << dir_path << dendl;
+    ldpp_dout(dpp, 10) <<  __func__ << "() file_name is " << file_name << dendl;
     return;
 }
 
@@ -101,7 +84,7 @@ static inline std::string get_file_path(const DoutPrefixProvider* dpp, const std
     return dir_path + "/" + file_name;
 }
 
-static std::string create_dirs_get_filepath_from_key(const DoutPrefixProvider* dpp, const std::string& location, const std::string& key, bool temp=false)
+static std::string create_dirs_get_filepath_from_key(const DoutPrefixProvider* dpp, const std::string& location, const CacheKey& key, bool temp=false)
 {
     std::string dir_path, file_name;
     parse_key(dpp, location, key, dir_path, file_name, temp);
@@ -255,7 +238,7 @@ int SSDDriver::restore_blocks_objects(const DoutPrefixProvider* dpp, ObjectDataC
 					    } else {
 						ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): localWeightStr: " << localWeightStr << dendl;
 					    }
-					    block_func(dpp, key, offset, len, version, false, null_yield, localWeightStr);
+					    block_func(dpp, key, offset, len, version, false, bucket_id, object_name, null_yield, localWeightStr);
 					    parsed = true;
 				        } else if (dirtyStr == "1") {
                                             //dirty blocks - version in head block and offset, len in data blocks
@@ -328,7 +311,7 @@ int SSDDriver::restore_blocks_objects(const DoutPrefixProvider* dpp, ObjectDataC
 
 					    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): calling func for: " << key << dendl;
 					    obj_func(dpp, key, version, deleteMarker, size, creationTime, user, etag, bucket_name, bucket_id, obj_key, null_yield, invalidStr);
-					    block_func(dpp, key, offset, len, version, dirty, null_yield, localWeightStr);
+					    block_func(dpp, key, offset, len, version, dirty, bucket_id, object_name, null_yield, localWeightStr);
 					    parsed = true;
                                         } // end-if dirtyStr == "1"
 				    } else if (parts.size() == 3) { //end-if parts.size() == 1
@@ -348,7 +331,7 @@ int SSDDriver::restore_blocks_objects(const DoutPrefixProvider* dpp, ObjectDataC
 					} else {
 					    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): localWeightStr: " << localWeightStr << dendl;
 					}
-					block_func(dpp, key, offset, len, version, dirty, null_yield, localWeightStr);
+					block_func(dpp, key, offset, len, version, dirty, bucket_id, object_name, null_yield, localWeightStr);
 					parsed = true;
 				    } 
 				    if (!parsed) {
@@ -383,7 +366,7 @@ void SSDDriver::set_free_space(const DoutPrefixProvider* dpp, uint64_t free_spac
     this->free_space = free_space;
 }
 
-int SSDDriver::put(const DoutPrefixProvider* dpp, const std::string& key, const bufferlist& bl, uint64_t len, const rgw::sal::Attrs& attrs, optional_yield y)
+int SSDDriver::put(const DoutPrefixProvider* dpp, const CacheKey& key, const bufferlist& bl, uint64_t len, const rgw::sal::Attrs& attrs, optional_yield y)
 {
     ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << key << dendl;
     boost::system::error_code ec;
@@ -402,7 +385,7 @@ int SSDDriver::put(const DoutPrefixProvider* dpp, const std::string& key, const 
     return 0;
 }
 
-int SSDDriver::get(const DoutPrefixProvider* dpp, const std::string& key, off_t offset, uint64_t len, bufferlist& bl, rgw::sal::Attrs& attrs, optional_yield y)
+int SSDDriver::get(const DoutPrefixProvider* dpp, const CacheKey& key, off_t offset, uint64_t len, bufferlist& bl, rgw::sal::Attrs& attrs, optional_yield y)
 {
     char buffer[len];
     std::string location = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
@@ -443,7 +426,7 @@ int SSDDriver::get(const DoutPrefixProvider* dpp, const std::string& key, off_t 
     return 0;
 }
 
-int SSDDriver::append_data(const DoutPrefixProvider* dpp, const::std::string& key, const bufferlist& bl_data, optional_yield y)
+int SSDDriver::append_data(const DoutPrefixProvider* dpp, const CacheKey& key, const bufferlist& bl_data, optional_yield y)
 {
     bufferlist src = bl_data;
     std::string location = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
@@ -492,14 +475,14 @@ auto SSDDriver::AsyncWriteRequest::create(const Executor1& ex1, CompletionHandle
 }
 
 template <typename Executor, typename CompletionToken>
-auto SSDDriver::get_async(const DoutPrefixProvider *dpp, const Executor& ex, const std::string& key,
+auto SSDDriver::get_async(const DoutPrefixProvider *dpp, const Executor& ex, const CacheKey& key,
                 off_t read_ofs, off_t read_len, CompletionToken&& token)
 {
   using Op = AsyncReadOp;
   using Signature = typename Op::Signature;
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [this] (auto handler, const DoutPrefixProvider *dpp,
-              const Executor& ex, const std::string& key,
+              const Executor& ex, const CacheKey& key,
               off_t read_ofs, off_t read_len) {
     auto p = Op::create(ex, handler);
     auto& op = p->user_data;
@@ -523,14 +506,14 @@ auto SSDDriver::get_async(const DoutPrefixProvider *dpp, const Executor& ex, con
 }
 
 template <typename Executor, typename CompletionToken>
-void SSDDriver::put_async(const DoutPrefixProvider *dpp, const Executor& ex, const std::string& key,
+void SSDDriver::put_async(const DoutPrefixProvider *dpp, const Executor& ex, const CacheKey& key,
                 const bufferlist& bl, uint64_t len, const rgw::sal::Attrs& attrs, CompletionToken&& token)
 {
   using Op = AsyncWriteRequest;
   using Signature = typename Op::Signature;
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [this] (auto handler, const DoutPrefixProvider *dpp,
-              const Executor& ex, const std::string& key, const bufferlist& bl,
+              const Executor& ex, const CacheKey& key, const bufferlist& bl,
               uint64_t len, const rgw::sal::Attrs& attrs) {
     auto p = Op::create(ex, handler);
     auto& op = p->user_data;
@@ -568,7 +551,7 @@ void SSDDriver::put_async(const DoutPrefixProvider *dpp, const Executor& ex, con
 }
 
 rgw::Aio::OpFunc SSDDriver::ssd_cache_read_op(const DoutPrefixProvider *dpp, optional_yield y, rgw::cache::CacheDriver* cache_driver,
-                                off_t read_ofs, off_t read_len, const std::string& key) {
+                                off_t read_ofs, off_t read_len, const CacheKey& key) {
   return [this, dpp, y, read_ofs, read_len, key] (Aio* aio, AioResult& r) mutable {
     ceph_assert(y);
     ldpp_dout(dpp, 20) << "SSDCache: cache_read_op(): Read From Cache, oid=" << r.obj.oid << dendl;
@@ -583,7 +566,7 @@ rgw::Aio::OpFunc SSDDriver::ssd_cache_read_op(const DoutPrefixProvider *dpp, opt
 }
 
 rgw::Aio::OpFunc SSDDriver::ssd_cache_write_op(const DoutPrefixProvider *dpp, optional_yield y, rgw::cache::CacheDriver* cache_driver,
-                                const bufferlist& bl, uint64_t len, const rgw::sal::Attrs& attrs, const std::string& key) {
+                                const bufferlist& bl, uint64_t len, const rgw::sal::Attrs& attrs, const CacheKey& key) {
   return [this, dpp, y, bl, len, attrs, key] (Aio* aio, AioResult& r) mutable {
     ceph_assert(y);
     ldpp_dout(dpp, 20) << "SSDCache: cache_write_op(): Write to Cache, oid=" << r.obj.oid << dendl;
@@ -597,21 +580,23 @@ rgw::Aio::OpFunc SSDDriver::ssd_cache_write_op(const DoutPrefixProvider *dpp, op
   };
 }
 
-rgw::AioResultList SSDDriver::get_async(const DoutPrefixProvider* dpp, optional_yield y, rgw::Aio* aio, const std::string& key, off_t ofs, uint64_t len, uint64_t cost, uint64_t id)
+rgw::AioResultList SSDDriver::get_async(const DoutPrefixProvider* dpp, optional_yield y, rgw::Aio* aio, const CacheKey& key, off_t ofs, uint64_t len, uint64_t cost, uint64_t id)
 {
     rgw_raw_obj r_obj;
-    r_obj.oid = key;
+    std::string k = get_key(key);
+    r_obj.oid = k;
     return aio->get(r_obj, ssd_cache_read_op(dpp, y, this, ofs, len, key), cost, id);
 }
 
-rgw::AioResultList SSDDriver::put_async(const DoutPrefixProvider* dpp, optional_yield y, rgw::Aio* aio, const std::string& key, const bufferlist& bl, uint64_t len, const rgw::sal::Attrs& attrs, uint64_t cost, uint64_t id)
+rgw::AioResultList SSDDriver::put_async(const DoutPrefixProvider* dpp, optional_yield y, rgw::Aio* aio, const CacheKey& key, const bufferlist& bl, uint64_t len, const rgw::sal::Attrs& attrs, uint64_t cost, uint64_t id)
 {
     rgw_raw_obj r_obj;
-    r_obj.oid = key;
+    std::string k = get_key(key);
+    r_obj.oid = k;
     return aio->get(r_obj, ssd_cache_write_op(dpp, y, this, bl, len, attrs, key), cost, id);
 }
 
-int SSDDriver::delete_data(const DoutPrefixProvider* dpp, const::std::string& key, optional_yield y)
+int SSDDriver::delete_data(const DoutPrefixProvider* dpp, const CacheKey& key, optional_yield y)
 {
     std::string dir_path, file_name;
     parse_key(dpp, partition_info.location, key, dir_path, file_name);
@@ -653,7 +638,7 @@ int SSDDriver::delete_data(const DoutPrefixProvider* dpp, const::std::string& ke
     return 0;
 }
 
-int SSDDriver::rename(const DoutPrefixProvider* dpp, const::std::string& oldKey, const::std::string& newKey, optional_yield y)
+int SSDDriver::rename(const DoutPrefixProvider* dpp, const CacheKey& oldKey, const CacheKey& newKey, optional_yield y)
 { 
     std::string old_file_path = create_dirs_get_filepath_from_key(dpp, partition_info.location, oldKey);
     std::string new_file_path = create_dirs_get_filepath_from_key(dpp, partition_info.location, newKey);
@@ -794,7 +779,7 @@ void SSDDriver::AsyncReadOp::libaio_cb_aio_dispatch(sigval sigval)
     ceph::async::dispatch(std::move(p), ec, std::move(op.result));
 }
 
-int SSDDriver::update_attrs(const DoutPrefixProvider* dpp, const std::string& key, const rgw::sal::Attrs& attrs, optional_yield y)
+int SSDDriver::update_attrs(const DoutPrefixProvider* dpp, const CacheKey& key, const rgw::sal::Attrs& attrs, optional_yield y)
 {
     std::string location = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
     ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): location=" << location << dendl;
@@ -817,7 +802,7 @@ int SSDDriver::update_attrs(const DoutPrefixProvider* dpp, const std::string& ke
     return 0;
 }
 
-int SSDDriver::delete_attrs(const DoutPrefixProvider* dpp, const std::string& key, rgw::sal::Attrs& del_attrs, optional_yield y)
+int SSDDriver::delete_attrs(const DoutPrefixProvider* dpp, const CacheKey& key, rgw::sal::Attrs& del_attrs, optional_yield y)
 {
     std::string location = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
     ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): location=" << location << dendl;
@@ -838,19 +823,11 @@ int SSDDriver::delete_attrs(const DoutPrefixProvider* dpp, const std::string& ke
 
 int SSDDriver::get_attrs(const DoutPrefixProvider* dpp, const std::string& key, rgw::sal::Attrs& attrs, optional_yield y)
 {
-    std::string location;
-    // a hack to avoid calling create_dirs_get_filepath_from_key in case the path is already formed
-    if(key.find(partition_info.location, 0) == 0) {
-        location = key;
-    } else {
-        location = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
-    }
-
-    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): location=" << location << dendl;
+    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << key << dendl;
 
     char namebuf[64 * 1024];
     int ret;
-    ssize_t buflen = listxattr(location.c_str(), namebuf, sizeof(namebuf));
+    ssize_t buflen = listxattr(key.c_str(), namebuf, sizeof(namebuf));
     if (buflen < 0) {
         ret = errno;
         ldpp_dout(dpp, 0) << "ERROR: could not get attributes for key: " << key << ": " << ret << dendl;
@@ -869,7 +846,7 @@ int SSDDriver::get_attrs(const DoutPrefixProvider* dpp, const std::string& key, 
             continue;
         }
         std::string attr_value;
-        get_attr(dpp, location, attr_name, attr_value, y);
+        get_attr(dpp, key, attr_name, attr_value, y);
         bufferlist bl_value;
         bl_value.append(attr_value);
         attrs.emplace(std::move(attr_name), std::move(bl_value));
@@ -877,57 +854,25 @@ int SSDDriver::get_attrs(const DoutPrefixProvider* dpp, const std::string& key, 
     return 0;
 }
 
-int SSDDriver::set_attrs(const DoutPrefixProvider* dpp, const std::string& key, const rgw::sal::Attrs& attrs, optional_yield y)
+int SSDDriver::get_attrs(const DoutPrefixProvider* dpp, const CacheKey& key, rgw::sal::Attrs& attrs, optional_yield y)
 {
-    std::string location;
-    // a hack to avoid calling create_dirs_get_filepath_from_key in case the path is already formed
-    if(key.find(partition_info.location, 0) == 0) {
-        location = key;
-    } else {
-        location = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
-    }
-
-    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): location=" << location << dendl;
-
-    for (auto& [attr_name, attr_val_bl] : attrs) {
-        ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): attr_name = " << attr_name << " attr_val_bl length: " << attr_val_bl.length() << dendl;
-        if (attr_val_bl.length() != 0) {
-            auto ret = set_attr(dpp, key, attr_name, attr_val_bl.to_str(), y);
-            if (ret < 0) {
-                ldpp_dout(dpp, 0) << "SSDCache: " << __func__ << "(): could not set attr value for attr name: " << attr_name << " key: " << key << cpp_strerror(errno) << dendl;
-                return ret;
-            }
-        }
-    }
-
-    efs::space_info space = efs::space(partition_info.location);
-    this->free_space = space.available;
-
-    return 0;
+    std::string location = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
+    return get_attrs(dpp, location, attrs, y);
 }
 
 int SSDDriver::get_attr(const DoutPrefixProvider* dpp, const std::string& key, const std::string& attr_name, std::string& attr_val, optional_yield y)
 {
-    std::string location;
-    // a hack to avoid calling create_dirs_get_filepath_from_key in case the path is already formed
-    if(key.find(partition_info.location, 0) == 0) {
-        location = key;
-    } else {
-        location = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
-    }
-
-    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): location=" << location << dendl;
-
-    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): get_attr: key: " << attr_name << dendl;
+    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << key << dendl;
+    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): get_attr: attr_name: " << attr_name << dendl;
 
     size_t buffer_size = 256;
     while (true) {
         attr_val.resize(buffer_size);
-        ssize_t attr_size = getxattr(location.c_str(), attr_name.c_str(), attr_val.data(), attr_val.size());
+        ssize_t attr_size = getxattr(key.c_str(), attr_name.c_str(), attr_val.data(), attr_val.size());
         if (attr_size < 0) {
             if (errno == ERANGE) {
                 // Buffer too small, get actual size needed
-                attr_size = getxattr(location.c_str(), attr_name.c_str(), nullptr, 0);
+                attr_size = getxattr(key.c_str(), attr_name.c_str(), nullptr, 0);
                 if (attr_size < 0) {
                     ldpp_dout(dpp, 0) << "ERROR: could not get attribute " << attr_name << ": " << cpp_strerror(errno) << dendl;
                     attr_val = "";
@@ -958,17 +903,42 @@ int SSDDriver::get_attr(const DoutPrefixProvider* dpp, const std::string& key, c
     }
 }
 
-int SSDDriver::set_attr(const DoutPrefixProvider* dpp, const std::string& key, const std::string& attr_name, const std::string& attr_val, optional_yield y)
+int SSDDriver::get_attr(const DoutPrefixProvider* dpp, const CacheKey& key, const std::string& attr_name, std::string& attr_val, optional_yield y)
 {
-    std::string location;
-    // a hack to avoid calling create_dirs_get_filepath_from_key in case the path is already formed
-    if(key.find(partition_info.location, 0) == 0) {
-        location = key;
-    } else {
-        location = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
+    std::string location = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
+    return get_attr(dpp, location, attr_name, attr_val, y);
+}
+
+int SSDDriver::set_attrs(const DoutPrefixProvider* dpp, const std::string& key, const rgw::sal::Attrs& attrs, optional_yield y)
+{
+    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << key << dendl;
+
+    for (auto& [attr_name, attr_val_bl] : attrs) {
+        ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): attr_name = " << attr_name << " attr_val_bl length: " << attr_val_bl.length() << dendl;
+        if (attr_val_bl.length() != 0) {
+            auto ret = set_attr(dpp, key, attr_name, attr_val_bl.to_str(), y);
+            if (ret < 0) {
+                ldpp_dout(dpp, 0) << "SSDCache: " << __func__ << "(): could not set attr value for attr name: " << attr_name << " key: " << key << cpp_strerror(errno) << dendl;
+                return ret;
+            }
+        }
     }
 
-    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): location=" << location << dendl;
+    efs::space_info space = efs::space(partition_info.location);
+    this->free_space = space.available;
+
+    return 0;
+}
+
+int SSDDriver::set_attrs(const DoutPrefixProvider* dpp, const CacheKey& key, const rgw::sal::Attrs& attrs, optional_yield y)
+{
+    std::string location = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
+    return set_attrs(dpp, location, attrs, y);
+}
+
+int SSDDriver::set_attr(const DoutPrefixProvider* dpp, const std::string& key, const std::string& attr_name, const std::string& attr_val, optional_yield y)
+{
+    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << key << dendl;
 
     if (attr_name == RGW_ATTR_ACL) {
       if (dpp->get_cct()->_conf->subsys.should_gather(ceph_subsys_rgw, 20)) {
@@ -995,7 +965,7 @@ int SSDDriver::set_attr(const DoutPrefixProvider* dpp, const std::string& key, c
       ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): set_attr: key: " << attr_name << " val: " << attr_val << dendl;
     }
 
-    auto ret = setxattr(location.c_str(), attr_name.c_str(), attr_val.c_str(), attr_val.size(), 0);
+    auto ret = setxattr(key.c_str(), attr_name.c_str(), attr_val.c_str(), attr_val.size(), 0);
     if (ret < 0) {
         ldpp_dout(dpp, 0) << "SSDCache: " << __func__ << "(): could not set attr value for attr name: " << attr_name << " key: " << key << cpp_strerror(errno) << dendl;
         return ret;
@@ -1007,7 +977,13 @@ int SSDDriver::set_attr(const DoutPrefixProvider* dpp, const std::string& key, c
     return 0;
 }
 
-int SSDDriver::delete_attr(const DoutPrefixProvider* dpp, const std::string& key, const std::string& attr_name)
+int SSDDriver::set_attr(const DoutPrefixProvider* dpp, const CacheKey& key, const std::string& attr_name, const std::string& attr_val, optional_yield y)
+{
+    std::string location = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
+    return set_attr(dpp, location, attr_name, attr_val, y);
+}
+
+int SSDDriver::delete_attr(const DoutPrefixProvider* dpp, const CacheKey& key, const std::string& attr_name)
 {
     std::string location = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
     ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): location=" << location << dendl;
