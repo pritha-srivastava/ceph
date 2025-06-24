@@ -16,6 +16,70 @@ namespace rgw { namespace cache {
 static std::atomic<uint64_t> index{0};
 static std::atomic<uint64_t> dir_index{0};
 
+int FileDescriptorCache::remove(const DoutPrefixProvider* dpp, const std::string& file_path, bool close_file) {
+    auto p = entries_map.find(file_path);
+    if (p == entries_map.end()) {
+        return -ENOENT;
+    }
+    if (close_file) {
+        ::close(p->second->fd);
+    }
+    entries_map.erase(p);
+    entries_lru_list.erase_and_dispose(entries_lru_list.iterator_to(*(p->second)), Entry_delete_disposer());
+    return 0;
+}
+void FileDescriptorCache::update(const DoutPrefixProvider* dpp, const std::string& file_path, int fd) {
+    if (entries_map.size() == max_entries) {
+        evict(dpp);
+    }
+    remove(dpp, file_path);
+    Entry* e = new Entry(file_path, fd);
+    entries_lru_list.push_back(*e);
+    entries_map.emplace(file_path, e);
+}
+
+int FileDescriptorCache::evict(const DoutPrefixProvider* dpp) {
+    auto p = entries_lru_list.front();
+    ::close(p.fd);
+    entries_map.erase(entries_map.find(p.file_path));
+    entries_lru_list.pop_front_and_dispose(Entry_delete_disposer());
+    cache_evictions++;
+    ldpp_dout(dpp, 10) <<  __func__ << "() cache evictions is " << cache_evictions << dendl;
+    return 0;
+}
+
+int FileDescriptorCache::get(const DoutPrefixProvider* dpp, const std::string& file_path) {
+    const std::lock_guard l(lru_lock);
+    auto entry = entries_map.find(file_path);
+    int fd;
+    if (entry == entries_map.end()) {
+        fd = TEMP_FAILURE_RETRY(::open(file_path.c_str(), O_RDONLY|O_CLOEXEC|O_BINARY));
+        if (fd < 0) {
+            int err = errno;
+            return -err;
+        }
+        cache_misses++;
+        ldpp_dout(dpp, 10) <<  __func__ << "() cache misses is " << cache_misses << dendl;
+    } else {
+        fd = entry->second->fd;
+        lseek(fd, 0, SEEK_SET);
+        cache_hits++;
+        ldpp_dout(dpp, 10) <<  __func__ << "() cache hits is " << cache_hits << dendl;
+    }
+    update(dpp, file_path, fd);
+    return fd;
+}
+
+void FileDescriptorCache::put(const DoutPrefixProvider* dpp, const std::string& file_path, int fd) {
+    const std::lock_guard l(lru_lock);
+    update(dpp, file_path, fd);
+}
+
+int FileDescriptorCache::erase(const DoutPrefixProvider* dpp, const std::string& file_path) {
+    const std::lock_guard l(lru_lock);
+    return remove(dpp, file_path, true);
+}
+
 static std::vector<std::string> tokenize_key(std::string_view key)
 {
     std::vector<std::string> tokens;
@@ -183,6 +247,8 @@ int SSDDriver::initialize(const DoutPrefixProvider* dpp)
     efs::space_info space = efs::space(partition_info.location);
     //currently partition_info.size is unused
     this->free_space = space.available;
+
+    fd_cache = std::make_unique<FileDescriptorCache>(100);
 
     return 0;
 }
@@ -505,7 +571,7 @@ auto SSDDriver::get_async(const DoutPrefixProvider *dpp, const Executor& ex, con
     std::string location = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
     ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): location=" << location << dendl;
 
-    int ret = op.prepare_libaio_read_op(dpp, location, read_ofs, read_len, p.get());
+    int ret = op.prepare_libaio_read_op(dpp, fd_cache.get(), location, read_ofs, read_len, p.get());
     if(0 == ret) {
         ret = ::aio_read(op.aio_cb.get());
     }
@@ -615,6 +681,8 @@ int SSDDriver::delete_data(const DoutPrefixProvider* dpp, const::std::string& ke
     std::string location = get_file_path(dpp, dir_path, file_name);
     ldpp_dout(dpp, 20) << "INFO: delete_data::file to remove: " << location << dendl;
     std::error_code ec;
+
+    fd_cache->erase(dpp, location);
 
     //Remove file
     if (!efs::remove(location, ec)) {
@@ -749,16 +817,17 @@ void SSDDriver::AsyncWriteRequest::libaio_write_cb(sigval sigval) {
     ceph::async::dispatch(std::move(p), ec);
 }
 
-int SSDDriver::AsyncReadOp::prepare_libaio_read_op(const DoutPrefixProvider *dpp, const std::string& file_path, off_t read_ofs, off_t read_len, void* arg)
+int SSDDriver::AsyncReadOp::prepare_libaio_read_op(const DoutPrefixProvider *dpp, rgw::cache::FileDescriptorCache* fd_cache, const std::string& file_path, off_t read_ofs, off_t read_len, void* arg)
 {
     ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): file_path=" << file_path << dendl;
     aio_cb.reset(new struct aiocb);
     memset(aio_cb.get(), 0, sizeof(struct aiocb));
-    aio_cb->aio_fildes = TEMP_FAILURE_RETRY(::open(file_path.c_str(), O_RDONLY|O_CLOEXEC|O_BINARY));
+    //aio_cb->aio_fildes = TEMP_FAILURE_RETRY(::open(file_path.c_str(), O_RDONLY|O_CLOEXEC|O_BINARY));
+    aio_cb->aio_fildes = fd_cache->get(dpp, file_path);
     if(aio_cb->aio_fildes < 0) {
-        int err = errno;
-        ldpp_dout(dpp, 1) << "ERROR: SSDCache: " << __func__ << "(): can't open " << file_path << " : " << " error: " << err << dendl;
-        return -err;
+        //int err = errno;
+        ldpp_dout(dpp, 1) << "ERROR: SSDCache: " << __func__ << "(): can't open " << file_path << " : " << " error: " << aio_cb->aio_fildes << dendl;
+        return aio_cb->aio_fildes;
     }
     if (dpp->get_cct()->_conf->rgw_d4n_l1_fadvise != POSIX_FADV_NORMAL) {
         posix_fadvise(aio_cb->aio_fildes, 0, 0, g_conf()->rgw_d4n_l1_fadvise);
