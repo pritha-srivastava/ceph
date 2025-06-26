@@ -78,6 +78,7 @@ private:
   CephContext* cct;
   std::mutex cache_lock;
   std::unique_ptr<FileDescriptorCache> fd_cache;
+  std::unique_ptr<FileDescriptorCache> dir_fd_cache;
 
   struct libaio_read_handler {
     rgw::Aio* throttle = nullptr;
@@ -141,7 +142,7 @@ private:
     using Signature = void(boost::system::error_code, bufferlist);
     using Completion = ceph::async::Completion<Signature, AsyncReadOp>;
 
-    int prepare_libaio_read_op(const DoutPrefixProvider *dpp, rgw::cache::FileDescriptorCache* fd_cache, const std::string& file_path, off_t read_ofs, off_t read_len, void* arg);
+    int prepare_libaio_read_op(const DoutPrefixProvider *dpp, rgw::cache::FileDescriptorCache* fd_cache, rgw::cache::FileDescriptorCache* dir_fd_cache, const std::string& dir_path, const std::string& file_name, off_t read_ofs, off_t read_len, void* arg);
     static void libaio_cb_aio_dispatch(sigval sigval);
 
     template <typename Executor1, typename CompletionHandler>
@@ -161,7 +162,7 @@ private:
     using Signature = void(boost::system::error_code);
     using Completion = ceph::async::Completion<Signature, AsyncWriteRequest>;
 
-	  int prepare_libaio_write_op(const DoutPrefixProvider *dpp, bufferlist& bl, unsigned int len, std::string file_path);
+	  int prepare_libaio_write_op(const DoutPrefixProvider *dpp, bufferlist& bl, unsigned int len, std::string file_path, FileDescriptorCache* dir_fd_cache);
     static void libaio_write_cb(sigval sigval);
 
     template <typename Executor1, typename CompletionHandler>
