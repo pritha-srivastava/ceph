@@ -298,8 +298,8 @@ int SSDDriver::initialize(const DoutPrefixProvider* dpp)
     //currently partition_info.size is unused
     this->free_space = space.available;
 
-    fd_cache = std::make_unique<FileDescriptorCache>(100);
-    dir_fd_cache = std::make_unique<FileDescriptorCache>(100);
+    fd_cache = std::make_unique<FileDescriptorCache>(10000);
+    dir_fd_cache = std::make_unique<FileDescriptorCache>(10000);
 
     return 0;
 }
