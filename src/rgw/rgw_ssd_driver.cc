@@ -25,8 +25,9 @@ int FileDescriptorCache::remove(const DoutPrefixProvider* dpp, const std::string
         ldpp_dout(dpp, 10) <<  __func__ << "() fd is: " << p->second->fd << " file_path is: " << p->second->file_path << dendl;
         ::close(p->second->fd);
     }
-    entries_map.erase(p);
+    ldpp_dout(dpp, 10) <<  __func__ << "() removed fd is: " << p->second->fd << " file_path is: " << file_path << dendl;
     entries_lru_list.erase_and_dispose(entries_lru_list.iterator_to(*(p->second)), Entry_delete_disposer());
+    entries_map.erase(p);
     return 0;
 }
 void FileDescriptorCache::update(const DoutPrefixProvider* dpp, const std::string& file_path, int fd) {
@@ -44,12 +45,12 @@ int FileDescriptorCache::evict(const DoutPrefixProvider* dpp) {
     auto p = entries_lru_list.front();
     ldpp_dout(dpp, 10) <<  __func__ << "() fd is: " << p.fd << " file_path is: " << p.file_path << dendl;
     ::close(p.fd);
+    entries_lru_list.pop_front_and_dispose(Entry_delete_disposer());
     auto it = entries_map.find(p.file_path);
     if (it != entries_map.end()) {
         ldpp_dout(dpp, 10) <<  __func__ << "() removing fd is: " << p.fd << " file_path is: " << p.file_path << dendl;
         entries_map.erase(it);
     }
-    entries_lru_list.pop_front_and_dispose(Entry_delete_disposer());
     cache_evictions++;
     ldpp_dout(dpp, 10) <<  __func__ << "() cache evictions is " << cache_evictions << dendl;
     return 0;
@@ -298,8 +299,8 @@ int SSDDriver::initialize(const DoutPrefixProvider* dpp)
     //currently partition_info.size is unused
     this->free_space = space.available;
 
-    fd_cache = std::make_unique<FileDescriptorCache>(10000);
-    dir_fd_cache = std::make_unique<FileDescriptorCache>(10000);
+    fd_cache = std::make_unique<FileDescriptorCache>(dpp->get_cct()->_conf->rgw_d4n_file_descriptor_cache_size);
+    dir_fd_cache = std::make_unique<FileDescriptorCache>(dpp->get_cct()->_conf->rgw_d4n_file_descriptor_cache_size);
 
     return 0;
 }
