@@ -27,8 +27,8 @@ private:
     std::atomic<uint64_t> cache_misses{0};
     std::atomic<uint64_t> cache_evictions{0};
 
-    int remove(const DoutPrefixProvider* dpp, const std::string& file_path, bool close_file = false);
-    void update(const DoutPrefixProvider* dpp, const std::string& file_path, int fd);
+    int remove(const DoutPrefixProvider* dpp, const std::string& file_path);
+    void update(const DoutPrefixProvider* dpp, const std::string& file_path, int fd, Entry* entry=nullptr);
     int evict(const DoutPrefixProvider* dpp);
 
 public:

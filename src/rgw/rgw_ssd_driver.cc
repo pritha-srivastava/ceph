@@ -16,29 +16,35 @@ namespace rgw { namespace cache {
 static std::atomic<uint64_t> index{0};
 static std::atomic<uint64_t> dir_index{0};
 
-int FileDescriptorCache::remove(const DoutPrefixProvider* dpp, const std::string& file_path, bool close_file) {
+int FileDescriptorCache::remove(const DoutPrefixProvider* dpp, const std::string& file_path) {
     auto p = entries_map.find(file_path);
     if (p == entries_map.end()) {
         return -ENOENT;
     }
-    if (close_file) {
-        ldpp_dout(dpp, 10) <<  __func__ << "() fd is: " << p->second->fd << " file_path is: " << p->second->file_path << dendl;
-        ::close(p->second->fd);
-    }
+    ::close(p->second->fd);
     ldpp_dout(dpp, 10) <<  __func__ << "() removed fd is: " << p->second->fd << " file_path is: " << file_path << dendl;
     entries_lru_list.erase_and_dispose(entries_lru_list.iterator_to(*(p->second)), Entry_delete_disposer());
     entries_map.erase(p);
     return 0;
 }
-void FileDescriptorCache::update(const DoutPrefixProvider* dpp, const std::string& file_path, int fd) {
-    remove(dpp, file_path);
-    if (entries_map.size() == max_entries) {
-        evict(dpp);
+
+void FileDescriptorCache::update(const DoutPrefixProvider* dpp, const std::string& file_path, int fd, Entry* entry) {
+    //for existing entries, move entry to back (most recently used position)
+    if (entry) {
+        if (!entries_lru_list.empty() && entry == &entries_lru_list.back()) {
+            return;// Already at back, no operation needed
+        }
+        auto it = entries_lru_list.iterator_to(*entry);
+        entries_lru_list.splice(entries_lru_list.end(), entries_lru_list, it);
+    } else {
+        if (entries_map.size() == max_entries) {
+            evict(dpp);
+        }
+        ldpp_dout(dpp, 10) <<  __func__ << "() added fd is: " << fd << " file_path is: " << file_path << dendl;
+        Entry* e = new Entry(file_path, fd);
+        entries_lru_list.push_back(*e);
+        entries_map.emplace(file_path, e);
     }
-    ldpp_dout(dpp, 10) <<  __func__ << "() added fd is: " << fd << " file_path is: " << file_path << dendl;
-    Entry* e = new Entry(file_path, fd);
-    entries_lru_list.push_back(*e);
-    entries_map.emplace(file_path, e);
 }
 
 int FileDescriptorCache::evict(const DoutPrefixProvider* dpp) {
@@ -59,6 +65,7 @@ int FileDescriptorCache::evict(const DoutPrefixProvider* dpp) {
 int FileDescriptorCache::get(const DoutPrefixProvider* dpp, const std::string& file_path) {
     const std::lock_guard l(lru_lock);
     auto entry = entries_map.find(file_path);
+    Entry *e = nullptr;
     int fd;
     if (entry == entries_map.end()) {
         cache_misses++;
@@ -67,6 +74,7 @@ int FileDescriptorCache::get(const DoutPrefixProvider* dpp, const std::string& f
         return -ENOENT;
     } else {
         fd = entry->second->fd;
+        e = entry->second;
         auto ret = lseek(fd, 0, SEEK_SET);
         if (ret < 0) {
             ldpp_dout(dpp, 10) <<  __func__ << "() file_path is: " << file_path << dendl;
@@ -76,7 +84,7 @@ int FileDescriptorCache::get(const DoutPrefixProvider* dpp, const std::string& f
         cache_hits++;
         ldpp_dout(dpp, 10) <<  __func__ << "() cache hits is " << cache_hits << dendl;
     }
-    update(dpp, file_path, fd);
+    update(dpp, file_path, fd, e);
     return fd;
 }
 
@@ -87,7 +95,7 @@ void FileDescriptorCache::put(const DoutPrefixProvider* dpp, const std::string& 
 
 int FileDescriptorCache::erase(const DoutPrefixProvider* dpp, const std::string& file_path) {
     const std::lock_guard l(lru_lock);
-    return remove(dpp, file_path, true);
+    return remove(dpp, file_path);
 }
 
 static std::vector<std::string> tokenize_key(std::string_view key)
