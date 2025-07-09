@@ -9,7 +9,7 @@ namespace rgw { namespace cache {
 class SSDDriver : public CacheDriver {
 public:
   SSDDriver(Partition& partition_info) : partition_info(partition_info) {}
-  virtual ~SSDDriver() {}
+  virtual ~SSDDriver() { ::close(dir_fd); }
 
   virtual int initialize(const DoutPrefixProvider* dpp) override;
   virtual int put(const DoutPrefixProvider* dpp, const CacheKey& key, const bufferlist& bl, uint64_t len, const rgw::sal::Attrs& attrs, optional_yield y) override;
@@ -33,12 +33,15 @@ public:
   void set_free_space(const DoutPrefixProvider* dpp, uint64_t free_space);
 
   virtual int restore_blocks_objects(const DoutPrefixProvider* dpp, ObjectDataCallback obj_func, BlockDataCallback block_func) override;
+  int get_dir_fd() { return dir_fd; }
+  void set_dir_fd(int dir_fd) { this->dir_fd = dir_fd; }
 
 private:
   Partition partition_info;
   uint64_t free_space;
   CephContext* cct;
   std::mutex cache_lock;
+  int dir_fd{0};
 
   struct libaio_read_handler {
     rgw::Aio* throttle = nullptr;
@@ -107,6 +110,7 @@ private:
     std::string temp_file_path;
 	  void *data;
 	  int fd;
+    CacheKey key;
 	  unique_aio_cb_ptr cb;
     SSDDriver *priv_data;
     rgw::sal::Attrs attrs;
@@ -122,8 +126,8 @@ private:
   };
   int get_attrs(const DoutPrefixProvider* dpp, const std::string& key, rgw::sal::Attrs& attrs, optional_yield y);
   int get_attr(const DoutPrefixProvider* dpp, const std::string& key, const std::string& attr_name, std::string& attr_val, optional_yield y);
-  int set_attrs(const DoutPrefixProvider* dpp, const std::string& key, const rgw::sal::Attrs& attrs, optional_yield y);
-  int set_attr(const DoutPrefixProvider* dpp, const std::string& key, const std::string& attr_name, const std::string& attr_val, optional_yield y);
+  int set_attrs(const DoutPrefixProvider* dpp, int fd, const rgw::sal::Attrs& attrs, optional_yield y);
+  int set_attr(const DoutPrefixProvider* dpp, int fd, const std::string& attr_name, const std::string& attr_val, optional_yield y);
 };
 
 } } // namespace rgw::cache

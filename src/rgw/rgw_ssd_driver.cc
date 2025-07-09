@@ -86,7 +86,7 @@ static void parse_key(const DoutPrefixProvider* dpp, const std::string& location
 #endif
 }
 
-static void create_directories(const DoutPrefixProvider* dpp, const std::string& dir_path)
+static void create_directories(const DoutPrefixProvider* dpp, const std::string& dir_path, SSDDriver* cache_driver)
 {
     std::error_code ec;
     std::string temp_dir_path = dir_path + "_" + std::to_string(dir_index++);
@@ -116,6 +116,13 @@ static void create_directories(const DoutPrefixProvider* dpp, const std::string&
                         ldpp_dout(dpp, 5) << "create_directories: chmod return error: " << strerror(errno) << dendl;
                     }
                 }
+                if (cache_driver && cache_driver->get_dir_fd() == 0) {
+                    int dir_fd = open(cache_driver->get_current_partition_info(dpp).location.c_str(), O_RDONLY | O_DIRECTORY);
+                    if (dir_fd < 0) {
+                        ldpp_dout(dpp, 5) << "open directory returned error: " << dir_fd << dendl;
+                    }
+                    cache_driver->set_dir_fd(dir_fd);
+                }
             }
         }
     }
@@ -126,13 +133,28 @@ static inline std::string get_file_path(const DoutPrefixProvider* dpp, const std
     return dir_path + "/" + file_name;
 }
 
-static std::string create_dirs_get_filepath_from_key(const DoutPrefixProvider* dpp, const std::string& location, const CacheKey& key, bool temp=false)
+static std::string create_dirs_get_filepath_from_key(const DoutPrefixProvider* dpp, const std::string& location, const CacheKey& key, SSDDriver* cache_driver=nullptr, bool temp=false)
 {
     std::string dir_path, file_name;
     parse_key(dpp, location, key, dir_path, file_name, temp);
-    create_directories(dpp, dir_path);
+    create_directories(dpp, dir_path, cache_driver);
     return get_file_path(dpp, dir_path, file_name);
 
+}
+
+static int open_file_for_writing(const DoutPrefixProvider* dpp, const std::string& location, const CacheKey& key, int dir_fd)
+{
+    std::string dir_path, file_name;
+    parse_key(dpp, location, key, dir_path, file_name);
+    std::string file_path_name1 = url_encode(key.bucket_id, true) + "/" + url_encode(key.obj_name, true) + "/" + file_name;
+    mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+    int fd = ::openat(dir_fd, file_path_name1.c_str(), O_WRONLY | O_CREAT | O_TRUNC | dpp->get_cct()->_conf->rgw_d4n_l1_write_open_flags, mode);
+    if (fd < 0) {
+        ldpp_dout(dpp, 5) << "file_path_name1: " << file_path_name1 << dendl;
+        ldpp_dout(dpp, 5) << "open file failed: " << strerror(errno) << dendl;
+        return -errno;
+    }
+    return fd;
 }
 
 int SSDDriver::initialize(const DoutPrefixProvider* dpp)
@@ -557,21 +579,23 @@ void SSDDriver::put_async(const DoutPrefixProvider *dpp, const Executor& ex, con
     auto p = Op::create(ex, handler);
     auto& op = p->user_data;
 
-    op.file_path = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
+    std::string dir_path;
+    parse_key(dpp, this->get_current_partition_info(dpp).location, key, dir_path, op.file_path);
+    parse_key(dpp, this->get_current_partition_info(dpp).location, key, dir_path, op.temp_file_path, true);
+    create_directories(dpp, dir_path, this);
     ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): op.file_path=" << op.file_path << dendl;
-
-    op.temp_file_path = create_dirs_get_filepath_from_key(dpp, partition_info.location, key, true);
     ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): op.temp_file_path=" << op.temp_file_path << dendl;
 
     int r = 0;
     bufferlist src = bl;
+    op.priv_data = this;
+    op.key = key;
     r = op.prepare_libaio_write_op(dpp, src, len, op.temp_file_path);
     op.cb->aio_sigevent.sigev_notify = SIGEV_THREAD;
     op.cb->aio_sigevent.sigev_notify_function = SSDDriver::AsyncWriteRequest::libaio_write_cb;
     op.cb->aio_sigevent.sigev_notify_attributes = nullptr;
     op.cb->aio_sigevent.sigev_value.sival_ptr = (void*)p.get();
     op.dpp = dpp;
-    op.priv_data = this;
     op.attrs = std::move(attrs);
     if (r >= 0) {
         r = ::aio_write(op.cb.get());
@@ -697,21 +721,18 @@ int SSDDriver::AsyncWriteRequest::prepare_libaio_write_op(const DoutPrefixProvid
     ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): Write To Cache, location=" << file_path << dendl;
     cb.reset(new struct aiocb);
     memset(cb.get(), 0, sizeof(struct aiocb));
+    std::string file_path_name1 = url_encode(key.bucket_id, true) + "/" + url_encode(key.obj_name, true) + "/" + file_path;
     mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
-    r = fd = TEMP_FAILURE_RETRY(::open(file_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | dpp->get_cct()->_conf->rgw_d4n_l1_write_open_flags, mode));
+    r = fd = ::openat(priv_data->dir_fd, file_path_name1.c_str(), O_WRONLY | O_CREAT | O_TRUNC | dpp->get_cct()->_conf->rgw_d4n_l1_write_open_flags, mode);
     if (fd < 0) {
         //directories might have been deleted by a parallel delete of the last version of an object
         if (errno == ENOENT) {
             //retry after creating directories
-            std::string dir_path = file_path;
-            auto pos = dir_path.find_last_of('/');
-            if (pos != std::string::npos) {
-                dir_path.erase(pos, (dir_path.length() - pos));
-            }
+            std::string dir_path = priv_data->get_current_partition_info(dpp).location + "/" + file_path_name1;
             ldpp_dout(dpp, 20) << "INFO: AsyncWriteRequest::prepare_libaio_write_op: dir_path for creating directories=" << dir_path << dendl;
-            create_directories(dpp, dir_path);
-            r = fd = TEMP_FAILURE_RETRY(::open(file_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | dpp->get_cct()->_conf->rgw_d4n_l1_write_open_flags, mode));
-            if (fd < 0) {
+            create_directories(dpp, dir_path, priv_data);
+            r = fd = ::openat(priv_data->dir_fd, file_path_name1.c_str(), O_WRONLY | O_CREAT | O_TRUNC | dpp->get_cct()->_conf->rgw_d4n_l1_write_open_flags, mode);
+            if (r < 0) {
                 ldpp_dout(dpp, 0) << "ERROR: AsyncWriteRequest::prepare_libaio_write_op: open file failed, errno=" << errno << ", location='" << file_path.c_str() << "'" << dendl;
                 return r;
             }
@@ -751,7 +772,7 @@ void SSDDriver::AsyncWriteRequest::libaio_write_cb(sigval sigval) {
     if (op.attrs.size() > 0) {
         //TODO - fix yield_context
         optional_yield y{null_yield};
-        attr_ret = op.priv_data->set_attrs(op.dpp, op.temp_file_path, op.attrs, y);
+        attr_ret = op.priv_data->set_attrs(op.dpp, op.fd, op.attrs, y);
         if (attr_ret < 0) {
             ldpp_dout(op.dpp, 0) << "ERROR: AsyncWriteRequest::libaio_write_yield_cb::set_attrs: failed to set attrs, ret = " << attr_ret << dendl;
             ec.assign(-ret, boost::system::system_category());
@@ -767,7 +788,9 @@ void SSDDriver::AsyncWriteRequest::libaio_write_cb(sigval sigval) {
     ldpp_dout(op.dpp, 20) << "INFO: AsyncWriteRequest::libaio_write_yield_cb: new_path: " << op.file_path << dendl;
     ldpp_dout(op.dpp, 20) << "INFO: AsyncWriteRequest::libaio_write_yield_cb: old_path: " << op.temp_file_path << dendl;
 
-    ret = std::rename(op.temp_file_path.c_str(), op.file_path.c_str());
+    std::string temp_file_name = url_encode(op.key.bucket_id, true) + "/" + url_encode(op.key.obj_name, true) + "/" + op.temp_file_path;
+    std::string file_name = url_encode(op.key.bucket_id, true) + "/" + url_encode(op.key.obj_name, true) + "/" + op.file_path;
+    ret = ::renameat(op.priv_data->get_dir_fd(), temp_file_name.c_str(), op.priv_data->get_dir_fd(), file_name.c_str());
     if (ret < 0) {
         ret = errno;
         ldpp_dout(op.dpp, 0) << "ERROR: put::rename: failed to rename file: " << ret << dendl;
@@ -948,16 +971,14 @@ int SSDDriver::get_attr(const DoutPrefixProvider* dpp, const CacheKey& key, cons
     return get_attr(dpp, location, attr_name, attr_val, y);
 }
 
-int SSDDriver::set_attrs(const DoutPrefixProvider* dpp, const std::string& key, const rgw::sal::Attrs& attrs, optional_yield y)
+int SSDDriver::set_attrs(const DoutPrefixProvider* dpp, int fd, const rgw::sal::Attrs& attrs, optional_yield y)
 {
-    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << key << dendl;
- 
     for (auto& [attr_name, attr_val_bl] : attrs) {
         ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): attr_name = " << attr_name << " attr_val_bl length: " << attr_val_bl.length() << dendl;
         if (attr_val_bl.length() != 0) {
-            auto ret = set_attr(dpp, key, attr_name, attr_val_bl.to_str(), y);
+            auto ret = set_attr(dpp, fd, attr_name, attr_val_bl.to_str(), y);
             if (ret < 0) {
-                ldpp_dout(dpp, 0) << "SSDCache: " << __func__ << "(): could not set attr value for attr name: " << attr_name << " key: " << key << cpp_strerror(errno) << dendl;
+                ldpp_dout(dpp, 0) << "SSDCache: " << __func__ << "(): could not set attr value for attr name: " << attr_name << cpp_strerror(errno) << dendl;
                 return ret;
             }
         }
@@ -971,14 +992,18 @@ int SSDDriver::set_attrs(const DoutPrefixProvider* dpp, const std::string& key, 
 
 int SSDDriver::set_attrs(const DoutPrefixProvider* dpp, const CacheKey& key, const rgw::sal::Attrs& attrs, optional_yield y)
 {
-    std::string location = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
-    return set_attrs(dpp, location, attrs, y);
+    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << key << dendl;
+    int fd = open_file_for_writing(dpp, partition_info.location, key, dir_fd);
+    auto ret = set_attrs(dpp, fd, attrs, y);
+    if (ret < 0) {
+        ldpp_dout(dpp, 10) << "SSDCache: " << __func__ << "(): ret=" << ret << dendl;
+    }
+    ::close(fd);
+    return ret;
 }
 
-int SSDDriver::set_attr(const DoutPrefixProvider* dpp, const std::string& key, const std::string& attr_name, const std::string& attr_val, optional_yield y)
+int SSDDriver::set_attr(const DoutPrefixProvider* dpp, int fd, const std::string& attr_name, const std::string& attr_val, optional_yield y)
 {
-    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << key << dendl;
-
     if (attr_name == RGW_ATTR_ACL) {
       if (dpp->get_cct()->_conf->subsys.should_gather(ceph_subsys_rgw, 20)) {
         std::string policy_json;
@@ -1004,9 +1029,9 @@ int SSDDriver::set_attr(const DoutPrefixProvider* dpp, const std::string& key, c
       ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): set_attr: key: " << attr_name << " val: " << attr_val << dendl;
     }
 
-    auto ret = setxattr(key.c_str(), attr_name.c_str(), attr_val.c_str(), attr_val.size(), 0);
+    auto ret = fsetxattr(fd, attr_name.c_str(), attr_val.c_str(), attr_val.size(), 0);
     if (ret < 0) {
-        ldpp_dout(dpp, 0) << "SSDCache: " << __func__ << "(): could not set attr value for attr name: " << attr_name << " key: " << key << cpp_strerror(errno) << dendl;
+        ldpp_dout(dpp, 0) << "SSDCache: " << __func__ << "(): could not set attr value for attr name: " << attr_name << cpp_strerror(errno) << dendl;
         return ret;
     }
 
@@ -1018,8 +1043,14 @@ int SSDDriver::set_attr(const DoutPrefixProvider* dpp, const std::string& key, c
 
 int SSDDriver::set_attr(const DoutPrefixProvider* dpp, const CacheKey& key, const std::string& attr_name, const std::string& attr_val, optional_yield y)
 {
-    std::string location = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
-    return set_attr(dpp, location, attr_name, attr_val, y);
+    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << key << dendl;
+    int fd = open_file_for_writing(dpp, partition_info.location, key, dir_fd);
+    auto ret = set_attr(dpp, fd, attr_name, attr_val, y);
+    if (ret < 0) {
+        ldpp_dout(dpp, 10) << "SSDCache: " << __func__ << "(): ret=" << ret << dendl;
+    }
+    ::close(fd);
+    return ret;
 }
 
 int SSDDriver::delete_attr(const DoutPrefixProvider* dpp, const CacheKey& key, const std::string& attr_name)
