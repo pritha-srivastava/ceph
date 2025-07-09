@@ -9,7 +9,7 @@ namespace rgw { namespace cache {
 class SSDDriver : public CacheDriver {
 public:
   SSDDriver(Partition& partition_info, bool admin) : partition_info(partition_info), admin(admin) {}
-  virtual ~SSDDriver() {}
+  virtual ~SSDDriver() { ::close(dir_fd); }
 
   virtual int initialize(const DoutPrefixProvider* dpp) override;
   virtual int put(const DoutPrefixProvider* dpp, const CacheKey& key, const bufferlist& bl, uint64_t len, const rgw::sal::Attrs& attrs, optional_yield y) override;
@@ -33,6 +33,8 @@ public:
   void set_free_space(const DoutPrefixProvider* dpp, uint64_t free_space);
 
   virtual int restore_blocks_objects(const DoutPrefixProvider* dpp, ObjectDataCallback obj_func, BlockDataCallback block_func) override;
+  int get_dir_fd() { return dir_fd; }
+  void set_dir_fd(int dir_fd) { this->dir_fd = dir_fd; }
 
 private:
   Partition partition_info;
@@ -40,6 +42,7 @@ private:
   CephContext* cct;
   std::mutex cache_lock;
   bool admin;
+  int dir_fd{0};
 
   struct libaio_read_handler {
     rgw::Aio* throttle = nullptr;
@@ -92,10 +95,11 @@ private:
   struct AsyncReadOp {
     bufferlist result;
     unique_aio_cb_ptr aio_cb;
+    SSDDriver *priv_data;
     using Signature = void(boost::system::error_code, bufferlist);
     using Completion = ceph::async::Completion<Signature, AsyncReadOp>;
 
-    int prepare_libaio_read_op(const DoutPrefixProvider *dpp, const std::string& file_path, off_t read_ofs, off_t read_len, void* arg);
+    int prepare_libaio_read_op(const DoutPrefixProvider *dpp, const CacheKey& cache_key, off_t read_ofs, off_t read_len, void* arg);
     static void libaio_cb_aio_dispatch(sigval sigval);
 
     template <typename Executor1, typename CompletionHandler>
@@ -108,6 +112,7 @@ private:
     std::string temp_file_path;
 	  void *data;
 	  int fd;
+    CacheKey key;
 	  unique_aio_cb_ptr cb;
     SSDDriver *priv_data;
     rgw::sal::Attrs attrs;
@@ -121,10 +126,10 @@ private:
     template <typename Executor1, typename CompletionHandler>
     static auto create(const Executor1& ex1, CompletionHandler&& handler);
   };
-  int get_attrs(const DoutPrefixProvider* dpp, const std::string& key, rgw::sal::Attrs& attrs, optional_yield y);
-  int get_attr(const DoutPrefixProvider* dpp, const std::string& key, const std::string& attr_name, std::string& attr_val, optional_yield y);
-  int set_attrs(const DoutPrefixProvider* dpp, const std::string& key, const rgw::sal::Attrs& attrs, optional_yield y);
-  int set_attr(const DoutPrefixProvider* dpp, const std::string& key, const std::string& attr_name, const std::string& attr_val, optional_yield y);
+  int get_attrs(const DoutPrefixProvider* dpp, int fd, rgw::sal::Attrs& attrs, optional_yield y);
+  int get_attr(const DoutPrefixProvider* dpp, int fd, const std::string& attr_name, std::string& attr_val, optional_yield y);
+  int set_attrs(const DoutPrefixProvider* dpp, int fd, const rgw::sal::Attrs& attrs, optional_yield y);
+  int set_attr(const DoutPrefixProvider* dpp, int fd, const std::string& attr_name, const std::string& attr_val, optional_yield y);
 };
 
 } } // namespace rgw::cache
