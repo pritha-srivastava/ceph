@@ -6,6 +6,47 @@
 
 namespace rgw { namespace cache {
 
+class FileDescriptorCache {
+private:
+    struct Entry : public boost::intrusive::list_base_hook<> {
+        std::string file_path;
+        int fd;
+        bool needs_reset{false};
+        Entry(const std::string& file_path, int fd) : file_path(file_path), fd(fd) {}
+    };
+    struct Entry_delete_disposer {
+      void operator()(Entry* e) {
+        delete e;
+      }
+    };
+    std::mutex lru_lock;
+    typedef boost::intrusive::list<Entry> List;
+    std::unordered_map<std::string, Entry*> entries_map;
+    List entries_lru_list;
+    const uint64_t max_entries;
+    std::atomic<uint64_t> cache_hits{0};
+    std::atomic<uint64_t> cache_misses{0};
+    std::atomic<uint64_t> cache_evictions{0};
+    std::atomic<uint64_t> fd_lseek{0};
+
+    int evict(const DoutPrefixProvider* dpp);
+
+public:
+    FileDescriptorCache(const uint64_t max_entries) : max_entries(max_entries) {}
+    ~FileDescriptorCache() {
+        const std::lock_guard l(lru_lock);
+        for (auto const& [filepath, entry] : entries_map) {
+            ::close(entry->fd);
+            entries_lru_list.erase_and_dispose(entries_lru_list.iterator_to(*entry), Entry_delete_disposer());
+        }
+        entries_lru_list.clear();
+        entries_map.clear();
+    }
+    int get(const DoutPrefixProvider* dpp, const std::string& file_path);
+    int put(const DoutPrefixProvider* dpp, const std::string& file_path, int fd);
+    int erase(const DoutPrefixProvider* dpp, const std::string& file_path);
+};
+
 class SSDDriver : public CacheDriver {
 public:
   SSDDriver(Partition& partition_info) : partition_info(partition_info) {}
@@ -42,6 +83,7 @@ private:
   CephContext* cct;
   std::mutex cache_lock;
   int dir_fd{0};
+  std::unique_ptr<FileDescriptorCache> fd_cache = nullptr;
 
   struct libaio_read_handler {
     rgw::Aio* throttle = nullptr;
@@ -65,11 +107,18 @@ private:
   };
 
   // unique_ptr with custom deleter for struct aiocb
-  struct libaio_aiocb_deleter {
+  struct libaio_write_aiocb_deleter {
     void operator()(struct aiocb* c) {
       if(c->aio_fildes > 0) {
 	      TEMP_FAILURE_RETRY(::close(c->aio_fildes));
       }
+      c->aio_buf = nullptr;
+      delete c;
+    }
+  };
+
+  struct libaio_read_aiocb_deleter {
+    void operator()(struct aiocb* c) {
       c->aio_buf = nullptr;
       delete c;
     }
@@ -89,12 +138,14 @@ private:
   rgw::Aio::OpFunc ssd_cache_write_op(const DoutPrefixProvider *dpp, optional_yield y, rgw::cache::CacheDriver* cache_driver,
                                 const bufferlist& bl, uint64_t len, const rgw::sal::Attrs& attrs, const CacheKey& key);
 
-  using unique_aio_cb_ptr = std::unique_ptr<struct aiocb, libaio_aiocb_deleter>;
+  using unique_aio_read_cb_ptr = std::unique_ptr<struct aiocb, libaio_read_aiocb_deleter>;
+  using unique_aio_write_cb_ptr = std::unique_ptr<struct aiocb, libaio_write_aiocb_deleter>;
 
   struct AsyncReadOp {
     bufferlist result;
-    unique_aio_cb_ptr aio_cb;
+    unique_aio_read_cb_ptr aio_cb;
     SSDDriver *priv_data;
+    bool close_fd;
     using Signature = void(boost::system::error_code, bufferlist);
     using Completion = ceph::async::Completion<Signature, AsyncReadOp>;
 
@@ -112,7 +163,7 @@ private:
 	  void *data;
 	  int fd;
     CacheKey key;
-	  unique_aio_cb_ptr cb;
+	  unique_aio_write_cb_ptr cb;
     SSDDriver *priv_data;
     rgw::sal::Attrs attrs;
 
