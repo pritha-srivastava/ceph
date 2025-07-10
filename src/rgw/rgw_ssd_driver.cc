@@ -157,6 +157,21 @@ static int open_file_for_writing(const DoutPrefixProvider* dpp, const std::strin
     return fd;
 }
 
+static int open_file_for_reading(const DoutPrefixProvider* dpp, const std::string& location, const CacheKey& key, int dir_fd)
+{
+    std::string dir_path, file_name;
+    parse_key(dpp, location, key, dir_path, file_name);
+    std::string file_path_name1 = url_encode(key.bucket_id, true) + "/" + url_encode(key.obj_name, true) + "/" + file_name;
+    int fd = TEMP_FAILURE_RETRY(::openat(dir_fd, file_path_name1.c_str(), O_RDONLY|O_CLOEXEC|O_BINARY));
+    if (fd < 0) {
+        ldpp_dout(dpp, 5) << "file_path_name1: " << file_path_name1 << dendl;
+        ldpp_dout(dpp, 5) << "open file failed: " << strerror(errno) << dendl;
+        return -errno;
+    }
+    return fd;
+}
+
+
 int SSDDriver::initialize(const DoutPrefixProvider* dpp)
 {
     if(partition_info.location.back() != '/') {
@@ -271,30 +286,33 @@ int SSDDriver::restore_blocks_objects(const DoutPrefixProvider* dpp, ObjectDataC
   
 				std::string dirtyStr;
 				bool dirty;
-				auto ret = get_attr(dpp, file_entry.path(), RGW_CACHE_ATTR_DIRTY, dirtyStr, null_yield);
-				if (ret == 0 && dirtyStr == "1") {
-				    ldpp_dout(dpp, 10) << "SSDCache: " << __func__ << "(): Dirty xattr retrieved" << dendl;
-                                    dirty = true;
-                                } else if (ret < 0) {
-				    ldpp_dout(dpp, 0) << "SSDCache: " << __func__ << "(): Failed to get attr: " << RGW_CACHE_ATTR_DIRTY << ", ret=" << ret << dendl;
-                                    dirty = false;
-				} else {
-                                    dirty = false;
-                                }
-
-                                if (parts.size() == 1 || parts.size() == 3) {
-				    std::string version = url_decode(parts[0]);
+                if (parts.size() == 1 || parts.size() == 3) {
+				    std::string version = parts[0];
 				    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): version: " << version << dendl;
 
-				    std::string key = url_encode(bucket_id, true) + CACHE_DELIM + url_encode(version, true) + CACHE_DELIM + url_encode(object_name, true);
+				    std::string key = bucket_id + CACHE_DELIM + version + CACHE_DELIM + object_name;
 				    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key: " << key << dendl;
+
+                    CacheKey cache_key{url_decode(bucket_id), url_decode(object_name), url_decode(version), 0, 0};
+                    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): cache_key: " << cache_key << dendl;
 
 				    uint64_t len = 0, offset = 0;
 				    if (parts.size() == 1) {
+                        auto ret = get_attr(dpp, cache_key, RGW_CACHE_ATTR_DIRTY, dirtyStr, null_yield);
+                        if (ret == 0 && dirtyStr == "1") {
+                            ldpp_dout(dpp, 10) << "SSDCache: " << __func__ << "(): Dirty xattr retrieved" << dendl;
+                                dirty = true;
+                        } else if (ret < 0) {
+                            ldpp_dout(dpp, 0) << "SSDCache: " << __func__ << "(): Failed to get attr: " << RGW_CACHE_ATTR_DIRTY << ", ret=" << ret << dendl;
+                            dirty = false;
+                        } else {
+                            dirty = false;
+                        }
+
 					if (dirtyStr == "0") {
 					    //non-dirty or clean blocks - version in head block and offset, len in data blocks
 					    std::string localWeightStr;
-					    ret = get_attr(dpp, file_entry.path(), RGW_CACHE_ATTR_LOCAL_WEIGHT, localWeightStr, null_yield);
+					    ret = get_attr(dpp, cache_key, RGW_CACHE_ATTR_LOCAL_WEIGHT, localWeightStr, null_yield);
 					    if (ret < 0) {
 						ldpp_dout(dpp, 0) << "SSDCache: " << __func__ << "(): Failed to get attr: " << RGW_CACHE_ATTR_LOCAL_WEIGHT << dendl;
 					    } else {
@@ -307,7 +325,7 @@ int SSDDriver::restore_blocks_objects(const DoutPrefixProvider* dpp, ObjectDataC
 					    std::string localWeightStr;
 					    std::string invalidStr;
 					    rgw::sal::Attrs attrs;
-					    get_attrs(dpp, file_entry.path(), attrs, null_yield);
+					    get_attrs(dpp, cache_key, attrs, null_yield);
 					    std::string etag, bucket_name;
 					    uint64_t size = 0;
 					    time_t creationTime = time_t(nullptr);
@@ -386,8 +404,21 @@ int SSDDriver::restore_blocks_objects(const DoutPrefixProvider* dpp, ObjectDataC
 					key = key + CACHE_DELIM + std::to_string(offset) + CACHE_DELIM + std::to_string(len);
 					ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key: " << key << dendl;
 
+                    cache_key.offset = offset;
+                    cache_key.len = len;
+
+                    auto ret = get_attr(dpp, cache_key, RGW_CACHE_ATTR_DIRTY, dirtyStr, null_yield);
+                    if (ret == 0 && dirtyStr == "1") {
+                        ldpp_dout(dpp, 10) << "SSDCache: " << __func__ << "(): Dirty xattr retrieved" << dendl;
+                        dirty = true;
+                    } else if (ret < 0) {
+                        ldpp_dout(dpp, 0) << "SSDCache: " << __func__ << "(): Failed to get attr: " << RGW_CACHE_ATTR_DIRTY << ", ret=" << ret << dendl;
+                        dirty = false;
+                    } else {
+                        dirty = false;
+                    }
 					std::string localWeightStr;
-					auto ret = get_attr(dpp, file_entry.path(), RGW_CACHE_ATTR_LOCAL_WEIGHT, localWeightStr, null_yield);
+					ret = get_attr(dpp, cache_key, RGW_CACHE_ATTR_LOCAL_WEIGHT, localWeightStr, null_yield);
 					if (ret < 0) {
 					    ldpp_dout(dpp, 0) << "SSDCache: " << __func__ << "(): Failed to get attr: " << RGW_CACHE_ATTR_LOCAL_WEIGHT << dendl;
 					} else {
@@ -549,10 +580,8 @@ auto SSDDriver::get_async(const DoutPrefixProvider *dpp, const Executor& ex, con
     auto p = Op::create(ex, handler);
     auto& op = p->user_data;
 
-    std::string location = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
-    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): location=" << location << dendl;
-
-    int ret = op.prepare_libaio_read_op(dpp, location, read_ofs, read_len, p.get());
+    op.priv_data = this;
+    int ret = op.prepare_libaio_read_op(dpp, key, read_ofs, read_len, p.get());
     if(0 == ret) {
         ret = ::aio_read(op.aio_cb.get());
     }
@@ -799,15 +828,15 @@ void SSDDriver::AsyncWriteRequest::libaio_write_cb(sigval sigval) {
     ceph::async::dispatch(std::move(p), ec);
 }
 
-int SSDDriver::AsyncReadOp::prepare_libaio_read_op(const DoutPrefixProvider *dpp, const std::string& file_path, off_t read_ofs, off_t read_len, void* arg)
+int SSDDriver::AsyncReadOp::prepare_libaio_read_op(const DoutPrefixProvider *dpp, const CacheKey& cache_key, off_t read_ofs, off_t read_len, void* arg)
 {
-    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): file_path=" << file_path << dendl;
+    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << cache_key << dendl;
     aio_cb.reset(new struct aiocb);
     memset(aio_cb.get(), 0, sizeof(struct aiocb));
-    aio_cb->aio_fildes = TEMP_FAILURE_RETRY(::open(file_path.c_str(), O_RDONLY|O_CLOEXEC|O_BINARY));
+    aio_cb->aio_fildes = open_file_for_reading(dpp, priv_data->partition_info.location, cache_key, priv_data->get_dir_fd());
     if(aio_cb->aio_fildes < 0) {
         int err = errno;
-        ldpp_dout(dpp, 1) << "ERROR: SSDCache: " << __func__ << "(): can't open " << file_path << " : " << " error: " << err << dendl;
+        ldpp_dout(dpp, 1) << "ERROR: SSDCache: " << __func__ << "(): can't open " << cache_key << " : " << " error: " << err << dendl;
         return -err;
     }
     if (dpp->get_cct()->_conf->rgw_d4n_l1_fadvise != POSIX_FADV_NORMAL) {
@@ -883,16 +912,13 @@ int SSDDriver::delete_attrs(const DoutPrefixProvider* dpp, const CacheKey& key, 
     return 0;
 }
 
-int SSDDriver::get_attrs(const DoutPrefixProvider* dpp, const std::string& key, rgw::sal::Attrs& attrs, optional_yield y)
+int SSDDriver::get_attrs(const DoutPrefixProvider* dpp, int fd, rgw::sal::Attrs& attrs, optional_yield y)
 {
-    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << key << dendl;
-
     char namebuf[64 * 1024];
     int ret;
-    ssize_t buflen = listxattr(key.c_str(), namebuf, sizeof(namebuf));
+    ssize_t buflen = flistxattr(fd, namebuf, sizeof(namebuf));
     if (buflen < 0) {
         ret = errno;
-        ldpp_dout(dpp, 0) << "ERROR: could not get attributes for key: " << key << ": " << ret << dendl;
         return -ret;
     }
     char *keyptr = namebuf;
@@ -908,7 +934,7 @@ int SSDDriver::get_attrs(const DoutPrefixProvider* dpp, const std::string& key, 
             continue;
         }
         std::string attr_value;
-        get_attr(dpp, key, attr_name, attr_value, y);
+        get_attr(dpp, fd, attr_name, attr_value, y);
         bufferlist bl_value;
         bl_value.append(attr_value);
         attrs.emplace(std::move(attr_name), std::move(bl_value));
@@ -918,23 +944,27 @@ int SSDDriver::get_attrs(const DoutPrefixProvider* dpp, const std::string& key, 
 
 int SSDDriver::get_attrs(const DoutPrefixProvider* dpp, const CacheKey& key, rgw::sal::Attrs& attrs, optional_yield y)
 {
-    std::string location = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
-    return get_attrs(dpp, location, attrs, y);
+    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << key << dendl;
+    int fd = open_file_for_reading(dpp, partition_info.location, key, dir_fd);
+    if (fd < 0) {
+        return fd;
+    }
+    auto ret = get_attrs(dpp, fd, attrs, y);
+    //close fd, if fd cache is not enabled
+    ::close(fd);
+    return ret;
 }
 
-int SSDDriver::get_attr(const DoutPrefixProvider* dpp, const std::string& key, const std::string& attr_name, std::string& attr_val, optional_yield y)
+int SSDDriver::get_attr(const DoutPrefixProvider* dpp, int fd, const std::string& attr_name, std::string& attr_val, optional_yield y)
 {
-    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << key << dendl;
-    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): get_attr: attr_name: " << attr_name << dendl;
-
     size_t buffer_size = 256;
     while (true) {
         attr_val.resize(buffer_size);
-        ssize_t attr_size = getxattr(key.c_str(), attr_name.c_str(), attr_val.data(), attr_val.size());
+        ssize_t attr_size = fgetxattr(fd, attr_name.c_str(), attr_val.data(), attr_val.size());
         if (attr_size < 0) {
             if (errno == ERANGE) {
                 // Buffer too small, get actual size needed
-                attr_size = getxattr(key.c_str(), attr_name.c_str(), nullptr, 0);
+                attr_size = fgetxattr(fd, attr_name.c_str(), nullptr, 0);
                 if (attr_size < 0) {
                     ldpp_dout(dpp, 0) << "ERROR: could not get attribute " << attr_name << ": " << cpp_strerror(errno) << dendl;
                     attr_val = "";
@@ -967,8 +997,16 @@ int SSDDriver::get_attr(const DoutPrefixProvider* dpp, const std::string& key, c
 
 int SSDDriver::get_attr(const DoutPrefixProvider* dpp, const CacheKey& key, const std::string& attr_name, std::string& attr_val, optional_yield y)
 {
-    std::string location = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
-    return get_attr(dpp, location, attr_name, attr_val, y);
+    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << key << dendl;
+    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): get_attr: attr_name: " << attr_name << dendl;
+    int fd = open_file_for_reading(dpp, partition_info.location, key, dir_fd);
+    if (fd < 0) {
+        return fd;
+    }
+    auto ret = get_attr(dpp, fd, attr_name, attr_val, y);
+    //close fd, if fd cache is not enabled
+    ::close(fd);
+    return ret;
 }
 
 int SSDDriver::set_attrs(const DoutPrefixProvider* dpp, int fd, const rgw::sal::Attrs& attrs, optional_yield y)
