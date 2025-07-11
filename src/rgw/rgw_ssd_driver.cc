@@ -31,15 +31,10 @@ Entry* LRUCache<Entry, Key>::evict(const DoutPrefixProvider* dpp)
         return nullptr;
     }
     Entry* e = &entries_lru_list.front();
-    int fd = e->fd;
-    Key key = e->get_key();
     entries_lru_list.pop_front();
-    auto it = entries_map.find(key);
-    if (it != entries_map.end()) {
-        if constexpr (std::is_same_v<Entry, FileDescriptorEntry>) {
-            ldpp_dout(dpp, 10) <<  __func__ << "() removing fd is: " << fd << " file_path is: " << key << dendl;
-        }
-        entries_map.erase(it);
+    entries_set.erase(entries_set.iterator_to(*e));
+    if constexpr (std::is_same_v<Entry, FileDescriptorEntry>) {
+        ldpp_dout(dpp, 10) <<  __func__ << "() removing fd is: " << e->fd << " file_path is: " << e->file_path << dendl;
     }
     cache_evictions++;
     ldpp_dout(dpp, 10) <<  __func__ << "() cache evictions is " << cache_evictions << dendl;
@@ -54,13 +49,11 @@ Entry* LRUCache<Entry, Key>::put(const DoutPrefixProvider* dpp, Entry* entry)
         ldpp_dout(dpp, 10) <<  __func__ << "() fd to be added is: " << entry->fd << " file_path is: " << entry->file_path << dendl;
     }
     std::unique_lock l(lru_lock);
-    Key key = entry->get_key();
-    Entry* old_entry = nullptr;
-    auto e = entries_map.find(key);
-    if (e != entries_map.end()) {
+    auto it = entries_set.find(*entry);
+    if (it != entries_set.end()) {
         cache_hits++;
         ldpp_dout(dpp, 10) <<  __func__ << "() cache hits is " << cache_hits << dendl;
-        old_entry = e->second;
+        Entry* old_entry = &(*it);
         if (!entries_lru_list.empty() && old_entry == &entries_lru_list.back()) {
             return old_entry;
         }
@@ -70,12 +63,13 @@ Entry* LRUCache<Entry, Key>::put(const DoutPrefixProvider* dpp, Entry* entry)
     }
 
     Entry* evicted = nullptr;
-    if (entries_map.size() == max_entries) {
+    if (entries_set.size() == max_entries) {
         evicted = evict(dpp);
     }
 
     entries_lru_list.push_back(*entry);
-    entries_map.emplace(key, entry);
+    entries_set.insert(*entry);
+
     l.unlock();
     if (evicted) {
         ::close(evicted->fd);
@@ -103,14 +97,14 @@ Entry* LRUCache<Entry, Key>::get(const DoutPrefixProvider* dpp, const Key& key)
         ldpp_dout(dpp, 10) <<  __func__ << "() file_path to be fetched is: " << key << dendl;
     }
     const std::lock_guard l(lru_lock);
-    Entry *e = nullptr;
-    auto entry = entries_map.find(key);
-    if (entry == entries_map.end()) {
+    Entry temp_entry(key, -1);
+    auto it = entries_set.find(temp_entry);
+    if (it == entries_set.end()) {
         cache_misses++;
         ldpp_dout(dpp, 10) <<  __func__ << "() cache misses is " << cache_misses << dendl;
-        return e;
+        return nullptr;
     } else {
-        e = entry->second;
+        Entry* e = &(*it);
         cache_hits++;
         ldpp_dout(dpp, 10) <<  __func__ << "() cache hits is " << cache_hits << dendl;
         if (!entries_lru_list.empty() && e == &entries_lru_list.back()) {
@@ -126,19 +120,22 @@ template<typename Entry, typename Key>
 int LRUCache<Entry, Key>::erase(const DoutPrefixProvider* dpp, const Key& key)
 {
     const std::lock_guard l(lru_lock);
-    auto p = entries_map.find(key);
-    if (p == entries_map.end()) {
+    Entry temp_entry(key, -1);
+    auto it = entries_set.find(temp_entry);
+    if (it == entries_set.end()) {
         return -ENOENT;
     }
-    Entry* entry = p->second;
+    Entry* entry = &(*it);
     if(cleanup_func) {
         cleanup_func(entry);
     }
     if constexpr (std::is_same_v<Entry, FileDescriptorEntry>) {
         ldpp_dout(dpp, 10) <<  __func__ << "() removed fd is: " << entry->fd << " file_path is: " << entry->file_path << dendl;
     }
-    entries_lru_list.erase_and_dispose(entries_lru_list.iterator_to(*(p->second)), Entry_delete_disposer());
-    entries_map.erase(p);
+    entries_lru_list.erase(entries_lru_list.iterator_to(*entry));
+    entries_set.erase(it);
+    delete entry;
+
     return 0;
 }
 

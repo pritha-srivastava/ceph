@@ -1,12 +1,14 @@
 #pragma once
 
 #include <aio.h>
+#include <boost/intrusive/set.hpp>
 #include "rgw_common.h"
 #include "rgw_cache_driver.h"
 
 namespace rgw { namespace cache {
 
-struct FileDescriptorEntry : public boost::intrusive::list_base_hook<> {
+struct FileDescriptorEntry : public boost::intrusive::list_base_hook<>,
+                              public boost::intrusive::set_base_hook<> {
     std::string file_path;
     int fd;
 
@@ -14,6 +16,18 @@ struct FileDescriptorEntry : public boost::intrusive::list_base_hook<> {
         : file_path(file_path), fd(fd) {}
 
     std::string get_key() const { return file_path; }
+
+    bool operator<(const FileDescriptorEntry& other) {
+        return file_path < other.file_path;
+    }
+
+    bool operator>(const FileDescriptorEntry& other) {
+        return file_path > other.file_path;
+    }
+
+    bool operator==(const FileDescriptorEntry& other) {
+        return file_path == other.file_path;
+    }
 };
 
 template<typename Entry, typename Key = std::string>
@@ -24,10 +38,16 @@ private:
         delete e;
       }
     };
+    struct key_compare {
+        bool operator()(const Entry& a, const Entry& b) const {
+            return a.get_key() < b.get_key();
+        }
+    };
     std::mutex lru_lock;
     typedef boost::intrusive::list<Entry> List;
-    std::unordered_map<Key, Entry*> entries_map;
+    typedef boost::intrusive::set<Entry, boost::intrusive::compare<key_compare>> Set;
     List entries_lru_list;
+    Set entries_set;
     const uint64_t max_entries;
     std::atomic<uint64_t> cache_hits{0};
     std::atomic<uint64_t> cache_misses{0};
@@ -43,15 +63,8 @@ public:
               std::function<void(Entry*)> cleanup = nullptr) : max_entries(max_entries), cleanup_func(cleanup) {}
     ~LRUCache() {
         const std::lock_guard l(lru_lock);
-        for (auto const& [filepath, entry] : entries_map) {
-            //::close(entry->fd);
-            if (cleanup_func) {
-                cleanup_func(entry);
-            }
-            entries_lru_list.erase_and_dispose(entries_lru_list.iterator_to(*entry), Entry_delete_disposer());
-        }
-        entries_lru_list.clear();
-        entries_map.clear();
+        entries_set.clear();
+        entries_lru_list.clear_and_dispose(Entry_delete_disposer());
     }
     Entry* get(const DoutPrefixProvider* dpp, const Key& key);
     Entry* put(const DoutPrefixProvider* dpp, Entry* entry);
