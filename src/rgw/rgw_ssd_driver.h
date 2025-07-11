@@ -6,14 +6,19 @@
 
 namespace rgw { namespace cache {
 
-class FileDescriptorCache {
+struct FileDescriptorEntry : public boost::intrusive::list_base_hook<> {
+    std::string file_path;
+    int fd;
+
+    FileDescriptorEntry(const std::string& file_path, int fd) 
+        : file_path(file_path), fd(fd) {}
+
+    std::string get_key() const { return file_path; }
+};
+
+template<typename Entry, typename Key = std::string>
+class LRUCache {
 private:
-    struct Entry : public boost::intrusive::list_base_hook<> {
-        std::string file_path;
-        int fd;
-        bool needs_reset{false};
-        Entry(const std::string& file_path, int fd) : file_path(file_path), fd(fd) {}
-    };
     struct Entry_delete_disposer {
       void operator()(Entry* e) {
         delete e;
@@ -21,7 +26,7 @@ private:
     };
     std::mutex lru_lock;
     typedef boost::intrusive::list<Entry> List;
-    std::unordered_map<std::string, Entry*> entries_map;
+    std::unordered_map<Key, Entry*> entries_map;
     List entries_lru_list;
     const uint64_t max_entries;
     std::atomic<uint64_t> cache_hits{0};
@@ -29,23 +34,32 @@ private:
     std::atomic<uint64_t> cache_evictions{0};
     std::atomic<uint64_t> fd_lseek{0};
 
-    int evict(const DoutPrefixProvider* dpp);
+    std::function<void(Entry*)> cleanup_func;
+
+    Entry* evict(const DoutPrefixProvider* dpp);
 
 public:
-    FileDescriptorCache(const uint64_t max_entries) : max_entries(max_entries) {}
-    ~FileDescriptorCache() {
+    LRUCache(const uint64_t max_entries, 
+              std::function<void(Entry*)> cleanup = nullptr) : max_entries(max_entries), cleanup_func(cleanup) {}
+    ~LRUCache() {
         const std::lock_guard l(lru_lock);
         for (auto const& [filepath, entry] : entries_map) {
-            ::close(entry->fd);
+            //::close(entry->fd);
+            if (cleanup_func) {
+                cleanup_func(entry);
+            }
             entries_lru_list.erase_and_dispose(entries_lru_list.iterator_to(*entry), Entry_delete_disposer());
         }
         entries_lru_list.clear();
         entries_map.clear();
     }
-    int get(const DoutPrefixProvider* dpp, const std::string& file_path);
-    int put(const DoutPrefixProvider* dpp, const std::string& file_path, int fd);
-    int erase(const DoutPrefixProvider* dpp, const std::string& file_path);
+    Entry* get(const DoutPrefixProvider* dpp, const Key& key);
+    Entry* put(const DoutPrefixProvider* dpp, Entry* entry);
+    int put_with_cleanup(const DoutPrefixProvider* dpp, Entry* entry);
+    int erase(const DoutPrefixProvider* dpp, const Key& key);
 };
+
+using FileDescriptorCache = LRUCache<FileDescriptorEntry>;
 
 class SSDDriver : public CacheDriver {
 public:

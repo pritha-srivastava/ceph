@@ -24,98 +24,119 @@ static inline std::string get_key(const CacheKey& key) {
   }
 }
 
-int FileDescriptorCache::evict(const DoutPrefixProvider* dpp)
+template<typename Entry, typename Key>
+Entry* LRUCache<Entry, Key>::evict(const DoutPrefixProvider* dpp)
 {
-    auto p = entries_lru_list.front();
-    int close_fd = p.fd;
-    entries_lru_list.pop_front_and_dispose(Entry_delete_disposer());
-    auto it = entries_map.find(p.file_path);
+    if (entries_lru_list.empty()) {
+        return nullptr;
+    }
+    Entry* e = &entries_lru_list.front();
+    int fd = e->fd;
+    Key key = e->get_key();
+    entries_lru_list.pop_front();
+    auto it = entries_map.find(key);
     if (it != entries_map.end()) {
-        ldpp_dout(dpp, 10) <<  __func__ << "() removing fd is: " << p.fd << " file_path is: " << p.file_path << dendl;
+        if constexpr (std::is_same_v<Entry, FileDescriptorEntry>) {
+            ldpp_dout(dpp, 10) <<  __func__ << "() removing fd is: " << fd << " file_path is: " << key << dendl;
+        }
         entries_map.erase(it);
     }
     cache_evictions++;
     ldpp_dout(dpp, 10) <<  __func__ << "() cache evictions is " << cache_evictions << dendl;
-    return close_fd;
+    
+    return e;
 }
 
-int FileDescriptorCache::put(const DoutPrefixProvider* dpp, const std::string& file_path, int fd)
+template<typename Entry, typename Key>
+Entry* LRUCache<Entry, Key>::put(const DoutPrefixProvider* dpp, Entry* entry)
 {
-    ldpp_dout(dpp, 10) <<  __func__ << "() fd to be added is: " << fd << " file_path is: " << file_path << dendl;
+    if constexpr (std::is_same_v<Entry, FileDescriptorEntry>) {
+        ldpp_dout(dpp, 10) <<  __func__ << "() fd to be added is: " << entry->fd << " file_path is: " << entry->file_path << dendl;
+    }
     std::unique_lock l(lru_lock);
-
-    auto entry = entries_map.find(file_path);
-    if (entry != entries_map.end()) {
-        if (entry->second->fd != fd) {
-            ldpp_dout(dpp, 20) <<  __func__ << "() fd already exists for file path: " << file_path << dendl;
-            cache_hits++;
-            ldpp_dout(dpp, 10) <<  __func__ << "() cache hits is " << cache_hits << dendl;
-            Entry* e = entry->second;
-            int old_fd = entry->second->fd;
-            bool need_lru = true;
-            if (!entries_lru_list.empty() && e == &entries_lru_list.back()) {
-                need_lru = false;
-            }
-            if (need_lru) {
-                auto it = entries_lru_list.iterator_to(*e);
-                entries_lru_list.splice(entries_lru_list.end(), entries_lru_list, it);
-            }
-            l.unlock();
-            ::close(fd);
-            return old_fd;
+    Key key = entry->get_key();
+    Entry* old_entry = nullptr;
+    auto e = entries_map.find(key);
+    if (e != entries_map.end()) {
+        cache_hits++;
+        ldpp_dout(dpp, 10) <<  __func__ << "() cache hits is " << cache_hits << dendl;
+        old_entry = e->second;
+        if (!entries_lru_list.empty() && old_entry == &entries_lru_list.back()) {
+            return old_entry;
         }
-        //should not happen, but its a no op in case it happens
-        return fd;
+        auto it = entries_lru_list.iterator_to(*old_entry);
+        entries_lru_list.splice(entries_lru_list.end(), entries_lru_list, it);
+        return old_entry;
     }
 
-    int close_fd = 0;
+    Entry* evicted = nullptr;
     if (entries_map.size() == max_entries) {
-        close_fd = evict(dpp);
+        evicted = evict(dpp);
     }
 
-    Entry* e = new Entry(file_path, fd);
-    entries_lru_list.push_back(*e);
-    entries_map.emplace(file_path, e);
+    entries_lru_list.push_back(*entry);
+    entries_map.emplace(key, entry);
     l.unlock();
-    //if evict returns an fd which needs to be closed then close it.
-    if (close_fd > 0) {
-        ::close(close_fd);
+    if (evicted) {
+        ::close(evicted->fd);
+        delete evicted;
     }
-    return fd;
+    return nullptr;
 }
 
-int FileDescriptorCache::get(const DoutPrefixProvider* dpp, const std::string& file_path)
+template<typename Entry, typename Key>
+int LRUCache<Entry, Key>::put_with_cleanup(const DoutPrefixProvider* dpp, Entry* entry) {
+    Entry* old_entry = put(dpp, entry);
+    if (old_entry) {
+        if (cleanup_func) {
+            cleanup_func(old_entry);
+        }
+        delete old_entry;
+    }
+    return 0;
+}
+
+template<typename Entry, typename Key>
+Entry* LRUCache<Entry, Key>::get(const DoutPrefixProvider* dpp, const Key& key)
 {
-    ldpp_dout(dpp, 10) <<  __func__ << "() file_path to be fetched is: " << file_path << dendl;
+    if constexpr (std::is_same_v<Entry, FileDescriptorEntry>) {
+        ldpp_dout(dpp, 10) <<  __func__ << "() file_path to be fetched is: " << key << dendl;
+    }
     const std::lock_guard l(lru_lock);
-    auto entry = entries_map.find(file_path);
+    Entry *e = nullptr;
+    auto entry = entries_map.find(key);
     if (entry == entries_map.end()) {
         cache_misses++;
         ldpp_dout(dpp, 10) <<  __func__ << "() cache misses is " << cache_misses << dendl;
-        return -ENOENT;
+        return e;
     } else {
-        int fd = entry->second->fd;
-        Entry *e = entry->second;
+        e = entry->second;
         cache_hits++;
         ldpp_dout(dpp, 10) <<  __func__ << "() cache hits is " << cache_hits << dendl;
         if (!entries_lru_list.empty() && e == &entries_lru_list.back()) {
-            return fd;
+            return e;
         }
         auto it = entries_lru_list.iterator_to(*e);
         entries_lru_list.splice(entries_lru_list.end(), entries_lru_list, it);
-        return fd;
+        return e;
     }
 }
 
-int FileDescriptorCache::erase(const DoutPrefixProvider* dpp, const std::string& file_path)
+template<typename Entry, typename Key>
+int LRUCache<Entry, Key>::erase(const DoutPrefixProvider* dpp, const Key& key)
 {
     const std::lock_guard l(lru_lock);
-    auto p = entries_map.find(file_path);
+    auto p = entries_map.find(key);
     if (p == entries_map.end()) {
         return -ENOENT;
     }
-    ::close(p->second->fd);
-    ldpp_dout(dpp, 10) <<  __func__ << "() removed fd is: " << p->second->fd << " file_path is: " << file_path << dendl;
+    Entry* entry = p->second;
+    if(cleanup_func) {
+        cleanup_func(entry);
+    }
+    if constexpr (std::is_same_v<Entry, FileDescriptorEntry>) {
+        ldpp_dout(dpp, 10) <<  __func__ << "() removed fd is: " << entry->fd << " file_path is: " << entry->file_path << dendl;
+    }
     entries_lru_list.erase_and_dispose(entries_lru_list.iterator_to(*(p->second)), Entry_delete_disposer());
     entries_map.erase(p);
     return 0;
@@ -255,9 +276,9 @@ static int open_file_for_reading(const DoutPrefixProvider* dpp, const std::strin
     int fd = -ENOENT;
     close_fd = true;
     if (fd_cache) {
-        fd = fd_cache->get(dpp, file_path);
-        //fd is not cached or has been evicted
-        if (fd < 0) {
+        FileDescriptorEntry* e = fd_cache->get(dpp, file_path);
+        //entry is not cached or has been evicted
+        if (!e) {
             std::string file_path_name1 = url_encode(key.bucket_id, true) + "/" + url_encode(key.obj_name, true) + "/" + file_name;
             fd = TEMP_FAILURE_RETRY(::openat(dir_fd, file_path_name1.c_str(), O_RDONLY|O_CLOEXEC|O_BINARY));
             if (fd < 0) {
@@ -265,7 +286,17 @@ static int open_file_for_reading(const DoutPrefixProvider* dpp, const std::strin
                 ldpp_dout(dpp, 5) << "open file failed: " << strerror(errno) << dendl;
                 return -errno;
             }
-            fd = fd_cache->put(dpp, file_path, fd);
+            FileDescriptorEntry* new_entry = new FileDescriptorEntry(file_path, fd);
+            FileDescriptorEntry* old_entry = fd_cache->put(dpp, new_entry);
+            if (old_entry) {
+                fd = old_entry->fd;
+                if (new_entry->fd > 0) {
+                    ::close(new_entry->fd);
+                }
+                delete new_entry;
+            }
+        } else {
+            fd = e->fd;
         }
         close_fd = false;
     } else {
@@ -356,7 +387,12 @@ int SSDDriver::initialize(const DoutPrefixProvider* dpp)
     this->free_space = space.available;
 
     if (dpp->get_cct()->_conf->rgw_d4n_file_descriptor_cache_size > 0) {
-        fd_cache = std::make_unique<FileDescriptorCache>(dpp->get_cct()->_conf->rgw_d4n_file_descriptor_cache_size);
+        auto cleanup_func = [](FileDescriptorEntry* entry) {
+            if (entry->fd > 0) {
+                ::close(entry->fd);
+            }
+        };
+        fd_cache = std::make_unique<FileDescriptorCache>(dpp->get_cct()->_conf->rgw_d4n_file_descriptor_cache_size, cleanup_func);
     }
 
     this->dir_fd = open(partition_info.location.c_str(), O_RDONLY | O_DIRECTORY);
