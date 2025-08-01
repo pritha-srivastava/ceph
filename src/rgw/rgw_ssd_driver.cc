@@ -9,12 +9,126 @@
 
 #include <filesystem>
 #include <errno.h>
+#include <variant>
+
 namespace efs = std::filesystem;
 
 namespace rgw { namespace cache {
 
 static std::atomic<uint64_t> index{0};
 static std::atomic<uint64_t> dir_index{0};
+
+FileDescriptorEntry::FileDescriptorEntry(const std::string& path, uint64_t hk, FDCache* fd_cache)
+    : Object(), file_path(path), hk(hk), fd_cache(fd_cache)
+{
+    fd = ::openat(SSDDriver::dir_fd, file_path.c_str(), O_RDONLY|O_CLOEXEC|O_BINARY);
+    flags = FLAG_NONE;
+}
+
+bool FileDescriptorEntry::reclaim(const cohort::lru::ObjectFactory* newobj_fac) 
+{
+    auto factory = dynamic_cast<const FileDescriptorEntry::Factory*>(newobj_fac);
+    if (factory == nullptr) {
+      return false;
+    }
+
+    if (!fd_cache->is_same_partition(factory->hk, this->hk)) {
+      return false;
+    }
+    /* in the non-delete case, handle may still be in handle table */
+    if (fd_hook.is_linked()) {
+      /* in this case, we are being called from a context which holds
+       * the partition lock */
+      fd_cache->remove(this->hk, this, FDCache::FLAG_NONE);
+    }
+    if (fd > 0) {
+        ::close(fd);
+    }
+    file_path.clear();
+    return true;
+}
+
+void FileDescriptorEntry::Factory::recycle (cohort::lru::Object* o)
+{
+    fd = ::openat(SSDDriver::dir_fd, path.c_str(), O_RDONLY|O_CLOEXEC|O_BINARY);
+    if (fd > 0) {
+        FileDescriptorEntry* e = dynamic_cast<FileDescriptorEntry*>(o);
+        e->fd = fd;
+        e->file_path = path;
+        e->hk = hk;
+        e->flags = FLAG_NONE;
+    }
+}
+
+FileDescriptorEntry* SSDDriver::get_fde(const DoutPrefixProvider* dpp, const std::string& path, uint32_t flags)
+{
+    bool fd_locked = flags & FileDescriptorEntry::FLAG_LOCKED;
+    FileDescriptorEntry::FDCache::Latch lat;
+    FileDescriptorEntry::Factory fac(path, &(this->fd_cache));
+    retry:
+        FileDescriptorEntry* e = fd_cache.find_latch(fac.hk, path, lat, FileDescriptorEntry::FDCache::FLAG_LOCK);
+        if (e) {
+            e->mtx.lock();
+            if (e->flags & FileDescriptorEntry::FLAG_DELETED ||
+                !fd_lru.ref(e, cohort::lru::FLAG_INITIAL)) {
+                lat.lock->unlock();
+                if (likely(!fd_locked))
+                    e->mtx.unlock();
+                goto retry; /* !LATCHED */
+            }
+            if (!(flags & FileDescriptorEntry::FLAG_LOCK))
+                if (likely(!fd_locked))
+                    e->mtx.unlock(); /* ! LOCKED */
+        } else {
+            uint32_t iflags{cohort::lru::FLAG_INITIAL};
+            e = static_cast<FileDescriptorEntry*>(fd_lru.insert(&fac, cohort::lru::Edge::MRU, iflags));
+            if (e) {
+                /* lock fh (LATCHED) */
+                if (flags & FileDescriptorEntry::FLAG_LOCK) {
+                    e->mtx.lock();
+                }
+                if (likely(!(iflags & cohort::lru::FLAG_RECYCLE))) {
+                    /* inserts at cached insert iterator, releasing latch */
+                    fd_cache.insert_latched(e, lat, FileDescriptorEntry::FDCache::FLAG_UNLOCK);
+                } else {
+                    /* recycle step invalidates Latch */
+                    fd_cache.insert(e->hk, e, FileDescriptorEntry::FDCache::FLAG_NONE);
+                    lat.lock->unlock(); /* !LATCHED */
+                }
+                return e; /* !LATCHED */
+            } else {
+                lat.lock->unlock();
+                goto retry; /* !LATCHED */
+            }
+        }
+        lat.lock->unlock();
+        return e;
+}
+
+FileDescriptorEntry* SSDDriver::lookup_fde(const DoutPrefixProvider* dpp, const std::string& path, uint32_t flags)
+{
+    bool fd_locked = flags & FileDescriptorEntry::FLAG_LOCKED;
+    FileDescriptorEntry::FDCache::Latch lat;
+    FileDescriptorEntry::Factory fac(path, &(this->fd_cache));
+    FileDescriptorEntry* e{nullptr};
+    retry:
+        e = fd_cache.find_latch(fac.hk, path, lat, FileDescriptorEntry::FDCache::FLAG_LOCK);
+        if (e) {
+            e->mtx.lock();
+            if (e->flags & FileDescriptorEntry::FLAG_DELETED ||
+                !fd_lru.ref(e, cohort::lru::FLAG_INITIAL)) {
+                lat.lock->unlock();
+                if (likely(!fd_locked))
+                    e->mtx.unlock();
+                goto retry; /* !LATCHED */
+            }
+            if (!(flags & FileDescriptorEntry::FLAG_LOCK))
+                if (likely(!fd_locked))
+                    e->mtx.unlock(); /* ! LOCKED */
+        }
+        lat.lock->unlock();
+        return e;
+}
 
 static inline std::string get_key(const CacheKey& key) {
   if (key.len == 0 && key.offset == 0) {
@@ -74,13 +188,6 @@ static void create_directories(const DoutPrefixProvider* dpp, const std::string&
                         ldpp_dout(dpp, 5) << "create_directories: chmod return error: " << strerror(errno) << dendl;
                     }
                 }
-                if (cache_driver && cache_driver->get_dir_fd() == 0) {
-                    int dir_fd = open(cache_driver->get_current_partition_info(dpp).location.c_str(), O_RDONLY | O_DIRECTORY);
-                    if (dir_fd < 0) {
-                        ldpp_dout(dpp, 5) << "open directory returned error: " << dir_fd << dendl;
-                    }
-                    cache_driver->set_dir_fd(dir_fd);
-                }
             }
         }
     }
@@ -115,18 +222,24 @@ static int open_file_for_writing(const DoutPrefixProvider* dpp, const std::strin
     return fd;
 }
 
-static int open_file_for_reading(const DoutPrefixProvider* dpp, const std::string& location, const CacheKey& key, int dir_fd)
+using OpenFileResult = std::variant<int, FileDescriptorEntry*>;
+static OpenFileResult open_file_for_reading(const DoutPrefixProvider* dpp, const std::string& location, const CacheKey& key, int dir_fd, SSDDriver* driver)
 {
     std::string dir_path, file_name;
     parse_key(dpp, location, key, dir_path, file_name);
     std::string file_path_name1 = url_encode(key.bucket_id, true) + "/" + url_encode(key.obj_name, true) + "/" + file_name;
-    int fd = TEMP_FAILURE_RETRY(::openat(dir_fd, file_path_name1.c_str(), O_RDONLY|O_CLOEXEC|O_BINARY));
-    if (fd < 0) {
-        ldpp_dout(dpp, 5) << "file_path_name1: " << file_path_name1 << dendl;
-        ldpp_dout(dpp, 5) << "open file failed: " << strerror(errno) << dendl;
-        return -errno;
+    if (dpp->get_cct()->_conf->rgw_d4n_file_descriptor_cache_size > 0) {
+        FileDescriptorEntry* fde = driver->get_fde(dpp, file_path_name1, 0);
+        return fde;
+    } else {
+        int fd = TEMP_FAILURE_RETRY(::openat(SSDDriver::dir_fd, file_path_name1.c_str(), O_RDONLY|O_CLOEXEC|O_BINARY));
+        if (fd < 0) {
+            ldpp_dout(dpp, 5) << "file_path_name1: " << file_path_name1 << dendl;
+            ldpp_dout(dpp, 5) << "open file failed: " << strerror(errno) << dendl;
+            return -errno;
+        }
+        return fd;
     }
-    return fd;
 }
 
 
@@ -206,6 +319,10 @@ int SSDDriver::initialize(const DoutPrefixProvider* dpp)
     //currently partition_info.size is unused
     this->free_space = space.available;
 
+    SSDDriver::dir_fd = open(partition_info.location.c_str(), O_RDONLY | O_DIRECTORY);
+    if (SSDDriver::dir_fd < 0) {
+        ldpp_dout(dpp, 5) << "open directory returned error: " << dir_fd << dendl;
+    }
     return 0;
 }
 
@@ -688,6 +805,15 @@ int SSDDriver::delete_data(const DoutPrefixProvider* dpp, const CacheKey& key, o
     efs::space_info space = efs::space(partition_info.location);
     this->free_space = space.available;
 
+    //need to improve this
+    if (dpp->get_cct()->_conf->rgw_d4n_file_descriptor_cache_size > 0) {
+        std::string file_path_name1 = url_encode(key.bucket_id, true) + "/" + url_encode(key.obj_name, true) + "/" + file_name;
+        auto fde = this->lookup_fde(dpp, file_path_name1, 0);
+        if (fde) {
+            fd_cache.remove(fde->hk, fde, FileDescriptorEntry::FDCache::FLAG_LOCK);
+            (void) fd_lru.unref(fde, cohort::lru::FLAG_NONE);
+        }
+    }
     return 0;
 }
 
@@ -794,11 +920,19 @@ int SSDDriver::AsyncReadOp::prepare_libaio_read_op(const DoutPrefixProvider *dpp
     ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << cache_key << dendl;
     aio_cb.reset(new struct aiocb);
     memset(aio_cb.get(), 0, sizeof(struct aiocb));
-    aio_cb->aio_fildes = open_file_for_reading(dpp, priv_data->partition_info.location, cache_key, priv_data->get_dir_fd());
+    OpenFileResult open_result = open_file_for_reading(dpp, priv_data->partition_info.location, cache_key, priv_data->get_dir_fd(), priv_data);
+    std::visit([this](auto&& arg) {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, int>) {
+            aio_cb->aio_fildes = fd = arg;
+        } else if constexpr (std::is_same_v<T, FileDescriptorEntry*>) {
+            fde = arg;
+            aio_cb->aio_fildes = fde->fd;
+        }
+    }, open_result);
     if(aio_cb->aio_fildes < 0) {
-        int err = errno;
-        ldpp_dout(dpp, 1) << "ERROR: SSDCache: " << __func__ << "(): can't open " << cache_key << " : " << " error: " << err << dendl;
-        return -err;
+        ldpp_dout(dpp, 1) << "ERROR: SSDCache: " << __func__ << "(): can't open " << cache_key << " : " << " error: " << aio_cb->aio_fildes << dendl;
+        return -aio_cb->aio_fildes;
     }
     if (dpp->get_cct()->_conf->rgw_d4n_l1_fadvise != POSIX_FADV_NORMAL) {
         posix_fadvise(aio_cb->aio_fildes, 0, 0, g_conf()->rgw_d4n_l1_fadvise);
@@ -829,6 +963,11 @@ void SSDDriver::AsyncReadOp::libaio_cb_aio_dispatch(sigval sigval)
     }
 
     ceph::async::dispatch(std::move(p), ec, std::move(op.result));
+    if (op.fde) {
+        op.priv_data->fd_lru.unref(op.fde, 0);
+    } else {
+        ::close(op.fd);
+    }
 }
 
 int SSDDriver::update_attrs(const DoutPrefixProvider* dpp, const CacheKey& key, const rgw::sal::Attrs& attrs, optional_yield y)
@@ -906,13 +1045,39 @@ int SSDDriver::get_attrs(const DoutPrefixProvider* dpp, int fd, rgw::sal::Attrs&
 int SSDDriver::get_attrs(const DoutPrefixProvider* dpp, const CacheKey& key, rgw::sal::Attrs& attrs, optional_yield y)
 {
     ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << key << dendl;
-    int fd = open_file_for_reading(dpp, partition_info.location, key, dir_fd);
-    if (fd < 0) {
-        return fd;
+    int fd = 0;
+    FileDescriptorEntry* fde{nullptr};
+    OpenFileResult result = open_file_for_reading(dpp, partition_info.location, key, dir_fd, this);
+    int ret = 0;
+    std::visit([&](auto&& arg) {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, int>) {
+            fd = arg;
+            if (fd < 0) {
+                ret = -EINVAL;
+            }
+        } else if constexpr (std::is_same_v<T, FileDescriptorEntry*>) {
+            fde = arg;
+            if (fde->fd < 0) {
+                ret = -EINVAL;
+            }
+            if(fde) {
+                fd = fde->fd;
+            }
+        } else {
+            ret = -EINVAL;
+        }
+    }, result);
+    if (ret != 0) {
+        return ret;
     }
-    auto ret = get_attrs(dpp, fd, attrs, y);
+    ret = get_attrs(dpp, fd, attrs, y);
     //close fd, if fd cache is not enabled
-    ::close(fd);
+    if (fde) {
+        fd_lru.unref(fde, 0);
+    } else {
+        ::close(fd);
+    }
     return ret;
 }
 
@@ -960,13 +1125,39 @@ int SSDDriver::get_attr(const DoutPrefixProvider* dpp, const CacheKey& key, cons
 {
     ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << key << dendl;
     ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): get_attr: attr_name: " << attr_name << dendl;
-    int fd = open_file_for_reading(dpp, partition_info.location, key, dir_fd);
-    if (fd < 0) {
-        return fd;
+    int fd = 0;
+    FileDescriptorEntry* fde{nullptr};
+    OpenFileResult result = open_file_for_reading(dpp, partition_info.location, key, dir_fd, this);
+    int ret = 0;
+    std::visit([&](auto&& arg) {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, int>) {
+            fd = arg;
+            if (fd < 0) {
+                ret = -EINVAL;
+            }
+        } else if constexpr (std::is_same_v<T, FileDescriptorEntry*>) {
+            fde = arg;
+            if (fde->fd < 0) {
+                ret = -EINVAL;
+            }
+            if(fde) {
+                fd = fde->fd;
+            }
+        } else {
+            ret = -EINVAL;
+        }
+    }, result);
+    if (ret != 0) {
+        return ret;
     }
-    auto ret = get_attr(dpp, fd, attr_name, attr_val, y);
+    ret = get_attr(dpp, fde->fd, attr_name, attr_val, y);
     //close fd, if fd cache is not enabled
-    ::close(fd);
+    if (fde) {
+        fd_lru.unref(fde, 0);
+    } else {
+        ::close(fd);
+    }
     return ret;
 }
 
