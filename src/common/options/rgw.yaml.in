@@ -3988,6 +3988,15 @@ options:
   flags:
   - startup
   with_legacy: true
+- name: rgw_d4n_use_setgetxattrs
+  type: bool
+  level: advanced
+  desc: use getxattr and setxattr (and not fgetxattr and fsetxattr)
+  long_desc:
+  default: true
+  services:
+  - rgw
+  with_legacy: true
 - name: rgw_backend_store
   type: str
   level: advanced

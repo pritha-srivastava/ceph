@@ -111,7 +111,7 @@ private:
 	  std::string file_path;
     std::string temp_file_path;
 	  void *data;
-	  int fd;
+	  int fd{0};
     CacheKey key;
 	  unique_aio_cb_ptr cb;
     SSDDriver *priv_data;
@@ -126,10 +126,10 @@ private:
     template <typename Executor1, typename CompletionHandler>
     static auto create(const Executor1& ex1, CompletionHandler&& handler);
   };
-  int get_attrs(const DoutPrefixProvider* dpp, int fd, rgw::sal::Attrs& attrs, optional_yield y);
-  int get_attr(const DoutPrefixProvider* dpp, int fd, const std::string& attr_name, std::string& attr_val, optional_yield y);
-  int set_attrs(const DoutPrefixProvider* dpp, int fd, const rgw::sal::Attrs& attrs, optional_yield y);
-  int set_attr(const DoutPrefixProvider* dpp, int fd, const std::string& attr_name, const std::string& attr_val, optional_yield y);
+  int get_attrs(const DoutPrefixProvider* dpp, int fd, const std::string& location, rgw::sal::Attrs& attrs, optional_yield y);
+  int get_attr(const DoutPrefixProvider* dpp, int fd, const std::string& location, const std::string& attr_name, std::string& attr_val, optional_yield y);
+  int set_attrs(const DoutPrefixProvider* dpp, int fd, const std::string& location, const rgw::sal::Attrs& attrs, optional_yield y);
+  int set_attr(const DoutPrefixProvider* dpp, int fd, const std::string& location, const std::string& attr_name, const std::string& attr_val, optional_yield y);
 };
 
 } } // namespace rgw::cache
