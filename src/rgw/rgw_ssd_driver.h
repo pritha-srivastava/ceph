@@ -4,10 +4,12 @@
 #include <boost/intrusive/set.hpp>
 #include <xxhash.h>
 #include "common/cohort_lru.h"
+#include "common/dout.h"
 #include "rgw_common.h"
 #include "rgw_cache_driver.h"
 
 #define dout_context g_ceph_context
+#define dout_subsys ceph_subsys_rgw
 
 namespace rgw { namespace cache {
 
@@ -94,15 +96,111 @@ struct FileDescriptorEntry : public cohort::lru::Object {
   }
 };
 
+struct FileHandleEntry : public cohort::lru::Object {
+  std::string file_path;
+  struct file_handle* handle;
+  int mount_id;
+  uint64_t hk;
+  std::mutex mtx;
+  uint32_t flags;
+  int fd;
+  static constexpr uint64_t seed = 8675309;
+  static constexpr uint32_t FLAG_NONE = 0x0000;
+  static constexpr uint32_t FLAG_LOCKED = 0x0001;//do we need LOCK?
+  static constexpr uint32_t FLAG_LOCK =   0x0002;//do we need LOCKED?
+  static constexpr uint32_t FLAG_DELETED = 0x0004;
+
+  bool reclaim(const cohort::lru::ObjectFactory* newobj_fac) override;
+
+  struct FhLT
+  {
+    bool operator()(const FileHandleEntry& lhs, const FileHandleEntry& rhs) const
+    { return (lhs.file_path < rhs.file_path); }
+
+    bool operator()(const std::string& k, const FileHandleEntry& fd) const
+    { return k < fd.file_path; }
+
+    bool operator()(const FileHandleEntry& fd, const std::string& k) const
+    { return fd.file_path < k; }
+  };
+
+  struct FhEQ
+  {
+    bool operator()(const FileHandleEntry& lhs, const FileHandleEntry& rhs) const
+    { return (lhs.file_path == rhs.file_path); }
+
+    bool operator()(const std::string& k, const FileHandleEntry& fd) const
+    { return k == fd.file_path; }
+
+    bool operator()(const FileHandleEntry& fd, const std::string& k) const
+    { return fd.file_path == k; }
+  };
+
+  typedef bi::link_mode<bi::safe_link> link_mode;
+  typedef bi::set_member_hook<link_mode> tree_hook_type;
+  tree_hook_type fh_hook;
+
+  typedef cohort::lru::LRU<std::mutex> FHLRU;
+  typedef bi::member_hook<FileHandleEntry, tree_hook_type, &FileHandleEntry::fh_hook> FhHook;
+  typedef bi::rbtree<FileHandleEntry, bi::compare<FhLT>, FhHook> FhTree;
+  typedef cohort::lru::TreeX<FileHandleEntry, FhTree, FhLT, FhEQ, std::string, std::mutex> FHCache;
+
+  class Factory : public cohort::lru::ObjectFactory {
+  public:
+    std::string path;
+    uint64_t hk;
+    FHCache* fh_cache;
+    int fd;
+
+    Factory(const std::string& path, FHCache* fh_cache) : path(path), fh_cache(fh_cache)
+    {
+      hk = XXH64(path.c_str(), path.length(), FileHandleEntry::seed);
+    }
+
+    Factory() = delete;
+
+    void recycle (cohort::lru::Object* o) override;
+
+    cohort::lru::Object* alloc() override {
+        return new FileHandleEntry(path, hk, fh_cache);
+    }
+  };
+
+  FHCache* fh_cache;
+  FileHandleEntry(const std::string& path, uint64_t hk, FHCache* fh_cache);
+
+  ~FileHandleEntry() override {
+    if (fh_hook.is_linked()) {
+      fh_cache->remove(this->hk, this, FHCache::FLAG_LOCK);
+    }
+    free(handle);
+  }
+};
+
 class SSDDriver : public CacheDriver {
 public:
   static inline int dir_fd{0};
+  std::pair<int, int> mount_id_fd;
+  // Cache statistics
+  std::atomic<uint64_t> l1_hits{0};
+  std::atomic<uint64_t> l1_misses{0};
+  std::atomic<uint64_t> l2_hits{0};
+  std::atomic<uint64_t> l2_misses{0};
+
   SSDDriver(Partition& partition_info, bool admin, uint32_t max_files=g_ceph_context->_conf->rgw_d4n_file_descriptor_cache_size, uint8_t max_lanes=5,
 	      uint8_t max_partitions=5) : partition_info(partition_info), admin(admin),
             fd_cache(max_lanes, max_files/max_partitions),
-            fd_lru(max_lanes, max_files/max_lanes) {}
+            fd_lru(max_lanes, max_files/max_lanes),
+            fh_cache(max_lanes, (4*max_files)/max_partitions),
+            fh_lru(max_lanes, (4*max_files)/max_lanes) {}
 
-  virtual ~SSDDriver() { ::close(dir_fd); }
+  virtual ~SSDDriver() {
+    dout(20) << "l1_hits: " << l1_hits << dendl;
+    dout(20) << "l1_misses: " << l1_misses << dendl;
+    dout(20) << "l2_hits: " << l2_hits << dendl;
+    dout(20) << "l2_misses: " << l2_misses << dendl;
+    ::close(dir_fd);
+  }
 
   virtual int initialize(const DoutPrefixProvider* dpp) override;
   virtual int put(const DoutPrefixProvider* dpp, const CacheKey& key, const bufferlist& bl, uint64_t len, const rgw::sal::Attrs& attrs, optional_yield y) override;
@@ -122,6 +220,10 @@ public:
 
   FileDescriptorEntry* get_fde(const DoutPrefixProvider* dpp, const std::string& path, uint32_t flags);
   FileDescriptorEntry* lookup_fde(const DoutPrefixProvider* dpp, const std::string& path, uint32_t flags);
+  FileDescriptorEntry* insert_fde(const DoutPrefixProvider* dpp, const std::string& path, uint32_t flags);
+  FileHandleEntry* get_fhe(const DoutPrefixProvider* dpp, const std::string& path, uint32_t flags);
+  FileHandleEntry* lookup_fhe(const DoutPrefixProvider* dpp, const std::string& path, uint32_t flags);
+  FileHandleEntry* insert_fhe(const DoutPrefixProvider* dpp, const std::string& path, uint32_t flags);
 
   /* Partition */
   virtual Partition get_current_partition_info(const DoutPrefixProvider* dpp) override { return partition_info; }
@@ -140,6 +242,8 @@ private:
   bool admin;
   FileDescriptorEntry::FDCache fd_cache;
   FileDescriptorEntry::FDLRU fd_lru;
+  FileHandleEntry::FHCache fh_cache;
+  FileHandleEntry::FHLRU fh_lru;
 
   struct libaio_read_handler {
     rgw::Aio* throttle = nullptr;
@@ -202,6 +306,7 @@ private:
     unique_aio_read_cb_ptr aio_cb;
     SSDDriver *priv_data;
     FileDescriptorEntry* fde{nullptr};
+    FileHandleEntry* fhe{nullptr};
     int fd{0};
     using Signature = void(boost::system::error_code, bufferlist);
     using Completion = ceph::async::Completion<Signature, AsyncReadOp>;
