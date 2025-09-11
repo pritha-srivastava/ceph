@@ -281,6 +281,7 @@ if(WITH_RADOSGW_D4N)
         driver/d4n/d4n_directory.cc
         driver/d4n/d4n_policy.cc
         driver/d4n/d4n_hashing.cc
+        driver/d4n/d4n_remote_cache_manager.cc
         driver/d4n/rgw_sal_d4n.cc)
 endif()
 

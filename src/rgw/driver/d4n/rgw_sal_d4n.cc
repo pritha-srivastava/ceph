@@ -2702,6 +2702,7 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
       ret = driver->get_policy_driver()->get_cache_policy()->eviction(dpp, bl.length(), y);
       if (ret == 0) {
         if (bl.length() > 0) {
+          #if 0
           rgw::d4n::CacheObj object;
           rgw::d4n::CacheBlock block;
           object.bucketName = obj->get_bucket()->get_name();
@@ -2710,8 +2711,21 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
           object.dirty = true;
           bufferlist out_bl;
           object.hostsList.insert(dpp->get_cct()->_conf->rgw_d4n_l1_datacache_address);
-          ret = sendRemote(dpp, &object, dpp->get_cct()->_conf->rgw_d4n_remote_cache_address, oid, &out_bl, y);
-          if (ret == 0) {
+          #endif
+          auto user = obj->get_bucket()->get_owner();
+          rgw::d4n::RemoteCachePut::RemoteCachePutOp op {
+              obj->get_bucket()->get_name(),
+              obj->get_key().get_oid(),
+              0,
+              bl.length(),
+              obj->get_obj(),
+              std::get<rgw_user>(user),
+              dpp->get_cct()->_conf->rgw_d4n_remote_cache_address
+          };
+          rgw::d4n::RemoteCachePut cp(driver, op);
+          //ret = sendRemote(dpp, &object, dpp->get_cct()->_conf->rgw_d4n_remote_cache_address, oid, &out_bl, y);
+          //ret = cp.send_request(dpp, bl, y);
+          //if (ret == 0) {
             ldpp_dout(dpp, 10) << "D4NFilterWriter::" << __func__ << "(): oid_in_cache is: " << oid_in_cache << dendl;
             ret = driver->get_cache_driver()->put(dpp, oid_in_cache, bl, bl.length(), attrs, y);
             if (ret == 0) {
@@ -2723,7 +2737,7 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
               ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): ERROR: writing data to the cache failed, ret=" << ret << dendl;
               return ret;
             }
-          } //sendRemote ret = 0
+          //} //sendRemote ret = 0
         }
       }
     } 
@@ -2886,6 +2900,22 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
         if (!prev_oid_in_cache.empty()) {
           driver->get_policy_driver()->get_cache_policy()->invalidate_dirty_object(dpp, prev_oid_in_cache);
         }
+        auto user = obj->get_bucket()->get_owner();
+        std::string remote_addr = dpp->get_cct()->_conf->rgw_d4n_remote_cache_address;
+        rgw::d4n::RemoteCachePut::RemoteCachePutOp op {
+            obj->get_bucket()->get_name(),
+            obj->get_key().get_oid(),
+            0,
+            bl.length(),
+            obj->get_obj(),
+            std::get<rgw_user>(user),
+            remote_addr
+        };
+        rgw::d4n::RemoteCachePut cp(driver, op);
+        ret = cp.send_request(dpp, bl, y);
+        if (ret < 0) {
+          ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): put failed for remote cache: " << remote_addr <<  "ret= " << ret << dendl;
+        }
       }
     } else { //if get_cache_driver()->put()
       ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): put failed for head_oid_in_cache, ret=" << ret << dendl;
@@ -3029,7 +3059,7 @@ int D4NFilterObject::D4NFilterReadOp::getRemote(const DoutPrefixProvider* dpp, l
 
     bufferlist out_bl;
     HostStyle host_style = PathStyle;
-    std::map<std::string, std::string> extra_headers;                                                            
+    std::map<std::string, std::string> extra_headers;
     Attrs object_attrs;
     D4NGetObjectCB cb(bl);
 

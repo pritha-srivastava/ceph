@@ -26,6 +26,7 @@
 
 #include "driver/d4n/d4n_directory.h"
 #include "driver/d4n/d4n_policy.h"
+#include "driver/d4n/d4n_remote_cache_manager.h"
 
 #include <boost/intrusive/list.hpp>
 #include <boost/asio/io_context.hpp>
