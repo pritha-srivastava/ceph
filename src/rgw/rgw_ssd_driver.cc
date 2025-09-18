@@ -386,6 +386,45 @@ void SSDDriver::set_free_space(const DoutPrefixProvider* dpp, uint64_t free_spac
 int SSDDriver::put(const DoutPrefixProvider* dpp, const std::string& key, const bufferlist& bl, uint64_t len, const rgw::sal::Attrs& attrs, optional_yield y)
 {
     ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): key=" << key << dendl;
+    auto file_path = create_dirs_get_filepath_from_key(dpp, partition_info.location, key);
+    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): file_path=" << file_path << dendl;
+
+    auto temp_file_path = create_dirs_get_filepath_from_key(dpp, partition_info.location, key, true);
+    ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): temp_file_path=" << temp_file_path << dendl;
+
+    mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+    int fd = TEMP_FAILURE_RETRY(::open(temp_file_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | dpp->get_cct()->_conf->rgw_d4n_l1_write_open_flags, mode));
+    if (fd < 0) {
+        ldpp_dout(dpp, 0) << "ERROR: SSDCache::put: open file failed, errno=" << errno << ", location='" << temp_file_path.c_str() << "'" << dendl;
+        return fd;
+    }
+    bufferlist src = bl;
+    char* data = src.c_str();
+    size_t remaining = src.length();
+    ssize_t total_written = 0;
+    while (remaining > 0) {
+        ssize_t written = TEMP_FAILURE_RETRY(::write(fd, data + total_written, remaining));
+        if (written < 0) {
+            int write_err = errno;
+            ldpp_dout(dpp, 0) << "ERROR: write failed, errno=" << write_err << ", written so far=" << total_written << dendl;
+            return -write_err;
+        }
+        total_written += written;
+        remaining -= written;
+    }
+    auto attr_ret = set_attrs(dpp, temp_file_path, attrs, y);
+    if (attr_ret < 0) {
+        ldpp_dout(dpp, 0) << "ERROR: SSDCache::put: failed to set attrs, ret = " << attr_ret << dendl;
+        return attr_ret;
+    }
+    auto ret = std::rename(temp_file_path.c_str(), file_path.c_str());
+    if (ret < 0) {
+        ret = errno;
+        ldpp_dout(dpp, 0) << "ERROR: SSDCache:put: failed to rename file: " << ret << dendl;
+        return ret;
+    }
+    ::close(fd);
+#if 0
     boost::system::error_code ec;
     if (y) {
         using namespace boost::asio;
@@ -399,6 +438,7 @@ int SSDDriver::put(const DoutPrefixProvider* dpp, const std::string& key, const 
     if (ec) {
         return ec.value();
     }
+#endif
     return 0;
 }
 
