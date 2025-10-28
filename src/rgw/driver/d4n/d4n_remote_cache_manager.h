@@ -15,6 +15,10 @@ namespace rgw { namespace d4n {
 namespace asio = boost::asio;
 namespace sys = boost::system;
 
+inline std::string get_resource(std::string& bucket_name, std::string& oid) {
+  return fmt::format("{}{}{}", bucket_name, "/", oid);
+}
+
 class RemoteGetCB : public RGWHTTPStreamRWRequest::ReceiveCB {
 public:
   bufferlist *in_bl;
@@ -29,10 +33,10 @@ class RemoteCachePut {
   public:
     struct RemoteCachePutOp {
       std::string bucket_name;
-      std::string obj_name;
+      std::string oid;
       uint64_t offset;
       uint64_t len;
-      rgw_obj obj;
+      std::string version;
       rgw_user bucket_owner;
       std::string remote_addr;
     };

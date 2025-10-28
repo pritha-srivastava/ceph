@@ -4581,8 +4581,19 @@ void RGWPutObj::execute(optional_yield y)
 					 pdest_placement, olh_epoch, s->req_id);
   }
 #ifdef WITH_RADOSGW_D4N
-  if (s->info.env->get_optional("HTTP_X_RGW_CACHE_REQUEST") && (g_conf().get_val<std::string>("rgw_filter") == "d4n")) {
-    dynamic_cast<rgw::sal::D4NFilterWriter*>(processor.get())->set_cache_request();
+  if (g_conf().get_val<std::string>("rgw_filter") == "d4n") {
+    if (s->info.env->get_optional("HTTP_X_RGW_CACHE_REQUEST")) {
+      ldpp_dout(this, 20) << "This is a cache request !!!" << dendl;
+      dynamic_cast<rgw::sal::D4NFilterWriter*>(processor.get())->set_cache_request();
+    }
+    rgw::sal::D4NFilterObject* d4n_obj = dynamic_cast<rgw::sal::D4NFilterObject*>(s->object.get());
+    auto object_version = s->info.env->get_optional("HTTP_X_RGW_CACHE_OBJECT_VERSION");
+    if (object_version) {
+      d4n_obj->set_object_version(object_version.get());
+    }
+    if (s->info.env->get_optional("HTTP_X_RGW_CACHE_ONLY_WRITE")) {
+      d4n_obj->set_cache_only_write();
+    }
   }
 #endif
 

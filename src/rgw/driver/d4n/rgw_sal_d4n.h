@@ -156,6 +156,7 @@ class D4NFilterObject : public FilterObject {
     bool load_from_store{false};
     bool attrs_read_from_cache{false};
     bool cache_request{false};
+    bool cache_only_write{false};
 
   public:
     struct D4NFilterReadOp : FilterReadOp {
@@ -306,7 +307,8 @@ class D4NFilterObject : public FilterObject {
     int get_obj_attrs_from_cache(const DoutPrefixProvider* dpp, optional_yield y);
     void set_attrs_from_obj_state(const DoutPrefixProvider* dpp, optional_yield y, rgw::sal::Attrs& attrs, bool dirty = false);
     int calculate_version(const DoutPrefixProvider* dpp, optional_yield y, std::string& version, rgw::sal::Attrs& attrs);
-    int set_head_obj_dir_entry(const DoutPrefixProvider* dpp, std::vector<std::string>* exec_responses, optional_yield y, bool is_latest_version = true, bool dirty = false);
+    int set_head_obj_dir_entry(const DoutPrefixProvider* dpp, optional_yield y, bool is_latest_version = true, bool dirty = false);
+    int update_head_block_hostslist(const DoutPrefixProvider* dpp, optional_yield y);
     int set_data_block_dir_entries(const DoutPrefixProvider* dpp, optional_yield y, std::string& version, bool dirty = false);
     int delete_data_block_cache_entries(const DoutPrefixProvider* dpp, optional_yield y, std::string& version, bool dirty = false);
     bool check_head_exists_in_cache_get_oid(const DoutPrefixProvider* dpp, std::string& head_oid_in_cache, rgw::sal::Attrs& attrs, rgw::d4n::CacheBlock& blk, optional_yield y);
@@ -321,6 +323,8 @@ class D4NFilterObject : public FilterObject {
     void set_load_obj_from_store(bool load_from_store) { this->load_from_store = load_from_store; }
     void set_cache_request() { cache_request = true; }
     bool is_cache_request() { return cache_request; }
+    bool is_cache_only_write() { return cache_only_write; }
+    void set_cache_only_write() { cache_only_write = true; }
 };
 
 class D4NFilterWriter : public FilterWriter {
@@ -333,6 +337,7 @@ class D4NFilterWriter : public FilterWriter {
     bool d4n_writecache;
     std::string version;
     std::string prev_oid_in_cache;
+    bufferlist out_bl;
 
   public:
     D4NFilterWriter(std::unique_ptr<Writer> _next, D4NFilterDriver* _driver, Object* _obj, 

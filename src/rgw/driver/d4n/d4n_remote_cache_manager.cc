@@ -34,10 +34,14 @@ int RemoteCachePut::send_request(const DoutPrefixProvider* dpp, bufferlist& bl, 
 
   HostStyle host_style = PathStyle;
   std::map<std::string, std::string> extra_headers;
+  extra_headers["x-rgw-cache-request"] = "true";
+  extra_headers["x-rgw-cache-only-write"] = "true";
+  extra_headers["x-rgw-cache-object-version"] = op.version;
 
+  auto resource = get_resource(op.bucket_name, op.oid);
   auto sender = new RGWRESTStreamRWRequest(dpp->get_cct(), "PUT", op.remote_addr, &cb, NULL, NULL, "", host_style);
 
-  ret = sender->send_request(dpp, accessKey, extra_headers, op.obj, nullptr);
+  ret = sender->send_request(dpp, &accessKey, extra_headers, resource, nullptr, &bl);
   if (ret < 0) {
     delete sender;
     return ret;
