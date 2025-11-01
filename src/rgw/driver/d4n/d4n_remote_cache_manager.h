@@ -39,6 +39,7 @@ class RemoteCachePut {
       std::string version;
       rgw_user bucket_owner;
       std::string remote_addr;
+      uint64_t obj_size;
     };
     RemoteCachePut(rgw::sal::Driver* driver, RemoteCachePutOp& op) : driver(driver), op(op) {}
     virtual ~RemoteCachePut() = default; 

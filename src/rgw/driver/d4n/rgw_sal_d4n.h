@@ -156,7 +156,10 @@ class D4NFilterObject : public FilterObject {
     bool load_from_store{false};
     bool attrs_read_from_cache{false};
     bool cache_request{false};
-    bool cache_only_write{false};
+    bool remote_cache_request{false}; //sent by another rgw
+    uint64_t blk_offset;
+    uint64_t blk_len;
+    uint64_t obj_size; //sent by remote rgw
 
   public:
     struct D4NFilterReadOp : FilterReadOp {
@@ -323,8 +326,16 @@ class D4NFilterObject : public FilterObject {
     void set_load_obj_from_store(bool load_from_store) { this->load_from_store = load_from_store; }
     void set_cache_request() { cache_request = true; }
     bool is_cache_request() { return cache_request; }
-    bool is_cache_only_write() { return cache_only_write; }
-    void set_cache_only_write() { cache_only_write = true; }
+    //the following are helper methods to get/set from/to cache
+    bool is_remote_cache_request() { return remote_cache_request; }
+    void set_remote_cache_request() { remote_cache_request = true; }
+    void set_block_offset(uint64_t offset) { blk_offset = offset; }
+    void set_block_len(uint64_t len) { blk_len = len; }
+    uint64_t get_remote_block_offset() { return blk_offset; }
+    uint64_t get_remote_block_len() { return blk_len; }
+    void set_remote_obj_size(uint64_t size) { obj_size = size; }
+    uint64_t get_remote_obj_size() { return obj_size; }
+    bool is_remote_head_block_request() { return (remote_cache_request && (blk_offset == 0) && (blk_len == 0)); }
 };
 
 class D4NFilterWriter : public FilterWriter {
@@ -337,7 +348,6 @@ class D4NFilterWriter : public FilterWriter {
     bool d4n_writecache;
     std::string version;
     std::string prev_oid_in_cache;
-    bufferlist out_bl;
 
   public:
     D4NFilterWriter(std::unique_ptr<Writer> _next, D4NFilterDriver* _driver, Object* _obj, 
@@ -367,6 +377,7 @@ class D4NFilterWriter : public FilterWriter {
     out_bl, optional_yield y);
    const DoutPrefixProvider* get_dpp() { return this->dpp; } 
    void set_cache_request() { object->set_cache_request(); }
+   void set_remote_cache_request() { object->set_remote_cache_request(); }
 };
 
 class D4NGetObjectCB : public RGWHTTPStreamRWRequest::ReceiveCB {

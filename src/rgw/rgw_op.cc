@@ -4582,17 +4582,26 @@ void RGWPutObj::execute(optional_yield y)
   }
 #ifdef WITH_RADOSGW_D4N
   if (g_conf().get_val<std::string>("rgw_filter") == "d4n") {
-    if (s->info.env->get_optional("HTTP_X_RGW_CACHE_REQUEST")) {
-      ldpp_dout(this, 20) << "This is a cache request !!!" << dendl;
-      dynamic_cast<rgw::sal::D4NFilterWriter*>(processor.get())->set_cache_request();
-    }
-    rgw::sal::D4NFilterObject* d4n_obj = dynamic_cast<rgw::sal::D4NFilterObject*>(s->object.get());
-    auto object_version = s->info.env->get_optional("HTTP_X_RGW_CACHE_OBJECT_VERSION");
-    if (object_version) {
-      d4n_obj->set_object_version(object_version.get());
-    }
-    if (s->info.env->get_optional("HTTP_X_RGW_CACHE_ONLY_WRITE")) {
-      d4n_obj->set_cache_only_write();
+    if (s->info.env->get_optional("HTTP_X_RGW_REMOTE_CACHE_REQUEST")) {
+      ldpp_dout(this, 20) << "This is a remote cache request !!!" << dendl;
+      dynamic_cast<rgw::sal::D4NFilterWriter*>(processor.get())->set_remote_cache_request();
+      rgw::sal::D4NFilterObject* d4n_obj = dynamic_cast<rgw::sal::D4NFilterObject*>(s->object.get());
+      auto object_version = s->info.env->get_optional("HTTP_X_RGW_CACHE_OBJECT_VERSION");
+      if (object_version) {
+        d4n_obj->set_object_version(object_version.get());
+      }
+      auto blk_offset = s->info.env->get_optional("HTTP_X_RGW_CACHE_BLK_OFFSET");
+      if (blk_offset) {
+        d4n_obj->set_block_offset(std::stoull(blk_offset.get()));
+      }
+      auto blk_len = s->info.env->get_optional("HTTP_X_RGW_CACHE_BLK_LEN");
+      if (blk_len) {
+        d4n_obj->set_block_len(std::stoull(blk_len.get()));
+      }
+      auto obj_size = s->info.env->get_optional("HTTP_X_RGW_CACHE_OBJ_SIZE");
+      if (obj_size) {
+        d4n_obj->set_remote_obj_size(std::stoull(obj_size.get()));
+      }
     }
   }
 #endif
