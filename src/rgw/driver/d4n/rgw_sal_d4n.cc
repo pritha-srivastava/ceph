@@ -2874,8 +2874,9 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
               std::get<rgw_user>(user),
               remote_addr
           };
-          rgw::d4n::RemoteCachePut cp(driver, op);
-          auto remote_cache_ret = cp.send_request(dpp, bl, y);
+          requests.emplace_back(std::make_unique<rgw::d4n::RemoteCachePut>(driver, op));
+          auto cp = requests.back().get();
+          auto remote_cache_ret = cp->send_request(dpp, bl, y);
           if (remote_cache_ret < 0) {
             ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): put failed for remote cache: " << remote_addr <<  "ret= " << remote_cache_ret << dendl;
             return remote_cache_ret;
@@ -3074,11 +3075,18 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
                 remote_addr,
                 obj->get_size()
             };
-            rgw::d4n::RemoteCachePut cp(driver, op);
+            requests.emplace_back(std::make_unique<rgw::d4n::RemoteCachePut>(driver, op));
+            auto cp = requests.back().get();
             bufferlist bl;
-            ret = cp.send_request(dpp, bl, y);
+            ret = cp->send_request(dpp, bl, y);
             if (ret < 0) {
               ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): put failed for remote cache: " << remote_addr <<  "ret= " << ret << dendl;
+            }
+            for (size_t i = 0; i < requests.size(); ++i) {
+              ret = requests[i]->complete_request(dpp, y);
+              if (ret < 0) {
+                ldpp_dout(dpp, 5) << "D4NFilterWriter::" << __func__ << "(): Request " << i << " failed to complete: " << ret << dendl;
+              }
             }
           }
         }
@@ -3156,51 +3164,6 @@ int D4NFilterMultipartUpload::complete(const DoutPrefixProvider *dpp,
     return ret;
   }
 
-  return 0;
-}
-
-int D4NFilterWriter::sendRemote(const DoutPrefixProvider* dpp, rgw::d4n::CacheObj *object, std::string remoteCacheAddress, std::string key, bufferlist*
- out_bl, optional_yield y)
-{
-  bufferlist in_bl;
-  RGWRemoteD4NGetCB cb(&in_bl);
-  std::string bucketName = object->bucketName;
-
-  RGWAccessKey accessKey;
-  std::string findKey;
-
-  auto user = obj->get_bucket()->get_owner();
-  if (std::holds_alternative<rgw_user>(user)) {
-    std::unique_ptr<rgw::sal::User> c_user = driver->get_user(std::get<rgw_user>(user));
-    int ret = c_user->load_user(dpp, y);
-    if (ret < 0) {
-      return -EPERM;
-    }
-
-    if (c_user->get_info().access_keys.empty()) {
-      return -EINVAL;
-    }
-
-    accessKey.id = c_user->get_info().access_keys.begin()->second.id;
-    accessKey.key = c_user->get_info().access_keys.begin()->second.key;
-
-    HostStyle host_style = PathStyle;
-    std::map<std::string, std::string> extra_headers;
-
-    auto sender = new RGWRESTStreamRWRequest(dpp->get_cct(), "PUT", remoteCacheAddress, &cb, NULL, NULL, "", host_style);
-
-    ret = sender->send_request(dpp, accessKey, extra_headers, obj->get_obj(), nullptr);
-    if (ret < 0) {
-      delete sender;
-      return ret;
-    }
-
-    ret = sender->complete_request(dpp, y);
-    if (ret < 0) {
-      delete sender;
-      return ret;
-    }
-  }
   return 0;
 }
 

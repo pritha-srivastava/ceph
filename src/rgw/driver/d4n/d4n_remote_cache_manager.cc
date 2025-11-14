@@ -13,8 +13,8 @@ int RemoteCachePut::init(CephContext* cct, const DoutPrefixProvider* dpp)
 
 int RemoteCachePut::send_request(const DoutPrefixProvider* dpp, bufferlist& bl, optional_yield& y)
 {
-  bufferlist in_bl;
-  RemoteGetCB cb(&in_bl);
+  in_bl.clear();
+  cb = std::make_unique<RemoteGetCB>(&in_bl);
 
   RGWAccessKey accessKey;
   std::string findKey;
@@ -41,21 +41,25 @@ int RemoteCachePut::send_request(const DoutPrefixProvider* dpp, bufferlist& bl, 
   extra_headers["x-rgw-cache-obj-size"] = std::to_string(op.obj_size);
 
   auto resource = get_resource(op.bucket_name, op.oid);
-  auto sender = new RGWRESTStreamRWRequest(dpp->get_cct(), "PUT", op.remote_addr, &cb, NULL, NULL, "", host_style);
+  sender = std::make_unique<RGWRESTStreamRWRequest>(dpp->get_cct(), "PUT", op.remote_addr, cb.get(), nullptr, nullptr, "", host_style);
 
   ret = sender->send_request(dpp, &accessKey, extra_headers, resource, nullptr, &bl);
   if (ret < 0) {
-    delete sender;
-    return ret;
-  }
-
-  ret = sender->complete_request(dpp, y);
-  if (ret < 0) {
-    delete sender;
     return ret;
   }
 
   return 0;
+}
+
+int RemoteCachePut::complete_request(const DoutPrefixProvider* dpp, optional_yield& y)
+{
+  if (!sender) {
+    return -EINVAL;
+  }
+
+  int ret = sender->complete_request(dpp, y);
+  sender.reset();
+  return ret;
 }
 
 } } // namespace rgw::d4n

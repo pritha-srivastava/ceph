@@ -37,6 +37,7 @@
 
 namespace rgw::d4n {
   class PolicyDriver;
+  class RemoteCachePut;
 }
 
 namespace rgw { namespace sal {
@@ -348,6 +349,7 @@ class D4NFilterWriter : public FilterWriter {
     bool d4n_writecache;
     std::string version;
     std::string prev_oid_in_cache;
+    std::vector<std::unique_ptr<rgw::d4n::RemoteCachePut>> requests;
 
   public:
     D4NFilterWriter(std::unique_ptr<Writer> _next, D4NFilterDriver* _driver, Object* _obj, 
@@ -373,8 +375,6 @@ class D4NFilterWriter : public FilterWriter {
 			 const req_context& rctx,
 			 uint32_t flags) override;
    bool is_atomic() { return atomic; };
-   int sendRemote(const DoutPrefixProvider* dpp, rgw::d4n::CacheObj *object, std::string remoteCacheAddress, std::string key, bufferlist*
-    out_bl, optional_yield y);
    const DoutPrefixProvider* get_dpp() { return this->dpp; } 
    void set_cache_request() { object->set_cache_request(); }
    void set_remote_cache_request() { object->set_remote_cache_request(); }
