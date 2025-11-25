@@ -3991,6 +3991,14 @@ options:
   flags:
   - startup
   with_legacy: true
+- name: rgw_d4n_remote_requests_num
+  type: int
+  level: advanced
+  desc: specifies the maximum number of simultaneous I/O requests that can be sent to a remote cache.
+  default: 10
+  services:
+  - rgw
+  with_legacy: true
 - name: rgw_backend_store
   type: str
   level: advanced

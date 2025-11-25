@@ -56,4 +56,58 @@ class RemoteCachePut {
     std::unique_ptr<RemoteGetCB> cb;
 };
 
+class RemoteCachePutBatch {
+private:
+  size_t max_in_flight;
+  rgw::sal::Driver* driver;
+  CephContext* cct;
+
+  struct PutResult {
+    std::unique_ptr<RemoteCachePut> put_op;
+    std::string key;
+    int status = -EINPROGRESS;
+    RemoteCachePut::RemoteCachePutOp op_info;
+  };
+
+  std::deque<PutResult> in_flight;
+  std::vector<PutResult> completed;
+
+public:
+  RemoteCachePutBatch(rgw::sal::Driver* driver, CephContext* cct, size_t max)
+    : max_in_flight(max), driver(driver), cct(cct) {}
+
+  int send(const DoutPrefixProvider* dpp,
+          optional_yield y,
+          RemoteCachePut::RemoteCachePutOp& op,
+          bufferlist& bl);
+  int complete_next(const DoutPrefixProvider* dpp, optional_yield y);
+  int finish_all(const DoutPrefixProvider* dpp, optional_yield y);
+
+  const std::vector<PutResult>& get_results() const {
+    return completed;
+  }
+
+  void clear_results() {
+    completed.clear();
+  }
+
+  std::vector<RemoteCachePut::RemoteCachePutOp> get_failed_ops() const {
+    std::vector<RemoteCachePut::RemoteCachePutOp> failed;
+    for (const auto& r : completed) {
+      if (r.status < 0) {
+        failed.push_back(r.op_info);
+      }
+    }
+    return failed;
+  }
+
+  bool has_errors() const {
+    return std::any_of(completed.begin(), completed.end(),
+                      [](const PutResult& r) { return r.status < 0; });
+  }
+
+  size_t get_in_flight_count() const { return in_flight.size(); }
+  size_t get_completed_count() const { return completed.size(); }
+};
+
 } } // namespace rgw::d4n

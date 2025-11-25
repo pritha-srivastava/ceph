@@ -38,6 +38,7 @@
 namespace rgw::d4n {
   class PolicyDriver;
   class RemoteCachePut;
+  class RemoteCachePutBatch;
 }
 
 namespace rgw { namespace sal {
@@ -350,6 +351,7 @@ class D4NFilterWriter : public FilterWriter {
     std::string version;
     std::string prev_oid_in_cache;
     std::vector<std::unique_ptr<rgw::d4n::RemoteCachePut>> requests;
+    std::unique_ptr<rgw::d4n::RemoteCachePutBatch> batch_reqs;
 
   public:
     D4NFilterWriter(std::unique_ptr<Writer> _next, D4NFilterDriver* _driver, Object* _obj, 

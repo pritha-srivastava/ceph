@@ -62,4 +62,90 @@ int RemoteCachePut::complete_request(const DoutPrefixProvider* dpp, optional_yie
   return ret;
 }
 
+int RemoteCachePutBatch::send(const DoutPrefixProvider* dpp,
+                              optional_yield y,
+                              RemoteCachePut::RemoteCachePutOp& op,
+                              bufferlist& bl)
+{
+  // Drain one if at capacity
+  while (in_flight.size() >= max_in_flight) {
+    int ret = complete_next(dpp, y);
+    if (ret < 0) {
+      ldpp_dout(dpp, 5) << "RemoteCachePut request failed for oid=" << op.oid << " ret=" << ret << dendl;
+    }
+  }
+
+  // Create and initialize the put operation
+  auto put_op = std::make_unique<RemoteCachePut>(driver, op);
+  int ret = put_op->init(cct, dpp);
+  if (ret < 0) {
+    ldpp_dout(dpp, 0) << "Failed to init RemoteCachePut for oid=" << op.oid << " ret=" << ret << dendl;
+    return ret;
+  }
+
+  // Send the request
+  ret = put_op->send_request(dpp, bl, y);
+  if (ret < 0) {
+    ldpp_dout(dpp, 0) << "Failed to send RemoteCachePut for oid=" << op.oid << " ret=" << ret << dendl;
+    return ret;
+  }
+
+  // Track it
+  PutResult result;
+  result.put_op = std::move(put_op);
+  result.key = op.oid;
+  result.op_info = op;
+  in_flight.push_back(std::move(result));
+
+  ldpp_dout(dpp, 20) << "RemoteCachePut queued: oid=" << op.oid << " offset=" << op.offset << " len=" << op.len << dendl;
+
+  return 0;
+}
+
+int RemoteCachePutBatch::complete_next(const DoutPrefixProvider* dpp, optional_yield y)
+{
+  if (in_flight.empty()) {
+    return 0;
+  }
+
+  auto result = std::move(in_flight.front());
+  in_flight.pop_front();
+
+  // Complete the request
+  result.status = result.put_op->complete_request(dpp, y);
+
+  if (result.status < 0) {
+    ldpp_dout(dpp, 5) << "RemoteCachePut completed with error: oid=" << result.key << " ret=" << result.status << dendl;
+  } else {
+    ldpp_dout(dpp, 20) << "RemoteCachePut completed successfully: oid=" << result.key << dendl;
+  }
+
+  result.put_op.reset();
+
+  completed.push_back(std::move(result));
+  return result.status;
+}
+
+int RemoteCachePutBatch::finish_all(const DoutPrefixProvider* dpp, optional_yield y)
+{
+  int first_error = 0;
+  int error_count = 0;
+
+  while (!in_flight.empty()) {
+    int ret = complete_next(dpp, y);
+    if (ret < 0) {
+      error_count++;
+      if (first_error == 0) {
+        first_error = ret;
+      }
+    }
+  }
+
+  if (error_count > 0) {
+    ldpp_dout(dpp, 5) << "RemoteCachePutBatch finished with " << error_count << " errors" << dendl;
+  }
+
+  return first_error;
+}
+
 } } // namespace rgw::d4n

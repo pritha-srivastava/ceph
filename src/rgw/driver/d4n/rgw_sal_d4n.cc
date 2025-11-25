@@ -2791,6 +2791,7 @@ int D4NFilterWriter::prepare(optional_yield y)
       }
       object->clear_instance();
     }
+    batch_reqs = std::make_unique<rgw::d4n::RemoteCachePutBatch>(driver, dpp->get_cct(), dpp->get_cct()->_conf->rgw_d4n_remote_requests_num);
   }
 
   std::string version = object->get_object_version();
@@ -2874,9 +2875,7 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
               std::get<rgw_user>(user),
               remote_addr
           };
-          requests.emplace_back(std::make_unique<rgw::d4n::RemoteCachePut>(driver, op));
-          auto cp = requests.back().get();
-          auto remote_cache_ret = cp->send_request(dpp, bl, y);
+          int remote_cache_ret = batch_reqs->send(dpp, y, op, bl);
           if (remote_cache_ret < 0) {
             ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): put failed for remote cache: " << remote_addr <<  "ret= " << remote_cache_ret << dendl;
             return remote_cache_ret;
@@ -3075,19 +3074,12 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
                 remote_addr,
                 obj->get_size()
             };
-            requests.emplace_back(std::make_unique<rgw::d4n::RemoteCachePut>(driver, op));
-            auto cp = requests.back().get();
             bufferlist bl;
-            ret = cp->send_request(dpp, bl, y);
+            ret = batch_reqs->send(dpp, y, op, bl);
             if (ret < 0) {
               ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): put failed for remote cache: " << remote_addr <<  "ret= " << ret << dendl;
             }
-            for (size_t i = 0; i < requests.size(); ++i) {
-              ret = requests[i]->complete_request(dpp, y);
-              if (ret < 0) {
-                ldpp_dout(dpp, 5) << "D4NFilterWriter::" << __func__ << "(): Request " << i << " failed to complete: " << ret << dendl;
-              }
-            }
+            batch_reqs->finish_all(dpp, y);
           }
         }
       } else { //if get_cache_driver()->put()
