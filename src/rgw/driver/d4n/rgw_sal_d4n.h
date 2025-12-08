@@ -353,6 +353,8 @@ class D4NFilterWriter : public FilterWriter {
     std::vector<std::unique_ptr<rgw::d4n::RemoteCachePut>> requests;
     std::unique_ptr<rgw::d4n::RemoteCachePutBatch> batch_reqs;
 
+    void write_to_remote_cache(const DoutPrefixProvider* dpp, std::string prefix, uint64_t size, rgw_user& user, std::string& remote_addr, std::string& bucket_name, std::string& oid, D4NFilterDriver* driver);
+
   public:
     D4NFilterWriter(std::unique_ptr<Writer> _next, D4NFilterDriver* _driver, Object* _obj, 
 	const DoutPrefixProvider* _dpp, optional_yield _y) : FilterWriter(std::move(_next), _obj),

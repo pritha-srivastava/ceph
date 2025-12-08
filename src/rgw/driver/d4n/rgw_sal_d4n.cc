@@ -3080,6 +3080,30 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
               ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): put failed for remote cache: " << remote_addr <<  "ret= " << ret << dendl;
             }
             batch_reqs->finish_all(dpp, y);
+            #if 0
+            auto future = std::async(std::launch::async,
+                write_to_remote_cache,
+                dpp,
+                object->get_prefix(),
+                obj->get_size(),
+                std::get<rgw_user>(user),
+                remote_addr,
+                obj->get_bucket()->get_name(),
+                obj->get_key().get_oid(),
+                driver
+            );
+            #endif
+            uint64_t size = obj->get_size();
+            std::string prefix = object->get_prefix();
+            auto user = std::get<rgw_user>(user);
+            std::string bucket_name = obj->get_bucket()->get_name();
+            std::string oid = obj->get_key().get_oid();
+            auto future = std::async(std::launch::async,
+                [this, dpp, prefix, size, user, remote_addr, bucket_name, oid, driver]() {
+                    write_to_remote_cache(dpp, prefix, size, user, 
+                                          remote_addr, bucket_name, oid, driver);
+                }
+            );
           }
         }
       } else { //if get_cache_driver()->put()
@@ -3092,6 +3116,73 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
     }
   }
   return 0;
+}
+
+void D4NFilterWriter::write_to_remote_cache(const DoutPrefixProvider* dpp, std::string prefix, uint64_t size, rgw_user& user, std::string& remote_addr, std::string& bucket_name, std::string& oid, D4NFilterDriver* driver)
+{
+  //Read data blocks from cache, and send remote requests
+  uint64_t lst = size;
+  uint64_t fst = 0;
+  ldpp_dout(dpp, 20) << "D4NFilterWriter::" << __func__ << "(): remoteaddr =" << remote_addr << dendl;
+  std::unique_ptr<rgw::d4n::RemoteCachePutBatch> batch_reqs;
+
+  do {
+    rgw::d4n::CacheBlock block;
+    if (fst >= lst){
+      break;
+    }
+    uint64_t cur_size = std::min<off_t>(fst + dpp->get_cct()->_conf->rgw_max_chunk_size, lst);
+    uint64_t cur_len = cur_size - fst;
+    std::string oid_in_cache = get_key_in_cache(prefix, std::to_string(fst), std::to_string(cur_len));
+
+    ldpp_dout(dpp, 20) << "D4NFilterWriter:: " << __func__ <<  " " << __LINE__ << "(): READ FROM CACHE: oid=" << oid_in_cache << " length to read is: " << cur_len << 
+    " read_ofs: " << fst << dendl;
+
+    auto policy = driver->get_policy_driver()->get_cache_policy();
+    auto cache_driver = driver->get_cache_driver();
+    if (policy->update_refcount_if_key_exists(dpp, oid_in_cache, rgw::d4n::RefCount::INCR, y) > 0) {
+      ldpp_dout(dpp, 20) << "D4NFilterWriter:: " << __func__ << "(): " << __LINE__ << ": READ FROM CACHE: oid_in_cache=" << oid_in_cache << dendl;
+      // Read From Cache
+      bufferlist bl;
+      rgw::sal::Attrs attrs;
+      auto ret = cache_driver->get(dpp, oid_in_cache, fst, cur_len, bl, attrs, y);
+      if (ret < 0) {
+        ldpp_dout(dpp, 20) << "D4NFilterWriter:: " << __func__ <<  " get failed with ret: " << ret << dendl;
+      }
+
+      rgw::d4n::RemoteCachePut::RemoteCachePutOp op {
+          bucket_name,
+          oid,
+          fst,
+          cur_len,
+          version,
+          user,
+          remote_addr,
+          size
+      };
+      ret = batch_reqs->send(dpp, y, op, bl);
+      if (ret < 0) {
+        ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): put failed for remote cache: " << remote_addr <<  "ret= " << ret << dendl;
+      }
+      fst += cur_len;
+    }
+  } while(fst < lst);
+  rgw::d4n::RemoteCachePut::RemoteCachePutOp op {
+              bucket_name,
+              oid,
+              0,
+              0,
+              version,
+              user,
+              remote_addr,
+              size
+            };
+  bufferlist bl;
+  auto ret = batch_reqs->send(dpp, y, op, bl);
+  if (ret < 0) {
+    ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): put failed for remote cache: " << remote_addr <<  "ret= " << ret << dendl;
+  }
+  batch_reqs->finish_all(dpp, y);
 }
 
 int D4NFilterMultipartUpload::complete(const DoutPrefixProvider *dpp,
