@@ -3999,6 +3999,14 @@ options:
   services:
   - rgw
   with_legacy: true
+- name: rgw_d4n_async_remote_put
+  type: bool
+  level: advanced
+  desc: option to asynchronously write to a remote cache, off by default.
+  default: false
+  services:
+  - rgw
+  with_legacy: true
 - name: rgw_backend_store
   type: str
   level: advanced

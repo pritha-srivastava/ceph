@@ -340,6 +340,18 @@ class D4NFilterObject : public FilterObject {
     bool is_remote_head_block_request() { return (remote_cache_request && (blk_offset == 0) && (blk_len == 0)); }
 };
 
+class D4NFilterDPP : public DoutPrefixProvider {
+  CephContext* cct;
+public:
+  explicit D4NFilterDPP(CephContext* c) : cct(c) {}
+  CephContext* get_cct() const override { return cct; }
+  unsigned get_subsys() const override { return ceph_subsys_rgw; }
+  std::ostream& gen_prefix(std::ostream& out) const override {
+    out << "write_to_remote_cache: ";
+    return out;
+  }
+};
+
 class D4NFilterWriter : public FilterWriter {
   private:
     D4NFilterDriver* driver; 
@@ -353,7 +365,7 @@ class D4NFilterWriter : public FilterWriter {
     std::vector<std::unique_ptr<rgw::d4n::RemoteCachePut>> requests;
     std::unique_ptr<rgw::d4n::RemoteCachePutBatch> batch_reqs;
 
-    void write_to_remote_cache(const DoutPrefixProvider* dpp, std::string prefix, uint64_t size, rgw_user& user, std::string& remote_addr, std::string& bucket_name, std::string& oid, D4NFilterDriver* driver);
+    void write_to_remote_cache(const DoutPrefixProvider* dpp_o, std::string prefix, uint64_t size, const rgw_user& user, const std::string& remote_addr, const std::string& bucket_name, const std::string& oid, const std::string& version, D4NFilterDriver* driver);
 
   public:
     D4NFilterWriter(std::unique_ptr<Writer> _next, D4NFilterDriver* _driver, Object* _obj, 

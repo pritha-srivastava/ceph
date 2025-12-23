@@ -434,7 +434,7 @@ int SSDDriver::get(const DoutPrefixProvider* dpp, const std::string& key, off_t 
 
     bl.append(buffer, len);
 
-    r = get_attrs(dpp, key, attrs, y);
+    r = get_attrs(dpp, location, attrs, y);
     if (r < 0) {
         ldpp_dout(dpp, 0) << "ERROR: get::get_attrs: failed to get attrs, r = " << r << dendl;
         return r;
