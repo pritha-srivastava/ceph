@@ -32,6 +32,7 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/redis/connection.hpp>
+#include <boost/asio/thread_pool.hpp>
 
 #include <fmt/core.h>
 
@@ -65,6 +66,113 @@ public:
   }
 };
 
+class CoroutinePool {
+public:
+  using Task = std::function<void(boost::asio::yield_context)>;
+
+  CoroutinePool(boost::asio::any_io_executor executor, size_t pool_size)
+      : executor(executor),
+        pool_size(pool_size),
+        strand(boost::asio::make_strand(executor)),
+        running(false)
+  {}
+
+  void start(const DoutPrefixProvider *dpp) {
+    running = true;
+    for (size_t i = 0; i < pool_size; ++i) {
+      spawn_worker(dpp, i);
+    }
+  }
+
+  void stop() {
+    running = false;
+    cv.notify_all();
+  }
+
+  void submit(Task task) {
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        task_queue.push(std::move(task));
+        queued_tasks++;
+    }
+    cv.notify_one();
+  }
+
+  struct Stats {
+    size_t pool_size;
+    size_t queue_size;
+    int active_workers;
+    int idle_workers;
+    int queued_tasks;
+  };
+
+  Stats get_stats() const {
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    return Stats{
+      pool_size,
+      task_queue.size(),
+      active_workers,
+      static_cast<int>(pool_size) - active_workers,
+      queued_tasks
+    };
+  }
+
+private:
+  void spawn_worker(const DoutPrefixProvider *dpp, size_t worker_id) {
+    boost::asio::spawn(
+      strand,
+      [this, dpp, worker_id](boost::asio::yield_context yield) {
+        worker_loop(dpp, worker_id, yield);
+      },
+      boost::asio::detached);
+  }
+
+  void worker_loop(const DoutPrefixProvider *dpp, size_t worker_id, boost::asio::yield_context yield) {
+    while (running) {
+      Task task;
+      {
+        std::unique_lock<std::mutex> lock(queue_mutex);
+
+        cv.wait(lock, [&] {
+          return !running || !task_queue.empty();
+        });
+
+        if (!running && task_queue.empty()) {
+          return;
+        }
+
+        task = std::move(task_queue.front());
+        task_queue.pop();
+        queued_tasks--;
+      }
+
+      auto task_start = std::chrono::steady_clock::now();
+      active_workers++;
+      try {
+        task(yield);
+      } catch (const std::exception& e) {
+        ldpp_dout(dpp, 0) << "ERROR: CoroutinePool Worker: " << worker_id
+                           << " caught exception: " << e.what() << dendl;
+      }
+      auto task_duration = std::chrono::steady_clock::now() - task_start;
+      active_workers--;
+      ldpp_dout(dpp, 20) << "Worker " << worker_id << " task took "
+          << std::chrono::duration_cast<std::chrono::milliseconds>(task_duration).count()
+          << "ms" << dendl;
+    }
+  }
+
+  boost::asio::any_io_executor executor;
+  size_t pool_size;
+  boost::asio::strand<boost::asio::any_io_executor> strand;
+  std::queue<Task> task_queue;
+  mutable std::mutex queue_mutex;
+  std::condition_variable cv;
+  std::atomic<bool> running;
+  std::atomic<int> active_workers{0};
+  std::atomic<int> queued_tasks{0};
+};
+
 class D4NFilterDriver : public FilterDriver {
   private:
     std::shared_ptr<rgw::d4n::DirectoryConnection> dir_conn;
@@ -75,8 +183,35 @@ class D4NFilterDriver : public FilterDriver {
     std::unique_ptr<rgw::d4n::PolicyDriver> policyDriver;
     boost::asio::io_context& io_context;
     optional_yield y;
+    std::unique_ptr<boost::asio::thread_pool> d4n_thread_pool;
+    std::unique_ptr<CoroutinePool> d4n_coroutine_pool;
 
   public:
+    void initialize_pool(const DoutPrefixProvider *dpp,
+                        boost::asio::any_io_executor executor,
+                               size_t pool_size = 32) {
+      if (!d4n_coroutine_pool) {
+        d4n_coroutine_pool = std::make_unique<CoroutinePool>(executor, pool_size);
+        d4n_coroutine_pool->start(dpp);
+      }
+    }
+    void shutdown_pool() {
+      if (d4n_coroutine_pool) {
+        d4n_coroutine_pool->stop();
+        d4n_coroutine_pool.reset();
+      }
+    }
+    CoroutinePool::Stats get_pool_stats() {
+      if (d4n_coroutine_pool) {
+        return d4n_coroutine_pool->get_stats();
+      }
+      return CoroutinePool::Stats{0, 0, 0, 0, 0};
+    }
+
+    CoroutinePool* get_pool() {
+      return d4n_coroutine_pool.get();
+    }
+
     D4NFilterDriver(Driver* _next, boost::asio::io_context& io_context, bool admin);
     virtual ~D4NFilterDriver();
 
@@ -101,7 +236,11 @@ class D4NFilterDriver : public FilterDriver {
     rgw::d4n::PolicyDriver* get_policy_driver() { return policyDriver.get(); }
     void save_y(optional_yield y) { this->y = y; }
     std::shared_ptr<rgw::d4n::DirectoryConnection> get_dir_connection() { return dir_conn; }
+    boost::asio::io_context& get_io_context() { return io_context; }
     void shutdown() override;
+    auto get_d4n_executor() {
+      return d4n_thread_pool->get_executor();
+    }
 };
 
 class D4NFilterUser : public FilterUser {
@@ -365,7 +504,7 @@ class D4NFilterWriter : public FilterWriter {
     std::vector<std::unique_ptr<rgw::d4n::RemoteCachePut>> requests;
     std::unique_ptr<rgw::d4n::RemoteCachePutBatch> batch_reqs;
 
-    void write_to_remote_cache(const DoutPrefixProvider* dpp_o, std::string prefix, uint64_t size, const rgw_user& user, const std::string& remote_addr, const std::string& bucket_name, const std::string& oid, const std::string& version, D4NFilterDriver* driver);
+    static void write_to_remote_cache(const DoutPrefixProvider* dpp_o, const std::string& prefix, uint64_t size, const rgw_user& user, const std::string& remote_addr, const std::string& bucket_name, const std::string& oid, const std::string& version, D4NFilterDriver* driver, optional_yield y);
 
   public:
     D4NFilterWriter(std::unique_ptr<Writer> _next, D4NFilterDriver* _driver, Object* _obj, 

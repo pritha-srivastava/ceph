@@ -4007,6 +4007,13 @@ options:
   services:
   - rgw
   with_legacy: true
+- name: rgw_d4n_thread_pool_size
+  type: int
+  level: advanced
+  desc: size of thread pool used to asynchronously write a request to a remote cache
+  services:
+  - rgw
+  with_legacy: true
 - name: rgw_backend_store
   type: str
   level: advanced
