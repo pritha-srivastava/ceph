@@ -120,7 +120,7 @@ public:
 private:
   void spawn_worker(const DoutPrefixProvider *dpp, size_t worker_id) {
     boost::asio::spawn(
-      strand,
+      executor,
       [this, dpp, worker_id](boost::asio::yield_context yield) {
         worker_loop(dpp, worker_id, yield);
       },

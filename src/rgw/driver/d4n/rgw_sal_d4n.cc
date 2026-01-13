@@ -2873,7 +2873,7 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
           ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): adding block to local cache failed with ret= " << local_cache_ret << dendl;
         }
         //send it to remote only if it is not a remote request from another rgw
-        if (!remote_cache_request && !dpp->get_cct()->_conf->rgw_d4n_async_remote_put) {
+        if (!remote_cache_request && dpp->get_cct()->_conf->rgw_d4n_remote_put && !dpp->get_cct()->_conf->rgw_d4n_async_remote_put) {
           auto user = obj->get_bucket()->get_owner();
           std::string remote_addr = dpp->get_cct()->_conf->rgw_d4n_remote_cache_address;
           ldpp_dout(dpp, 20) << "D4NFilterWriter::" << __func__ << "(): remoteaddr =" << remote_addr << dendl;
@@ -2888,13 +2888,9 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
               remote_addr
           };
           std::unique_ptr<rgw::d4n::RemoteCachePut> remote_put = std::make_unique<rgw::d4n::RemoteCachePut>(driver, op);
-          auto ret = remote_put->send_request(dpp, bl, y);
+          auto ret = remote_put->send_and_complete_request(dpp, bl, y);
           if (ret < 0) {
-            ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): send_request failed for remote cache: " << remote_addr <<  "ret= " << ret << dendl;
-          }
-          ret = remote_put->complete_request(dpp, y);
-          if (ret < 0) {
-            ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): complete_request failed for remote cache: " << remote_addr <<  "ret= " << ret << dendl;
+            ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): send_and_complete_request failed for remote cache: " << remote_addr <<  "ret= " << ret << dendl;
           }
         } //end - if (!remote_cache_request)
         if (local_cache_ret < 0) {
@@ -3076,7 +3072,7 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
           if (!prev_oid_in_cache.empty()) {
             driver->get_policy_driver()->get_cache_policy()->invalidate_dirty_object(dpp, prev_oid_in_cache);
           }
-          if (!object->is_remote_cache_request()) {
+          if (dpp->get_cct()->_conf->rgw_d4n_remote_put && !object->is_remote_cache_request()) {
             auto user = obj->get_bucket()->get_owner();
             std::string remote_addr = dpp->get_cct()->_conf->rgw_d4n_remote_cache_address;
             if (!dpp->get_cct()->_conf->rgw_d4n_async_remote_put) {
@@ -3093,13 +3089,9 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
               };
               bufferlist bl;
               std::unique_ptr<rgw::d4n::RemoteCachePut> remote_put = std::make_unique<rgw::d4n::RemoteCachePut>(driver, op);
-              ret = remote_put->send_request(dpp, bl, y);
+              ret = remote_put->send_and_complete_request(dpp, bl, y);
               if (ret < 0) {
-                ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): send_request failed for remote cache: " << remote_addr <<  "ret= " << ret << dendl;
-              }
-              ret = remote_put->complete_request(dpp, y);
-              if (ret < 0) {
-                ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): complete_request failed for remote cache: " << remote_addr <<  "ret= " << ret << dendl;
+                ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): send_and_complete_request failed for remote cache: " << remote_addr <<  "ret= " << ret << dendl;
               }
             } else {
               CephContext* cct = dpp->get_cct();
