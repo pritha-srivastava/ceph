@@ -62,6 +62,23 @@ int RemoteCachePut::complete_request(const DoutPrefixProvider* dpp, optional_yie
   return ret;
 }
 
+int RemoteCachePut::send_and_complete_request(const DoutPrefixProvider* dpp, bufferlist& bl, optional_yield& y)
+{
+  auto ret = send_request(dpp, bl, y);
+  if (ret < 0) {
+    ldpp_dout(dpp, 20) << "RemoteCachePut:: " << __func__ <<  " send_request failed with ret: " << ret << dendl;
+    return ret;
+  }
+
+  ret = complete_request(dpp, y);
+  if (ret < 0) {
+    ldpp_dout(dpp, 20) << "RemoteCachePut:: " << __func__ <<  " complete_request failed with ret: " << ret << dendl;
+    return ret;
+  }
+
+  return 0;
+}
+
 int RemoteCachePutBatch::send(const DoutPrefixProvider* dpp,
                               optional_yield y,
                               RemoteCachePut::RemoteCachePutOp& op,

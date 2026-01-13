@@ -47,6 +47,7 @@ class RemoteCachePut {
     int init(CephContext* cct, const DoutPrefixProvider* dpp);
     int send_request(const DoutPrefixProvider* dpp, bufferlist& bl, optional_yield& y);
     int complete_request(const DoutPrefixProvider* dpp, optional_yield& y);
+    int send_and_complete_request(const DoutPrefixProvider* dpp, bufferlist& bl, optional_yield& y);
 
   private:
     rgw::sal::Driver* driver;
