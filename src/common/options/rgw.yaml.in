@@ -3991,6 +3991,14 @@ options:
   flags:
   - startup
   with_legacy: true
+- name: rgw_d4n_remote_enabled
+  type: bool
+  level: advanced
+  desc: option to enable/diasble remote cache operations
+  default: true
+  services:
+  - rgw
+  with_legacy: true
 - name: rgw_d4n_remote_requests_num
   type: int
   level: advanced
