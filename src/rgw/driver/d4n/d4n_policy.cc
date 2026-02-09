@@ -243,12 +243,12 @@ asio::awaitable<void> LFUDAPolicy::redis_sync(const DoutPrefixProvider* dpp, opt
   }
 }
 
-/* Changes state to INVALID for dirty objects. An INVALID state indicates that a delete request has been
+/* Changes state to INVALID for an objects. An INVALID state indicates that a delete request has been
  issued on an object and it must be deleted rather than written to the backend. This lazy deletion occurs
  in the Cleaning method and prevents data races during concurrent requests. The method below returns "false"
  if the state has not been set to INVALID, and "true" if it has. The state is not set to INVALID when
  cleaning is in progress, a process which writes the object to the backend store. */
-bool LFUDAPolicy::invalidate_dirty_object(const DoutPrefixProvider* dpp, const std::string& key) {
+bool LFUDAPolicy::invalidate_object(const DoutPrefixProvider* dpp, const std::string& key) {
   std::unique_lock<std::mutex> l(lfuda_cleaning_lock);
 
   if (o_entries_map.empty())
@@ -637,6 +637,8 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
 	int ret = -1;
 	//check if key exists and get the refcount of block, if greater than zero then modify the creationTime of dirty object to attempt to delete later
 	std::unique_lock<std::mutex> ll(lfuda_lock);
+
+	/* TODO: If an object is invalid, it should be deleted. Any furthure read request should be directed to the backend. */
 	auto it = entries_map.find(e->key);
 	if (it != entries_map.end()) {
 	  if (it->second->refcount > 0) {

@@ -66,11 +66,6 @@ class RemoteCacheDelete : public RemoteCache {
     RemoteCacheDelete(rgw::sal::Driver* driver, RemoteCacheDeleteOp& op) : RemoteCache(driver, op) {}
     virtual ~RemoteCacheDelete() = default; 
 
-    //virtual int init(CephContext* cct, const DoutPrefixProvider* dpp);
-    //virtual int send_request(const DoutPrefixProvider* dpp, bufferlist& bl, std::string method, optional_yield& y);
-    //virtual int complete_request(const DoutPrefixProvider* dpp, optional_yield& y);
-    //virtual int send_and_complete_request(const DoutPrefixProvider* dpp, bufferlist& bl, std::string method, optional_yield& y);
-
   private:
     rgw::sal::Driver* driver;
     RemoteCacheDeleteOp op;
@@ -79,25 +74,17 @@ class RemoteCacheDelete : public RemoteCache {
     std::unique_ptr<RemoteGetCB> cb;
 };
 
-class RemoteCachePut {
+class RemoteCachePut : public RemoteCache {
   public:
-    struct RemoteCachePutOp {
-      std::string bucket_name;
-      std::string oid;
-      uint64_t offset;
-      uint64_t len;
-      std::string version;
-      rgw_user bucket_owner;
-      std::string remote_addr;
-      uint64_t obj_size;
-    };
-    RemoteCachePut(rgw::sal::Driver* driver, RemoteCachePutOp& op) : driver(driver), op(op) {}
+    struct RemoteCachePutOp : RemoteCacheOp {};
+
+    RemoteCachePut(rgw::sal::Driver* driver, RemoteCachePutOp& op) : RemoteCache(driver, op) {}
     virtual ~RemoteCachePut() = default; 
 
-    int init(CephContext* cct, const DoutPrefixProvider* dpp);
-    int send_request(const DoutPrefixProvider* dpp, bufferlist& bl, optional_yield& y);
-    int complete_request(const DoutPrefixProvider* dpp, optional_yield& y);
-    int send_and_complete_request(const DoutPrefixProvider* dpp, bufferlist& bl, optional_yield& y);
+    //virtual int init(CephContext* cct, const DoutPrefixProvider* dpp);
+    //virtual int send_request(const DoutPrefixProvider* dpp, bufferlist& bl, optional_yield& y) override;
+    //virtual int complete_request(const DoutPrefixProvider* dpp, optional_yield& y) override;
+    //virtual int send_and_complete_request(const DoutPrefixProvider* dpp, bufferlist& bl, optional_yield& y) override;
 
   private:
     rgw::sal::Driver* driver;
