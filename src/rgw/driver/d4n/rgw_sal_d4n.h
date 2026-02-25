@@ -38,7 +38,9 @@
 
 namespace rgw::d4n {
   class PolicyDriver;
-  class RemoteCachePut;
+  class RemoteCacheOp;
+  class RemoteCacheDeleteOp;
+  class RemoteCachePutOp;
   class RemoteCachePutBatch;
 }
 
@@ -505,7 +507,7 @@ class D4NFilterWriter : public FilterWriter {
     bool d4n_writecache;
     std::string version;
     std::string prev_oid_in_cache;
-    std::vector<std::unique_ptr<rgw::d4n::RemoteCachePut>> requests;
+    std::vector<std::unique_ptr<rgw::d4n::RemoteCachePutOp>> requests;
 
     static void write_to_remote_cache(const DoutPrefixProvider* dpp_o, const std::string& prefix, uint64_t size, const rgw_user& user, const std::string& remote_addr, const std::string& bucket_name, const std::string& oid, const std::string& version, D4NFilterDriver* driver, optional_yield y);
 

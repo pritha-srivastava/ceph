@@ -5726,6 +5726,16 @@ void RGWDeleteObj::execute(optional_yield y)
       del_op->params.size_match = size_match;
       del_op->params.if_match = if_match;
 
+#ifdef WITH_RADOSGW_D4N
+  if (g_conf().get_val<std::string>("rgw_filter") == "d4n") {
+    if (s->info.env->get_optional("HTTP_X_RGW_REMOTE_CACHE_REQUEST")) {
+      ldpp_dout(this, 20) << "This is a remote cache request !!!" << dendl;
+      rgw::sal::D4NFilterObject* d4n_obj = dynamic_cast<rgw::sal::D4NFilterObject*>(s->object.get());
+      d4n_obj->set_remote_cache_request();
+    }
+  }
+#endif
+
       op_ret = del_op->delete_obj(this, y, rgw::sal::FLAG_LOG_OP);
       if (op_ret >= 0) {
 	delete_marker = del_op->result.delete_marker;
