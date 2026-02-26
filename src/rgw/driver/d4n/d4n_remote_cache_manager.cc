@@ -10,48 +10,6 @@ int RemoteCacheOp::init(CephContext* cct, const DoutPrefixProvider* dpp)
   return 0;
 }
 
-/*
-int RemoteCacheOp::send_request(const DoutPrefixProvider* dpp, bufferlist& bl, std::string method, optional_yield& y)
-{
-  in_bl.clear();
-  cb = std::make_unique<RemoteGetCB>(&in_bl);
-
-  RGWAccessKey accessKey;
-  std::string findKey;
-
-  std::unique_ptr<rgw::sal::User> c_user = driver->get_user(op.bucket_owner);
-  int ret = c_user->load_user(dpp, y);
-  if (ret < 0) {
-    return -EPERM;
-  }
-
-  if (c_user->get_info().access_keys.empty()) {
-    return -EINVAL;
-  }
-
-  accessKey.id = c_user->get_info().access_keys.begin()->second.id;
-  accessKey.key = c_user->get_info().access_keys.begin()->second.key;
-
-  HostStyle host_style = PathStyle;
-  std::map<std::string, std::string> extra_headers;
-  extra_headers["x-rgw-remote-cache-request"] = "true";
-  extra_headers["x-rgw-cache-object-version"] = op.version;
-  extra_headers["x-rgw-cache-blk-offset"] = std::to_string(op.offset);
-  extra_headers["x-rgw-cache-blk-len"] = std::to_string(op.len);
-  extra_headers["x-rgw-cache-obj-size"] = std::to_string(op.obj_size);
-
-  auto resource = get_resource(op.bucket_name, op.oid);
-  sender = std::make_unique<RGWRESTStreamRWRequest>(dpp->get_cct(), method, op.remote_addr, cb.get(), nullptr, nullptr, "", host_style);
-
-  ret = sender->send_request(dpp, &accessKey, extra_headers, resource, nullptr, &bl);
-  if (ret < 0) {
-    return ret;
-  }
-
-  return 0;
-}
-*/
-
 int RemoteCacheOp::complete_request(const DoutPrefixProvider* dpp, optional_yield& y)
 {
   if (!sender) {
@@ -62,25 +20,6 @@ int RemoteCacheOp::complete_request(const DoutPrefixProvider* dpp, optional_yiel
   sender.reset();
   return ret;
 }
-
-/*
-int RemoteCacheOp::send_and_complete_request(const DoutPrefixProvider* dpp, bufferlist& bl, std::string method, optional_yield& y)
-{
-  auto ret = send_request(dpp, bl, method, y);
-  if (ret < 0) {
-    ldpp_dout(dpp, 20) << "RemoteCacheOp:: " << __func__ <<  " " << method<< ": send_request failed with ret: " << ret << dendl;
-    return ret;
-  }
-
-  ret = complete_request(dpp, y);
-  if (ret < 0) {
-    ldpp_dout(dpp, 20) << "RemoteCacheOp:: " << __func__ << " " << method << ": complete_request failed with ret: " << ret << dendl;
-    return ret;
-  }
-
-  return 0;
-}
-*/
 
 int RemoteCacheDeleteOp::send_request(const DoutPrefixProvider* dpp, bufferlist& bl, optional_yield& y)
 {
