@@ -2545,13 +2545,14 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
 
 	if (dpp->get_cct()->_conf->rgw_d4n_remote_enabled) {
 	  if (remote_cache_request) {
+		objDirty = source->get_remote_dirty_flag();
 	    if (objDirty){
 	  	  ret = source->driver->get_policy_driver()->get_cache_policy()->invalidate_dirty_object(dpp, head_oid_in_cache);
 	  	  if (ret < 0)
 			return ret;
 		  objDirty = false;
 	    }
-	    //check if the cache has enough space, if not, don't wait for cleaning 
+	    //check if the cache has enough space, if yes, we will wait for cleaning.
 	    if (source->driver->get_cache_driver()->get_free_space(dpp, y) > dpp->get_cct()->_conf->rgw_d4n_l1_datacache_free_threshold)
 		  return 0;
 	  }
@@ -2567,6 +2568,7 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
 			  0, 
 			  0,
               version,
+			  objDirty,
               std::get<rgw_user>(user),
               remote_addr,
 			  source->get_size()
@@ -2907,7 +2909,7 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
     bool dirty = true;
     bool remote_cache_request = object->is_remote_cache_request();
     if (remote_cache_request) {
-	  dirty = false;
+	  dirty = object->get_remote_dirty_flag();
       ofs = object->get_remote_block_offset();
       ldpp_dout(dpp, 10) << "D4NFilterWriter::" << __func__ << "(): ofs is: " << ofs << dendl;
     }
@@ -2924,7 +2926,6 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
       rgw::sal::Attrs attrs;
       std::string oid = prefix + CACHE_DELIM + std::to_string(ofs);
       std::string oid_in_cache = oid + CACHE_DELIM + std::to_string(bl_len);
-      //dirty = true;
       if (bl.length() > 0) {
         ldpp_dout(dpp, 10) << "D4NFilterWriter::" << __func__ << "(): oid_in_cache is: " << oid_in_cache << dendl;
         auto local_cache_ret = driver->get_policy_driver()->get_cache_policy()->eviction(dpp, bl.length(), y);
@@ -2954,6 +2955,7 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
               offset,
               bl.length(),
               version,
+			  dirty,
               std::get<rgw_user>(user),
               remote_addr
           };
@@ -3055,7 +3057,7 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
 
     dirty = true;
     if (remote_cache_request) {
-      dirty = false;
+      dirty = object->get_remote_dirty_flag();
     }
     ceph::real_time m_time;
     if (mtime) {
@@ -3153,6 +3155,7 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
                   0,
                   0,
                   version,
+				  dirty,
                   std::get<rgw_user>(user),
                   remote_addr,
                   obj->get_size()
@@ -3176,6 +3179,7 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
                   bucket_name = obj->get_bucket()->get_name(),
                   oid = obj->get_key().get_oid(),
                   version,
+				  dirty,
                   driver = this->driver]
                   (boost::asio::yield_context yield) {
 
@@ -3190,6 +3194,7 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
                         bucket_name,
                         oid,
                         version,
+						dirty,
                         driver,
                         yield
                     );
@@ -3220,7 +3225,7 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
   return 0;
 }
 
-void D4NFilterWriter::write_to_remote_cache(const DoutPrefixProvider* dpp_o, const std::string& prefix, uint64_t size, const rgw_user& user, const std::string& remote_addr, const std::string& bucket_name, const std::string& oid, const std::string& version, D4NFilterDriver* driver, optional_yield y)
+void D4NFilterWriter::write_to_remote_cache(const DoutPrefixProvider* dpp_o, const std::string& prefix, uint64_t size, const rgw_user& user, const std::string& remote_addr, const std::string& bucket_name, const std::string& oid, const std::string& version, bool dirty, D4NFilterDriver* driver, optional_yield y)
 {
   //Read data blocks from cache, and send remote requests
   uint64_t lst = size;
@@ -3256,6 +3261,7 @@ void D4NFilterWriter::write_to_remote_cache(const DoutPrefixProvider* dpp_o, con
           fst,
           cur_len,
           version,
+		  dirty,
           user,
           remote_addr,
           size
@@ -3275,6 +3281,7 @@ void D4NFilterWriter::write_to_remote_cache(const DoutPrefixProvider* dpp_o, con
               0,
               0,
               version,
+			  dirty,
               user,
               remote_addr,
               size
