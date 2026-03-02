@@ -2545,13 +2545,14 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
 
 	if (dpp->get_cct()->_conf->rgw_d4n_remote_enabled) {
 	  if (remote_cache_request) {
+		objDirty = source->get_remote_dirty_flag();
 	    if (objDirty){
 	  	  ret = source->driver->get_policy_driver()->get_cache_policy()->invalidate_dirty_object(dpp, head_oid_in_cache);
 	  	  if (ret < 0)
 			return ret;
 		  objDirty = false;
 	    }
-	    //check if the cache has enough space, if not, don't wait for cleaning 
+	    //check if the cache has enough space, if yes, we will wait for cleaning.
 	    if (source->driver->get_cache_driver()->get_free_space(dpp, y) > dpp->get_cct()->_conf->rgw_d4n_l1_datacache_free_threshold)
 		  return 0;
 	  }
@@ -2925,7 +2926,6 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
       rgw::sal::Attrs attrs;
       std::string oid = prefix + CACHE_DELIM + std::to_string(ofs);
       std::string oid_in_cache = oid + CACHE_DELIM + std::to_string(bl_len);
-      //dirty = true;
       if (bl.length() > 0) {
         ldpp_dout(dpp, 10) << "D4NFilterWriter::" << __func__ << "(): oid_in_cache is: " << oid_in_cache << dendl;
         auto local_cache_ret = driver->get_policy_driver()->get_cache_policy()->eviction(dpp, bl.length(), y);
@@ -3057,7 +3057,7 @@ int D4NFilterWriter::complete(size_t accounted_size, const std::string& etag,
 
     dirty = true;
     if (remote_cache_request) {
-      dirty = false;
+      dirty = object->get_remote_dirty_flag();
     }
     ceph::real_time m_time;
     if (mtime) {
