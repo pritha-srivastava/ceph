@@ -2551,7 +2551,7 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
 			return ret;
 		  objDirty = false;
 	    }
-	    //check if the cache has enough space, if not, don't wait for cleaning 
+	    //check if the cache has enough space, if yes, we will wait for cleaning 
 	    if (source->driver->get_cache_driver()->get_free_space(dpp, y) > dpp->get_cct()->_conf->rgw_d4n_l1_datacache_free_threshold)
 		  return 0;
 	  }
@@ -2835,6 +2835,11 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
 
         fst += cur_len;
       } while (fst < lst);
+	  /* check if we have enough space, if not, call eviction with deleted object size. We don't delete the requested object since 
+	  // it is possible for policy to choose a better candidate. The requested object to be deleted will be cleaned eventually. */
+	  if (source->driver->get_cache_driver()->get_free_space(dpp, y) <= dpp->get_cct()->_conf->rgw_d4n_l1_datacache_free_threshold){
+		source->driver->get_policy_driver()->get_cache_policy()->eviction(dpp, size, y);
+	  }	
     }
 
     if (!objDirty) {
