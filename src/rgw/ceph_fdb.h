@@ -13,6 +13,8 @@
  *
 */
 
+#include <fmt/ranges.h>
+
 #ifndef CEPH_RGW_FDB_CONVERSION_H
  #define CEPH_RGW_FDB_CONVERSION_H
 
@@ -33,7 +35,7 @@ namespace ceph::libfdb::to {
 inline auto convert(const ceph::buffer::list& from) -> std::vector<std::uint8_t>
 {
  // uint32_t is what zpp::bits uses by default, but we could fiddle with that:
- std::vector<std::uint8_t> out_data(sizeof(std::uint32_t) + std::size(from)); 
+ std::vector<std::uint8_t> out_data(sizeof(std::uint32_t) + 1 + std::size(from)); 
  zpp::bits::out out(out_data);
 
  auto ptr = const_cast<ceph::buffer::list&>(from).c_str();
@@ -83,6 +85,7 @@ constexpr auto serialize(auto &archive, ceph::buffer::list &target)
 
  auto r = archive(out);
 
+fmt::format("JFW: out ({}):\n{}\n-----", out.size(), out);
  // JFW: this is really annoying, but again buffer::list is not something I find
  // easy to wrangle-- I'm not sure there's a straightforward way to just assign
  // a new value... so if you know what that is, please improve this:
