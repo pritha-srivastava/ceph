@@ -292,6 +292,7 @@ class D4NFilterObject : public FilterObject {
   private:
     D4NFilterDriver* driver;
     std::string version;
+	bool remote_dirty;
     std::string prefix;
     Attrs attrs_d4n;
     rgw_obj obj;
@@ -480,6 +481,8 @@ class D4NFilterObject : public FilterObject {
     void set_block_len(uint64_t len) { blk_len = len; }
     uint64_t get_remote_block_offset() { return blk_offset; }
     uint64_t get_remote_block_len() { return blk_len; }
+	bool get_remote_dirty_flag() {return remote_dirty;}
+	void set_remote_dirty_flag(bool flag) {remote_dirty = flag;}
     void set_remote_obj_size(uint64_t size) { obj_size = size; }
     uint64_t get_remote_obj_size() { return obj_size; }
     bool is_remote_head_block_request() { return (remote_cache_request && (blk_offset == 0) && (blk_len == 0)); }
@@ -509,7 +512,7 @@ class D4NFilterWriter : public FilterWriter {
     std::string prev_oid_in_cache;
     std::vector<std::unique_ptr<rgw::d4n::RemoteCachePutOp>> requests;
 
-    static void write_to_remote_cache(const DoutPrefixProvider* dpp_o, const std::string& prefix, uint64_t size, const rgw_user& user, const std::string& remote_addr, const std::string& bucket_name, const std::string& oid, const std::string& version, D4NFilterDriver* driver, optional_yield y);
+    static void write_to_remote_cache(const DoutPrefixProvider* dpp_o, const std::string& prefix, uint64_t size, const rgw_user& user, const std::string& remote_addr, const std::string& bucket_name, const std::string& oid, const std::string& version, bool dirty, D4NFilterDriver* driver, optional_yield y);
 
   public:
     D4NFilterWriter(std::unique_ptr<Writer> _next, D4NFilterDriver* _driver, Object* _obj, 
