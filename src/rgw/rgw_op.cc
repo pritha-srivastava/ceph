@@ -4590,10 +4590,6 @@ void RGWPutObj::execute(optional_yield y)
       if (object_version) {
         d4n_obj->set_object_version(object_version.get());
       }
-      auto object_dirty = s->info.env->get_optional("HTTP_X_RGW_CACHE_OBJECT_DIRTY");
-      if (object_dirty) {
-        d4n_obj->set_remote_dirty_flag(object_dirty.get() == "true" || object_dirty.get() == "1" );
-      }
       auto blk_offset = s->info.env->get_optional("HTTP_X_RGW_CACHE_BLK_OFFSET");
       if (blk_offset) {
         d4n_obj->set_block_offset(std::stoull(blk_offset.get()));
