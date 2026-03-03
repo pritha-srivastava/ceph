@@ -144,6 +144,43 @@ struct janitor final
    }
 };
 
+// Store expiry as a prefixed key alongside the value key
+static std::string expiry_key(std::string_view k) {
+  return fmt::format("__ttl__:{}", k);
+}
+
+static bool is_expired(ceph::libfdb::transaction_handle txn, std::string_view k) {
+  std::string expiry_str;
+  if (!get(txn, expiry_key(k), expiry_str, lfdb::commit_after_op::no_commit))
+    return false; // no TTL set, not expired
+  auto expiry = std::chrono::system_clock::time_point(
+      std::chrono::milliseconds(std::stoll(expiry_str)));
+  return std::chrono::system_clock::now() > expiry;
+}
+
+// Returns true if key was set, false if it already exists and hasn't expired
+bool acquire_lease(ceph::libfdb::transaction_handle txn, std::string_view k, std::string_view v,
+           std::chrono::milliseconds ttl) {
+  if (key_exists(txn, k, lfdb::commit_after_op::no_commit) && !is_expired(txn, k))
+    return false;
+
+  auto expiry = std::chrono::system_clock::now() + ttl;
+  auto expiry_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      expiry.time_since_epoch()).count();
+
+  set(txn, k, v, lfdb::commit_after_op::no_commit);
+  set(txn, expiry_key(k), std::to_string(expiry_ms), lfdb::commit_after_op::commit);
+  return true;
+}
+
+bool expire_lease(ceph::libfdb::transaction_handle txn, std::string_view k) {
+  if (!is_expired(txn, k))
+    return false;
+  erase(txn, k, lfdb::commit_after_op::no_commit);
+  erase(txn, expiry_key(k), lfdb::commit_after_op::commit);
+  return true;
+}
+
 // Basically, make sure we're actually linking with the library:
 TEST_CASE()
 {
@@ -638,6 +675,67 @@ TEST_CASE("Gal demo", "[fdb]") {
 
  CAPTURE(out["userId"]);
  REQUIRE(bucket_entries == out);
+}
+
+TEST_CASE("fdb lease with ttl", "[rgw][fdb]") {
+  janitor j;
+  const string_view k = "lease_key";
+  const string v1 = "owner-1";
+  const string v2 = "owner-2";
+  auto dbh = lfdb::create_database();
+  REQUIRE(nullptr != dbh);
+
+  // Clean slate:
+  lfdb::erase(lfdb::make_transaction(dbh), k, lfdb::commit_after_op::commit);
+  SECTION("acquire_lease acquires key when absent") {
+    CHECK(acquire_lease(lfdb::make_transaction(dbh), k, v1,
+                      std::chrono::milliseconds(5000)));
+
+    std::string out;
+    CHECK(lfdb::get(lfdb::make_transaction(dbh), k, out,
+                    lfdb::commit_after_op::no_commit));
+    CHECK(out == v1);
+  }
+  SECTION("acquire_lease fails when key already held") {
+    // First acquire succeeds:
+    REQUIRE(acquire_lease(lfdb::make_transaction(dbh), k, v1,
+                        std::chrono::milliseconds(5000)));
+    // Second acquire fails:
+    CHECK_FALSE(acquire_lease(lfdb::make_transaction(dbh), k, v2,
+                            std::chrono::milliseconds(5000)));
+
+    // Value should still be v1:
+    std::string out;
+    lfdb::get(lfdb::make_transaction(dbh), k, out,
+              lfdb::commit_after_op::no_commit);
+    CHECK(out == v1);
+  }
+  SECTION("acquire_lease succeeds after ttl expiry") {
+    // Acquire with a very short TTL:
+    REQUIRE(acquire_lease(lfdb::make_transaction(dbh), k, v1,
+                        std::chrono::milliseconds(100)));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    // Expired -- second caller should now acquire:
+    CHECK(acquire_lease(lfdb::make_transaction(dbh), k, v2,
+                      std::chrono::milliseconds(5000)));
+
+    std::string out;
+    lfdb::get(lfdb::make_transaction(dbh), k, out,
+              lfdb::commit_after_op::no_commit);
+    CHECK(out == v2);
+  }
+  SECTION("expire_lease removes stale lease") {
+    REQUIRE(acquire_lease(lfdb::make_transaction(dbh), k, v1,
+                        std::chrono::milliseconds(100)));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    CHECK(expire_lease(lfdb::make_transaction(dbh), k));
+    CHECK_FALSE(key_exists(lfdb::make_transaction(dbh), k,
+                                    lfdb::commit_after_op::no_commit));
+  }
 }
 
 // Adapted from Catch2 documentation:
