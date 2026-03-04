@@ -481,7 +481,7 @@ class D4NFilterObject : public FilterObject {
     void set_block_len(uint64_t len) { blk_len = len; }
     uint64_t get_remote_block_offset() { return blk_offset; }
     uint64_t get_remote_block_len() { return blk_len; }
-	bool get_remote_dirty_flag() {return remote_dirty;}
+	const bool get_remote_dirty_flag() {return remote_dirty;}
 	void set_remote_dirty_flag(bool flag) {remote_dirty = flag;}
     void set_remote_obj_size(uint64_t size) { obj_size = size; }
     uint64_t get_remote_obj_size() { return obj_size; }
