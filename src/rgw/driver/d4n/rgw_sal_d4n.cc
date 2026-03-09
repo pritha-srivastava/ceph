@@ -2832,13 +2832,35 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
             ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): Failed to delete directory entry for: " << source->get_name() << " blockid: " << fst << " block size: " << cur_len << ", ret=" << ret << dendl;
             return ret;
           }
+	  	  /* check if we have enough space, if not, call eviction with deleted object size. We don't delete the requested object since 
+	  	  // it is possible for policy to choose a better candidate. The requested object to be deleted will be cleaned eventually. */
+	 	  if (source->driver->get_cache_driver()->get_free_space(dpp, y) <= dpp->get_cct()->_conf->rgw_d4n_l1_datacache_free_threshold){
+		    std::string key =  get_key_in_cache(get_cache_block_prefix(source, version), std::to_string(fst), std::to_string(cur_len));
+    		if ((ret = source->driver->get_cache_driver()->delete_data(dpp, key, y)) == 0) {
+	       	  if (!(ret = source->driver->get_policy_driver()->get_cache_policy()->erase(dpp, key, y))) {
+    	      	ldpp_dout(dpp, 0) << "Failed to delete policy entry for: " << key << ", ret=" << ret << dendl;
+        	  	return ret;
+	          }
+    		} else {
+      		  ldpp_dout(dpp, 0) << "Failed to delete cache entry for: " << key << ", ret=" << ret << dendl;
+        	  return ret;
+	  	    }
+		  }
 
         fst += cur_len;
       } while (fst < lst);
-	  /* check if we have enough space, if not, call eviction with deleted object size. We don't delete the requested object since 
-	  // it is possible for policy to choose a better candidate. The requested object to be deleted will be cleaned eventually. */
+	  // we delete the head block at the end if needed
 	  if (source->driver->get_cache_driver()->get_free_space(dpp, y) <= dpp->get_cct()->_conf->rgw_d4n_l1_datacache_free_threshold){
-		source->driver->get_policy_driver()->get_cache_policy()->eviction(dpp, size, y);
+	    std::string key =  get_key_in_cache(get_cache_block_prefix(source, version), std::to_string(0), std::to_string(0));
+    	if ((ret = source->driver->get_cache_driver()->delete_data(dpp, key, y)) == 0) {
+	   	  if (!(ret = source->driver->get_policy_driver()->get_cache_policy()->erase(dpp, key, y))) {
+         	ldpp_dout(dpp, 0) << "Failed to delete policy entry for: " << key << ", ret=" << ret << dendl;
+       	  	return ret;
+	      }
+    	} else {
+    	  ldpp_dout(dpp, 0) << "Failed to delete cache entry for: " << key << ", ret=" << ret << dendl;
+          return ret;
+	    }
 	  }	
     }
 
