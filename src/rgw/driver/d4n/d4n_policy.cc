@@ -387,6 +387,7 @@ int LFUDAPolicy::get_victim_block(const DoutPrefixProvider* dpp, CacheBlock* vic
     return -ENOENT;
   }
 
+  ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "(): Victim name: " << victim->cacheObj.objName << dendl;
   return 0;
 }
 
@@ -400,6 +401,10 @@ int LFUDAPolicy::exist_key(const std::string& key) {
 }
 
 int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) {
+  if (dpp->get_cct()->_conf->rgw_d4n_local_rgw_address == "127.0.0.1:8001") {
+    return 0;
+  }
+
   int ret = -1;
   std::vector<LFUDAEntry> to_delete;
 
@@ -409,12 +414,13 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
     std::unique_lock<std::mutex> lfuda_l(lfuda_lock);
 
     uint64_t freed = 0;
-    while (freed < size) {
+   // while (freed < size) {
 	  CacheBlock victim;
 	  ret = get_victim_block(dpp, &victim, y);
       if (ret == -ENOENT) {
         ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "(): Could not retrieve victim block." << dendl;
-        return -ENOSPC;
+		return 0;
+		//return -ENOSPC;
       }
 
 	  std::string victim_key = entries_heap.top()->key;
@@ -429,7 +435,7 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
       _erase(dpp, victim_key, y);
       freed += victim_size;
     }
-  } // lfuda_lock released
+  //} // lfuda_lock released
 
   // Outside both locks, do expensive I/O
   for (auto& entry : to_delete) {

@@ -1271,7 +1271,7 @@ int D4NFilterObject::write_if_space_available(const DoutPrefixProvider* dpp, con
   };
 
   int ret = cacheDriver->check_and_reserve_space(dpp, len, y);
-  if (ret == -ENOSPC) {
+  //if (ret == -ENOSPC) {
     // Not enough space — reserve upfront unconditionally and evict to free space
 	cacheDriver->reserve_space(dpp, len, y);  
 	ret = driver->get_policy_driver()->get_cache_policy()->eviction(dpp, len, y);
@@ -1280,9 +1280,9 @@ int D4NFilterObject::write_if_space_available(const DoutPrefixProvider* dpp, con
 	  rollback_reservation();
       return ret;
     }
-  } else if (ret < 0) {
-    return ret;
-  }
+ // } else if (ret < 0) {
+ //   return ret;
+ // }
 
   ret = driver->get_cache_driver()->put(dpp, key, bl, len, attrs, y);
   if (ret == 0) {
@@ -1292,6 +1292,7 @@ int D4NFilterObject::write_if_space_available(const DoutPrefixProvider* dpp, con
 	rollback_reservation();
 	return ret;
   }
+
   return 0;
 }
 
