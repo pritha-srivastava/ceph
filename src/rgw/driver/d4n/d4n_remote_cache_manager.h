@@ -37,6 +37,7 @@ class RemoteCacheOp {
       uint64_t offset;
       uint64_t len;
       std::string version;
+	  bool dirty;
       rgw_user bucket_owner;
       std::string remote_addr;
       uint64_t obj_size;
