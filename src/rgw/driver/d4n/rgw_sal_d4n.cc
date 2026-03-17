@@ -2543,7 +2543,7 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
     std::string objName = source->get_name();
     bool remote_cache_request = source->is_remote_cache_request();
 
-	if (dpp->get_cct()->_conf->rgw_d4n_remote_enabled) {
+	if (dpp->get_cct()->_conf->rgw_d4n_remote_delete_enabled) {
 	  if (remote_cache_request) {
 		objDirty = source->get_remote_dirty_flag();
 	    if (objDirty){
@@ -2580,7 +2580,7 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
             ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): send_and_complete_request failed for remote cache: " << remote_addr <<  "ret= " << ret << dendl;
     	}
       } //end - if else (remote_cache_request)
-	} //if (dpp->get_cct()->_conf->rgw_d4n_remote_enabled)
+	} //if (dpp->get_cct()->_conf->rgw_d4n_remote_delete_enabled)
 
     // special handling for name starting with '_'
     if (objName[0] == '_') {

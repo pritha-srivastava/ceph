@@ -4000,10 +4000,10 @@ options:
   flags:
   - startup
   with_legacy: true
-- name: rgw_d4n_remote_enabled
+- name: rgw_d4n_remote_delete_enabled
   type: bool
   level: advanced
-  desc: option to enable/diasble remote cache operations
+  desc: option to enable/diasble remote delete operations
   default: true
   services:
   - rgw
