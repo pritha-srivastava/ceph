@@ -3,14 +3,19 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/heap/fibonacci_heap.hpp>
 #include <boost/system/detail/errc.hpp>
 
-#include "d4n_directory.h"
-#include "rgw_sal_d4n.h"
-#include "rgw_cache_driver.h"
+#include "driver/cache/rgw_cache_driver.h"
 
-namespace rgw { namespace d4n {
+namespace rgw::d4n {
+
+class DirectoryConnection;
+class BucketDirectory;
+class ObjectDirectory;
+class BlockDirectory;
+class CacheBlock;
 
 namespace asio = boost::asio;
 namespace sys = boost::system;
@@ -38,7 +43,6 @@ class CachePolicy {
       std::string version;
       bool dirty;
       uint64_t refcount{0};
-      Entry() = default;
       Entry(const std::string& key, uint64_t offset, uint64_t len, const std::string& version, bool dirty, uint64_t refcount) : key(key), offset(offset), 
 											        len(len), version(version), dirty(dirty), refcount(refcount) {}
       };
@@ -88,7 +92,7 @@ class CachePolicy {
 };
 
 class LFUDAPolicy : public CachePolicy {
-  private:
+  protected:
     template<typename T>
     struct EntryComparator {
       bool operator()(T* const e1, T* const e2) const {
@@ -121,7 +125,7 @@ class LFUDAPolicy : public CachePolicy {
       int localWeight;
       using handle_type = boost::heap::fibonacci_heap<LFUDAEntry*, boost::heap::compare<EntryComparator<LFUDAEntry>>>::handle_type;
       handle_type handle;
-      LFUDAEntry() = default;
+
       LFUDAEntry(const std::string& key, uint64_t offset, uint64_t len, const std::string& version, bool dirty, uint64_t refcount, int localWeight) : Entry(key, offset, len, version, dirty, refcount), 
 														       localWeight(localWeight) {}
       
@@ -156,23 +160,25 @@ class LFUDAPolicy : public CachePolicy {
 
     int age = 1, weightSum = 0, postedSum = 0;
     optional_yield y = null_yield;
-    std::shared_ptr<connection> conn;
+    std::shared_ptr<DirectoryConnection> conn;
     BlockDirectory* blockDir;
     ObjectDirectory* objDir;
     BucketDirectory* bucketDir;
     rgw::cache::CacheDriver* cacheDriver;
-    std::optional<asio::steady_timer> rthread_timer;
     rgw::sal::Driver* driver;
+	
+    std::optional<asio::steady_timer> rthread_timer;
     std::thread tc;
+
     std::thread lwthread;
     //data structure for accumulating updated blocks
     std::unordered_map<std::string, uint64_t> updated_blocks;
     static constexpr size_t LOCALWEIGHT_BATCH_SIZE = 10000;
 
     CacheBlock* get_victim_block(const DoutPrefixProvider* dpp, optional_yield y);
-    int age_sync(const DoutPrefixProvider* dpp, optional_yield y); 
-    int local_weight_sync(const DoutPrefixProvider* dpp, optional_yield y); 
-    asio::awaitable<void> redis_sync(const DoutPrefixProvider* dpp, optional_yield y);
+    virtual int age_sync(const DoutPrefixProvider* dpp, optional_yield y) = 0; 
+    virtual int local_weight_sync(const DoutPrefixProvider* dpp, optional_yield y) = 0; 
+	
     void rthread_stop() {
       std::lock_guard l{lfuda_lock};
 
@@ -180,44 +186,31 @@ class LFUDAPolicy : public CachePolicy {
 	rthread_timer->cancel();
       }
     }
+	
     LFUDAEntry* find_entry(const std::string& key) {
       auto it = entries_map.find(key); 
       if (it == entries_map.end())
         return nullptr;
       return it->second;
     }
-    int delete_data_blocks(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, optional_yield y);
+
+	virtual int delete_data_blocks(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, optional_yield y);
+
+  protected:
+    asio::awaitable<void> directory_sync(const DoutPrefixProvider* dpp, optional_yield y);
+
 
   public:
-    LFUDAPolicy(std::shared_ptr<connection>& conn, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : CachePolicy(), 
+    LFUDAPolicy(std::shared_ptr<DirectoryConnection>& conn, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : CachePolicy(), 
                                                                                                              y(y),
 													     conn(conn), 
 													     cacheDriver(cacheDriver)
-    {
-      blockDir = new BlockDirectory{conn};
-      objDir = new ObjectDirectory{conn};
-      bucketDir = new BucketDirectory{conn};
-    }
+	{
+	}
     ~LFUDAPolicy() {
-      rthread_stop();
-      delete bucketDir;
-      delete blockDir;
-      delete objDir;
-      quit = true;
-      lw_quit = true;
-      cond.notify_all();
-      lw_cond.notify_all();
-      if (tc.joinable()) { tc.join(); }
-      if (lwthread.joinable()) { lwthread.join(); }
-      for (auto& it : entries_map) {
-        delete it.second;
-      }
-      for (auto& it : o_entries_map) {
-        delete it.second.first;
-      }
-    }
+    } 
 
-    virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver);
+    virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver) = 0;
     virtual int exist_key(const std::string& key) override;
     virtual int eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) override;
     virtual bool update_refcount_if_key_exists(const DoutPrefixProvider* dpp, const std::string& key, uint8_t op, optional_yield y) override;
@@ -270,26 +263,4 @@ class LRUPolicy : public CachePolicy {
     virtual void cleaning(const DoutPrefixProvider* dpp) override {}
 };
 
-class PolicyDriver {
-  private:
-    std::string policyName;
-    CachePolicy* cachePolicy;
-
-  public:
-    PolicyDriver(std::shared_ptr<connection>& conn, rgw::cache::CacheDriver* cacheDriver, const std::string& _policyName, optional_yield y) : policyName(_policyName) 
-    {
-      if (policyName == "lfuda") {
-	cachePolicy = new LFUDAPolicy(conn, cacheDriver, y);
-      } else if (policyName == "lru") {
-	cachePolicy = new LRUPolicy(cacheDriver);
-      }
-    }
-    ~PolicyDriver() {
-      delete cachePolicy;
-    }
-
-    CachePolicy* get_cache_policy() { return cachePolicy; }
-    std::string get_policy_name() { return policyName; }
-};
-
-} } // namespace rgw::d4n
+} // namespace rgw::d4n

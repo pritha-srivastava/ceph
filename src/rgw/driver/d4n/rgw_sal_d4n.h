@@ -20,11 +20,8 @@
 #include "rgw_role.h"
 #include "common/dout.h" 
 #include "rgw_aio_throttle.h"
-#include "rgw_ssd_driver.h"
-#include "rgw_redis_driver.h"
 
-#include "driver/d4n/d4n_directory.h"
-#include "driver/d4n/d4n_policy.h"
+#include "d4n_policy_driver.h"
 
 #include <boost/intrusive/list.hpp>
 #include <boost/asio/io_context.hpp>
@@ -33,11 +30,17 @@
 
 #include <fmt/core.h>
 
+
 namespace rgw::d4n {
   class PolicyDriver;
+  class CachePolicy;
+  class BucketDirectory;
+  class ObjectDirectory;
+  class BlockDirectory;
 }
 
 namespace rgw { namespace sal {
+
 
 inline std::string get_cache_block_prefix(rgw::sal::Object* object, const std::string& version)
 {
@@ -49,11 +52,15 @@ inline std::string get_key_in_cache(const std::string& prefix, const std::string
   return fmt::format("{}{}{}{}{}", prefix, CACHE_DELIM, offset, CACHE_DELIM, len);
 }
 
+namespace lfdb = ceph::libfdb;
+
 using boost::redis::connection;
+using fdbase= lfdb::database;
 
 class D4NFilterDriver : public FilterDriver {
   private:
-    std::shared_ptr<connection> conn;
+    std::shared_ptr<rgw::d4n::DirectoryConnection> conn;
+
     std::unique_ptr<rgw::cache::CacheDriver> cacheDriver;
     std::unique_ptr<rgw::d4n::ObjectDirectory> objDir;
     std::unique_ptr<rgw::d4n::BlockDirectory> blockDir;
@@ -61,6 +68,7 @@ class D4NFilterDriver : public FilterDriver {
     std::unique_ptr<rgw::d4n::PolicyDriver> policyDriver;
     boost::asio::io_context& io_context;
     optional_yield y;
+	std::string directory_type;
 
     // Redis connection pool
     std::shared_ptr<rgw::d4n::RedisPool> redis_pool;
@@ -86,11 +94,15 @@ class D4NFilterDriver : public FilterDriver {
     rgw::cache::CacheDriver* get_cache_driver() { return cacheDriver.get(); }
     rgw::d4n::ObjectDirectory* get_obj_dir() { return objDir.get(); }
     rgw::d4n::BlockDirectory* get_block_dir() { return blockDir.get(); }
-    rgw::d4n::BucketDirectory* get_bucket_dir() { return bucketDir.get(); }
+    rgw::d4n::BucketDirectory* get_bucket_dir() { return bucketDir.get(); } //FIXME: this needs dynamic_casting
     rgw::d4n::PolicyDriver* get_policy_driver() { return policyDriver.get(); }
     void save_y(optional_yield y) { this->y = y; }
-    std::shared_ptr<connection> get_conn() { return conn; }
+
+    std::shared_ptr<rgw::d4n::DirectoryConnection> get_conn() { return conn; }
     std::shared_ptr<rgw::d4n::RedisPool> get_redis_pool() { return redis_pool; }
+
+	std::string get_directory_type(){ return directory_type; }
+
     void shutdown() override;
 };
 
@@ -113,8 +125,26 @@ class D4NFilterBucket : public FilterBucket {
     };
     D4NFilterDriver* filter;
     bool cache_request{false};
-    bool return_blocks{false}; // indicates whether dir_blocks should be populated
-    std::unordered_map<std::string, rgw::d4n::CacheBlock> dir_blocks; // for use in bucket removal
+
+    struct FetchContext {
+      std::vector<std::string> objects;
+      bool has_more = false;
+      std::string next_cursor_or_start;  // Next cursor for scan_objects or start for get_range
+    };
+    int fetch_objects_batch(const DoutPrefixProvider* dpp, const ListParams& params, int batch_size,
+                            std::string& cursor_or_start, FetchContext& fetch_ctx, optional_yield y);
+    void filter_and_group_objects(const DoutPrefixProvider* dpp, const std::vector<std::string>& input_objects,
+                                    const ListParams& params, std::vector<std::string>& filtered_objects,
+                                    ListResults& cache_results, ListResults& store_results,
+                                    int& num_objs);
+    int build_versioned_entries(const DoutPrefixProvider* dpp, const std::string& obj_name,
+                              const ListParams& params, std::vector<rgw_bucket_list_entries>& entries,
+                              std::string& last_version, int& num_objs, int max, optional_yield y);
+    int populate_cache_results(const DoutPrefixProvider* dpp, const std::vector<rgw_bucket_list_entries>& entries,
+                                ListResults& cache_results, optional_yield y);
+    void merge_results(const DoutPrefixProvider* dpp, const ListParams& params,
+                        ListResults& cache_results, ListResults& store_results,
+                        int max, ListResults& results);
 
   public:
     D4NFilterBucket(std::unique_ptr<Bucket> _next, D4NFilterDriver* _filter) :
@@ -125,12 +155,9 @@ class D4NFilterBucket : public FilterBucket {
     virtual std::unique_ptr<Object> get_object(const rgw_obj_key& key) override;
     virtual int list(const DoutPrefixProvider* dpp, ListParams& params, int max,
 		   ListResults& results, optional_yield y) override;
-    virtual int remove(const DoutPrefixProvider* dpp, bool delete_children,
-		       optional_yield y) override;
     virtual int create(const DoutPrefixProvider* dpp,
                        const CreateParams& params,
                        optional_yield y) override;
-    virtual int check_empty(const DoutPrefixProvider* dpp, optional_yield y) override;
     virtual std::unique_ptr<MultipartUpload> get_multipart_upload(
 				const std::string& oid,
 				std::optional<std::string> upload_id=std::nullopt,
