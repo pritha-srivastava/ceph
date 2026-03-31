@@ -3972,6 +3972,17 @@ options:
   flags:
   - startup
   with_legacy: true
+- name: rgw_d4n_directory_type
+  type: str
+  level: advanced
+  desc: This option chooses D4N directory type.
+  long_desc: D4N may use Redis(redis) or FDB(fdb) as the directory.
+  default: redis
+  services: 
+  - rgw
+  flags:
+  - startup
+  with_legacy: true
 - name: rgw_backend_store
   type: str
   level: advanced

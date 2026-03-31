@@ -7,6 +7,7 @@
 #include <boost/system/detail/errc.hpp>
 
 #include "d4n_directory.h"
+#include "d4n_connection.h"
 #include "rgw_sal_d4n.h"
 
 #include "driver/cache/rgw_cache_driver.h"
@@ -154,19 +155,22 @@ class LFUDAPolicy : public CachePolicy {
 
     int age = 1, weightSum = 0, postedSum = 0;
     optional_yield y = null_yield;
-    std::shared_ptr<connection> conn;
+    std::shared_ptr<D4NConnection> conn;
     BlockDirectory* blockDir;
     ObjectDirectory* objDir;
     BucketDirectory* bucketDir;
     rgw::cache::CacheDriver* cacheDriver;
-    std::optional<asio::steady_timer> rthread_timer;
     rgw::sal::Driver* driver;
+	
+    std::optional<asio::steady_timer> rthread_timer;
     std::thread tc;
+	
 
-    CacheBlock* get_victim_block(const DoutPrefixProvider* dpp, optional_yield y);
-    int age_sync(const DoutPrefixProvider* dpp, optional_yield y); 
-    int local_weight_sync(const DoutPrefixProvider* dpp, optional_yield y); 
-    asio::awaitable<void> redis_sync(const DoutPrefixProvider* dpp, optional_yield y);
+    virtual CacheBlock* get_victim_block(const DoutPrefixProvider* dpp, optional_yield y) = 0;
+    virtual int age_sync(const DoutPrefixProvider* dpp, optional_yield y) = 0; 
+    virtual int local_weight_sync(const DoutPrefixProvider* dpp, optional_yield y) = 0; 
+	
+    //asio::awaitable<void> redis_sync(const DoutPrefixProvider* dpp, optional_yield y);
     void rthread_stop() {
       std::lock_guard l{lfuda_lock};
 
@@ -174,32 +178,35 @@ class LFUDAPolicy : public CachePolicy {
 	rthread_timer->cancel();
       }
     }
+	
     LFUDAEntry* find_entry(const std::string& key) {
       auto it = entries_map.find(key); 
       if (it == entries_map.end())
         return nullptr;
       return it->second;
     }
-    int delete_data_blocks(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, optional_yield y);
+
+	virtual int delete_data_blocks(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, optional_yield y) = 0;
 
   public:
-    LFUDAPolicy(std::shared_ptr<connection>& conn, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : CachePolicy(), 
+    LFUDAPolicy(std::shared_ptr<D4NConnection>& conn, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : CachePolicy(), 
                                                                                                              y(y),
 													     conn(conn), 
 													     cacheDriver(cacheDriver)
     {
-      blockDir = new BlockDirectory{conn};
-      objDir = new ObjectDirectory{conn};
-      bucketDir = new BucketDirectory{conn};
     }
     ~LFUDAPolicy() {
+	  
       rthread_stop();
+	  /*
       delete bucketDir;
       delete blockDir;
       delete objDir;
+	  */
       quit = true;
       cond.notify_all();
       if (tc.joinable()) { tc.join(); }
+	  
     } 
 
     virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver);
@@ -260,12 +267,17 @@ class PolicyDriver {
     CachePolicy* cachePolicy;
 
   public:
-    PolicyDriver(std::shared_ptr<connection>& conn, rgw::cache::CacheDriver* cacheDriver, const std::string& _policyName, optional_yield y) : policyName(_policyName) 
+    PolicyDriver(std::shared_ptr<D4NConnection>& conn, bool is_redis_used, rgw::cache::CacheDriver* cacheDriver, const std::string& _policyName, optional_yield y) : policyName(_policyName) 
     {
       if (policyName == "lfuda") {
-	cachePolicy = new LFUDAPolicy(conn, cacheDriver, y);
+		if (is_redis_used){
+		  cachePolicy = new RedisLFUDAPolicy(conn, cacheDriver, y);
+		}
+		else{
+		  cachePolicy = new FDBLFUDAPolicy(conn, cacheDriver, y);
+		}
       } else if (policyName == "lru") {
-	cachePolicy = new LRUPolicy(cacheDriver);
+		cachePolicy = new LRUPolicy(cacheDriver);
       }
     }
     ~PolicyDriver() {

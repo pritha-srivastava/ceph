@@ -1,80 +1,76 @@
+/*
+ * Ceph - scalable distributed file system
+ *
+ * Copyright (C) 2026 International Business Machines Corp. (IBM)
+ *      
+ * This is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License version 2.1, as published by the Free Software
+ * Foundation.  See file COPYING.
+ *
+*/
+
 #pragma once
 
+#include "driver/d4n/d4n_directory.h"
+#include "rgw/ceph_fdb.h"
+
+#include <fmt/format.h>
+#include <fmt/chrono.h>
+#include <fmt/ranges.h>
+
+#include "include/random.h"
+
+#include <chrono>
+#include <vector>
+
+/*
 #include "rgw_common.h"
 #include "rgw_asio_thread.h"
-
 #include <boost/asio/detached.hpp>
 #include <condition_variable>
 #include <deque>
 #include <memory>
 #include <concepts>
+*/
+
+using fmt::format;
+using fmt::println;
+
+using std::end;
+using std::begin;
+
+using std::string;
+using std::string_view;
+
+using std::to_string;
+
+using std::vector;
+
+using namespace std::literals::string_literals;
+
+namespace lfdb = ceph::libfdb;
+
 
 namespace rgw { namespace d4n {
 
+//namespace net = boost::asio;
+using connection = lfdb::FDBDatabase;
 
-namespace net = boost::asio;
-
-enum class ObjectFields { // Fields stored in object directory 
-  ObjName,
-  BucketName,
-  CreationTime,
-  Dirty,
-  Hosts,
-  Etag,
-  ObjSize,
-  UserID,
-  DisplayName
-};
-
-enum class BlockFields { // Fields stored in block directory 
-  BlockID,
-  Version, 
-  DeleteMarker,
-  Size,
-  GlobalWeight,
-  ObjName,
-  BucketName,
-  CreationTime,
-  Dirty,
-  Hosts,
-  Etag,
-  ObjSize,
-  UserID,
-  DisplayName
-};
-
-struct CacheObj {
-  std::string objName; /* S3 object name */
-  std::string bucketName; /* S3 bucket name */
-  std::string creationTime; /* Creation time of the S3 Object */
-  bool dirty{false};
-  std::unordered_set<std::string> hostsList; /* List of hostnames <ip:port> of object locations for multiple backends */
-  std::string etag; //etag needed for list objects
-  uint64_t size; //total object size (and not block size), needed for list objects
-  std::string user_id; // id of user, needed for list object versions
-  std::string display_name; // display name of owner, needed for list object versions
-};
-
-struct CacheBlock {
-  CacheObj cacheObj;
-  uint64_t blockID;
-  std::string version;
-  bool deleteMarker{false};
-  uint64_t size; /* Block size in bytes */
-  int globalWeight = 0; /* LFUDA policy variable */
-  /* Blocks use the cacheObj's dirty and hostsList metadata to store their dirty flag values and locations in the block directory. */
-};
-
-class Directory {
-public:
-    Directory() {}
-};
-
-
-/*
-class BucketDirectory: public Directory {
+class FDBDirectory : public Directory {
   public:
-    BucketDirectory(std::shared_ptr<connection>& conn) : conn(conn) {}
+	std::shared_ptr<connection> conn{nullptr}; // FDB data base
+    void set_fdb_database(std::shared_ptr<connection> db) {
+      	conn = db;
+    }
+    FDBDirectory() {}
+};
+
+
+class FDBBucketDirectory: public FDBDirectory {
+  public:
+    FDBBucketDirectory(std::shared_ptr<connection>& conn) : conn(conn) {}
+
     int zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, double score, const std::string& member, optional_yield y, Pipeline* pipeline=nullptr);
     int zrem(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& member, optional_yield y);
     int zrange(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start, const std::string& stop, uint64_t offset, uint64_t count, std::vector<std::string>& members, optional_yield y);
@@ -85,13 +81,13 @@ class BucketDirectory: public Directory {
     std::shared_ptr<connection> conn;
 };
 
-class ObjectDirectory: public Directory {
+class FDBObjectDirectory: public FDBDirectory {
   public:
-    ObjectDirectory(std::shared_ptr<connection>& conn) : conn(conn) {}
+    FDBObjectDirectory(std::shared_ptr<connection>& conn) : conn(conn) {}
 
     int exist_key(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y);
 
-    int set(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y);
+    int set(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y); /* If nx is true, set only if key doesn't exist */
     int get(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y);
     int copy(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& copyName, const std::string& copyBucketName, optional_yield y);
     int del(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y);
@@ -111,21 +107,28 @@ class ObjectDirectory: public Directory {
     std::string build_index(CacheObj* object);
 };
 
-class BlockDirectory: public Directory {
+class FDBBlockDirectory: public FDBDirectory {
   public:
-    BlockDirectory(std::shared_ptr<connection>& conn) : conn(conn) {}
+    FDBBlockDirectory(std::shared_ptr<connection>& conn) : conn(conn) {}
     
     int exist_key(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y);
 
+	/*
     //Pipelined version of set
     int set(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y);
+	*/
+
     int set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Pipeline* pipeline=nullptr);
     int get(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y);
+
+	/*
     //Pipelined version of get using boost::redis::response for list bucket
     template <size_t N = 100>
     int get(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y);
     //Pipelined version of get using boost::redis::generic_response
     int get(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y);
+	*/
+
     int copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, optional_yield y);
     int del(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y);
     int update_field(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& field, std::string& value, optional_yield y);
@@ -139,9 +142,8 @@ class BlockDirectory: public Directory {
     std::shared_ptr<connection> conn;
     std::string build_index(CacheBlock* block);
 
-    template<SeqContainer Container>
+    //template<SeqContainer Container>
     int set_values(const DoutPrefixProvider* dpp, CacheBlock& block, Container& redisValues, optional_yield y);
 };
-*/
 
 } } // namespace rgw::d4n

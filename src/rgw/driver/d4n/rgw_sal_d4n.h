@@ -23,6 +23,8 @@
 
 
 #include "driver/d4n/d4n_directory.h"
+#include "driver/d4n/d4n_directory_redis.h"
+#include "driver/d4n/d4n_directory_fdb.h"
 #include "driver/d4n/d4n_policy.h"
 
 #include "driver/redis/rgw_redis_driver.h"
@@ -53,10 +55,12 @@ inline std::string get_key_in_cache(const std::string& prefix, const std::string
 }
 
 using boost::redis::connection;
+using fdbase= lfdb::FDBDatabase;
 
 class D4NFilterDriver : public FilterDriver {
   private:
-    std::shared_ptr<connection> conn;
+    std::shared_ptr<D4NConnection> conn;
+
     std::unique_ptr<rgw::cache::CacheDriver> cacheDriver;
     std::unique_ptr<rgw::d4n::ObjectDirectory> objDir;
     std::unique_ptr<rgw::d4n::BlockDirectory> blockDir;
@@ -92,8 +96,11 @@ class D4NFilterDriver : public FilterDriver {
     rgw::d4n::BucketDirectory* get_bucket_dir() { return bucketDir.get(); }
     rgw::d4n::PolicyDriver* get_policy_driver() { return policyDriver.get(); }
     void save_y(optional_yield y) { this->y = y; }
-    std::shared_ptr<connection> get_conn() { return conn; }
+
+    std::shared_ptr<D4NConnection> get_conn() { return conn; }
     std::shared_ptr<rgw::d4n::RedisPool> get_redis_pool() { return redis_pool; }
+
+
     void shutdown() override;
 };
 

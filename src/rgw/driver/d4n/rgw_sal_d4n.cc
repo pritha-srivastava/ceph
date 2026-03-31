@@ -57,15 +57,6 @@ int D4NFilterDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
   namespace net = boost::asio;
   using boost::redis::config;
 
-  conn = std::make_shared<connection>(boost::asio::make_strand(io_context));
-  objDir = std::make_unique<rgw::d4n::ObjectDirectory>(conn);
-  blockDir = std::make_unique<rgw::d4n::BlockDirectory>(conn);
-  bucketDir = std::make_unique<rgw::d4n::BucketDirectory>(conn);
-  policyDriver = std::make_unique<rgw::d4n::PolicyDriver>(conn,
-							  cacheDriver.get(),
-							  "lfuda",
-                                                          this->y);
-
   std::string address = cct->_conf->rgw_d4n_address;
   config cfg;
   cfg.addr.host = address.substr(0, address.find(":"));
@@ -77,25 +68,41 @@ int D4NFilterDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
     return -EDESTADDRREQ;
   }
 
-  conn->async_run(cfg, {}, net::consign(net::detached, conn));
+  std::string directory_type = dpp->get_cct()->_conf->rgw_d4n_directory_type;
+  if (directory_type == "redis"){
+    conn = std::make_shared<RedisConnection>(boost::asio::make_strand(io_context));
+    objDir = std::make_unique<rgw::d4n::RedisObjectDirectory>(conn);
+    blockDir = std::make_unique<rgw::d4n::RedisBlockDirectory>(conn);
+    bucketDir = std::make_unique<rgw::d4n::RedisBucketDirectory>(conn);
+    policyDriver = std::make_unique<rgw::d4n::PolicyDriver>(conn, cacheDriver.get(), "lfuda", this->y);
+    conn->async_run(cfg, {}, net::consign(net::detached, conn));
+
+    //setting the connection pool size and other parameters
+    uint64_t rgw_redis_connection_pool_size = dpp->get_cct()->_conf->rgw_redis_connection_pool_size;
+    std::shared_ptr<rgw::d4n::RedisPool>redis_pool = nullptr;
+    if(rgw_redis_connection_pool_size>0){
+      redis_pool = std::make_shared<rgw::d4n::RedisPool>(&io_context, cfg, rgw_redis_connection_pool_size);
+      ldpp_dout(dpp, 10) << "redis connection pool created with " << rgw_redis_connection_pool_size << " connections "  << dendl;
+    }
+
+    objDir->set_redis_pool(redis_pool);
+    blockDir->set_redis_pool(redis_pool);
+    bucketDir->set_redis_pool(redis_pool);
+
+  }
+  else if (directory_type == "fdb"){
+    conn = std::make_shared<FDBConnection>(lfdb::create_database());
+    objDir = std::make_unique<rgw::d4n::FDBObjectDirectory>(conn);
+    blockDir = std::make_unique<rgw::d4n::FDBBlockDirectory>(conn);
+    bucketDir = std::make_unique<rgw::d4n::FDBBucketDirectory>(conn);
+    policyDriver = std::make_unique<rgw::d4n::PolicyDriver>(conn, cacheDriver.get(), "lfuda", this->y);
+  }
 
   FilterDriver::initialize(cct, dpp);
 
   cacheDriver->initialize(dpp);
   policyDriver->get_cache_policy()->init(cct, dpp, io_context, next);
-
-  //setting the connection pool size and other parameters
-  uint64_t rgw_redis_connection_pool_size = dpp->get_cct()->_conf->rgw_redis_connection_pool_size;
-  std::shared_ptr<rgw::d4n::RedisPool>redis_pool = nullptr;
-  if(rgw_redis_connection_pool_size>0){
-      redis_pool = std::make_shared<rgw::d4n::RedisPool>(&io_context, cfg, rgw_redis_connection_pool_size);
-      ldpp_dout(dpp, 10) << "redis connection pool created with " << rgw_redis_connection_pool_size << " connections "  << dendl;
-  }
-
-  objDir->set_redis_pool(redis_pool);
-  blockDir->set_redis_pool(redis_pool);
-  bucketDir->set_redis_pool(redis_pool);
-  
+ 
   return 0;
 }
 
@@ -1687,8 +1694,13 @@ std::unique_ptr<Writer> D4NFilterDriver::get_atomic_writer(const DoutPrefixProvi
 
 void D4NFilterDriver::shutdown()
 {
-  // call cancel() on the connection's executor
-  boost::asio::dispatch(conn->get_executor(), [c = conn] { c->cancel(); });
+  std::string directory_type = dpp->get_cct()->_conf->rgw_d4n_directory_type;
+  if (directory_type == "redis"){
+    boost::asio::dispatch(conn->get_executor(), [c = conn] { c->cancel(); });
+  }
+  else if (directory_type == "fdb"){
+  	ceph::libfdb::shutdown_libfdb(); 
+  }
 
   cacheDriver.reset();
   objDir.reset();
