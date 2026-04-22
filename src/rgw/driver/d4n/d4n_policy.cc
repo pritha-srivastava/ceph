@@ -152,6 +152,7 @@ int LFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_
   asio::co_spawn(io_context.get_executor(),
 		   redis_sync(dpp, y), asio::detached);
 
+  eviction_thread = std::thread(&LFUDAPolicy::background_eviction_worker, this, dpp);
   return 0;
 }
 
@@ -372,6 +373,66 @@ int LFUDAPolicy::exist_key(const std::string& key) {
   }
 
   return false;
+}
+
+void LFUDAPolicy::perform_background_eviction(const DoutPrefixProvider* dpp, uint64_t bytes_to_free)
+{
+  uint64_t total_freed = 0;
+
+  // Evict in batches to avoid holding locks too long
+  while (total_freed < bytes_to_free && !quit) {
+    uint64_t batch_size = std::min(bytes_to_free - total_freed, BATCH_SIZE);
+
+    // Use existing eviction logic
+    int ret = eviction(dpp, batch_size, null_yield);
+    if (ret < 0) {
+      ldpp_dout(dpp, 5) << "Background eviction failed: " << ret << dendl;
+      break;
+    }
+
+    total_freed += batch_size;
+
+    // Brief pause between batches to allow other operations
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  ldpp_dout(dpp, 10) << "Background eviction completed: freed " 
+                 << (total_freed / 1024 / 1024) << "MB" << dendl;
+}
+
+void LFUDAPolicy::background_eviction_worker(const DoutPrefixProvider* dpp)
+{
+  ldpp_dout(dpp, 10) << "Background eviction thread started" << dendl;
+
+  while (!quit) {
+    // Sleep for check interval
+    std::this_thread::sleep_for(CHECK_INTERVAL);
+
+    if (quit.load()) {
+      break;
+    }
+
+    // Check current cache usage
+    uint64_t used_space = cache_capacity - cacheDriver->get_free_space(dpp, null_yield);
+
+    // Only evict if above watermark
+    if (used_space < eviction_watermark_bytes) {
+      continue;  // Below 75%, nothing to do
+    }
+
+    // Calculate bytes to free (evict to 65%)
+    uint64_t bytes_to_free = used_space - target_bytes;
+
+    double usage_pct = (static_cast<double>(used_space) / cache_capacity) * 100;
+    ldpp_dout(dpp, 5) << "Cache at " << usage_pct 
+                   << "% - evicting " << (bytes_to_free / 1024 / 1024) 
+                   << "MB to reach 65%" << dendl;
+
+    // Perform eviction
+    perform_background_eviction(dpp, bytes_to_free);
+  }
+
+  ldpp_dout(dpp, 10) << "Background eviction thread stopped" << dendl;
 }
 
 int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) {

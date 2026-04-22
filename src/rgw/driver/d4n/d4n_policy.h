@@ -17,6 +17,11 @@ namespace sys = boost::system;
 
 static std::string empty = std::string();
 
+constexpr double EVICTION_WATERMARK = 0.75;  // 75% - start background eviction
+constexpr double TARGET_WATERMARK = 0.65;    // 65% - target after eviction
+constexpr auto CHECK_INTERVAL = std::chrono::seconds(5);  // Check every 5 seconds
+constexpr uint64_t BATCH_SIZE = 100 * 1024 * 1024;  // 100MB eviction batches
+
 enum RefCount {
   NOOP = 0,
   INCR = 1,
@@ -31,6 +36,9 @@ enum class State { // state machine for dirty objects in the cache
 
 class CachePolicy {
   protected:
+    std::atomic<uint64_t> cache_capacity;
+    std::atomic<uint64_t> eviction_watermark_bytes;
+    std::atomic<uint64_t> target_bytes;
     struct Entry : public boost::intrusive::list_base_hook<> {
       std::string key;
       uint64_t offset;
@@ -68,11 +76,18 @@ class CachePolicy {
 									      bucket_name(bucket_name), bucket_id(bucket_id), obj_key(obj_key) {}
     };
 
+    rgw::cache::CacheDriver* cacheDriver;
   public:
-    CachePolicy() {}
+    CachePolicy(rgw::cache::CacheDriver* cacheDriver) : cacheDriver(cacheDriver) {}
     virtual ~CachePolicy() = default; 
 
-    virtual int init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver* _driver) = 0;
+    virtual int init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver* _driver) {
+      cache_capacity = cacheDriver->get_current_partition_info(dpp).size;
+      eviction_watermark_bytes = cache_capacity * EVICTION_WATERMARK;
+      target_bytes = cache_capacity * TARGET_WATERMARK;
+      return 0; 
+    }
+
     virtual int exist_key(const std::string& key) = 0;
     virtual int eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) = 0;
     virtual bool update_refcount_if_key_exists(const DoutPrefixProvider* dpp, const std::string& key, uint8_t op, optional_yield y) = 0;
@@ -84,6 +99,7 @@ class CachePolicy {
     virtual bool erase_dirty_object(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) = 0;
     virtual bool invalidate_dirty_object(const DoutPrefixProvider* dpp, const std::string& key) = 0;
     virtual void cleaning(const DoutPrefixProvider* dpp) = 0;
+    virtual void background_eviction_worker(const DoutPrefixProvider* dpp) = 0;
 };
 
 class LFUDAPolicy : public CachePolicy {
@@ -102,7 +118,7 @@ class LFUDAPolicy : public CachePolicy {
           return true;
         } else if (e1->refcount == 0 && e2->refcount > 0) {
           return false;
-        }else {
+        } else {
           return e1->localWeight > e2->localWeight;
         }
       }
@@ -157,10 +173,10 @@ class LFUDAPolicy : public CachePolicy {
     BlockDirectory* blockDir;
     ObjectDirectory* objDir;
     BucketDirectory* bucketDir;
-    rgw::cache::CacheDriver* cacheDriver;
     std::optional<asio::steady_timer> rthread_timer;
     rgw::sal::Driver* driver;
     std::thread tc;
+    std::thread eviction_thread;
 
     CacheBlock* get_victim_block(const DoutPrefixProvider* dpp, optional_yield y);
     int age_sync(const DoutPrefixProvider* dpp, optional_yield y); 
@@ -180,12 +196,12 @@ class LFUDAPolicy : public CachePolicy {
       return it->second;
     }
     int delete_data_blocks(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, optional_yield y);
+    void perform_background_eviction(const DoutPrefixProvider* dpp, uint64_t bytes_to_free);
 
   public:
-    LFUDAPolicy(std::shared_ptr<connection>& conn, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : CachePolicy(), 
+    LFUDAPolicy(std::shared_ptr<connection>& conn, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : CachePolicy(cacheDriver), 
                                                                                                              y(y),
-													     conn(conn), 
-													     cacheDriver(cacheDriver)
+													     conn(conn)
     {
       blockDir = new BlockDirectory{conn};
       objDir = new ObjectDirectory{conn};
@@ -199,6 +215,7 @@ class LFUDAPolicy : public CachePolicy {
       quit = true;
       cond.notify_all();
       if (tc.joinable()) { tc.join(); }
+      if (eviction_thread.joinable()) { eviction_thread.join(); }
     } 
 
     virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver);
@@ -214,6 +231,7 @@ class LFUDAPolicy : public CachePolicy {
     virtual bool erase_dirty_object(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) override;
     virtual bool invalidate_dirty_object(const DoutPrefixProvider* dpp, const std::string& key) override;
     virtual void cleaning(const DoutPrefixProvider* dpp) override;
+    virtual void background_eviction_worker(const DoutPrefixProvider* dpp) override;
     LFUDAObjEntry* find_obj_entry(const std::string& key) {
       auto it = o_entries_map.find(key);
       if (it == o_entries_map.end()) {
@@ -232,12 +250,11 @@ class LRUPolicy : public CachePolicy {
     std::unordered_map<std::string, ObjEntry*> o_entries_map;
     std::mutex lru_lock;
     List entries_lru_list;
-    rgw::cache::CacheDriver* cacheDriver;
 
     bool _erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y);
 
   public:
-    LRUPolicy(rgw::cache::CacheDriver* cacheDriver) : cacheDriver{cacheDriver} {}
+    LRUPolicy(rgw::cache::CacheDriver* cacheDriver) : CachePolicy(cacheDriver) {}
 
     virtual int init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver* _driver) { return 0; }
     virtual int exist_key(const std::string& key) override;
@@ -251,6 +268,7 @@ class LRUPolicy : public CachePolicy {
     virtual bool erase_dirty_object(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) override;
     virtual bool invalidate_dirty_object(const DoutPrefixProvider* dpp, const std::string& key) override { return false; }
     virtual void cleaning(const DoutPrefixProvider* dpp) override {}
+    virtual void background_eviction_worker(const DoutPrefixProvider* dpp) override {}
 };
 
 class PolicyDriver {

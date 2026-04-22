@@ -184,8 +184,8 @@ int SSDDriver::initialize(const DoutPrefixProvider* dpp)
     #endif
 
     efs::space_info space = efs::space(partition_info.location);
-    //currently partition_info.size is unused
-    this->free_space = space.available;
+    partition_info.size = space.capacity - partition_info.reserve_size;
+    this->free_space = (space.available < partition_info.reserve_size) ? 0 : (space.available - partition_info.reserve_size);
 
     return 0;
 }
@@ -302,8 +302,6 @@ int SSDDriver::restore_blocks_objects(const DoutPrefixProvider* dpp, ObjectDataC
 				    } else if (parts.size() == 3) { //end-if parts.size() == 1
                         std::string invalidStr;
                         std::string etag, bucket_name;
-					    uint64_t size = 0;
-					    time_t creationTime = time_t(nullptr);
 					    rgw_user user;
                         rgw::sal::Attrs attrs;
                         get_attrs(dpp, file_entry.path(), attrs, null_yield);
