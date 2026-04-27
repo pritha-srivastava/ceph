@@ -10,12 +10,17 @@
  *
 */
 
+#pragma once
+
 #include "rgw/ceph_fdb.h"
 #include <boost/redis/connection.hpp>
 
-using boost::redis::connection;
-using fdbase= lfdb::FDBDatabase;
+namespace lfdb = ceph::libfdb;
 
+using boost::redis::connection;
+using fdbase= lfdb::database;
+
+namespace rgw { namespace d4n {
 
 class D4NConnection {
 public:
@@ -23,6 +28,8 @@ public:
 
     virtual void get() = 0;
     virtual void put() = 0;
+
+	virtual std::shared_ptr<void> get_conn() = 0;
 };
 
 
@@ -35,6 +42,10 @@ public:
     }
 
     void put() override {
+    }
+
+    std::shared_ptr<void> get_conn() override {
+        return conn;
     }
 };
 
@@ -49,4 +60,10 @@ public:
 
     void put() override {
     }
+
+    std::shared_ptr<void> get_conn() override {
+        return conn;
+    }
 };
+
+}} //namespace rgw::d4n

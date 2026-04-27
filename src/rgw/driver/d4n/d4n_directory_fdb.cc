@@ -8,21 +8,13 @@
 
 namespace rgw { namespace d4n {
 
-using connection = lfdb::FDBDatabase;
+using fdb_conn = lfdb::database;
 
+/*
 struct initiate_exec {
-  std::shared_ptr<connection> conn;
+  std::shared_ptr<fdb_conn> conn;
 };
-
-int check_bool(std::string str) {
-  if (str == "true" || str == "1") {
-    return 1;
-  } else if (str == "false" || str == "0") {
-    return 0;
-  } else {
-    return -EINVAL;
-  }
-}
+*/
 
 int FDBBucketDirectory::zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, double score, const std::string& member, optional_yield y, Pipeline* pipeline)
 {
@@ -49,15 +41,9 @@ int FDBBucketDirectory::zrank(const DoutPrefixProvider* dpp, const std::string& 
   return 0;
 }
 
-std::string FDBObjectDirectory::build_index(CacheObj* object) 
-{
-  return object->bucketName + "_" + object->objName;
-}
-
 int FDBObjectDirectory::exist_key(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) 
 {
   std::string key = build_index(object);
-  //return std::get<0>(resp).value();
   return 0;
 }
 
@@ -111,19 +97,14 @@ int FDBObjectDirectory::zremrangebyscore(const DoutPrefixProvider* dpp, CacheObj
   return 0;
 }
 
-int FDBObjectDirectory::incr(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y)
-{
-  return 0;
-}
-
 int FDBObjectDirectory::zrank(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& member, std::string& index, optional_yield y)
 {
   return 0;
 }
 
-std::string FDBBlockDirectory::build_index(CacheBlock* block) 
+int FDBObjectDirectory::incr(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y)
 {
-  return block->cacheObj.bucketName + "_" + block->cacheObj.objName + "_" + std::to_string(block->blockID) + "_" + std::to_string(block->size);
+  return 0;
 }
 
 int FDBBlockDirectory::exist_key(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) 
@@ -131,24 +112,25 @@ int FDBBlockDirectory::exist_key(const DoutPrefixProvider* dpp, CacheBlock* bloc
   return 0;
 }
 
-//template<SeqContainer Container>
-int FDBBlockDirectory::set_values(const DoutPrefixProvider* dpp, CacheBlock& block, Container& redisValues, optional_yield y)
+template<SeqContainer Container>
+int FDBBlockDirectory::set_values(const DoutPrefixProvider* dpp, CacheBlock& block, Container& fdbValues, optional_yield y)
 {
   return 0;
 }
+
+int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y)
+{
+  return 0;
+}
+
 
 int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Pipeline* pipeline)
 {
   return 0;
 }
 
-/*
-int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y)
-{
-  return 0;
-}
-
 //explicit instantiation for 100 elements
+/*
 template int FDBBlockDirectory::get<100>(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y);
 
 template <size_t N>
@@ -163,12 +145,12 @@ int FDBBlockDirectory::get(const DoutPrefixProvider* dpp, CacheBlock* block, opt
   return 0;
 }
 
-/*
+
 int FDBBlockDirectory::get(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y)
 {
   return 0;
 }
-*/
+
 
 int FDBBlockDirectory::copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, optional_yield y)
 {

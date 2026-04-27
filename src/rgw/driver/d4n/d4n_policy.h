@@ -3,16 +3,19 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/heap/fibonacci_heap.hpp>
 #include <boost/system/detail/errc.hpp>
-
-#include "d4n_directory.h"
-#include "d4n_connection.h"
-#include "rgw_sal_d4n.h"
 
 #include "driver/cache/rgw_cache_driver.h"
 
 namespace rgw { namespace d4n {
+
+class D4NConnection;
+class BucketDirectory;
+class ObjectDirectory;
+class BlockDirectory;
+class CacheBlock;
 
 namespace asio = boost::asio;
 namespace sys = boost::system;
@@ -89,7 +92,7 @@ class CachePolicy {
 };
 
 class LFUDAPolicy : public CachePolicy {
-  private:
+  protected:
     template<typename T>
     struct EntryComparator {
       bool operator()(T* const e1, T* const e2) const {
@@ -166,7 +169,7 @@ class LFUDAPolicy : public CachePolicy {
     std::thread tc;
 	
 
-    virtual CacheBlock* get_victim_block(const DoutPrefixProvider* dpp, optional_yield y) = 0;
+    CacheBlock* get_victim_block(const DoutPrefixProvider* dpp, optional_yield y);
     virtual int age_sync(const DoutPrefixProvider* dpp, optional_yield y) = 0; 
     virtual int local_weight_sync(const DoutPrefixProvider* dpp, optional_yield y) = 0; 
 	
@@ -186,32 +189,21 @@ class LFUDAPolicy : public CachePolicy {
       return it->second;
     }
 
-	virtual int delete_data_blocks(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, optional_yield y) = 0;
+	virtual int delete_data_blocks(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, optional_yield y);
 
   public:
     LFUDAPolicy(std::shared_ptr<D4NConnection>& conn, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : CachePolicy(), 
                                                                                                              y(y),
 													     conn(conn), 
 													     cacheDriver(cacheDriver)
-    {
-    }
+	{
+	}
     ~LFUDAPolicy() {
-	  
-      rthread_stop();
-	  /*
-      delete bucketDir;
-      delete blockDir;
-      delete objDir;
-	  */
-      quit = true;
-      cond.notify_all();
-      if (tc.joinable()) { tc.join(); }
-	  
     } 
 
-    virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver);
+    virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver) = 0;
     virtual int exist_key(const std::string& key) override;
-    virtual int eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) override;
+    virtual int eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) = 0;
     virtual bool update_refcount_if_key_exists(const DoutPrefixProvider* dpp, const std::string& key, uint8_t op, optional_yield y) override;
     virtual void update(const DoutPrefixProvider* dpp, const std::string& key, uint64_t offset, uint64_t len, const std::string& version, std::optional<bool> dirty, uint8_t op, optional_yield y, std::string& restore_val=empty) override;
     virtual bool erase(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) override;
@@ -221,7 +213,7 @@ class LFUDAPolicy : public CachePolicy {
 			    const rgw_obj_key& obj_key, uint8_t op, optional_yield y, std::string& restore_val=empty) override;
     virtual bool erase_dirty_object(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) override;
     virtual bool invalidate_dirty_object(const DoutPrefixProvider* dpp, const std::string& key) override;
-    virtual void cleaning(const DoutPrefixProvider* dpp) override;
+    virtual void cleaning(const DoutPrefixProvider* dpp) = 0;
     LFUDAObjEntry* find_obj_entry(const std::string& key) {
       auto it = o_entries_map.find(key);
       if (it == o_entries_map.end()) {
@@ -259,33 +251,6 @@ class LRUPolicy : public CachePolicy {
     virtual bool erase_dirty_object(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) override;
     virtual bool invalidate_dirty_object(const DoutPrefixProvider* dpp, const std::string& key) override { return false; }
     virtual void cleaning(const DoutPrefixProvider* dpp) override {}
-};
-
-class PolicyDriver {
-  private:
-    std::string policyName;
-    CachePolicy* cachePolicy;
-
-  public:
-    PolicyDriver(std::shared_ptr<D4NConnection>& conn, bool is_redis_used, rgw::cache::CacheDriver* cacheDriver, const std::string& _policyName, optional_yield y) : policyName(_policyName) 
-    {
-      if (policyName == "lfuda") {
-		if (is_redis_used){
-		  cachePolicy = new RedisLFUDAPolicy(conn, cacheDriver, y);
-		}
-		else{
-		  cachePolicy = new FDBLFUDAPolicy(conn, cacheDriver, y);
-		}
-      } else if (policyName == "lru") {
-		cachePolicy = new LRUPolicy(cacheDriver);
-      }
-    }
-    ~PolicyDriver() {
-      delete cachePolicy;
-    }
-
-    CachePolicy* get_cache_policy() { return cachePolicy; }
-    std::string get_policy_name() { return policyName; }
 };
 
 } } // namespace rgw::d4n

@@ -12,7 +12,7 @@
 
 #pragma once
 
-#include "driver/d4n/d4n_directory.h"
+#include "d4n_directory.h"
 #include "rgw/ceph_fdb.h"
 
 #include <fmt/format.h>
@@ -24,126 +24,95 @@
 #include <chrono>
 #include <vector>
 
-/*
-#include "rgw_common.h"
-#include "rgw_asio_thread.h"
-#include <boost/asio/detached.hpp>
-#include <condition_variable>
-#include <deque>
-#include <memory>
-#include <concepts>
-*/
-
 using fmt::format;
 using fmt::println;
-
 using std::end;
 using std::begin;
-
 using std::string;
 using std::string_view;
-
 using std::to_string;
-
 using std::vector;
 
 using namespace std::literals::string_literals;
-
 namespace lfdb = ceph::libfdb;
-
 
 namespace rgw { namespace d4n {
 
-//namespace net = boost::asio;
-using connection = lfdb::FDBDatabase;
+using fdb_conn = lfdb::database;
 
-class FDBDirectory : public Directory {
+class FDBDirectory {
   public:
-	std::shared_ptr<connection> conn{nullptr}; // FDB data base
-    void set_fdb_database(std::shared_ptr<connection> db) {
-      	conn = db;
+	std::shared_ptr<fdb_conn> FDBconn{nullptr}; // FDB data base
+    void set_fdb_database(std::shared_ptr<fdb_conn> db) {
+      	FDBconn = db;
     }
     FDBDirectory() {}
 };
 
-
-class FDBBucketDirectory: public FDBDirectory {
+class FDBBucketDirectory: public FDBDirectory, public BucketDirectory {
   public:
-    FDBBucketDirectory(std::shared_ptr<connection>& conn) : conn(conn) {}
+	FDBBucketDirectory(std::shared_ptr<FDBConnection> fdb_conn) : FDBconn(fdb_conn->conn) {}
 
-    int zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, double score, const std::string& member, optional_yield y, Pipeline* pipeline=nullptr);
-    int zrem(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& member, optional_yield y);
-    int zrange(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start, const std::string& stop, uint64_t offset, uint64_t count, std::vector<std::string>& members, optional_yield y);
-    int zscan(const DoutPrefixProvider* dpp, const std::string& bucket_id, uint64_t cursor, const std::string& pattern, uint64_t count, std::vector<std::string>& members, uint64_t next_cursor, optional_yield y);
-    int zrank(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& member, uint64_t& rank, optional_yield y);
+    virtual int zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, double score, const std::string& member, optional_yield y, Pipeline* pipeline=nullptr) override;
+    virtual int zrem(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& member, optional_yield y) override;
+    virtual int zrange(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start, const std::string& stop, uint64_t offset, uint64_t count, std::vector<std::string>& members, optional_yield y) override;
+    virtual int zscan(const DoutPrefixProvider* dpp, const std::string& bucket_id, uint64_t cursor, const std::string& pattern, uint64_t count, std::vector<std::string>& members, uint64_t next_cursor, optional_yield y) override;
+    virtual int zrank(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& member, uint64_t& rank, optional_yield y) override;
 
   private:
-    std::shared_ptr<connection> conn;
+    std::shared_ptr<fdb_conn> FDBconn;
 };
 
-class FDBObjectDirectory: public FDBDirectory {
+class FDBObjectDirectory: public FDBDirectory, public ObjectDirectory {
   public:
-    FDBObjectDirectory(std::shared_ptr<connection>& conn) : conn(conn) {}
+	FDBObjectDirectory(std::shared_ptr<FDBConnection> fdb_conn) : FDBconn(fdb_conn->conn) {}
 
-    int exist_key(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y);
+    virtual int exist_key(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) override;
 
-    int set(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y); /* If nx is true, set only if key doesn't exist */
-    int get(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y);
-    int copy(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& copyName, const std::string& copyBucketName, optional_yield y);
-    int del(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y);
-    int update_field(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& field, std::string& value, optional_yield y);
-    int zadd(const DoutPrefixProvider* dpp, CacheObj* object, double score, const std::string& member, optional_yield y, Pipeline* pipeline=nullptr);
-    int zrange(const DoutPrefixProvider* dpp, CacheObj* object, int start, int stop, std::vector<std::string>& members, optional_yield y);
-    int zrevrange(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& start, const std::string& stop, std::vector<std::string>& members, optional_yield y);
-    int zrem(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& member, optional_yield y);
-    int zremrangebyscore(const DoutPrefixProvider* dpp, CacheObj* object, double min, double max, optional_yield y);
-    int zrank(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& member, std::string& index, optional_yield y);
+    virtual int set(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) override; /* If nx is true, set only if key doesn't exist */
+    virtual int get(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) override;
+    virtual int copy(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& copyName, const std::string& copyBucketName, optional_yield y) override;
+    virtual int del(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) override;
+    virtual int update_field(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& field, std::string& value, optional_yield y) override;
+    virtual int zadd(const DoutPrefixProvider* dpp, CacheObj* object, double score, const std::string& member, optional_yield y, Pipeline* pipeline=nullptr) override;
+    virtual int zrange(const DoutPrefixProvider* dpp, CacheObj* object, int start, int stop, std::vector<std::string>& members, optional_yield y) override;
+    virtual int zrevrange(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& start, const std::string& stop, std::vector<std::string>& members, optional_yield y) override;
+    virtual int zrem(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& member, optional_yield y) override;
+    virtual int zremrangebyscore(const DoutPrefixProvider* dpp, CacheObj* object, double min, double max, optional_yield y) override;
+    virtual int zrank(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& member, std::string& index, optional_yield y) override;
     //Return value is the incremented value, else return error
-    int incr(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y);
+    virtual int incr(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) override;
 
   private:
-    std::shared_ptr<connection> conn;
-
-    std::string build_index(CacheObj* object);
+    std::shared_ptr<fdb_conn> FDBconn;
 };
 
-class FDBBlockDirectory: public FDBDirectory {
+class FDBBlockDirectory: public FDBDirectory, public BlockDirectory {
   public:
-    FDBBlockDirectory(std::shared_ptr<connection>& conn) : conn(conn) {}
+	FDBBlockDirectory(std::shared_ptr<FDBConnection> fdb_conn) : FDBconn(fdb_conn->conn) {}
     
-    int exist_key(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y);
+    virtual int exist_key(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) override;
 
-	/*
-    //Pipelined version of set
-    int set(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y);
-	*/
-
-    int set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Pipeline* pipeline=nullptr);
-    int get(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y);
-
-	/*
-    //Pipelined version of get using boost::redis::response for list bucket
-    template <size_t N = 100>
-    int get(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y);
+    virtual int set(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y) override;
+    virtual int set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Pipeline* pipeline=nullptr) override;
+    virtual int get(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) override;
     //Pipelined version of get using boost::redis::generic_response
-    int get(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y);
-	*/
+    virtual int get(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y) override;
 
-    int copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, optional_yield y);
-    int del(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y);
-    int update_field(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& field, std::string& value, optional_yield y);
-    int remove_host(const DoutPrefixProvider* dpp, CacheBlock* block, std::string& value, optional_yield y);
-    int zadd(const DoutPrefixProvider* dpp, CacheBlock* block, double score, const std::string& member, optional_yield y);
-    int zrange(const DoutPrefixProvider* dpp, CacheBlock* block, int start, int stop, std::vector<std::string>& members, optional_yield y);
-    int zrevrange(const DoutPrefixProvider* dpp, CacheBlock* block, int start, int stop, std::vector<std::string>& members, optional_yield y);
-    int zrem(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& member, optional_yield y);
+    virtual int copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, optional_yield y) override;
+    virtual int del(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) override;
+    virtual int update_field(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& field, std::string& value, optional_yield y) override;
+    virtual int remove_host(const DoutPrefixProvider* dpp, CacheBlock* block, std::string& value, optional_yield y) override;
+    virtual int zadd(const DoutPrefixProvider* dpp, CacheBlock* block, double score, const std::string& member, optional_yield y) override;
+    virtual int zrange(const DoutPrefixProvider* dpp, CacheBlock* block, int start, int stop, std::vector<std::string>& members, optional_yield y) override;
+    virtual int zrevrange(const DoutPrefixProvider* dpp, CacheBlock* block, int start, int stop, std::vector<std::string>& members, optional_yield y) override;
+    virtual int zrem(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& member, optional_yield y) override;
 
   private:
-    std::shared_ptr<connection> conn;
-    std::string build_index(CacheBlock* block);
+    std::shared_ptr<fdb_conn> FDBconn;
 
-    //template<SeqContainer Container>
-    int set_values(const DoutPrefixProvider* dpp, CacheBlock& block, Container& redisValues, optional_yield y);
+    template<SeqContainer Container>
+    int set_values(const DoutPrefixProvider* dpp, CacheBlock& block, Container& fdbValues, optional_yield y);
 };
 
 } } // namespace rgw::d4n

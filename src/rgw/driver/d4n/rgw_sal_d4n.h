@@ -21,11 +21,7 @@
 #include "common/dout.h" 
 #include "rgw_aio_throttle.h"
 
-
-#include "driver/d4n/d4n_directory.h"
-#include "driver/d4n/d4n_directory_redis.h"
-#include "driver/d4n/d4n_directory_fdb.h"
-#include "driver/d4n/d4n_policy.h"
+#include "d4n_policy_driver.h"
 
 #include "driver/redis/rgw_redis_driver.h"
 
@@ -38,11 +34,17 @@
 
 #include <fmt/core.h>
 
+
 namespace rgw::d4n {
   class PolicyDriver;
+  class CachePolicy;
+  class BucketDirectory;
+  class ObjectDirectory;
+  class BlockDirectory;
 }
 
 namespace rgw { namespace sal {
+
 
 inline std::string get_cache_block_prefix(rgw::sal::Object* object, const std::string& version)
 {
@@ -54,12 +56,14 @@ inline std::string get_key_in_cache(const std::string& prefix, const std::string
   return fmt::format("{}{}{}{}{}", prefix, CACHE_DELIM, offset, CACHE_DELIM, len);
 }
 
+namespace lfdb = ceph::libfdb;
+
 using boost::redis::connection;
-using fdbase= lfdb::FDBDatabase;
+using fdbase= lfdb::database;
 
 class D4NFilterDriver : public FilterDriver {
   private:
-    std::shared_ptr<D4NConnection> conn;
+    std::shared_ptr<rgw::d4n::D4NConnection> conn;
 
     std::unique_ptr<rgw::cache::CacheDriver> cacheDriver;
     std::unique_ptr<rgw::d4n::ObjectDirectory> objDir;
@@ -68,6 +72,7 @@ class D4NFilterDriver : public FilterDriver {
     std::unique_ptr<rgw::d4n::PolicyDriver> policyDriver;
     boost::asio::io_context& io_context;
     optional_yield y;
+	std::string directory_type;
 
     // Redis connection pool
     std::shared_ptr<rgw::d4n::RedisPool> redis_pool;
@@ -93,13 +98,14 @@ class D4NFilterDriver : public FilterDriver {
     rgw::cache::CacheDriver* get_cache_driver() { return cacheDriver.get(); }
     rgw::d4n::ObjectDirectory* get_obj_dir() { return objDir.get(); }
     rgw::d4n::BlockDirectory* get_block_dir() { return blockDir.get(); }
-    rgw::d4n::BucketDirectory* get_bucket_dir() { return bucketDir.get(); }
+    rgw::d4n::BucketDirectory* get_bucket_dir() { return bucketDir.get(); } //FIXME: this needs dynamic_casting
     rgw::d4n::PolicyDriver* get_policy_driver() { return policyDriver.get(); }
     void save_y(optional_yield y) { this->y = y; }
 
-    std::shared_ptr<D4NConnection> get_conn() { return conn; }
+    std::shared_ptr<rgw::d4n::D4NConnection> get_conn() { return conn; }
     std::shared_ptr<rgw::d4n::RedisPool> get_redis_pool() { return redis_pool; }
 
+	std::string get_directory_type(){ return directory_type; }
 
     void shutdown() override;
 };

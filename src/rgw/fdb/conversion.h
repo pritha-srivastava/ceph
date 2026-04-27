@@ -18,7 +18,7 @@
 
 #include "base.h"
 
-#include "zpp_bits.h"
+#include "rgw/driver/posix/zpp_bits.h"
 
 #include <span>
 #include <string>

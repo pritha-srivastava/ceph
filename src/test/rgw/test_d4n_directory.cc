@@ -5,7 +5,7 @@
 #include "gtest/gtest.h"
 #include "common/ceph_argparse.h"
 #include "rgw_auth_registry.h"
-#include "driver/d4n/d4n_directory.h"
+#include "driver/d4n/d4n_directory_fdb.h"
 
 #define dout_subsys ceph_subsys_rgw
 
@@ -50,7 +50,7 @@ class ObjectDirectoryFixture: public ::testing::Test {
   protected:
     virtual void SetUp() {
       conn = std::make_shared<connection>(boost::asio::make_strand(io));
-      dir = new rgw::d4n::ObjectDirectory{conn};
+      dir = new rgw::d4n::FDBObjectDirectory{conn};
       obj = new rgw::d4n::CacheObj{
 	.objName = "testName",
 	.bucketName = "testBucket",
@@ -77,7 +77,7 @@ class ObjectDirectoryFixture: public ::testing::Test {
     }
 
     rgw::d4n::CacheObj* obj;
-    rgw::d4n::ObjectDirectory* dir;
+    rgw::d4n::FDBObjectDirectory* dir;
 
     net::io_context io;
     std::shared_ptr<connection> conn;
