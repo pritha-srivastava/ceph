@@ -23,7 +23,6 @@ static std::string encode_score(double score)
   return ss.str();
 }
 
-
 int FDBBucketDirectory::add_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, optional_yield y, Pipeline* pipeline)
 {
   return 0;
@@ -555,6 +554,12 @@ int FDBBlockDirectory::set_values(const DoutPrefixProvider* dpp, CacheBlock& blo
   return 0;
 }
 
+int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y)
+{
+  return 0;
+}
+
+
 int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Pipeline* pipeline)
 {
   std::string key = build_index(block);
@@ -690,7 +695,6 @@ int FDBBlockDirectory::get(const DoutPrefixProvider* dpp, std::vector<CacheBlock
 
   return 0;
 }
-
 
 //FIXME: shouldn't copyName reflect block's name instead of object name?
 //the same for redis class.

@@ -395,7 +395,6 @@ int LFUDAPolicy::delete_data_blocks(const DoutPrefixProvider* dpp, LFUDAObjEntry
   return 0;
 }
 
-
 void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
 {
   const int interval = dpp->get_cct()->_conf->rgw_d4n_cache_cleaning_interval;

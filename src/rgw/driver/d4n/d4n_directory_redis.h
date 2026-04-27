@@ -4,7 +4,6 @@
 
 namespace rgw::d4n {
 
-
 namespace net = boost::asio;
 using boost::redis::config;
 using boost::redis::connection;

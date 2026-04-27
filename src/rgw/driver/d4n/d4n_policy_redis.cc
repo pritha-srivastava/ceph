@@ -6,7 +6,7 @@
 #include "common/split.h"
 #include "rgw_perf_counters.h"
 
-namespace rgw { namespace d4n {
+namespace rgw::d4n {
 
 // initiate a call to async_exec() on the connection's executor
 struct initiate_exec {
@@ -217,4 +217,4 @@ int RedisLFUDAPolicy::local_weight_sync(const DoutPrefixProvider* dpp, optional_
   }
 }
 
-} } // namespace rgw::d4n
+} // namespace rgw::d4n

@@ -5,7 +5,7 @@
 #include "d4n_connection.h"
 
 
-namespace rgw { namespace d4n {
+namespace rgw::d4n {
 
 namespace asio = boost::asio;
 namespace sys = boost::system;
@@ -14,9 +14,6 @@ namespace sys = boost::system;
 class RedisLFUDAPolicy : public LFUDAPolicy {
   private:
     std::shared_ptr<RedisConnection> conn;
-    //RedisBlockDirectory* blockDir;
-    //RedisObjectDirectory* objDir;
-    //RedisBucketDirectory* bucketDir;
 
     virtual int age_sync(const DoutPrefixProvider* dpp, optional_yield y) override; 
     virtual int local_weight_sync(const DoutPrefixProvider* dpp, optional_yield y) override ; 
@@ -50,8 +47,6 @@ class RedisLFUDAPolicy : public LFUDAPolicy {
     } 
 
     virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver) override;
-    //virtual int eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) override;
-    //virtual void cleaning(const DoutPrefixProvider* dpp) override;
 };
 
-} } // namespace rgw::d4n
+} // namespace rgw::d4n

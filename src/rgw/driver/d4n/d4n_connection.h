@@ -24,7 +24,11 @@ namespace rgw { namespace d4n {
 
 struct DirectoryConnection {
 public:
-    virtual ~DirectoryConnection() = default;
+    virtual ~D4NConnection() = default;
+
+    virtual void get() = 0;
+    virtual void put() = 0;
+
     virtual std::shared_ptr<void> get_conn() = 0;
 };
 
@@ -43,6 +47,10 @@ public:
     std::shared_ptr<connection> get_redis_conn() {
         return conn;
     }
+
+    std::shared_ptr<void> get_conn() override {
+        return conn;
+    }
 };
 
 
@@ -58,6 +66,10 @@ public:
     }
 
     std::shared_ptr<fdbase> get_fdb_conn(){
+        return conn;
+    }
+
+    std::shared_ptr<void> get_conn() override {
         return conn;
     }
 };

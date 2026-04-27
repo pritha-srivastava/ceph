@@ -51,7 +51,7 @@ class FDBDirectory {
 
 class FDBBucketDirectory: public FDBDirectory, public BucketDirectory {
   public:
-	FDBBucketDirectory(std::shared_ptr<FDBConnection> fdb_conn) : FDBconn(fdb_conn->get_fdb_conn()) {}
+    FDBBucketDirectory(std::shared_ptr<FDBConnection> fdb_conn) : FDBconn(fdb_conn->get_fdb_conn()) {}
 
     virtual int add_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, optional_yield y, Pipeline* pipeline=nullptr) override;
     virtual int remove_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, optional_yield y) override;

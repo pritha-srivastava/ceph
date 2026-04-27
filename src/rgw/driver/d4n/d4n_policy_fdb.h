@@ -4,7 +4,7 @@
 #include "d4n_directory_fdb.h"
 #include "d4n_connection.h"
 
-namespace rgw { namespace d4n {
+namespace rgw::d4n {
 
 namespace asio = boost::asio;
 namespace sys = boost::system;
@@ -34,8 +34,6 @@ class FDBLFUDAPolicy : public LFUDAPolicy {
     } 
 
     virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver) override;
-    //virtual int eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) override;
-    //virtual void cleaning(const DoutPrefixProvider* dpp) override;
 };
 
-} } // namespace rgw::d4n
+} // namespace rgw::d4n

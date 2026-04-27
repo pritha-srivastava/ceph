@@ -31,13 +31,6 @@ inline int check_bool(std::string_view str) {
   }
 }
 
-/* //FIXME: this should be used isntead of class member functions.
-inline std::string build_index(const std::string_view bucket_id, const std::string_view obj_name)
-{
-	return bucket_id + "_" + obj_name;
-}
-*/
-
 
 //FIXME: AMIN: should be moved to redis directory
 class RedisPool {
@@ -304,6 +297,5 @@ class BlockDirectory: public Directory {
   protected:
     std::string build_index(CacheBlock* block);
 };
-
 
 } // namespace rgw::d4n
