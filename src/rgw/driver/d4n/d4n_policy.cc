@@ -50,6 +50,10 @@ static inline void redis_exec(std::shared_ptr<connection> conn,
 }
 
 int LFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver* _driver) {
+  cache_capacity = cacheDriver->get_current_partition_info(dpp).size;
+  eviction_watermark_bytes = cache_capacity * EVICTION_WATERMARK;
+  target_bytes = cache_capacity * TARGET_WATERMARK;
+
   response<int, int, int, int> resp;
   static auto obj_callback = [this](
           const DoutPrefixProvider* dpp, const std::string& key, const std::string& version, bool deleteMarker, const std::string& bucket_id,
@@ -160,7 +164,6 @@ int LFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_
           background_eviction_worker(dpp, y);
         },
         [this, dpp](std::exception_ptr e) {
-          std::cerr << "completion handler called\n";
           if (e) {
             eviction_done_promise.set_exception(e);
           } else {
@@ -397,16 +400,21 @@ void LFUDAPolicy::perform_background_eviction(const DoutPrefixProvider* dpp, uin
 
   // Evict in batches to avoid holding locks too long
   while (total_freed < bytes_to_free && !quit) {
+    uint64_t before = cacheDriver->get_free_space(dpp, y);
     uint64_t batch_size = std::min(bytes_to_free - total_freed, BATCH_SIZE);
 
-    // Use existing eviction logic
+    // call eviction
     int ret = eviction(dpp, batch_size, y);
     if (ret < 0) {
       ldpp_dout(dpp, 5) << "Background eviction failed: " << ret << dendl;
       break;
     }
 
-    total_freed += batch_size;
+    uint64_t after = cacheDriver->get_free_space(dpp, y);
+    uint64_t actually_freed = after - before;
+    total_freed += actually_freed;
+
+    ldpp_dout(dpp, 20) << "Batch freed " << actually_freed << " bytes (requested " << batch_size << ")" << dendl;
   }
 
   ldpp_dout(dpp, 10) << "Background eviction completed: freed " 
@@ -428,9 +436,13 @@ void LFUDAPolicy::background_eviction_worker(const DoutPrefixProvider* dpp, opti
     // Check current cache usage
     uint64_t used_space = cache_capacity - cacheDriver->get_free_space(dpp, y);
 
+    ldpp_dout(dpp, 20) << "LFUDAPolicy:: " << __func__ << " cache_capacity: " << cache_capacity << dendl;
+    ldpp_dout(dpp, 20) << "LFUDAPolicy:: " << __func__ << " free_space: " << cacheDriver->get_free_space(dpp, y) << dendl;
+    ldpp_dout(dpp, 10) << "LFUDAPolicy:: " << __func__ << " used_space: " << used_space << dendl;
+
     // Only evict if above watermark
     if (used_space < eviction_watermark_bytes) {
-      continue;  // Below 75%, nothing to do
+      continue;
     }
 
     // Calculate bytes to free (evict to 65%)
@@ -444,7 +456,6 @@ void LFUDAPolicy::background_eviction_worker(const DoutPrefixProvider* dpp, opti
     // Perform eviction
     perform_background_eviction(dpp, bytes_to_free, y);
   }
-  ldpp_dout(dpp, 10) << "Background eviction co-routine stopped" << dendl;
 }
 
 int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) {

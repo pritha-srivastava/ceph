@@ -36,9 +36,6 @@ enum class State { // state machine for dirty objects in the cache
 
 class CachePolicy {
   protected:
-    std::atomic<uint64_t> cache_capacity;
-    std::atomic<uint64_t> eviction_watermark_bytes;
-    std::atomic<uint64_t> target_bytes;
     struct Entry : public boost::intrusive::list_base_hook<> {
       std::string key;
       uint64_t offset;
@@ -77,14 +74,12 @@ class CachePolicy {
     };
 
     rgw::cache::CacheDriver* cacheDriver;
+
   public:
     CachePolicy(rgw::cache::CacheDriver* cacheDriver) : cacheDriver(cacheDriver) {}
     virtual ~CachePolicy() = default; 
 
     virtual int init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver* _driver) {
-      cache_capacity = cacheDriver->get_current_partition_info(dpp).size;
-      eviction_watermark_bytes = cache_capacity * EVICTION_WATERMARK;
-      target_bytes = cache_capacity * TARGET_WATERMARK;
       return 0; 
     }
 
@@ -99,7 +94,6 @@ class CachePolicy {
     virtual bool erase_dirty_object(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) = 0;
     virtual bool invalidate_dirty_object(const DoutPrefixProvider* dpp, const std::string& key) = 0;
     virtual void cleaning(const DoutPrefixProvider* dpp) = 0;
-    virtual void background_eviction_worker(const DoutPrefixProvider* dpp, optional_yield y) = 0;
 };
 
 class LFUDAPolicy : public CachePolicy {
@@ -176,6 +170,9 @@ class LFUDAPolicy : public CachePolicy {
     std::optional<asio::steady_timer> rthread_timer;
     rgw::sal::Driver* driver;
     std::thread tc;
+    std::atomic<uint64_t> cache_capacity;
+    std::atomic<uint64_t> eviction_watermark_bytes;
+    std::atomic<uint64_t> target_bytes;
     std::promise<void> eviction_done_promise;
     std::future<void> eviction_done_future = eviction_done_promise.get_future();
     std::optional<boost::asio::steady_timer> eviction_timer;
@@ -199,6 +196,7 @@ class LFUDAPolicy : public CachePolicy {
     }
     int delete_data_blocks(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, optional_yield y);
     void perform_background_eviction(const DoutPrefixProvider* dpp, uint64_t bytes_to_free, optional_yield y);
+    virtual void background_eviction_worker(const DoutPrefixProvider* dpp, optional_yield y);
 
   public:
     LFUDAPolicy(std::shared_ptr<connection>& conn, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : CachePolicy(cacheDriver), 
@@ -236,7 +234,6 @@ class LFUDAPolicy : public CachePolicy {
     virtual bool erase_dirty_object(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) override;
     virtual bool invalidate_dirty_object(const DoutPrefixProvider* dpp, const std::string& key) override;
     virtual void cleaning(const DoutPrefixProvider* dpp) override;
-    virtual void background_eviction_worker(const DoutPrefixProvider* dpp, optional_yield y) override;
     LFUDAObjEntry* find_obj_entry(const std::string& key) {
       auto it = o_entries_map.find(key);
       if (it == o_entries_map.end()) {
@@ -273,7 +270,6 @@ class LRUPolicy : public CachePolicy {
     virtual bool erase_dirty_object(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) override;
     virtual bool invalidate_dirty_object(const DoutPrefixProvider* dpp, const std::string& key) override { return false; }
     virtual void cleaning(const DoutPrefixProvider* dpp) override {}
-    virtual void background_eviction_worker(const DoutPrefixProvider* dpp, optional_yield y) override {}
 };
 
 class PolicyDriver {
