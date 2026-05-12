@@ -122,8 +122,19 @@ int LFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_
 
   driver = _driver;
   if (dpp->get_cct()->_conf->d4n_writecache_enabled) {
+    int num_threads = dpp->get_cct()->_conf->rgw_d4n_cleaning_threads;
+    ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ 
+                       << "(): initializing cleaning thread pool with " 
+                       << num_threads << " threads" << dendl;
+    cleaning_pool = std::make_unique<boost::asio::thread_pool>(num_threads);
     quit = false;
-    tc = std::thread(&CachePolicy::cleaning, this, dpp);
+    for (int i = 0; i < num_threads; ++i) {
+      boost::asio::post(*cleaning_pool,
+          [this, dpp]() {
+              cleaning(dpp);
+          }
+      );
+    }
   }
 
   try {
@@ -655,9 +666,27 @@ void LFUDAPolicy::update_dirty_object(const DoutPrefixProvider* dpp, const std::
 
   const std::lock_guard l(lfuda_cleaning_lock);
   LFUDAObjEntry* e = new LFUDAObjEntry{key, version, deleteMarker, size, creationTime, user, etag, bucket_name, bucket_id, obj_key};
-  handle_type handle = object_heap.push(e);
-  e->set_handle(handle);
   o_entries_map.emplace(key, std::make_pair(e, state));
+  std::string obj_name = e->obj_key.name;
+  auto& versions = per_obj_versions[obj_name];
+  versions[e->creationTime] = e;
+  if (versions.size() == 1) {
+    handle_type handle = object_heap.push(e);
+    e->set_handle(handle);
+    ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__
+                           << "(): added obj=" << obj_name
+                           << " key=" << e->key
+                           << " creationTime=" << e->creationTime
+                           << dendl;
+  } else {
+    ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__
+                           << "(): queued version for existing obj="
+                           << obj_name
+                           << " key=" << e->key
+                           << " creationTime=" << e->creationTime
+                           << " versions_count=" << versions.size()
+                           << dendl;
+  }
   cond.notify_one();
 }
 
@@ -687,17 +716,39 @@ bool LFUDAPolicy::erase(const DoutPrefixProvider* dpp, const std::string& key, o
 bool LFUDAPolicy::erase_dirty_object(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y)
 {
   const std::lock_guard l(lfuda_cleaning_lock);
+  ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__ 
+                       << "(): erasing key=" << key << dendl;
   auto p = o_entries_map.find(key);
   if (p == o_entries_map.end()) {
     return false;
   }
 
-  object_heap.erase(p->second.first->handle);
+  LFUDAObjEntry* e = p->second.first;
+  ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__ 
+                       << "(): obj_name=" << e->obj_key.name << dendl;
+  std::string obj_name = e->obj_key.name;
+  auto v_it = per_obj_versions.find(obj_name);
+  if (v_it != per_obj_versions.end()) {
+    v_it->second.erase(e->creationTime);
+    if (v_it->second.empty()) {
+      // No more versions for this object — full cleanup
+      per_obj_versions.erase(v_it);
+    }
+  }
+  ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__ 
+                       << "(): After deleting version" << dendl;
+  //object_heap.erase(p->second.first->handle);
   delete p->second.first;
   p->second.first = nullptr;
+  ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__ 
+                       << "(): After LFUDAObjEntry*" << dendl;
   o_entries_map.erase(p);
+  ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__ 
+                       << "(): After erasing from map" << dendl;
   state_cond.notify_one();
 
+  //ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__ 
+  //                     << "(): erased key=" << key << dendl;
   return true;
 }
 
@@ -737,13 +788,368 @@ int LFUDAPolicy::delete_data_blocks(const DoutPrefixProvider* dpp, LFUDAObjEntry
   return 0;
 }
 
+/* This method deletes INVALID cache entries during cleaning.
+   Invalid entries are dirty entries that have been marked invalid due to a delete request from the client.
+   It defers the deletion time of the object, in case it is still being read (using its refcount) */
+void LFUDAPolicy::do_delete(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, int interval, optional_yield y)
+{
+  ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__
+                      << "(): State is INVALID; deleting key=" << e->key << dendl;
+
+  int ret;
+	//check if key exists and get the refcount of block, if greater than zero then modify the creationTime of dirty object to attempt to delete later
+	std::unique_lock<std::mutex> ll(lfuda_lock);
+	auto it = entries_map.find(e->key);
+	if (it != entries_map.end()) {
+	  ll.unlock();
+    //head blocks only exist for delete markers
+    if (e->delete_marker) {
+      if ((ret = cacheDriver->delete_data(dpp, e->key, y)) == 0) {
+        if (!(ret = erase(dpp, e->key, y))) {
+          ldpp_dout(dpp, 0) << "Failed to delete head policy entry for: " << e->key << ", ret=" << ret << dendl; // TODO: what must occur during failure?
+        }
+      } else {
+        ldpp_dout(dpp, 0) << "Failed to delete head block for: " << e->key << ", ret=" << ret << dendl;
+      }
+    }
+	} else {
+	  //ignore if block not found, as it could have been deleted earlier when refcount for it was 0
+	  ll.unlock();
+	}
+	if (!e->delete_marker) {
+	  ret = delete_data_blocks(dpp, e, y);
+	  if (ret == 0) {
+	    erase_dirty_object(dpp, e->key, y);
+	  } else if (ret == -EBUSY) {
+	    std::unique_lock<std::mutex> l(lfuda_cleaning_lock);
+	    //deferring the deletion of the invalid object
+      auto v_it = per_obj_versions.find(e->obj_key.name);
+      if (v_it != per_obj_versions.end()) {
+         v_it->second.erase(e->creationTime);
+         e->creationTime += interval / 2;
+         v_it->second[e->creationTime] = e;
+      }
+	    ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__ << "(): updated creation time is: " << e->creationTime << dendl;
+      //TODO - check if entry with least creationTime is re-inserted in heap
+	    l.unlock();
+	  } else {
+	    ldpp_dout(dpp, 0) << "Failed to delete blocks for: " << e->key << ", ret=" << ret << dendl;
+	  }
+	} else {
+    //remove dirty object from in memory metadata as there are no data blocks for a delete marker
+    erase_dirty_object(dpp, e->key, y);
+  }
+}
+
+/* As part of the cleaning process, this method reads an object from the cache
+ * and writes it to the backend store. It marks the object clean in the directory
+ * It is also responsible for correctly updating the version in the directory.
+*/
+void LFUDAPolicy::do_writeback(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, optional_yield y)
+{
+  ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__
+                       << "(): writing back key=" << e->key << dendl;
+  rgw::sal::Attrs obj_attrs;
+  uint64_t len = 0;
+  rgw_user c_rgw_user = e->user; 
+  //writing data to the backend
+  //we need to create an atomic_writer
+  std::unique_ptr<rgw::sal::User> c_user = driver->get_user(c_rgw_user);
+
+  std::unique_ptr<rgw::sal::Bucket> c_bucket;
+  rgw_bucket c_rgw_bucket = rgw_bucket(c_rgw_user.tenant, e->bucket_name, e->bucket_id);
+
+  RGWBucketInfo c_bucketinfo;
+  c_bucketinfo.bucket = c_rgw_bucket;
+  c_bucketinfo.owner = c_rgw_user;
+  int ret = driver->load_bucket(dpp, c_rgw_bucket, &c_bucket, y);
+  if (ret < 0) {
+    ldpp_dout(dpp, 10) << __func__ << "(): load_bucket() returned ret=" << ret << dendl;
+    //Remove bucket should take care of deleting objects belonging to the bucket, and hence we should not reach here
+    erase_dirty_object(dpp, e->key, y);
+    return;
+  }
+
+  std::unique_ptr<rgw::sal::Object> c_obj = c_bucket->get_object(e->obj_key);
+  bool null_instance = (c_obj->get_instance() == "null");
+  if (null_instance) {
+    //clear the instance for backend store
+    c_obj->clear_instance();
+  }
+  ldpp_dout(dpp, 20) << __func__ << "(): c_obj oid =" << c_obj->get_oid() << dendl;
+
+  ACLOwner owner{c_user->get_id(), c_user->get_display_name()};
+
+  ldpp_dout(dpp, 10) << __func__ << "(): e->key=" << e->key << dendl;
+  int op_ret;
+  if (e->delete_marker) {
+    std::unique_ptr<rgw::sal::Object::DeleteOp> del_op = c_obj->get_delete_op();
+    del_op->params.obj_owner = owner;
+    del_op->params.bucket_owner = c_bucket->get_owner();
+    del_op->params.versioning_status = c_bucket->get_info().versioning_status();
+    //populate marker_version_id only when delete marker is not null
+    if (!null_instance) {
+      del_op->params.marker_version_id = e->version;
+    }
+    op_ret = del_op->delete_obj(dpp, y, rgw::sal::FLAG_LOG_OP);
+    if (op_ret >= 0) {
+      bool delete_marker = del_op->result.delete_marker;
+      std::string version_id = del_op->result.version_id;
+      ldpp_dout(dpp, 20) << __func__ << "delete_obj delete_marker=" << delete_marker << dendl;
+      ldpp_dout(dpp, 20) << __func__ << "delete_obj version_id=" << version_id << dendl;
+    } else {
+      ldpp_dout(dpp, 20) << __func__ << "delete_obj returned ret=" << op_ret << dendl;
+      erase_dirty_object(dpp, e->key, y);
+      return;
+    }
+  } else { //end-if delete_marker
+    std::unique_ptr<rgw::sal::Writer> processor =  driver->get_atomic_writer(dpp,
+      y,
+      c_obj.get(),
+      owner,
+      NULL,
+      0,
+      "");
+
+    op_ret = processor->prepare(y);
+    if (op_ret < 0) {
+      ldpp_dout(dpp, 20) << __func__ << "processor->prepare() returned ret=" << op_ret << dendl;
+      erase_dirty_object(dpp, e->key, y);
+      return;
+    }
+
+    off_t lst = e->size;
+    off_t fst = 0;
+    off_t ofs = 0;
+
+    rgw::sal::DataProcessor* filter = processor.get();
+    rgw::d4n::CacheBlock block;
+    block.cacheObj.objName = e->obj_key.get_oid();
+    block.cacheObj.bucketName = e->bucket_id;
+    block.blockID = 0;
+    block.size = 0;
+    auto ret = blockDir->get(dpp, &block, y);
+    if (ret < 0) {
+      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() blockDir->get() failed: " << ret << dendl;
+    }
+    obj_attrs = std::move(block.cacheObj.attrs);
+    obj_attrs.erase(RGW_CACHE_ATTR_MTIME);
+    obj_attrs.erase(RGW_CACHE_ATTR_OBJECT_SIZE);
+    obj_attrs.erase(RGW_CACHE_ATTR_ACCOUNTED_SIZE);
+    obj_attrs.erase(RGW_CACHE_ATTR_EPOCH);
+    obj_attrs.erase(RGW_CACHE_ATTR_MULTIPART);
+    obj_attrs.erase(RGW_CACHE_ATTR_OBJECT_NS);
+    obj_attrs.erase(RGW_CACHE_ATTR_BUCKET_NAME);
+    obj_attrs.erase(RGW_CACHE_ATTR_LOCAL_WEIGHT);
+
+    do {
+      ceph::bufferlist data;
+      if (fst >= lst){
+        break;
+      }
+      off_t cur_size = std::min<off_t>(fst + dpp->get_cct()->_conf->rgw_max_chunk_size, lst);
+      off_t cur_len = cur_size - fst;
+      std::string oid_in_cache = rgw::sal::get_key_in_cache(e->key, std::to_string(fst), std::to_string(cur_len));
+      ldpp_dout(dpp, 10) << __func__ << "(): oid_in_cache=" << oid_in_cache << dendl;
+      rgw::sal::Attrs attrs;
+      cacheDriver->get(dpp, oid_in_cache, 0, cur_len, data, attrs, y);
+      if (op_ret < 0) {
+        ldpp_dout(dpp, 20) << __func__ << "cacheDriver->get returned ret=" << op_ret << dendl;
+        erase_dirty_object(dpp, e->key, y);
+        return;
+      }
+      len = data.length();
+      fst += len;
+
+      if (len == 0) {
+        // TODO: if len of any block is 0 for some reason, we must return from here?
+        break;
+      }
+
+      op_ret = filter->process(std::move(data), ofs);
+      if (op_ret < 0) {
+        ldpp_dout(dpp, 20) << __func__ << "processor->process() returned ret=" << op_ret << dendl;
+        erase_dirty_object(dpp, e->key, y);
+        return;
+      }
+      ofs += len;
+    } while (len > 0);
+
+    op_ret = filter->process({}, ofs);
+
+    const req_context rctx{dpp, y, nullptr};
+    ceph::real_time mtime = ceph::real_clock::from_time_t(e->creationTime);
+    op_ret = processor->complete(lst, e->etag, &mtime, ceph::real_clock::from_time_t(e->creationTime), obj_attrs,
+          std::nullopt, ceph::real_time(), nullptr, nullptr,
+          nullptr, nullptr, nullptr,
+          rctx, rgw::sal::FLAG_LOG_OP);
+
+    if (op_ret < 0) {
+      ldpp_dout(dpp, 20) << __func__ << "processor->complete() returned ret=" << op_ret << dendl;
+      erase_dirty_object(dpp, e->key, y);
+      return;
+    }
+    /* invoke update() with dirty flag set to false, to update in-memory metadata for each block
+        reset values */
+    lst = e->size;
+    fst = 0;
+    do {
+      if (fst >= lst) {
+        break;
+      }
+      off_t cur_size = std::min<off_t>(fst + dpp->get_cct()->_conf->rgw_max_chunk_size, lst);
+      off_t cur_len = cur_size - fst;
+
+      std::string oid_in_cache = rgw::sal::get_key_in_cache(e->key, std::to_string(fst), std::to_string(cur_len));
+      ldpp_dout(dpp, 20) << __func__ << "(): oid_in_cache =" << oid_in_cache << dendl;
+      //Update in-memory data structure for each block
+      this->update(dpp, oid_in_cache, 0, 0, e->version, false, 0, y);
+
+      rgw::d4n::CacheBlock block;
+      block.cacheObj.bucketName = c_obj->get_bucket()->get_bucket_id();
+      block.cacheObj.objName = c_obj->get_key().get_oid();
+      block.size = cur_len;
+      block.blockID = fst;
+      if ((op_ret = cacheDriver->set_attr(dpp, oid_in_cache, RGW_CACHE_ATTR_DIRTY, "0", y)) == 0) {
+        std::string dirty = "false";
+        op_ret = blockDir->update_field(dpp, &block, "dirty", dirty, y);
+        if (op_ret < 0) {
+          ldpp_dout(dpp, 0) << __func__ << "updating dirty flag in block directory failed, ret=" << op_ret << dendl;
+        }
+      } else {
+        ldpp_dout(dpp, 0) << __func__ << "(): Failed to update dirty xattr in cache, ret=" << op_ret << dendl;
+      }
+
+      fst += cur_len;
+    } while(fst < lst);
+  } //end-else if delete_marker
+
+  //head block exists only for delete marker
+  if (e->delete_marker) {
+    //invoke update() with dirty flag set to false, to update in-memory metadata for head
+    this->update(dpp, e->key, 0, 0, e->version, false, 0, y);
+    if ((ret = cacheDriver->set_attr(dpp, e->key, RGW_CACHE_ATTR_DIRTY, "0", y)) < 0) {
+      ldpp_dout(dpp, 0) << __func__ << "(): Failed to update dirty attr in cache, ret=" << op_ret << dendl;
+    }
+  }
+  if (null_instance) {
+    //restore instance for directory data processing in later steps
+    c_obj->set_instance("null");
+  }
+  rgw::d4n::CacheBlock block;
+  block.cacheObj.bucketName = c_obj->get_bucket()->get_bucket_id();
+        ldpp_dout(dpp, 20) << __func__ << "(): bucket name: " << block.cacheObj.bucketName << dendl;
+  block.cacheObj.objName = c_obj->get_name();
+  block.size = 0;
+  block.blockID = 0;
+  //non-versioned case
+  if (!c_obj->have_instance()) {
+    // hash entry for latest version
+    op_ret = blockDir->get(dpp, &block, y);
+    if (op_ret < 0) {
+      ldpp_dout(dpp, 0) << __func__ << "(): Failed to get latest entry in block directory for: " << block.cacheObj.objName << ", ret=" << ret << dendl;
+    } else {
+      // if this entry is not the latest, it could have been overwritten by a newer one
+      if (block.version == e->version) {
+        rgw::d4n::CacheBlock null_block;
+        null_block = block;
+        null_block.cacheObj.objName = "_:null_" + c_obj->get_name();
+        //hash entry for null block
+        op_ret = blockDir->get(dpp, &null_block, y);
+        if (op_ret < 0) {
+          ldpp_dout(dpp, 0) << __func__ << "(): Failed to get latest entry in block directory for: " << null_block.cacheObj.objName << ", ret=" << ret << dendl;
+        } else {
+          if (null_block.version == e->version) {
+            block.cacheObj.dirty = false;
+            null_block.cacheObj.dirty = false;
+            auto blk_op_ret = blockDir->set(dpp, &block, y);
+            auto null_op_ret = blockDir->set(dpp, &null_block, y);
+            if (blk_op_ret < 0 || null_op_ret < 0) {
+              ldpp_dout(dpp, 0) << __func__ << "(): Failed to Queue update dirty flag for latest entry/null entry in block directory" << dendl;
+            }
+          }
+        }
+      } //end-if (block.version == entry->version)
+    } //end - else if op_ret == 0
+    ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): Removing object name: "<< c_obj->get_name() << " score: " << std::setprecision(std::numeric_limits<double>::max_digits10) << e->creationTime << " from ordered set" << dendl;
+    rgw::d4n::CacheObj dir_obj = rgw::d4n::CacheObj{
+      .objName = c_obj->get_name(),
+      .bucketName = c_obj->get_bucket()->get_bucket_id(),
+    };
+    /* remove the entry from the ordered set using its score, as the object is already cleaned
+        need not be part of a transaction as it is being removed based on its score which is its creation time. */
+    ret = objDir->zremrangebyscore(dpp, &dir_obj, e->creationTime, e->creationTime, y);
+    if (ret < 0) {
+      ldpp_dout(dpp, 0) << __func__ << "(): Failed to remove object from ordered set with error: " << ret << dendl;
+    }
+  }
+  if (c_obj->have_instance()) { //versioned case
+    std::string objName = c_obj->get_oid();
+    if (c_obj->get_instance() == "null") {
+      objName = "_:null_" + c_obj->get_name();
+    }
+    rgw::d4n::CacheBlock instance_block;
+    instance_block.cacheObj.bucketName = c_obj->get_bucket()->get_bucket_id();
+    instance_block.cacheObj.objName = objName;
+    instance_block.size = 0;
+    instance_block.blockID = 0;
+    std::string dirty = "false";
+    op_ret = blockDir->update_field(dpp, &instance_block, "dirty", dirty, y);
+    if (op_ret < 0) {
+      ldpp_dout(dpp, 20) << __func__ << "updating dirty flag in block directory for instance block failed!" << dendl;
+    }
+    //the next steps remove the entry from the ordered set and if needed the latest hash entry also in case of versioned buckets
+    rgw::d4n::CacheBlock latest_block = block;
+    latest_block.cacheObj.objName = c_obj->get_name();
+    int retry = 3;
+    while(retry) {
+      retry--;
+      //get latest entry
+      ret = blockDir->get(dpp, &latest_block, y);
+      if (ret < 0) {
+        ldpp_dout(dpp, 0) << __func__ << "(): Failed to get latest entry in block directory for: " << latest_block.cacheObj.objName << ", ret=" << ret << dendl;
+      }
+      if (latest_block.version == e->version) {
+        //remove object entry from ordered set of versions
+        if (c_obj->have_instance()) {
+          blockDir->del(dpp, &latest_block, y);
+          if (ret < 0) {
+            ldpp_dout(dpp, 0) << __func__ << "(): Failed to queue del for latest hash entry: " << latest_block.cacheObj.objName << ", ret=" << ret << dendl;
+            return;
+          }
+        }
+        //delete entry from ordered set of objects, as older versions would have been written to the backend store
+        ret = bucketDir->zrem(dpp, e->bucket_id, c_obj->get_name(), y);
+        if (ret < 0) {
+          ldpp_dout(dpp, 0) << __func__ << "(): Failed to queue zrem for object entry: " << c_obj->get_name() << ", ret=" << ret << dendl;
+          continue;
+        }
+      }
+      ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): Removing object name: "<< c_obj->get_name() << " score: " << std::setprecision(std::numeric_limits<double>::max_digits10) << e->creationTime << " from ordered set" << dendl;
+      rgw::d4n::CacheObj dir_obj = rgw::d4n::CacheObj{
+        .objName = c_obj->get_name(),
+        .bucketName = c_obj->get_bucket()->get_bucket_id(),
+      };
+      ret = objDir->zremrangebyscore(dpp, &dir_obj, e->creationTime, e->creationTime, y);
+      if (ret < 0) {
+        ldpp_dout(dpp, 0) << __func__ << "(): Failed to remove object from ordered set with error: " << ret << dendl;
+        continue;
+      }
+      break;
+    }//end-while (retry)
+  }
+  //remove entry from map and queue, erase_dirty_object locks correctly
+  erase_dirty_object(dpp, e->key, y);
+}
+
+/* This method "cleans" and writes back dirty data from the cache to the backend store.
+   It also deletes invalid dirty data from cache backend.
+*/
 void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
 {
   const int interval = dpp->get_cct()->_conf->rgw_d4n_cache_cleaning_interval;
   while(!quit) {
     ldpp_dout(dpp, 20) << __func__ << " : " << " Cache cleaning!" << dendl;
-    uint64_t len = 0;
-    rgw::sal::Attrs obj_attrs;
     bool invalid = false;
   
     ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__ << "" << __LINE__ << "(): Before acquiring cleaning-lock" << dendl;
@@ -755,6 +1161,7 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
       cond.wait(l, [this]{ return (!object_heap.empty() || quit); });
       continue;
     }
+    std::string obj_name = e->obj_key.name;
     ldpp_dout(dpp, 10) <<__LINE__ << " " << __func__ << "(): e->key=" << e->key << dendl;
     ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->delete_marker=" << e->delete_marker << dendl;
     ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->version=" << e->version << dendl;
@@ -762,11 +1169,19 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
     ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->bucket_id=" << e->bucket_id << dendl;
     ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->user=" << e->user << dendl;
     ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->obj_key=" << e->obj_key << dendl;
-    l.unlock();
 
     int diff = std::difftime(time(NULL), e->creationTime);
-    if (!e->key.empty() && (diff > interval)) { // if block is dirty and written more than interval seconds ago
-      l.lock();
+    if (diff < interval) {
+      ldpp_dout(dpp, 10) <<__LINE__ << " " << __func__ << "(): entry has not expired= " << e->key << dendl;
+      l.unlock();
+      std::mutex wait_mtx;
+      std::condition_variable wait_cv;
+      std::unique_lock<std::mutex> wait_lock(wait_mtx);
+      wait_cv.wait_for(wait_lock, std::chrono::seconds(interval - diff), [this]{ return quit.load(); });
+      continue;
+    }
+    if (!e->key.empty()) { // if block is dirty and written more than interval seconds ago
+      ldpp_dout(dpp, 10) <<__LINE__ << " " << __func__ << "(): entry has expired= " << e->key << dendl;
       auto p = o_entries_map.find(e->key);
       if (p == o_entries_map.end()) {
 	l.unlock();
@@ -774,369 +1189,49 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
       }
       if (p->second.second == State::INVALID) {
 	invalid = true;
-      } else {
-        p->second.second = State::IN_PROGRESS;
+      } else if (p->second.second == State::IN_PROGRESS) { //already being processed by another thread
+        l.unlock();
+        continue;
       }
+      //set to IN_PROGRESS irrespective of INVALID as this indicates that processing is in progress
+      p->second.second = State::IN_PROGRESS;
+      //Remove this entry so that it is not picked by any other thread
+      object_heap.pop();
       l.unlock();
-      
+
       // If the state is invalid, the blocks must be deleted from the cache rather than written to the backend.
       if (invalid) {
-	ldpp_dout(dpp, 10) << __func__ << "(): State is INVALID; deleting object." << dendl;
-	int ret = -1;
-	//check if key exists and get the refcount of block, if greater than zero then modify the creationTime of dirty object to attempt to delete later
-	std::unique_lock<std::mutex> ll(lfuda_lock);
-	auto it = entries_map.find(e->key);
-	if (it != entries_map.end()) {
-	  if (it->second->refcount > 0) {
-	    l.lock();
-	    //deferring the deletion of the invalid object
-	    (*e->handle)->creationTime = (*e->handle)->creationTime + interval/2;
-	    ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__ << "(): updated creation time is: " << (*e->handle)->creationTime << dendl;
-	    object_heap.update(e->handle);
-	    l.unlock();
-	    continue;
-	  }
-	  ll.unlock();
-    if (e->delete_marker) {
-      if ((ret = cacheDriver->delete_data(dpp, e->key, y)) == 0) {
-        if (!(ret = erase(dpp, e->key, y))) {
-          ldpp_dout(dpp, 0) << "Failed to delete head policy entry for: " << e->key << ", ret=" << ret << dendl; // TODO: what must occur during failure?
-        }
+        do_delete(dpp, e, interval, null_yield);
       } else {
-        ldpp_dout(dpp, 0) << "Failed to delete head object for: " << e->key << ", ret=" << ret << dendl;
+        do_writeback(dpp, e, null_yield);
       }
     }
-	} else {
-	  //ignore if block not found, as it could have been deleted earlier when refcount for it was 0
-	  ll.unlock();
-	}
+    {
+      ldpp_dout(dpp, 10) <<__LINE__ << " " << __func__ << "(): promoting next version" << dendl;
+      std::unique_lock<std::mutex> l(lfuda_cleaning_lock);
+      auto v_it = per_obj_versions.find(obj_name);
+      
+      if (v_it != per_obj_versions.end() && !v_it->second.empty()) {
+        auto next_it = v_it->second.begin();
+        LFUDAObjEntry* next = next_it->second;
+        auto handle = object_heap.push(next);
+        next->set_handle(handle);
 
-	if (!e->delete_marker) {
-	  ret = delete_data_blocks(dpp, e, y);
-	  if (ret == 0) {
-	    erase_dirty_object(dpp, e->key, null_yield);
-	  } else if (ret == -EBUSY) {
-	    l.lock();
-	    //deferring the deletion of the invalid object
-	    (*e->handle)->creationTime = (*e->handle)->creationTime + interval/2;
-	    ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__ << "(): updated creation time is: " << (*e->handle)->creationTime << dendl;
-	    object_heap.update(e->handle);
-	    l.unlock();
-	    continue;
-	  } else {
-	    ldpp_dout(dpp, 0) << "Failed to delete blocks for: " << e->key << ", ret=" << ret << dendl;
-	  }
-	} else {
-    erase_dirty_object(dpp, e->key, null_yield);
-  }
-      } else {
-	rgw_user c_rgw_user = e->user; 
-	//writing data to the backend
-	//we need to create an atomic_writer
-	std::unique_ptr<rgw::sal::User> c_user = driver->get_user(c_rgw_user);
-
-	std::unique_ptr<rgw::sal::Bucket> c_bucket;
-	rgw_bucket c_rgw_bucket = rgw_bucket(c_rgw_user.tenant, e->bucket_name, e->bucket_id);
-
-	RGWBucketInfo c_bucketinfo;
-	c_bucketinfo.bucket = c_rgw_bucket;
-	c_bucketinfo.owner = c_rgw_user;
-	int ret = driver->load_bucket(dpp, c_rgw_bucket, &c_bucket, null_yield);
-	if (ret < 0) {
-	  ldpp_dout(dpp, 10) << __func__ << "(): load_bucket() returned ret=" << ret << dendl;
-	  //Remove bucket should be implemented in d4n which will take care of deleting objects belonging to the bucket, and hence we should not reach here
-	  erase_dirty_object(dpp, e->key, null_yield);
-	  continue;
-	}
-
-	std::unique_ptr<rgw::sal::Object> c_obj = c_bucket->get_object(e->obj_key);
-	bool null_instance = (c_obj->get_instance() == "null");
-	if (null_instance) {
-	  //clear the instance for backend store
-	  c_obj->clear_instance();
-	}
-	ldpp_dout(dpp, 20) << __func__ << "(): c_obj oid =" << c_obj->get_oid() << dendl;
-
-	ACLOwner owner{c_user->get_id(), c_user->get_display_name()};
-
-	ldpp_dout(dpp, 10) << __func__ << "(): e->key=" << e->key << dendl;
-	int op_ret;
-	if (e->delete_marker) {
-	  std::unique_ptr<rgw::sal::Object::DeleteOp> del_op = c_obj->get_delete_op();
-	  del_op->params.obj_owner = owner;
-	  del_op->params.bucket_owner = c_bucket->get_owner();
-	  del_op->params.versioning_status = c_bucket->get_info().versioning_status();
-	  //populate marker_version_id only when delete marker is not null
-    if (!null_instance) {
-	    del_op->params.marker_version_id = e->version;
-    }
-	  op_ret = del_op->delete_obj(dpp, null_yield, rgw::sal::FLAG_LOG_OP);
-	  if (op_ret >= 0) {
-	    bool delete_marker = del_op->result.delete_marker;
-	    std::string version_id = del_op->result.version_id;
-	    ldpp_dout(dpp, 20) << __func__ << "delete_obj delete_marker=" << delete_marker << dendl;
-	    ldpp_dout(dpp, 20) << __func__ << "delete_obj version_id=" << version_id << dendl;
-	  } else {
-	    ldpp_dout(dpp, 20) << __func__ << "delete_obj returned ret=" << op_ret << dendl;
-	    erase_dirty_object(dpp, e->key, null_yield);
-	    continue;
-	  }
-	} else { //end-if delete_marker
-
-	  std::unique_ptr<rgw::sal::Writer> processor =  driver->get_atomic_writer(dpp,
-		  null_yield,
-		  c_obj.get(),
-		  owner,
-		  NULL,
-		  0,
-		  "");
-
-	  op_ret = processor->prepare(null_yield);
-	  if (op_ret < 0) {
-	    ldpp_dout(dpp, 20) << __func__ << "processor->prepare() returned ret=" << op_ret << dendl;
-	    erase_dirty_object(dpp, e->key, null_yield);
-	    continue;
-	  }
-
-	  off_t lst = e->size;
-	  off_t fst = 0;
-	  off_t ofs = 0;
-
-	  rgw::sal::DataProcessor* filter = processor.get();
-    #if 0
-	  bufferlist bl;
-	  op_ret = cacheDriver->get_attrs(dpp, e->key, obj_attrs, null_yield); //get obj attrs from head
-	  if (op_ret < 0) {
-	    ldpp_dout(dpp, 20) << __func__ << "cacheDriver->get_attrs returned ret=" << op_ret << dendl;
-	    erase_dirty_object(dpp, e->key, null_yield);
-	    continue;
-	  }
-    #endif
-    rgw::d4n::CacheBlock block;
-    block.cacheObj.objName = e->obj_key.get_oid();
-    block.cacheObj.bucketName = e->bucket_id;
-    block.blockID = 0;
-    block.size = 0;
-    auto ret = blockDir->get(dpp, &block, null_yield);
-    if (ret < 0) {
-      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() blockDir->get() failed: " << ret << dendl;
-    }
-    obj_attrs = std::move(block.cacheObj.attrs);
-	  obj_attrs.erase(RGW_CACHE_ATTR_MTIME);
-	  obj_attrs.erase(RGW_CACHE_ATTR_OBJECT_SIZE);
-	  obj_attrs.erase(RGW_CACHE_ATTR_ACCOUNTED_SIZE);
-	  obj_attrs.erase(RGW_CACHE_ATTR_EPOCH);
-	  obj_attrs.erase(RGW_CACHE_ATTR_MULTIPART);
-	  obj_attrs.erase(RGW_CACHE_ATTR_OBJECT_NS);
-	  obj_attrs.erase(RGW_CACHE_ATTR_BUCKET_NAME);
-	  obj_attrs.erase(RGW_CACHE_ATTR_LOCAL_WEIGHT);
-
-	  do {
-	    ceph::bufferlist data;
-	    if (fst >= lst){
-	      break;
-	    }
-	    off_t cur_size = std::min<off_t>(fst + dpp->get_cct()->_conf->rgw_max_chunk_size, lst);
-	    off_t cur_len = cur_size - fst;
-	    std::string oid_in_cache = rgw::sal::get_key_in_cache(e->key, std::to_string(fst), std::to_string(cur_len));
-	    ldpp_dout(dpp, 10) << __func__ << "(): oid_in_cache=" << oid_in_cache << dendl;
-	    rgw::sal::Attrs attrs;
-	    cacheDriver->get(dpp, oid_in_cache, 0, cur_len, data, attrs, null_yield);
-	    if (op_ret < 0) {
-	      ldpp_dout(dpp, 20) << __func__ << "cacheDriver->get returned ret=" << op_ret << dendl;
-	      erase_dirty_object(dpp, e->key, null_yield);
-	      continue;
-	    }
-	    len = data.length();
-	    fst += len;
-
-	    if (len == 0) {
-	      // TODO: if len of any block is 0 for some reason, we must return from here?
-	      break;
-	    }
-
-	    op_ret = filter->process(std::move(data), ofs);
-	    if (op_ret < 0) {
-	      ldpp_dout(dpp, 20) << __func__ << "processor->process() returned ret=" << op_ret << dendl;
-	      erase_dirty_object(dpp, e->key, null_yield);
-	      continue;
-	    }
-
-	    ofs += len;
-	  } while (len > 0);
-
-	  op_ret = filter->process({}, ofs);
-
-	  const req_context rctx{dpp, null_yield, nullptr};
-	  ceph::real_time mtime = ceph::real_clock::from_time_t(e->creationTime);
-	  op_ret = processor->complete(lst, e->etag, &mtime, ceph::real_clock::from_time_t(e->creationTime), obj_attrs,
-				  std::nullopt, ceph::real_time(), nullptr, nullptr,
-				  nullptr, nullptr, nullptr,
-				  rctx, rgw::sal::FLAG_LOG_OP);
-
-	  if (op_ret < 0) {
-	    ldpp_dout(dpp, 20) << __func__ << "processor->complete() returned ret=" << op_ret << dendl;
-	    erase_dirty_object(dpp, e->key, null_yield);
-	    continue;
-	  }
-	  /* invoke update() with dirty flag set to false, to update in-memory metadata for each block
-	     reset values */
-	  lst = e->size;
-	  fst = 0;
-	  do {
-	    if (fst >= lst) {
-	break;
-	    }
-	    off_t cur_size = std::min<off_t>(fst + dpp->get_cct()->_conf->rgw_max_chunk_size, lst);
-	    off_t cur_len = cur_size - fst;
-
-	    std::string oid_in_cache = rgw::sal::get_key_in_cache(e->key, std::to_string(fst), std::to_string(cur_len));
-	    ldpp_dout(dpp, 20) << __func__ << "(): oid_in_cache =" << oid_in_cache << dendl;
-	    //Update in-memory data structure for each block
-	    this->update(dpp, oid_in_cache, 0, 0, e->version, false, 0, y);
-
-	    rgw::d4n::CacheBlock block;
-	    block.cacheObj.bucketName = c_obj->get_bucket()->get_bucket_id();
-	    block.cacheObj.objName = c_obj->get_key().get_oid();
-	    block.size = cur_len;
-	    block.blockID = fst;
-            if ((op_ret = cacheDriver->set_attr(dpp, oid_in_cache, RGW_CACHE_ATTR_DIRTY, "0", y)) == 0) {
-        std::string dirty = "false";
-	      op_ret = blockDir->update_field(dpp, &block, "dirty", dirty, null_yield);
-	      if (op_ret < 0) {
-		ldpp_dout(dpp, 0) << __func__ << "updating dirty flag in block directory failed, ret=" << op_ret << dendl;
-	      }
-            } else {
-	      ldpp_dout(dpp, 0) << __func__ << "(): Failed to update dirty xattr in cache, ret=" << op_ret << dendl;
-            }
-
-	    fst += cur_len;
-	  } while(fst < lst);
-	} //end-else if delete_marker
-
-  //head block exists only for delete marker
-  if (e->delete_marker) {
-    //invoke update() with dirty flag set to false, to update in-memory metadata for head
-    this->update(dpp, e->key, 0, 0, e->version, false, 0, y);
-    if ((ret = cacheDriver->set_attr(dpp, e->key, RGW_CACHE_ATTR_DIRTY, "0", y)) < 0) {
-      ldpp_dout(dpp, 0) << __func__ << "(): Failed to update dirty attr in cache, ret=" << op_ret << dendl;
-    }
-  }
-	if (null_instance) {
-	  //restore instance for directory data processing in later steps
-	  c_obj->set_instance("null");
-	}
-	rgw::d4n::CacheBlock block;
-	block.cacheObj.bucketName = c_obj->get_bucket()->get_bucket_id();
-        ldpp_dout(dpp, 20) << __func__ << "(): bucket name: " << block.cacheObj.bucketName << dendl;
-	block.cacheObj.objName = c_obj->get_name();
-	block.size = 0;
-	block.blockID = 0;
-	//non-versioned case
-	if (!c_obj->have_instance()) {
-	  // hash entry for latest version
-	  op_ret = blockDir->get(dpp, &block, y);
-	  if (op_ret < 0) {
-	    ldpp_dout(dpp, 0) << __func__ << "(): Failed to get latest entry in block directory for: " << block.cacheObj.objName << ", ret=" << ret << dendl;
-	  } else {
-	    // if this entry is not the latest, it could have been overwritten by a newer one
-	    if (block.version == e->version) {
-	      rgw::d4n::CacheBlock null_block;
-	      null_block = block;
-	      null_block.cacheObj.objName = "_:null_" + c_obj->get_name();
-	      //hash entry for null block
-	      op_ret = blockDir->get(dpp, &null_block, y);
-	      if (op_ret < 0) {
-		ldpp_dout(dpp, 0) << __func__ << "(): Failed to get latest entry in block directory for: " << null_block.cacheObj.objName << ", ret=" << ret << dendl;
-	      } else {
-		if (null_block.version == e->version) {
-		  block.cacheObj.dirty = false;
-		  null_block.cacheObj.dirty = false;
-		  auto blk_op_ret = blockDir->set(dpp, &block, y);
-		  auto null_op_ret = blockDir->set(dpp, &null_block, y);
-		  if (blk_op_ret < 0 || null_op_ret < 0) {
-		    ldpp_dout(dpp, 0) << __func__ << "(): Failed to Queue update dirty flag for latest entry/null entry in block directory" << dendl;
-		  }
-		}
-	      }
-	    } //end-if (block.version == entry->version)
-	  } //end - else if op_ret == 0
-	  ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): Removing object name: "<< c_obj->get_name() << " score: " << std::setprecision(std::numeric_limits<double>::max_digits10) << e->creationTime << " from ordered set" << dendl;
-	  rgw::d4n::CacheObj dir_obj = rgw::d4n::CacheObj{
-	    .objName = c_obj->get_name(),
-	    .bucketName = c_obj->get_bucket()->get_bucket_id(),
-	  };
-	  /* remove the entry from the ordered set using its score, as the object is already cleaned
-	     need not be part of a transaction as it is being removed based on its score which is its creation time. */
-	  ret = objDir->zremrangebyscore(dpp, &dir_obj, e->creationTime, e->creationTime, y);
-	  if (ret < 0) {
-	    ldpp_dout(dpp, 0) << __func__ << "(): Failed to remove object from ordered set with error: " << ret << dendl;
-	  }
-	}
-	if (c_obj->have_instance()) { //versioned case
-	  std::string objName = c_obj->get_oid();
-	  if (c_obj->get_instance() == "null") {
-	    objName = "_:null_" + c_obj->get_name();
-	  }
-	  rgw::d4n::CacheBlock instance_block;
-	  instance_block.cacheObj.bucketName = c_obj->get_bucket()->get_bucket_id();
-	  instance_block.cacheObj.objName = objName;
-	  instance_block.size = 0;
-	  instance_block.blockID = 0;
-    std::string dirty = "false";
-	  op_ret = blockDir->update_field(dpp, &instance_block, "dirty", dirty, null_yield);
-	  if (op_ret < 0) {
-	    ldpp_dout(dpp, 20) << __func__ << "updating dirty flag in block directory for instance block failed!" << dendl;
-	  }
-	  //the next steps remove the entry from the ordered set and if needed the latest hash entry also in case of versioned buckets
-	  rgw::d4n::CacheBlock latest_block = block;
-	  latest_block.cacheObj.objName = c_obj->get_name();
-	  int retry = 3;
-	  while(retry) {
-	    retry--;
-	    //get latest entry
-	    ret = blockDir->get(dpp, &latest_block, y);
-	    if (ret < 0) {
-	      ldpp_dout(dpp, 0) << __func__ << "(): Failed to get latest entry in block directory for: " << latest_block.cacheObj.objName << ", ret=" << ret << dendl;
-	    }
-	    if (latest_block.version == e->version) {
-	      //remove object entry from ordered set of versions
-	      if (c_obj->have_instance()) {
-		blockDir->del(dpp, &latest_block, y);
-		if (ret < 0) {
-		  ldpp_dout(dpp, 0) << __func__ << "(): Failed to queue del for latest hash entry: " << latest_block.cacheObj.objName << ", ret=" << ret << dendl;
-		  continue;
-		}
-	      }
-	      //delete entry from ordered set of objects, as older versions would have been written to the backend store
-	      ret = bucketDir->zrem(dpp, e->bucket_id, c_obj->get_name(), y);
-	      if (ret < 0) {
-		ldpp_dout(dpp, 0) << __func__ << "(): Failed to queue zrem for object entry: " << c_obj->get_name() << ", ret=" << ret << dendl;
-		continue;
-	      }
-	    }
-	    ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): Removing object name: "<< c_obj->get_name() << " score: " << std::setprecision(std::numeric_limits<double>::max_digits10) << e->creationTime << " from ordered set" << dendl;
-	    rgw::d4n::CacheObj dir_obj = rgw::d4n::CacheObj{
-	      .objName = c_obj->get_name(),
-	      .bucketName = c_obj->get_bucket()->get_bucket_id(),
-	    };
-	    ret = objDir->zremrangebyscore(dpp, &dir_obj, e->creationTime, e->creationTime, y);
-	    if (ret < 0) {
-	      ldpp_dout(dpp, 0) << __func__ << "(): Failed to remove object from ordered set with error: " << ret << dendl;
-	      continue;
-	    }
-	    break;
-	  }//end-while (retry)
-	}
-	//remove entry from map and queue, erase_dirty_object locks correctly
-	erase_dirty_object(dpp, e->key, null_yield);
+        ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__
+                            << "(): promoted next version key="
+                            << next->key
+                            << " creationTime="
+                            << next->creationTime
+                            << dendl;
+        v_it->second.erase(next_it);
+        cond.notify_one();
+      } else if (v_it != per_obj_versions.end()) {
+        // No more versions — cleanup
+        per_obj_versions.erase(v_it);
+        ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__
+                            << "(): all versions processed for obj="
+                            << obj_name << dendl;
       }
-    } else if (diff < interval) { //end-if std::difftime(time(NULL), e->creationTime) > interval
-      {
-        std::unique_lock<std::mutex> wait_lock(lfuda_cleaning_lock);
-        cond.wait_for(wait_lock, std::chrono::seconds(interval - diff), []{ return quit.load(); });
-      }
-      continue;
     }
   } //end-while true
 }

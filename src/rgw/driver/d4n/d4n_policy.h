@@ -5,6 +5,7 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/heap/fibonacci_heap.hpp>
 #include <boost/system/detail/errc.hpp>
+#include <boost/asio/thread_pool.hpp>
 
 #include "d4n_directory.h"
 #include "rgw_sal_d4n.h"
@@ -155,6 +156,9 @@ class LFUDAPolicy : public CachePolicy {
     Object_Heap object_heap; //This heap contains dirty objects ordered by their creation time, used for cleaning method
     std::unordered_map<std::string, LFUDAEntry*> entries_map;
     std::unordered_map<std::string, std::pair<LFUDAObjEntry*, State> > o_entries_map; //Contains only dirty objects, used for look-up
+    std::unique_ptr<boost::asio::thread_pool> cleaning_pool;
+    //contains obj_name -> map of versions ordered by their creation time
+    std::unordered_map<std::string, std::map<uint64_t, LFUDAObjEntry*>> per_obj_versions;
     std::mutex lfuda_lock;
     std::mutex lfuda_cleaning_lock;
     std::condition_variable cond;
@@ -197,6 +201,8 @@ class LFUDAPolicy : public CachePolicy {
     int delete_data_blocks(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, optional_yield y);
     void perform_background_eviction(const DoutPrefixProvider* dpp, uint64_t bytes_to_free, optional_yield y);
     virtual void background_eviction_worker(const DoutPrefixProvider* dpp, optional_yield y);
+    void do_delete(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, int interval, optional_yield y);
+    void do_writeback(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, optional_yield y);
 
   public:
     LFUDAPolicy(std::shared_ptr<connection>& conn, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : CachePolicy(cacheDriver), 
@@ -214,7 +220,8 @@ class LFUDAPolicy : public CachePolicy {
       delete objDir;
       quit = true;
       cond.notify_all();
-      if (tc.joinable()) { tc.join(); }
+      cleaning_pool->stop();
+      cleaning_pool->join();
       if (eviction_timer.has_value()) {
         eviction_timer->cancel();
       }
