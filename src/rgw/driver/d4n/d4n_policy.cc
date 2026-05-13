@@ -417,6 +417,7 @@ void LFUDAPolicy::perform_background_eviction(const DoutPrefixProvider* dpp, uin
     // call eviction
     int ret = eviction(dpp, batch_size, y);
     if (ret < 0) {
+      //may fail due to all objects being dirty
       ldpp_dout(dpp, 5) << "Background eviction failed: " << ret << dendl;
       break;
     }
@@ -426,6 +427,15 @@ void LFUDAPolicy::perform_background_eviction(const DoutPrefixProvider* dpp, uin
     total_freed += actually_freed;
 
     ldpp_dout(dpp, 20) << "Batch freed " << actually_freed << " bytes (requested " << batch_size << ")" << dendl;
+    uint64_t used_space = cache_capacity - after;
+    if (used_space < eviction_watermark_bytes) {
+      ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__
+                         << " used_space=" << used_space
+                         << " dropped below watermark=" << eviction_watermark_bytes
+                         << ", clearing flag" << dendl;
+      above_watermark = false;
+      break;
+    }
   }
 
   ldpp_dout(dpp, 10) << "Background eviction completed: freed " 
@@ -455,6 +465,9 @@ void LFUDAPolicy::background_eviction_worker(const DoutPrefixProvider* dpp, opti
     if (used_space < eviction_watermark_bytes) {
       continue;
     }
+
+    above_watermark = true;
+    watermark_cv.notify_all();
 
     // Calculate bytes to free (evict to 65%)
     uint64_t bytes_to_free = used_space - target_bytes;
@@ -1148,62 +1161,67 @@ void LFUDAPolicy::do_writeback(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, 
 void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
 {
   const int interval = dpp->get_cct()->_conf->rgw_d4n_cache_cleaning_interval;
+  std::optional<LFUDAObjEntry*> e;
   while(!quit) {
     ldpp_dout(dpp, 20) << __func__ << " : " << " Cache cleaning!" << dendl;
     bool invalid = false;
   
     ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__ << "" << __LINE__ << "(): Before acquiring cleaning-lock" << dendl;
     std::unique_lock<std::mutex> l(lfuda_cleaning_lock);
-    LFUDAObjEntry* e;
-    if (object_heap.size() > 0) {
-      e = object_heap.top();
-    } else {
-      cond.wait(l, [this]{ return (!object_heap.empty() || quit); });
-      continue;
+    //saving e till the entry expires and is processed so that the same entry is not picked by another thread
+    if (!e.has_value()) {
+      if (object_heap.size() > 0) {
+        e = object_heap.top();
+        object_heap.pop();
+      } else {
+        cond.wait(l, [this]{ return (!object_heap.empty() || quit); });
+        continue;
+      }
     }
-    std::string obj_name = e->obj_key.name;
-    ldpp_dout(dpp, 10) <<__LINE__ << " " << __func__ << "(): e->key=" << e->key << dendl;
-    ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->delete_marker=" << e->delete_marker << dendl;
-    ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->version=" << e->version << dendl;
-    ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->bucket_name=" << e->bucket_name << dendl;
-    ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->bucket_id=" << e->bucket_id << dendl;
-    ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->user=" << e->user << dendl;
-    ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->obj_key=" << e->obj_key << dendl;
+    std::string obj_name = (*e)->obj_key.name;
+    ldpp_dout(dpp, 10) <<__LINE__ << " " << __func__ << "(): e->key=" << (*e)->key << dendl;
+    ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->delete_marker=" << (*e)->delete_marker << dendl;
+    ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->version=" << (*e)->version << dendl;
+    ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->bucket_name=" << (*e)->bucket_name << dendl;
+    ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->bucket_id=" << (*e)->bucket_id << dendl;
+    ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->user=" << (*e)->user << dendl;
+    ldpp_dout(dpp, 10) << __LINE__ << " " << __func__ << "(): e->obj_key=" << (*e)->obj_key << dendl;
 
-    int diff = std::difftime(time(NULL), e->creationTime);
-    if (diff < interval) {
-      ldpp_dout(dpp, 10) <<__LINE__ << " " << __func__ << "(): entry has not expired= " << e->key << dendl;
+    int diff = std::difftime(time(NULL), (*e)->creationTime);
+    bool entry_expired = (diff >= interval);
+    if (!entry_expired && !above_watermark) {
+      ldpp_dout(dpp, 10) << __LINE__ << " " << __func__
+                         << "(): entry not expired and below watermark, waiting on=" << (*e)->key << dendl;
       l.unlock();
-      std::mutex wait_mtx;
-      std::condition_variable wait_cv;
-      std::unique_lock<std::mutex> wait_lock(wait_mtx);
-      wait_cv.wait_for(wait_lock, std::chrono::seconds(interval - diff), [this]{ return quit.load(); });
+      std::unique_lock<std::mutex> wait_lock(watermark_mtx);
+      watermark_cv.wait_for(wait_lock, std::chrono::seconds(interval - diff), [this]{ return quit.load() || above_watermark.load(); });
       continue;
     }
-    if (!e->key.empty()) { // if block is dirty and written more than interval seconds ago
-      ldpp_dout(dpp, 10) <<__LINE__ << " " << __func__ << "(): entry has expired= " << e->key << dendl;
-      auto p = o_entries_map.find(e->key);
+    //start cleaning, either when entry is expired or when cache filled space is above EVICTION_WATERMARK
+    if (!(*e)->key.empty()) { // if block is dirty and written more than interval seconds ago
+      ldpp_dout(dpp, 10) <<__LINE__ << " " << __func__ << "(): entry has expired= " << (*e)->key << dendl;
+      auto p = o_entries_map.find((*e)->key);
       if (p == o_entries_map.end()) {
+        e.reset();
 	l.unlock();
 	continue;
       }
       if (p->second.second == State::INVALID) {
 	invalid = true;
       } else if (p->second.second == State::IN_PROGRESS) { //already being processed by another thread
+        e.reset();
         l.unlock();
         continue;
       }
       //set to IN_PROGRESS irrespective of INVALID as this indicates that processing is in progress
       p->second.second = State::IN_PROGRESS;
-      //Remove this entry so that it is not picked by any other thread
-      object_heap.pop();
       l.unlock();
 
       // If the state is invalid, the blocks must be deleted from the cache rather than written to the backend.
       if (invalid) {
-        do_delete(dpp, e, interval, null_yield);
+        do_delete(dpp, *e, interval, null_yield);
       } else {
-        do_writeback(dpp, e, null_yield);
+        do_writeback(dpp, *e, null_yield);
       }
     }
     {
@@ -1233,6 +1251,7 @@ void LFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
                             << obj_name << dendl;
       }
     }
+    e.reset();
   } //end-while true
 }
 

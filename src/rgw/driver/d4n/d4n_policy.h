@@ -156,7 +156,6 @@ class LFUDAPolicy : public CachePolicy {
     Object_Heap object_heap; //This heap contains dirty objects ordered by their creation time, used for cleaning method
     std::unordered_map<std::string, LFUDAEntry*> entries_map;
     std::unordered_map<std::string, std::pair<LFUDAObjEntry*, State> > o_entries_map; //Contains only dirty objects, used for look-up
-    std::unique_ptr<boost::asio::thread_pool> cleaning_pool;
     //contains obj_name -> map of versions ordered by their creation time
     std::unordered_map<std::string, std::map<uint64_t, LFUDAObjEntry*>> per_obj_versions;
     std::mutex lfuda_lock;
@@ -180,6 +179,12 @@ class LFUDAPolicy : public CachePolicy {
     std::promise<void> eviction_done_promise;
     std::future<void> eviction_done_future = eviction_done_promise.get_future();
     std::optional<boost::asio::steady_timer> eviction_timer;
+
+    std::unique_ptr<boost::asio::thread_pool> cleaning_pool;
+    //variables needed to trigger cleaning also when cache fills up to EVICTION_WATERMARK
+    std::atomic<bool> above_watermark{false};
+    std::condition_variable watermark_cv;
+    std::mutex watermark_mtx;
 
     CacheBlock* get_victim_block(const DoutPrefixProvider* dpp, optional_yield y);
     int age_sync(const DoutPrefixProvider* dpp, optional_yield y); 
@@ -220,6 +225,7 @@ class LFUDAPolicy : public CachePolicy {
       delete objDir;
       quit = true;
       cond.notify_all();
+      watermark_cv.notify_all();
       cleaning_pool->stop();
       cleaning_pool->join();
       if (eviction_timer.has_value()) {
