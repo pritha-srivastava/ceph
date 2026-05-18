@@ -116,6 +116,26 @@ int D4NFilterDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
 	}
 
 
+	//FIXME: AMIN: remote this. It is just for testing
+    auto fdb_conn_test = std::make_shared<rgw::d4n::FDBConnection>(lfdb::create_database());
+	auto fdb_conn_test_handle = std::dynamic_pointer_cast<rgw::d4n::FDBConnection>(fdb_conn_test);
+    auto fdb_objDir_test = std::make_unique<rgw::d4n::FDBObjectDirectory>(fdb_conn_test_handle);
+    rgw::d4n::CacheObj object = rgw::d4n::CacheObj{
+      .objName = "object_test",
+      .bucketName = "bucket_test",
+      .creationTime = "time",
+      .dirty = false,
+      .hostsList = { dpp->get_cct()->_conf->rgw_d4n_local_rgw_address },
+      .etag = "",
+      .size = 1024,
+      .user_id = "amin",
+      .display_name = "object_test_amin",
+      };
+
+    auto ret = fdb_objDir_test->set(dpp, &object, y);
+    ldpp_dout(dpp, 0) << "AMIN: D4NFilterDriver::" << __func__ << "(): ret value is: " << ret  << dendl;
+	//END FIXME
+
   }
   else if (directory_type == "fdb"){
     conn = std::make_shared<rgw::d4n::FDBConnection>(lfdb::create_database());

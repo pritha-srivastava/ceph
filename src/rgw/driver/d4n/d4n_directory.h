@@ -120,9 +120,19 @@ class Pipeline {
 //END FIXME
 
 template<typename T>
+concept SeqContainer =
+requires(T& t, typename T::value_type v) {
+    t.insert(v);
+} || requires(T& t, typename T::value_type v) {
+    t.push_back(v);
+};
+
+/*
+template<typename T>
   concept SeqContainer = requires(T& t, typename T::value_type v) {
       t.push_back(v);
   };
+*/
 
 enum class ObjectFields { // Fields stored in object directory 
   ObjName,
