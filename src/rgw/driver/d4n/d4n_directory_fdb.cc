@@ -451,6 +451,7 @@ int FDBObjectDirectory::zrank(const DoutPrefixProvider* dpp,
   }
 }
 
+//FIXME
 int FDBObjectDirectory::incr(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y)
 {
   std::string key = build_index(object);
@@ -553,12 +554,6 @@ int FDBBlockDirectory::set_values(const DoutPrefixProvider* dpp, CacheBlock& blo
 
   return 0;
 }
-
-int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y)
-{
-  return 0;
-}
-
 
 int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Pipeline* pipeline)
 {
