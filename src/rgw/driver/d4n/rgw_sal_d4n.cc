@@ -86,7 +86,6 @@ int D4NFilterDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
     objDir = std::make_unique<rgw::d4n::RedisObjectDirectory>(redis_conn);
     blockDir = std::make_unique<rgw::d4n::RedisBlockDirectory>(redis_conn);
     bucketDir = std::make_unique<rgw::d4n::RedisBucketDirectory>(redis_conn);
-    policyDriver = std::make_unique<rgw::d4n::PolicyDriver>(conn, directory_type, cacheDriver.get(), "lfuda", this->y);
 
     redis_conn->conn->async_run(cfg, {}, net::consign(net::detached, redis_conn->conn));
 
@@ -147,9 +146,9 @@ int D4NFilterDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
     objDir = std::make_unique<rgw::d4n::FDBObjectDirectory>(fdb_conn);
     blockDir = std::make_unique<rgw::d4n::FDBBlockDirectory>(fdb_conn);
     bucketDir = std::make_unique<rgw::d4n::FDBBucketDirectory>(fdb_conn);
-    policyDriver = std::make_unique<rgw::d4n::PolicyDriver>(conn, directory_type, cacheDriver.get(), "lfuda", this->y);
   }
 
+  policyDriver = std::make_unique<rgw::d4n::PolicyDriver>(conn, directory_type, cacheDriver.get(), "lfuda", this->y);
   FilterDriver::initialize(cct, dpp);
 
   cacheDriver->initialize(dpp);
