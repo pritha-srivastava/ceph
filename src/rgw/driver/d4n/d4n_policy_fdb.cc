@@ -55,7 +55,6 @@ int FDBLFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::
 
   lfdb::set(fdb_conn, "lfuda", fdbValues);
 
-
   asio::co_spawn(io_context.get_executor(),
 		   directory_sync(dpp, y), asio::detached);
 
@@ -129,4 +128,3 @@ int FDBLFUDAPolicy::local_weight_sync(const DoutPrefixProvider* dpp, optional_yi
 }
 
 } // namespace rgw::d4n
-=======
