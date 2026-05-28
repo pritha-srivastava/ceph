@@ -204,6 +204,14 @@ class LFUDAPolicy : public CachePolicy {
     //queue to maintain failed entries
     std::deque<LFUDAObjEntry> failed_entries;
 
+    std::mutex gw_lock;
+    std::optional<ceph::async::async_cond<>> gw_cond;
+    std::promise<void> gw_done_promise;
+    std::future<void> gw_done_future = gw_done_promise.get_future();
+    std::optional<boost::asio::steady_timer> gw_timer;
+    //data structure for accumulating updated global weight blocks 
+    std::unordered_map<std::string, uint64_t> updated_gw_blocks;
+
     int get_victim_block(const DoutPrefixProvider* dpp, CacheBlock* victim, optional_yield y);
     int age_sync(const DoutPrefixProvider* dpp, optional_yield y); 
     int local_weight_sync(const DoutPrefixProvider* dpp, optional_yield y); 
@@ -221,6 +229,7 @@ class LFUDAPolicy : public CachePolicy {
         return nullptr;
       return it->second;
     }
+    void globalweight_writer(const DoutPrefixProvider* dpp, optional_yield y);
     int delete_data_blocks(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, optional_yield y);
     int perform_background_eviction(const DoutPrefixProvider* dpp, uint64_t bytes_to_free, optional_yield y);
     virtual void background_eviction_worker(const DoutPrefixProvider* dpp, optional_yield y);
@@ -234,9 +243,9 @@ class LFUDAPolicy : public CachePolicy {
                                               const rgw_obj_key& obj_key, State state);
 
   public:
-    LFUDAPolicy(std::shared_ptr<connection>& conn, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : CachePolicy(cacheDriver), 
-                                                                                                             y(y),
-													     conn(conn)
+    LFUDAPolicy(const DoutPrefixProvider* dpp, std::shared_ptr<connection>& conn, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : CachePolicy(cacheDriver), 
+																																			y(y),
+																																		    conn(conn)
     {
       blockDir = std::make_unique<BlockDirectory>(conn);
       objDir = std::make_unique<ObjectDirectory>(conn);
@@ -268,6 +277,15 @@ class LFUDAPolicy : public CachePolicy {
     }
     void save_y(optional_yield y) { this->y = y; }
     void localweight_writer(const DoutPrefixProvider* dpp);
+    int get_age() { return age; }
+    void add_updated_gw_block(std::string key, uint64_t value) { updated_gw_blocks.emplace(key, value); }
+    size_t get_updated_gw_blocks_size() { return updated_gw_blocks.size(); }
+    void gw_notify_one() {
+      if (gw_cond.has_value()) {
+        std::unique_lock<std::mutex> l(gw_lock);
+        gw_cond->notify(l);
+      }  
+    }
 };
 
 class LRUPolicy : public CachePolicy {
@@ -304,12 +322,12 @@ class PolicyDriver {
     CachePolicy* cachePolicy;
 
   public:
-    PolicyDriver(std::shared_ptr<connection>& conn, rgw::cache::CacheDriver* cacheDriver, const std::string& _policyName, optional_yield y) : policyName(_policyName) 
+    PolicyDriver(const DoutPrefixProvider* dpp, std::shared_ptr<connection>& conn, rgw::cache::CacheDriver* cacheDriver, const std::string& _policyName, optional_yield y) : policyName(_policyName) 
     {
       if (policyName == "lfuda") {
-	cachePolicy = new LFUDAPolicy(conn, cacheDriver, y);
+		cachePolicy = new LFUDAPolicy(dpp, conn, cacheDriver, y);
       } else if (policyName == "lru") {
-	cachePolicy = new LRUPolicy(cacheDriver);
+		cachePolicy = new LRUPolicy(cacheDriver);
       }
     }
     ~PolicyDriver() {

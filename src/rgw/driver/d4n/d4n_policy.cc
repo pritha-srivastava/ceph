@@ -1,5 +1,6 @@
 #include "d4n_policy.h"
 
+#include <boost/asio/experimental/parallel_group.hpp>
 #include "../../../common/async/yield_context.h"
 #include "common/async/blocked_completion.h"
 #include "rgw_perf_counters.h"
@@ -52,7 +53,11 @@ LFUDAPolicy::~LFUDAPolicy()
 {
   rthread_stop();
   quit = true;
-  {
+  if (gw_cond.has_value()) {
+    std::unique_lock<std::mutex> l(gw_lock);
+    gw_cond->notify(l);
+  }
+  if (cond.has_value()) {
     std::unique_lock<std::mutex> l(lfuda_cleaning_lock);
     cond->notify(l);
   }
@@ -76,6 +81,10 @@ LFUDAPolicy::~LFUDAPolicy()
   for (auto& it : o_entries_map) {
     delete it.second.first;
   }
+  if (gw_timer.has_value()) {
+    gw_timer->cancel();
+  }
+  gw_done_future.wait();
 }
 
 int LFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver* _driver) {
@@ -175,6 +184,7 @@ int LFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_
                         << " creationTime=" << version_map.begin()->first << dendl;
     }
   }
+
   driver = _driver;
   if (dpp->get_cct()->_conf->d4n_writecache_enabled) {
     int num_cleaning_threads = dpp->get_cct()->_conf->rgw_d4n_cleaning_threads;
@@ -249,6 +259,23 @@ int LFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_
           ldpp_dout(dpp, 10) << "Background eviction co-routine stopped" << dendl;
       }
     );
+  gw_timer.emplace(io_context);
+  gw_cond.emplace(io_context.get_executor());
+  boost::asio::spawn(
+    io_context,
+    [this, dpp](boost::asio::yield_context yield) {
+      optional_yield y{yield};
+      globalweight_writer(dpp, y);
+    },
+    [this, dpp](std::exception_ptr e) {
+      if (e) {
+		gw_done_promise.set_exception(e);
+      } else {
+		gw_done_promise.set_value();
+      }
+      ldpp_dout(dpp, 10) << "Background global weight writer co-routine stopped" << dendl;
+    }
+  );
   return 0;
 }
 
@@ -343,8 +370,8 @@ int LFUDAPolicy::local_weight_sync(const DoutPrefixProvider* dpp, optional_yield
       redis_exec(conn, ec, req, resp, y);
 
       if (ec) {
-	ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ec.what() << dendl;
-	return -ec.value();
+		ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ec.what() << dendl;
+		return -ec.value();
       }
     } catch (std::exception &e) {
       return -EINVAL;
@@ -357,21 +384,21 @@ int LFUDAPolicy::local_weight_sync(const DoutPrefixProvider* dpp, optional_yield
 
     if (localAvgWeight < minAvgWeight) { /* Set new minimum weight */
       try { 
-	boost::system::error_code ec;
-	response<ignore_t> resp;
-	request req;
-	req.push("HSET", "lfuda", "minLocalWeights_sum", std::to_string(weightSum), 
-                  "minLocalWeights_size", std::to_string(entries_map.size()), 
-                  "minLocalWeights_address", dpp->get_cct()->_conf->rgw_d4n_local_rgw_address);
+		boost::system::error_code ec;
+		response<ignore_t> resp;
+		request req;
+		req.push("HSET", "lfuda", "minLocalWeights_sum", std::to_string(weightSum), 
+					  "minLocalWeights_size", std::to_string(entries_map.size()), 
+					  "minLocalWeights_address", dpp->get_cct()->_conf->rgw_d4n_local_rgw_address);
 
-	redis_exec(conn, ec, req, resp, y);
+		redis_exec(conn, ec, req, resp, y);
 
-	if (ec) {
-	  ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ec.what() << dendl;
-	  return -ec.value();
-	}
+		if (ec) {
+		  ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ec.what() << dendl;
+		  return -ec.value();
+		}
       } catch (std::exception &e) {
-	return -EINVAL;
+		return -EINVAL;
       }
     } else {
       weightSum = std::stoi(std::get<0>(resp).value()[0]);
@@ -603,10 +630,107 @@ void LFUDAPolicy::background_eviction_worker(const DoutPrefixProvider* dpp, opti
     }
 
     //if still above watermark, trigger cleaning
-    if (above_watermark) {
+    if (above_watermark && watermark_timer.has_value()) {
       watermark_timer->cancel();
     }
   }
+}
+
+void LFUDAPolicy::globalweight_writer(const DoutPrefixProvider* dpp, optional_yield y)
+{
+  /* The blocks to update are added to the updated_blocks vector in cases where the global weight is updated during 
+   * eviction or remote reads. Otherwise, general block sets (which included global weight as part of its metadata) 
+   * occur normally. */
+  ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Starting thread " << dendl;
+  auto TIMEOUT_DURATION = std::chrono::seconds(dpp->get_cct()->_conf->rgw_d4n_globalweight_processing_interval);
+  while (!quit) {
+    std::unordered_map<std::string, uint64_t> temp;
+    bool batch_size = false;
+    //sleep for some duration or till size crosses 10K before processing
+    {
+      std::unique_lock<std::mutex> l(gw_lock);
+      boost::system::error_code ec;
+      if (gw_cond.has_value() && gw_timer.has_value()) {
+		gw_timer->expires_after(TIMEOUT_DURATION);
+		auto [order_completed, ec1, ec2] = 
+		asio::experimental::make_parallel_group(
+		  [this, &l](auto token) {
+			return gw_cond->async_wait(l, token);
+		  },
+		  [this](auto token) {
+			return gw_timer->async_wait(token);
+		  }
+		).async_wait(asio::experimental::wait_for_one(), y.get_yield_context());
+		if (order_completed[0] == 0) {
+		  batch_size = true;
+		}
+	  }
+      if (quit.load()) {
+		break;
+      }
+
+      if (!updated_gw_blocks.empty()) {
+		updated_gw_blocks.swap(temp);
+		if (batch_size) {
+		  ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Woke up due to size threshold, processing " << temp.size() << " items" << dendl;
+		} else {
+		  ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Woke up due to timeout, processing " << temp.size() << " items" << dendl;
+		}
+      }
+    } //lock released here
+    if (!temp.empty()) {
+      ldpp_dout(dpp, 5) << "LFUDAPolicy::" << __func__ << "(): Processing batch of " << temp.size() << " items" << dendl;
+      if (quit.load()) {
+        ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Quit signal received, exiting" << quit << dendl;
+        break;
+      }
+      std::vector<rgw::d4n::CacheBlock> blocks;
+      for (const auto& pair : temp) {
+		auto parts = split(pair.first, "_");
+		std::vector<std::string> block_info;
+		block_info.assign(parts.begin(), parts.end());
+		rgw::d4n::CacheBlock block;
+
+        // 4: non-versioned block key
+        // 5: versioned block key
+		if (block_info.size() != 4 && block_info.size() != 5) {
+		  ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Failed to parse block key " << pair.first << "; skipping" << dendl;
+		  continue;
+		} else if (block_info.size() == 4) {
+		  block.cacheObj.bucketName = block_info[0];
+		  block.cacheObj.objName = block_info[1];
+		  try {
+			block.blockID = std::stoull(block_info[2]);
+			block.size = std::stoull(block_info[3]);
+		  } catch (std::exception &e) {
+			ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Failed to parse block key " << pair.first << "; skipping" << dendl;
+			continue;
+		  }
+		} else if (block_info.size() == 5) {
+		  block.cacheObj.bucketName = block_info[0];
+		  block.version = block_info[1];
+		  block.cacheObj.objName = block_info[2];
+		  try {
+			block.blockID = std::stoull(block_info[3]);
+			block.size = std::stoull(block_info[4]);
+		  } catch (std::exception &e) {
+			ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Failed to parse block key " << pair.first << "; skipping" << dendl;
+			continue;
+		  }
+		}
+		block.globalWeight = pair.second;
+		blocks.push_back(block); 
+      };
+
+      ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): BlockDirectory set method called." << dendl;
+      int ret = blockDir->set(dpp, blocks, null_yield);
+      if (ret < 0) {
+        ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "(): BlockDirectory set method failed, ret=" << ret << dendl;
+      }
+      ldpp_dout(dpp, 5) << "LFUDAPolicy::" << __func__ << "(): Finished processing batch" << dendl;
+    } //end-if
+  } //end-while
+  ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Thread exiting" << dendl;
 }
 
 int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) {
@@ -657,74 +781,89 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
       remoteCacheAddress.clear(); // evict normally without remote put 
     }
 
-	if ((ret = blockDir->get(dpp, &block, y)) < 0) {
-      ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Unable to retrieve victim block's hostsList." << dendl;
-	  return ret;
+    std::string object_name = block.cacheObj.objName; // without version
+    std::string instance = "";
+    bufferlist out_bl;
+	rgw::sal::Attrs obj_attrs;
+	int ret = cacheDriver->get(dpp, entry.key, block.blockID, block.size, out_bl, obj_attrs, y);
+	if (obj_attrs.contains(RGW_CACHE_ATTR_VERSION_ID)) {
+	  instance = obj_attrs.at(RGW_CACHE_ATTR_VERSION_ID).to_str();
+	  if (instance != "null") {
+		block.cacheObj.objName = "_:" + instance + "_" + block.cacheObj.objName;
+	  } // null version is not part of the data block's objName
 	}
 
-    ldpp_dout(dpp, 20) << __func__ << "(): " << __LINE__ << " Victim host list size is " << block.cacheObj.hostsList.size() << dendl;
+	bufferlist bl = obj_attrs[RGW_CACHE_ATTR_INVALID];
+	if (ret == 0 && !bl.length()) {
+	  if ((ret = blockDir->get(dpp, &block, y)) < 0) {
+		ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Unable to retrieve victim block's hostsList." << dendl;
+		return ret;
+	  }
 
-    //the following part takes care of updating the weight (globalWeight) of the block if this is the last copy in a remote setup
-    //and is pushed out to a remote cache where space is available
-    if (block.cacheObj.hostsList.size() == 1 && *(block.cacheObj.hostsList.begin()) == dpp->get_cct()->_conf->rgw_d4n_local_rgw_address) { // Last copy 
-	  update_global_weight = false;
-      if (block.globalWeight) {
-		entry.localWeight += block.globalWeight;
-		block.globalWeight = 0;
-      }
+	  ldpp_dout(dpp, 20) << __func__ << "(): " << __LINE__ << ": Victim host list size is " << block.cacheObj.hostsList.size() << dendl;
 
-	  if (!remoteCacheAddress.empty()) {
-		if (entry.localWeight > avgWeight) {
-		  // Write the victim block to the remote cache
-		  bufferlist out_bl;
-		  rgw::sal::Attrs obj_attrs;
+	  /* The following part takes care of updating the weight (globalWeight) of the block if this is the last copy in a remote setup
+	   * and is pushed out to a remote cache where space is available. */
+	  if (block.cacheObj.hostsList.size() == 1 && *(block.cacheObj.hostsList.begin()) == dpp->get_cct()->_conf->rgw_d4n_local_rgw_address) { // Last copy 
+		update_global_weight = false;
+		if (block.globalWeight) {
+		  entry.localWeight += block.globalWeight;
+		  block.globalWeight = 0;
+		}
 
-		  int ret = cacheDriver->get(dpp, entry.key, block.blockID, block.size, out_bl, obj_attrs, y);
-		  if (ret < 0) {
-			ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << " Failed to retrieve victim data block from cache." << dendl;
-			return ret;
-		  } else {
+		if (!remoteCacheAddress.empty()) {
+		  if (entry.localWeight > avgWeight) {
+			// Write the victim block to the remote cache
+			bufferlist out_bl;
 			rgw::d4n::RemoteCachePutOp::RemoteCachePutOpData op {
 			  entry.bucketName,
-			  block.cacheObj.objName,
+			  object_name,
 			  block.blockID,
 			  block.size,
 			  block.version,
-			  false,
+              false,
 			  entry.user,
 			  remoteCacheAddress,
-			  block.cacheObj.size
+			  block.cacheObj.size,
+			  instance
 			};
 			std::unique_ptr<rgw::d4n::RemoteCachePutOp> remote_put = std::make_unique<rgw::d4n::RemoteCachePutOp>(driver, op, true);
 			if ((ret = remote_put->send_and_complete_request(dpp, y, &out_bl)) < 0){
-			  ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << " Sending to remote has failed: " << remoteCacheAddress << dendl;
+			  ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << ": Sending to remote has failed: " << remoteCacheAddress << dendl;
 			  return ret;
 			}
-			ldpp_dout(dpp, 20) << __func__ << "(): " << __LINE__ << " Sending to remote is done." << dendl;
+			ldpp_dout(dpp, 20) << __func__ << "(): " << __LINE__ << ": Sending to remote is done." << dendl;
 			update_global_weight = true;
 		  } 
-	    }
+		}
 	  }
+	} else if (ret <= 0) {
+	  ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << ": Failed to retrieve victim data block from cache." << dendl;
+	  return ret;
     }
 
-	// Only update victim block's global weight if the block wasn't completely evicted 
+	// Only update victim block's global weight if the block wasn't completely evicted; else, delete block from directory 
     if (update_global_weight) {
 	  block.globalWeight += entry.localWeight;
-	  globalWeight = std::to_string(block.globalWeight);
-	  if (int ret = blockDir->update_field(dpp, &block, "globalWeight", globalWeight, y) < 0) {
-		return ret;
+	  add_updated_gw_block(blockDir->build_index(&block), block.globalWeight);
+	  if (updated_gw_blocks.size() >= rgw::d4n::GLOBALWEIGHT_BATCH_SIZE) {
+		gw_notify_one();
 	  }
 
-	  //Need to get and then update the host atomically in a remote setup
+	  // TODO: Need to get and then update the host atomically in a remote setup
 	  if ((ret = blockDir->remove_host(dpp, &block, dpp->get_cct()->_conf->rgw_d4n_local_rgw_address, y)) < 0) {
-		ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << " Failed to remove local host from victim block." << dendl;
+		ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << ": Failed to remove local host from victim block." << dendl;
 		return ret;
 	  }
-    }
-
+    } else {
+	  if ((ret = blockDir->del(dpp, &block, y)) < 0) {
+		ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << " Failed to delete victim block." << dendl;
+		return ret;
+	  }
+    } 
 
     if ((ret = cacheDriver->delete_data(dpp, entry.key, y)) < 0) {
-      ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << " Failed to delete victim block from cache." << dendl;
+      ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << ": Failed to delete victim block from cache." << dendl;
       return ret;
     }
 

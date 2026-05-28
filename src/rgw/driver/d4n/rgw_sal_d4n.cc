@@ -62,10 +62,7 @@ int D4NFilterDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
   objDir = std::make_unique<rgw::d4n::ObjectDirectory>(conn);
   blockDir = std::make_unique<rgw::d4n::BlockDirectory>(conn);
   bucketDir = std::make_unique<rgw::d4n::BucketDirectory>(conn);
-  policyDriver = std::make_unique<rgw::d4n::PolicyDriver>(conn,
-							  cacheDriver.get(),
-							  "lfuda",
-                                                          this->y);
+  policyDriver = std::make_unique<rgw::d4n::PolicyDriver>(dpp, conn, cacheDriver.get(), "lfuda", this->y);
 
   std::string address = cct->_conf->rgw_d4n_l1_datacache_address;
   config cfg;
@@ -2458,6 +2455,13 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
           if (hostsListSize > 0) { /* Remote copy */
             ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): Block with oid=" << oid_in_cache << " found in remote cache." << dendl;
             auto user = source->get_bucket()->get_owner();
+            std::string instance = "";
+            if (source->have_instance()) {
+              instance = source->get_instance();
+			  ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): instance=" << instance << dendl;
+            } else if (!source->get_bucket()->versioned() && source->get_bucket()->versioning_enabled()) {
+              instance = "null";
+			}
             std::string remote_addr = *(block.cacheObj.hostsList.begin());
             if (!dpp->get_cct()->_conf->rgw_d4n_remote_async_get) {
               ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): Info: remote_addr: " << remote_addr << dendl;
@@ -2469,7 +2473,9 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
                   version,
                   block.cacheObj.dirty,
                   std::get<rgw_user>(user),
-                  remote_addr
+                  remote_addr,
+                  block.cacheObj.size,
+                  instance
                 };
               std::unique_ptr<rgw::d4n::RemoteCacheGetOp> remote_get = std::make_unique<rgw::d4n::RemoteCacheGetOp>(source->driver, op);
               auto completed = remote_get->send_and_complete_request(dpp, aio.get(), cost, id, y);
@@ -2508,6 +2514,8 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
                 driver = source->driver,
                 aio_shared = aio,
                 dirty = block.cacheObj.dirty,
+                size = block.cacheObj.size,
+                instance = instance,
                 this]
                 (boost::asio::yield_context yield) mutable {
                 optional_yield y(yield);
@@ -2532,7 +2540,9 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
                       version,
                       dirty,
                       usr,
-                      remote_addr
+                      remote_addr,
+					  size,
+                      instance
                     };
                   std::unique_ptr<rgw::d4n::RemoteCacheGetOp> remote_get = std::make_unique<rgw::d4n::RemoteCacheGetOp>(driver, op);
                   task_result->result_list = remote_get->send_and_complete_request(dpp_local.get(), aio_shared.get(), cost, id, y);
@@ -2551,6 +2561,12 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
               },
               boost::asio::detached);
             }
+			auto lfuda_policy = dynamic_cast<rgw::d4n::LFUDAPolicy*>(source->driver->get_policy_driver()->get_cache_policy());
+            block.globalWeight += lfuda_policy->get_age();
+			lfuda_policy->add_updated_gw_block(block_dir->build_index(&block), block.globalWeight);
+			if (lfuda_policy->get_updated_gw_blocks_size() >= rgw::d4n::GLOBALWEIGHT_BATCH_SIZE) {
+			  lfuda_policy->gw_notify_one();
+			}
           } else {
             ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): Info: draining data for oid: " << oid_in_cache << dendl;
             auto r = process_remote_results(dpp, group, y);
@@ -2900,23 +2916,25 @@ int D4NFilterObject::D4NFilterDeleteOp::delete_obj(const DoutPrefixProvider* dpp
 	  else{
           auto user = source->get_bucket()->get_owner();
           std::string remote_addr = dpp->get_cct()->_conf->rgw_d4n_remote_cache_address;
-          ldpp_dout(dpp, 20) << "D4NFilterWriter::" << __func__ << "(): remoteaddr =" << remote_addr << dendl;
-          rgw::d4n::RemoteCacheDeleteOp::RemoteCacheDeleteOpData op {
-              source->get_bucket()->get_name(),
-              objName,
-			  0, 
-			  0,
-              version,
-			  objDirty,
-              std::get<rgw_user>(user),
-              remote_addr,
-			  source->get_size()
-          };
-          std::unique_ptr<rgw::d4n::RemoteCacheDeleteOp> remote_delete = std::make_unique<rgw::d4n::RemoteCacheDeleteOp>(source->driver, op);
-          auto ret = remote_delete->send_and_complete_request(dpp, y);
-          if (ret < 0) {
-            ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): send_and_complete_request failed for remote cache: " << remote_addr <<  "ret= " << ret << dendl;
-    	}
+          if (remote_addr.size()) {
+			ldpp_dout(dpp, 20) << "D4NFilterWriter::" << __func__ << "(): remoteaddr =" << remote_addr << dendl;
+			rgw::d4n::RemoteCacheDeleteOp::RemoteCacheDeleteOpData op {
+				source->get_bucket()->get_name(),
+				objName,
+				0, 
+				0,
+				version,
+				objDirty,
+				std::get<rgw_user>(user),
+				remote_addr,
+				source->get_size()
+			};
+			std::unique_ptr<rgw::d4n::RemoteCacheDeleteOp> remote_delete = std::make_unique<rgw::d4n::RemoteCacheDeleteOp>(source->driver, op);
+			auto ret = remote_delete->send_and_complete_request(dpp, y);
+			if (ret < 0) {
+			  ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__ << "(): send_and_complete_request failed for remote cache: " << remote_addr <<  "ret= " << ret << dendl;
+			}
+          }
       } //end - if else (remote_cache_request)
 	} //if (dpp->get_cct()->_conf->rgw_d4n_remote_delete_enabled)
 
@@ -3336,7 +3354,7 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
 	  bl_val.append(object->get_key().ns);
 	  attrs[RGW_CACHE_ATTR_OBJECT_NS] = std::move(bl_val);
 
-	  auto local_cache_ret = object->write_if_space_available(dpp, oid_in_cache, bl, bl.length(), attrs, ofs, version, dirty, std::get<rgw_user>(object->get_bucket()->get_owner()), 
+	  auto local_cache_ret = object->write_if_space_available(dpp, oid_in_cache, bl, bl_len, attrs, ofs, version, dirty, std::get<rgw_user>(object->get_bucket()->get_owner()), 
 												   object->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, y);
       if (local_cache_ret < 0) {
         ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): adding block to local cache failed with ret= " << local_cache_ret << dendl;
@@ -3366,7 +3384,7 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
       if (local_cache_ret < 0) {
         return local_cache_ret;
       }
-    } //end - if (bl.lenght() > 0)
+    } //end - if (bl.length() > 0)
   } 
   return 0;
 }

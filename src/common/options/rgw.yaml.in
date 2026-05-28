@@ -4549,6 +4549,16 @@ options:
   flags:
   - startup
   with_legacy: true
+- name: rgw_d4n_globalweight_processing_interval
+  type: int
+  level: advanced
+  desc: This is the interval in seconds for invoking global weight writer thread
+  default: 3600
+  services:
+  - rgw
+  flags:
+  - startup
+  with_legacy: true
 - name: rgw_topic_persistency_time_to_live
   type: uint
   level: advanced

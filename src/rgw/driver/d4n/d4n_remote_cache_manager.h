@@ -41,7 +41,7 @@ class RemoteCacheOp {
       rgw_user bucket_owner;
       std::string remote_addr;
       uint64_t obj_size = 0;
-      bool is_bucket_versioned{false};
+      std::string instance_id = "";
     };
     RemoteCacheOp(rgw::sal::Driver* driver, RemoteCacheOpData& op) : driver(driver), op(op) {}
     virtual ~RemoteCacheOp() = default; 
@@ -59,7 +59,7 @@ class RemoteCacheOp {
     std::unique_ptr<RemoteGetCB> cb;
 };
 
-class RemoteCacheGetOp : public RemoteCacheOp {
+class RemoteCacheGetOp : public RemoteCacheOp { // TODO: Test with version suspended buckets and if necessary, add instance ID
   public:
     struct RemoteCacheGetOpData : RemoteCacheOpData {};
 
