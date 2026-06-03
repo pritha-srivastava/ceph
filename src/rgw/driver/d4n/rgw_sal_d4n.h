@@ -130,6 +130,25 @@ class D4NFilterBucket : public FilterBucket {
     D4NFilterDriver* filter;
     bool cache_request{false};
 
+    struct FetchContext {
+      std::vector<std::string> objects;
+      bool has_more = false;
+      std::string next_cursor_or_start;  // Next cursor for scan_objects or start for get_range
+    };
+    int fetch_objects_batch(const DoutPrefixProvider* dpp, const ListParams& params, int batch_size,
+                            std::string& cursor_or_start, FetchContext& fetch_ctx, optional_yield y);
+    void filter_and_group_objects(const DoutPrefixProvider* dpp, const std::vector<std::string>& input_objects,
+                                    const ListParams& params, std::vector<std::string>& filtered_objects,
+                                    ListResults& cache_results, ListResults& store_results,
+                                    int& num_objs);
+    int build_versioned_entries(const DoutPrefixProvider* dpp, const std::string& obj_name,
+                              const ListParams& params, std::vector<rgw_bucket_list_entries>& entries,
+                              std::string& last_version, int& num_objs, int max, optional_yield y);
+    int populate_cache_results(const DoutPrefixProvider* dpp, const std::vector<rgw_bucket_list_entries>& entries,
+                                ListResults& cache_results, optional_yield y);
+    void merge_results(const DoutPrefixProvider* dpp, const ListParams& params,
+                        ListResults& cache_results, ListResults& store_results,
+                        int max, ListResults& results);
   public:
     D4NFilterBucket(std::unique_ptr<Bucket> _next, D4NFilterDriver* _filter) :
       FilterBucket(std::move(_next)),

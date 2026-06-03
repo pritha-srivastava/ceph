@@ -8,9 +8,9 @@
 
 namespace rgw { namespace d4n {
 
-std::string ObjectDirectory::build_index(CacheObj* object) 
+std::string ObjectDirectory::build_index(const std::string& bucket_id, const std::string& obj_name) 
 {
-  return object->bucketName + "_" + object->objName;
+  return bucket_id + "_" + obj_name;
 }
 
 std::string BlockDirectory::build_index(CacheBlock* block) 

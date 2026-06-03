@@ -642,13 +642,9 @@ void RedisLFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
 	    } //end-if (block.version == entry->version)
 	  } //end - else if op_ret == 0
 	  ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): Removing object name: "<< c_obj->get_name() << " score: " << std::setprecision(std::numeric_limits<double>::max_digits10) << e->creationTime << " from ordered set" << dendl;
-	  rgw::d4n::CacheObj dir_obj = rgw::d4n::CacheObj{
-	    .objName = c_obj->get_name(),
-	    .bucketName = c_obj->get_bucket()->get_bucket_id(),
-	  };
 	  /* remove the entry from the ordered set using its score, as the object is already cleaned
 	     need not be part of a transaction as it is being removed based on its score which is its creation time. */
-	  ret = objDir->zremrangebyscore(dpp, &dir_obj, e->creationTime, e->creationTime, y);
+	  ret = objDir->remove_version_by_creation_time(dpp, c_obj->get_bucket()->get_bucket_id(), c_obj->get_name(), e->creationTime, y);
 	  if (ret < 0) {
 	    ldpp_dout(dpp, 0) << __func__ << "(): Failed to remove object from ordered set with error: " << ret << dendl;
 	  }
@@ -689,18 +685,14 @@ void RedisLFUDAPolicy::cleaning(const DoutPrefixProvider* dpp)
 		}
 	      }
 	      //delete entry from ordered set of objects, as older versions would have been written to the backend store
-	      ret = bucketDir->zrem(dpp, e->bucket_id, c_obj->get_name(), y);
+	      ret = bucketDir->remove_object(dpp, e->bucket_id, c_obj->get_name(), y);
 	      if (ret < 0) {
 		ldpp_dout(dpp, 0) << __func__ << "(): Failed to queue zrem for object entry: " << c_obj->get_name() << ", ret=" << ret << dendl;
 		continue;
 	      }
 	    }
 	    ldpp_dout(dpp, 10) << "D4NFilterObject::" << __func__ << "(): Removing object name: "<< c_obj->get_name() << " score: " << std::setprecision(std::numeric_limits<double>::max_digits10) << e->creationTime << " from ordered set" << dendl;
-	    rgw::d4n::CacheObj dir_obj = rgw::d4n::CacheObj{
-	      .objName = c_obj->get_name(),
-	      .bucketName = c_obj->get_bucket()->get_bucket_id(),
-	    };
-	    ret = objDir->zremrangebyscore(dpp, &dir_obj, e->creationTime, e->creationTime, y);
+	    ret = objDir->remove_version_by_creation_time(dpp, c_obj->get_bucket()->get_bucket_id(), c_obj->get_name(), e->creationTime, y);
 	    if (ret < 0) {
 	      ldpp_dout(dpp, 0) << __func__ << "(): Failed to remove object from ordered set with error: " << ret << dendl;
 	      continue;
