@@ -9,18 +9,12 @@
 #include <iomanip>
 #include <sstream>
 
-namespace rgw { namespace d4n {
+namespace rgw::d4n {
 
 using fdb_conn = lfdb::database;
 
 using std::map;
 using std::string;
-
-/*
-struct initiate_exec {
-  std::shared_ptr<fdb_conn> conn;
-};
-*/
 
 static std::string encode_score(double score)
 {
@@ -75,18 +69,19 @@ int FDBBucketDirectory::zrem(const DoutPrefixProvider* dpp,
 
     std::string member_key = bucket_id + "/member/" + member;
 
-    std::string existing;
-    bool found = lfdb::get(tr, member_key, existing);
+    std::string existing_key;
+    bool found = lfdb::get(tr, member_key, existing_key);
 
     if (!found) {
       ldpp_dout(dpp, 10)
           << "FDBBucketDirectory::" << __func__
-          << "() Member does not exist"
+          << "() key: " << member_key 
+		  << " does not exist"
           << dendl;
       return -ENOENT;
     }
 
-    lfdb::erase(tr, bucket_id + "/ordered/" + existing + "/" + member);
+    lfdb::erase(tr, bucket_id + "/ordered/" + existing_key + "/" + member);
     lfdb::erase(tr, member_key);
 
     lfdb::commit(tr);
@@ -251,7 +246,7 @@ int FDBBucketDirectory::zrank(const DoutPrefixProvider* dpp,
 int FDBObjectDirectory::exist_key(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) 
 {
   std::string key = build_index(object);
-  return lfdb::key_exists(lfdb::make_transaction(FDBconn), key, lfdb::commit_after_op::commit) ? 1 : 0;
+  return lfdb::key_exists(lfdb::make_transaction(FDBconn), key, lfdb::commit_after_op::commit);
 }
 
 int FDBObjectDirectory::set(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y)
@@ -267,15 +262,16 @@ int FDBObjectDirectory::set(const DoutPrefixProvider* dpp, CacheObj* object, opt
   std::string key = build_index(object);
 
   std::string endpoint;
-  for (auto const& host : object->hostsList) {
-    if (endpoint.empty())
-      endpoint = host + "_";
-    else
-      endpoint = endpoint + host + "_";
-  }
+  if (!object->hostsList.empty()){
+    for (auto const& host : object->hostsList) {
+      if (endpoint.empty())
+        endpoint = host + "_";
+      else
+        endpoint = endpoint + host + "_";
+    }
 
-  if (!endpoint.empty())
     endpoint.pop_back();
+  }
 
   map<string, string> object_entries = {
     { "objName", object->objName },
@@ -300,7 +296,6 @@ int FDBObjectDirectory::get(const DoutPrefixProvider* dpp, CacheObj* object, opt
   std::string key = build_index(object);
   std::map<std::string, std::string> out_kvs;
 
-  //FIXME: return value should be checked. 
   if (lfdb::get(lfdb::make_transaction(FDBconn), key, out_kvs, lfdb::commit_after_op::commit) != true){
     ldpp_dout(dpp, 0) << "FDBObjectDirectory::" << __func__ << "() ERROR: " << "get function returned false! " << dendl;
 	return -1;
@@ -323,7 +318,7 @@ int FDBObjectDirectory::get(const DoutPrefixProvider* dpp, CacheObj* object, opt
   return 0;
 }
 
-int FDBObjectDirectory::copy(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& copyName, const std::string& copyBucketName, optional_yield y)
+int FDBObjectDirectory::copy(const DoutPrefixProvider* dpp, CacheObj* object, const std::string copyName, const std::string copyBucketName, optional_yield y)
 {
   if (this->get(dpp, object, y) < 0){
     ldpp_dout(dpp, 10) << "FDBObjectDirectory::" << __func__ << "(): Could not retrive the object." << dendl;
@@ -420,9 +415,7 @@ int FDBObjectDirectory::zadd(const DoutPrefixProvider* dpp,
     std::string member_key = index + "/member/" + member;
 
     std::string existing;
-    bool found = lfdb::get(tr, member_key, existing);
-
-    if (found) {
+    if (lfdb::get(tr, member_key, existing)){
       lfdb::erase(tr, index + "/ordered/" + existing + "/" + member);
     }
 
@@ -672,7 +665,7 @@ int FDBObjectDirectory::incr(const DoutPrefixProvider* dpp, CacheObj* object, op
   }
 
   auto value = std::stoull(out_value);
-  value ++;
+  value++;
 
   lfdb::set(FDBconn, key, value);
 
@@ -682,7 +675,7 @@ int FDBObjectDirectory::incr(const DoutPrefixProvider* dpp, CacheObj* object, op
 int FDBBlockDirectory::exist_key(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) 
 {
   std::string key = build_index(block);
-  return lfdb::key_exists(lfdb::make_transaction(FDBconn), key, lfdb::commit_after_op::commit) ? 1 : 0;
+  return lfdb::key_exists(lfdb::make_transaction(FDBconn), key, lfdb::commit_after_op::commit);
 }
 
 template<SeqContainer Container>
@@ -785,7 +778,6 @@ int FDBBlockDirectory::get(const DoutPrefixProvider* dpp, CacheBlock* block, opt
   std::string key = build_index(block);
   std::map<std::string, std::string> out_kvs;
 
-  //FIXME: return value should be checked. 
   if (lfdb::get(FDBconn, key, out_kvs) != true){
     ldpp_dout(dpp, 0) << "FDBBlockDirectory::" << __func__ << "() ERROR: " << "get function returned false! " << dendl;
 	return -1;
@@ -876,9 +868,9 @@ int FDBBlockDirectory::get(const DoutPrefixProvider* dpp, std::vector<CacheBlock
 
 //FIXME: shouldn't copyName reflect block's name instead of object name?
 //the same for redis class.
-int FDBBlockDirectory::copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, optional_yield y)
+int FDBBlockDirectory::copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string copyName, const std::string copyBucketName, optional_yield y)
 {
-  //we should get block from directory in case of it is updated by a remote cache
+  // Retrieve the block from the directory in case it has been updated by a remote cache.
   if (this->get(dpp, block, y) < 0){
     ldpp_dout(dpp, 10) << "FDBBlockDirectory::" << __func__ << "(): Could not retrive the object." << dendl;
 	return -1;
@@ -1065,7 +1057,7 @@ int FDBBlockDirectory::zrange(const DoutPrefixProvider* dpp,
     int end = std::min(stop + 1, (int)kvs.size());
 
     for (int i = start; i < end; ++i) {
-      const std::string& key = kvs[i].first; // IMPORTANT: key
+      const std::string& key = kvs[i].first;
       members.push_back(key.substr(key.rfind("/") + 1));
     }
 
@@ -1169,4 +1161,4 @@ int FDBBlockDirectory::zrem(const DoutPrefixProvider* dpp,
 }
 
 
-} } // namespace rgw::d4n
+} // namespace rgw::d4n

@@ -23,7 +23,7 @@ class RedisDirectory {
 
 class RedisBucketDirectory: public RedisDirectory, public BucketDirectory {
   public:
-	RedisBucketDirectory(std::shared_ptr<RedisConnection>& redis_conn): REDISconn(redis_conn->conn) {}
+	RedisBucketDirectory(std::shared_ptr<RedisConnection>& redis_conn): REDISconn(redis_conn->get_redis_conn()) {}
     virtual int zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, double score, const std::string& member, optional_yield y, Pipeline* pipeline=nullptr) override;
     virtual int zrem(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& member, optional_yield y) override;
     virtual int zrange(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start, const std::string& stop, uint64_t offset, uint64_t count, std::vector<std::string>& members, optional_yield y) override;
@@ -36,13 +36,13 @@ class RedisBucketDirectory: public RedisDirectory, public BucketDirectory {
 
 class RedisObjectDirectory: public RedisDirectory, public ObjectDirectory {
   public:
-	RedisObjectDirectory(std::shared_ptr<RedisConnection>& redis_conn): REDISconn(redis_conn->conn) {}
+	RedisObjectDirectory(std::shared_ptr<RedisConnection>& redis_conn): REDISconn(redis_conn->get_redis_conn()) {}
 
     virtual int exist_key(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) override;
 
     virtual int set(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) override; /* If nx is true, set only if key doesn't exist */
     virtual int get(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) override;
-    virtual int copy(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& copyName, const std::string& copyBucketName, optional_yield y) override;
+    virtual int copy(const DoutPrefixProvider* dpp, CacheObj* object, const std::string copyName, const std::string copyBucketName, optional_yield y) override;
     virtual int del(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) override;
     virtual int update_field(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& field, std::string& value, optional_yield y) override;
     virtual int zadd(const DoutPrefixProvider* dpp, CacheObj* object, double score, const std::string& member, optional_yield y, Pipeline* pipeline=nullptr) override;
@@ -60,7 +60,7 @@ class RedisObjectDirectory: public RedisDirectory, public ObjectDirectory {
 
 class RedisBlockDirectory: public RedisDirectory, public BlockDirectory {
   public:
-	RedisBlockDirectory(std::shared_ptr<RedisConnection>& redis_conn): REDISconn(redis_conn->conn) {}
+	RedisBlockDirectory(std::shared_ptr<RedisConnection>& redis_conn): REDISconn(redis_conn->get_redis_conn()) {}
     
     virtual int exist_key(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) override;
 
@@ -75,7 +75,7 @@ class RedisBlockDirectory: public RedisDirectory, public BlockDirectory {
 	*/
     //Pipelined version of get using boost::redis::generic_response
     virtual int get(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y) override;
-    virtual int copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, optional_yield y) override;
+    virtual int copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string copyName, const std::string copyBucketName, optional_yield y) override;
     virtual int del(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) override;
     virtual int update_field(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& field, std::string& value, optional_yield y) override;
     virtual int remove_host(const DoutPrefixProvider* dpp, CacheBlock* block, std::string& value, optional_yield y) override;

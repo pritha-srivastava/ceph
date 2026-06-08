@@ -24,7 +24,7 @@ class RedisLFUDAPolicy : public LFUDAPolicy {
     asio::awaitable<void> redis_sync(const DoutPrefixProvider* dpp, optional_yield y);
 
   public:
-    RedisLFUDAPolicy(std::shared_ptr<D4NConnection>& conn, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : LFUDAPolicy(conn, cacheDriver, y), 
+    RedisLFUDAPolicy(std::shared_ptr<DirectoryConnection>& conn, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : LFUDAPolicy(conn, cacheDriver, y), 
 													     conn(std::dynamic_pointer_cast<RedisConnection>(conn))
     {
 	  blockDir = new RedisBlockDirectory(this->conn);

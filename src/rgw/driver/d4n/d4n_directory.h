@@ -20,7 +20,7 @@ using boost::redis::request;
 using boost::redis::response;
 using boost::redis::ignore_t;
 
-inline int check_bool(std::string str) {
+inline int check_bool(std::string_view str) {
   if (str == "true" || str == "1") {
     return 1;
   } else if (str == "false" || str == "0") {
@@ -127,13 +127,6 @@ requires(T& t, typename T::value_type v) {
     t.push_back(v);
 };
 
-/*
-template<typename T>
-  concept SeqContainer = requires(T& t, typename T::value_type v) {
-      t.push_back(v);
-  };
-*/
-
 enum class ObjectFields { // Fields stored in object directory 
   ObjName,
   BucketName,
@@ -187,13 +180,13 @@ struct CacheBlock {
 
 class Directory {
 public:
-    Directory() {}
+    Directory() = default;
 	virtual ~Directory() = default;
 };
 
 class BucketDirectory: public Directory {
   public:
-    BucketDirectory() {}
+    BucketDirectory() = default;
     virtual ~BucketDirectory() = default;
 	
     virtual int zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, double score, const std::string& member, optional_yield y, Pipeline* pipeline=nullptr) = 0;
@@ -207,14 +200,14 @@ class BucketDirectory: public Directory {
 
 class ObjectDirectory: public Directory {
   public:
-    ObjectDirectory(){}
+    ObjectDirectory() = default;
     virtual ~ObjectDirectory() = default;
 	
     virtual int exist_key(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) = 0;
 
     virtual int set(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) = 0;
     virtual int get(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) = 0;
-    virtual int copy(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& copyName, const std::string& copyBucketName, optional_yield y) = 0;
+    virtual int copy(const DoutPrefixProvider* dpp, CacheObj* object, const std::string copyName, const std::string copyBucketName, optional_yield y) = 0;
     virtual int del(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) = 0;
     virtual int update_field(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& field, std::string& value, optional_yield y) = 0;
     virtual int zadd(const DoutPrefixProvider* dpp, CacheObj* object, double score, const std::string& member, optional_yield y, Pipeline* pipeline=nullptr) = 0;
@@ -234,7 +227,7 @@ class ObjectDirectory: public Directory {
 
 class BlockDirectory: public Directory {
   public:
-    BlockDirectory(){}
+    BlockDirectory() = default;
     virtual ~BlockDirectory() = default;
     
 	
@@ -252,7 +245,7 @@ class BlockDirectory: public Directory {
 	*/
     //Pipelined version of get using boost::redis::generic_response
     virtual int get(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y) = 0;
-    virtual int copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, optional_yield y) = 0;
+    virtual int copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string copyName, const std::string copyBucketName, optional_yield y) = 0;
     virtual int del(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) = 0;
     virtual int update_field(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& field, std::string& value, optional_yield y) = 0;
 	

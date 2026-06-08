@@ -87,7 +87,7 @@ int D4NFilterDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
     blockDir = std::make_unique<rgw::d4n::RedisBlockDirectory>(redis_conn);
     bucketDir = std::make_unique<rgw::d4n::RedisBucketDirectory>(redis_conn);
 
-    redis_conn->conn->async_run(cfg, {}, net::consign(net::detached, redis_conn->conn));
+    redis_conn->get_redis_conn()->async_run(cfg, {}, net::consign(net::detached, redis_conn->get_redis_conn()));
 
     //setting the connection pool size and other parameters
     uint64_t rgw_redis_connection_pool_size = dpp->get_cct()->_conf->rgw_redis_connection_pool_size;
@@ -1768,7 +1768,7 @@ void D4NFilterDriver::shutdown()
 {
   if (directory_type == "redis"){
 	auto redis_conn = std::dynamic_pointer_cast<rgw::d4n::RedisConnection>(conn);
-    boost::asio::dispatch(redis_conn->conn->get_executor(), [c = redis_conn->conn] { c->cancel(); });
+    boost::asio::dispatch(redis_conn->get_redis_conn()->get_executor(), [c = redis_conn->get_redis_conn()] { c->cancel(); });
   }
   else if (directory_type == "fdb"){
   	ceph::libfdb::shutdown_libfdb(); 

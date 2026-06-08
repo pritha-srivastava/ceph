@@ -63,7 +63,7 @@ using fdbase= lfdb::database;
 
 class D4NFilterDriver : public FilterDriver {
   private:
-    std::shared_ptr<rgw::d4n::D4NConnection> conn;
+    std::shared_ptr<rgw::d4n::DirectoryConnection> conn;
 
     std::unique_ptr<rgw::cache::CacheDriver> cacheDriver;
     std::unique_ptr<rgw::d4n::ObjectDirectory> objDir;
@@ -102,7 +102,7 @@ class D4NFilterDriver : public FilterDriver {
     rgw::d4n::PolicyDriver* get_policy_driver() { return policyDriver.get(); }
     void save_y(optional_yield y) { this->y = y; }
 
-    std::shared_ptr<rgw::d4n::D4NConnection> get_conn() { return conn; }
+    std::shared_ptr<rgw::d4n::DirectoryConnection> get_conn() { return conn; }
     std::shared_ptr<rgw::d4n::RedisPool> get_redis_pool() { return redis_pool; }
 
 	std::string get_directory_type(){ return directory_type; }

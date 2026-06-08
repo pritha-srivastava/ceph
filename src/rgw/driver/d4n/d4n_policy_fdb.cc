@@ -7,7 +7,7 @@
 #include "common/split.h"
 #include "rgw_perf_counters.h"
 
-namespace rgw { namespace d4n {
+namespace rgw::d4n {
 
 int FDBLFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver* _driver) {
   static auto obj_callback = [this](
@@ -31,7 +31,7 @@ int FDBLFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::
   }
 
 
-  auto fdb_conn = std::static_pointer_cast<fdbase>(conn->get_conn());
+  auto fdb_conn = std::static_pointer_cast<fdbase>(conn->get_fdb_conn());
   std::map<std::string, std::string> out_kvs;
   if (lfdb::get(fdb_conn, "lfuda", out_kvs) != true){
     ldpp_dout(dpp, 0) << "FDBLFUDAPolicy::" << __func__ << "() ERROR: " << "get function returned false! " << dendl;
@@ -57,7 +57,7 @@ int FDBLFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::
 }
 
 int FDBLFUDAPolicy::age_sync(const DoutPrefixProvider* dpp, optional_yield y) {
-  auto fdb_conn = std::static_pointer_cast<fdbase>(conn->get_conn());
+  auto fdb_conn = std::static_pointer_cast<fdbase>(conn->get_fdb_conn());
   std::map<std::string, std::string> out_kvs;
   if (lfdb::get(fdb_conn, "lfuda", out_kvs) != true){
     ldpp_dout(dpp, 0) << "FDBLFUDAPolicy::" << __func__ << "() ERROR: " << "get function returned false! " << dendl;
@@ -79,7 +79,7 @@ int FDBLFUDAPolicy::age_sync(const DoutPrefixProvider* dpp, optional_yield y) {
 }
 
 int FDBLFUDAPolicy::local_weight_sync(const DoutPrefixProvider* dpp, optional_yield y) {
-  auto fdb_conn = std::static_pointer_cast<fdbase>(conn->get_conn());
+  auto fdb_conn = std::static_pointer_cast<fdbase>(conn->get_fdb_conn());
 
   if (fabs(weightSum - postedSum) > (postedSum * 0.1)) {
 
@@ -576,4 +576,4 @@ void FDBLFUDAPolicy::cleaning(const DoutPrefixProvider* dpp){
 }
 
 
-} } // namespace rgw::d4n
+} // namespace rgw::d4n

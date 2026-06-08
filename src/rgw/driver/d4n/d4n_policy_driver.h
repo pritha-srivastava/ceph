@@ -11,7 +11,7 @@
 
 namespace rgw { namespace d4n {
 
-class D4NConnection;
+class DirectoryConnection;
 
 class PolicyDriver {
   private:
@@ -19,7 +19,7 @@ class PolicyDriver {
 	std::unique_ptr<CachePolicy> cachePolicy;
 
   public:
-    PolicyDriver(std::shared_ptr<D4NConnection>& conn, std::string directory_type,  rgw::cache::CacheDriver* cacheDriver, const std::string& _policyName, optional_yield y) : policyName(_policyName) 
+    PolicyDriver(std::shared_ptr<DirectoryConnection>& conn, std::string directory_type,  rgw::cache::CacheDriver* cacheDriver, const std::string& _policyName, optional_yield y) : policyName(_policyName) 
     {
       if (policyName == "lfuda") {
 		if (directory_type == "redis"){

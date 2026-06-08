@@ -42,7 +42,7 @@ using fdb_conn = lfdb::database;
 
 class FDBDirectory {
   public:
-	std::shared_ptr<fdb_conn> FDBconn{nullptr}; // FDB data base
+	std::shared_ptr<fdb_conn> FDBconn; // FDB data base
     void set_fdb_database(std::shared_ptr<fdb_conn> db) {
       	FDBconn = db;
     }
@@ -51,7 +51,7 @@ class FDBDirectory {
 
 class FDBBucketDirectory: public FDBDirectory, public BucketDirectory {
   public:
-	FDBBucketDirectory(std::shared_ptr<FDBConnection> fdb_conn) : FDBconn(fdb_conn->conn) {}
+	FDBBucketDirectory(std::shared_ptr<FDBConnection> fdb_conn) : FDBconn(fdb_conn->get_fdb_conn()) {}
 
     virtual int zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, double score, const std::string& member, optional_yield y, Pipeline* pipeline=nullptr) override;
     virtual int zrem(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& member, optional_yield y) override;
@@ -65,13 +65,13 @@ class FDBBucketDirectory: public FDBDirectory, public BucketDirectory {
 
 class FDBObjectDirectory: public FDBDirectory, public ObjectDirectory {
   public:
-	FDBObjectDirectory(std::shared_ptr<FDBConnection> fdb_conn) : FDBconn(fdb_conn->conn) {}
+	FDBObjectDirectory(std::shared_ptr<FDBConnection> fdb_conn) : FDBconn(fdb_conn->get_fdb_conn()) {}
 
     virtual int exist_key(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) override;
 
     virtual int set(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) override; /* If nx is true, set only if key doesn't exist */
     virtual int get(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) override;
-    virtual int copy(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& copyName, const std::string& copyBucketName, optional_yield y) override;
+    virtual int copy(const DoutPrefixProvider* dpp, CacheObj* object, const std::string copyName, const std::string copyBucketName, optional_yield y) override;
     virtual int del(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) override;
     virtual int update_field(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& field, std::string& value, optional_yield y) override;
     virtual int zadd(const DoutPrefixProvider* dpp, CacheObj* object, double score, const std::string& member, optional_yield y, Pipeline* pipeline=nullptr) override;
@@ -89,7 +89,7 @@ class FDBObjectDirectory: public FDBDirectory, public ObjectDirectory {
 
 class FDBBlockDirectory: public FDBDirectory, public BlockDirectory {
   public:
-	FDBBlockDirectory(std::shared_ptr<FDBConnection> fdb_conn) : FDBconn(fdb_conn->conn) {}
+	FDBBlockDirectory(std::shared_ptr<FDBConnection> fdb_conn) : FDBconn(fdb_conn->get_fdb_conn()) {}
     
     virtual int exist_key(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) override;
 
@@ -99,7 +99,7 @@ class FDBBlockDirectory: public FDBDirectory, public BlockDirectory {
     //Pipelined version of get using boost::redis::generic_response
     virtual int get(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y) override;
 
-    virtual int copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, optional_yield y) override;
+    virtual int copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string copyName, const std::string copyBucketName, optional_yield y) override;
     virtual int del(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) override;
     virtual int update_field(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& field, std::string& value, optional_yield y) override;
     virtual int remove_host(const DoutPrefixProvider* dpp, CacheBlock* block, std::string& value, optional_yield y) override;

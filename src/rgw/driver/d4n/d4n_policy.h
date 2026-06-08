@@ -11,7 +11,7 @@
 
 namespace rgw { namespace d4n {
 
-class D4NConnection;
+class DirectoryConnection;
 class BucketDirectory;
 class ObjectDirectory;
 class BlockDirectory;
@@ -158,7 +158,7 @@ class LFUDAPolicy : public CachePolicy {
 
     int age = 1, weightSum = 0, postedSum = 0;
     optional_yield y = null_yield;
-    std::shared_ptr<D4NConnection> conn;
+    std::shared_ptr<DirectoryConnection> conn;
     BlockDirectory* blockDir;
     ObjectDirectory* objDir;
     BucketDirectory* bucketDir;
@@ -192,7 +192,7 @@ class LFUDAPolicy : public CachePolicy {
 	virtual int delete_data_blocks(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, optional_yield y);
 
   public:
-    LFUDAPolicy(std::shared_ptr<D4NConnection>& conn, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : CachePolicy(), 
+    LFUDAPolicy(std::shared_ptr<DirectoryConnection>& conn, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : CachePolicy(), 
                                                                                                              y(y),
 													     conn(conn), 
 													     cacheDriver(cacheDriver)

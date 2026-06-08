@@ -20,7 +20,7 @@ class FDBLFUDAPolicy : public LFUDAPolicy {
     virtual int local_weight_sync(const DoutPrefixProvider* dpp, optional_yield y) override; 
 
   public:
-    FDBLFUDAPolicy(std::shared_ptr<D4NConnection>& conn, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : LFUDAPolicy(conn, cacheDriver, y), 
+    FDBLFUDAPolicy(std::shared_ptr<DirectoryConnection>& conn, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : LFUDAPolicy(conn, cacheDriver, y), 
                                                          conn(std::dynamic_pointer_cast<FDBConnection>(conn)) 
     {
 	  blockDir = new FDBBlockDirectory(this->conn);

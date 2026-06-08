@@ -22,46 +22,42 @@ using fdbase= lfdb::database;
 
 namespace rgw { namespace d4n {
 
-class D4NConnection {
+struct DirectoryConnection {
 public:
-    virtual ~D4NConnection() = default;
-
-    virtual void get() = 0;
-    virtual void put() = 0;
-
-	virtual std::shared_ptr<void> get_conn() = 0;
+    virtual ~DirectoryConnection() = default;
+    virtual std::shared_ptr<void> get_conn() = 0;
 };
 
 
-class RedisConnection : public D4NConnection {
-public:
+class RedisConnection : public DirectoryConnection {
+private:
     std::shared_ptr<connection> conn;
+
+public:
     RedisConnection(std::shared_ptr<connection> c) : conn(c) {}
 
-    void get() override {
-    }
-
-    void put() override {
-    }
-
     std::shared_ptr<void> get_conn() override {
+        return conn;
+    }
+
+    std::shared_ptr<connection> get_redis_conn() {
         return conn;
     }
 };
 
 
-class FDBConnection : public D4NConnection {
-public:
+class FDBConnection : public DirectoryConnection {
+private:
     std::shared_ptr<fdbase> conn;
+
+public:
     FDBConnection(std::shared_ptr<fdbase> c) : conn(c) {}
 
-    void get() override {
-    }
-
-    void put() override {
-    }
-
     std::shared_ptr<void> get_conn() override {
+        return conn;
+    }
+
+    std::shared_ptr<fdbase> get_fdb_conn(){
         return conn;
     }
 };

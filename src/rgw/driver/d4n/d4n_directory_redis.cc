@@ -457,7 +457,7 @@ int RedisObjectDirectory::get(const DoutPrefixProvider* dpp, CacheObj* object, o
 }
 
 /* Note: This method is not compatible for use on Ubuntu systems. */
-int RedisObjectDirectory::copy(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& copyName, const std::string& copyBucketName, optional_yield y)
+int RedisObjectDirectory::copy(const DoutPrefixProvider* dpp, CacheObj* object, const std::string copyName, const std::string copyBucketName, optional_yield y)
 {
   std::string key = build_index(object);
   auto copyObj = CacheObj{ .objName = copyName, .bucketName = copyBucketName };
@@ -1269,7 +1269,7 @@ int RedisBlockDirectory::get(const DoutPrefixProvider* dpp, std::vector<CacheBlo
 }
 
 /* Note: This method is not compatible for use on Ubuntu systems. */
-int RedisBlockDirectory::copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, optional_yield y)
+int RedisBlockDirectory::copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string copyName, const std::string copyBucketName, optional_yield y)
 {
   std::string key = build_index(block);
   auto copyBlock = CacheBlock{ .cacheObj = { .objName = copyName, .bucketName = copyBucketName }, .blockID = 0 };
