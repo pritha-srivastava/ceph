@@ -71,18 +71,19 @@ int FDBBucketDirectory::remove_object(const DoutPrefixProvider* dpp, const std::
 
     std::string member_key = bucket_id + "/member/" + member;
 
-    std::string existing;
-    bool found = lfdb::get(tr, member_key, existing);
+    std::string existing_key;
+    bool found = lfdb::get(tr, member_key, existing_key);
 
     if (!found) {
       ldpp_dout(dpp, 10)
           << "FDBBucketDirectory::" << __func__
-          << "() Member does not exist"
+          << "() key: " << member_key 
+		  << " does not exist"
           << dendl;
       return -ENOENT;
     }
 
-    lfdb::erase(tr, bucket_id + "/ordered/" + existing + "/" + member);
+    lfdb::erase(tr, bucket_id + "/ordered/" + existing_key + "/" + member);
     lfdb::erase(tr, member_key);
 
     lfdb::commit(tr);
@@ -835,7 +836,7 @@ int FDBBlockDirectory::get(const DoutPrefixProvider* dpp, std::vector<CacheBlock
 
 //FIXME: shouldn't copyName reflect block's name instead of object name?
 //the same for redis class.
-int FDBBlockDirectory::copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, optional_yield y)
+int FDBBlockDirectory::copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string copyName, const std::string copyBucketName, optional_yield y)
 {
   // Retrieve the block from the directory in case it has been updated by a remote cache.
   if (this->get(dpp, block, y) < 0){

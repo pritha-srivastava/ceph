@@ -81,7 +81,7 @@ class RedisBlockDirectory: public RedisDirectory, public BlockDirectory {
 	*/
     //Pipelined version of get using boost::redis::generic_response
     virtual int get(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y) override;
-    virtual int copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, optional_yield y) override;
+    virtual int copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string copyName, const std::string copyBucketName, optional_yield y) override;
     virtual int del(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) override;
     virtual int update_field(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& field, std::string& value, optional_yield y) override;
     virtual int remove_host(const DoutPrefixProvider* dpp, CacheBlock* block, std::string& value, optional_yield y) override;

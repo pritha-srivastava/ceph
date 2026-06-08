@@ -17,7 +17,7 @@ class ObjectDirectory;
 class BlockDirectory;
 class CacheBlock;
 
-class D4NConnection;
+class DirectoryConnection;
 class BucketDirectory;
 class ObjectDirectory;
 class BlockDirectory;

@@ -285,8 +285,7 @@ class BlockDirectory: public Directory {
     virtual int set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Pipeline* pipeline=nullptr) = 0;
     virtual int get(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) = 0;
     virtual int get(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y) = 0;
-
-    virtual int copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, optional_yield y) = 0;
+    virtual int copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string copyName, const std::string copyBucketName, optional_yield y) = 0;
     virtual int del(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) = 0;
     virtual int update_field(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& field, std::string& value, optional_yield y) = 0;
 	
