@@ -14,14 +14,12 @@ namespace sys = boost::system;
 class RedisLFUDAPolicy : public LFUDAPolicy {
   private:
     std::shared_ptr<RedisConnection> conn;
-    RedisBlockDirectory* blockDir;
-    RedisObjectDirectory* objDir;
-    RedisBucketDirectory* bucketDir;
+    //RedisBlockDirectory* blockDir;
+    //RedisObjectDirectory* objDir;
+    //RedisBucketDirectory* bucketDir;
 
-    //virtual CacheBlock* get_victim_block(const DoutPrefixProvider* dpp, optional_yield y) override;
     virtual int age_sync(const DoutPrefixProvider* dpp, optional_yield y) override; 
     virtual int local_weight_sync(const DoutPrefixProvider* dpp, optional_yield y) override ; 
-    asio::awaitable<void> redis_sync(const DoutPrefixProvider* dpp, optional_yield y);
 
   public:
     RedisLFUDAPolicy(std::shared_ptr<DirectoryConnection>& conn, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : LFUDAPolicy(conn, cacheDriver, y), 
@@ -42,8 +40,8 @@ class RedisLFUDAPolicy : public LFUDAPolicy {
     } 
 
     virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver) override;
-    virtual int eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) override;
-    virtual void cleaning(const DoutPrefixProvider* dpp) override;
+    //virtual int eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) override;
+    //virtual void cleaning(const DoutPrefixProvider* dpp) override;
 };
 
 } } // namespace rgw::d4n

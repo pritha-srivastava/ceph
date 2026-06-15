@@ -12,9 +12,9 @@ namespace sys = boost::system;
 class FDBLFUDAPolicy : public LFUDAPolicy {
   private:
     std::shared_ptr<FDBConnection> conn;
-    FDBBlockDirectory* blockDir;
-    FDBObjectDirectory* objDir;
-    FDBBucketDirectory* bucketDir;
+    //FDBBlockDirectory* blockDir;
+    //FDBObjectDirectory* objDir;
+    //FDBBucketDirectory* bucketDir;
 
     virtual int age_sync(const DoutPrefixProvider* dpp, optional_yield y) override; 
     virtual int local_weight_sync(const DoutPrefixProvider* dpp, optional_yield y) override; 
@@ -34,8 +34,8 @@ class FDBLFUDAPolicy : public LFUDAPolicy {
     } 
 
     virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver) override;
-    virtual int eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) override;
-    virtual void cleaning(const DoutPrefixProvider* dpp) override;
+    //virtual int eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) override;
+    //virtual void cleaning(const DoutPrefixProvider* dpp) override;
 };
 
 } } // namespace rgw::d4n

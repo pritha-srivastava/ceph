@@ -30,6 +30,13 @@ inline int check_bool(std::string_view str) {
   }
 }
 
+/* //FIXME: this should be used isntead of class member functions.
+inline std::string build_index(const std::string_view bucket_id, const std::string_view obj_name)
+{
+	return bucket_id + "_" + obj_name;
+}
+*/
+
 
 //FIXME: AMIN: should be moved to redis directory
 class RedisPool {
@@ -156,6 +163,24 @@ enum class BlockFields { // Fields stored in block directory
   DisplayName
 };
 
+//Represents an object entry for ListObjects
+struct CacheObject {
+  std::string objName;
+  std::string bucketId;
+  std::string etag;
+  uint64_t size; //total object size
+  std::string creationTime;
+};
+
+//Represents an Object version entry for ListObjectVersions
+struct CacheObjectVersion {
+  std::string objName;
+  std::string bucketId;
+  std::string version;
+  std::string user_id;
+  std::string display_name;
+};
+
 struct CacheObj {
   std::string objName; /* S3 object name */
   std::string bucketName; /* S3 bucket name */
@@ -184,26 +209,47 @@ public:
 	virtual ~Directory() = default;
 };
 
+
+//Namespace to lexicographically order objects belonging to a bucket
+//Should we rename to ObjectDirectory?
 class BucketDirectory: public Directory {
   public:
     BucketDirectory() = default;
     virtual ~BucketDirectory() = default;
-	
-    virtual int zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, double score, const std::string& member, optional_yield y, Pipeline* pipeline=nullptr) = 0;
-    virtual int zrem(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& member, optional_yield y) = 0;
-    virtual int zrange(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start, const std::string& stop, uint64_t offset, uint64_t count, std::vector<std::string>& members, optional_yield y) = 0;
-    virtual int zscan(const DoutPrefixProvider* dpp, const std::string& bucket_id, uint64_t cursor, const std::string& pattern, uint64_t count, std::vector<std::string>& members, uint64_t next_cursor, optional_yield y) = 0;
-    virtual int zrank(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& member, uint64_t& rank, optional_yield y) = 0;
+
+
+    virtual int add_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, optional_yield y, Pipeline* pipeline=nullptr) = 0;
+    virtual int remove_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, optional_yield y) = 0;
+
+    //the two methods below can be combined into just one list_objects method that performs prefix matching, ranged reads, filtering and grouping by delimiter based on ListParam in D4N FilterDriver
+    virtual int scan_objects(const DoutPrefixProvider* dpp, const std::string& bucket_id, uint64_t start_pos, const std::string& pattern, uint64_t count, std::vector<std::string>& objects, std::optional<CacheObject>& params, uint64_t& next_pos, optional_yield y) = 0;
+    virtual int get_range(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start, const std::string& stop, uint64_t offset, uint64_t count, std::vector<std::string>& objects, std::optional<CacheObject>& params, optional_yield y) = 0;
 
   private:
 };
 
+
+//Namespace to order versions of an object in the order in which they were added, with the latest
+//version appearing first
+//Should we rename to ObjectVersionDirectory?
 class ObjectDirectory: public Directory {
   public:
     ObjectDirectory() = default;
     virtual ~ObjectDirectory() = default;
 	
-    virtual int exist_key(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) = 0;
+    //virtual int exist_key(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) = 0;
+	virtual int exist_key(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, optional_yield y) = 0;
+	//version ordering is a function of creation time, hence adding creation time to the interface
+    virtual int add_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, ceph::real_time& creation_time, std::optional<CacheObjectVersion> params, optional_yield y, Pipeline* pipeline=nullptr) = 0;
+    virtual int remove_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, optional_yield y) = 0;
+    //this can be removed and remove_version can be used instead
+    virtual int remove_version_by_creation_time(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const double& creation_time, optional_yield y) = 0;
+    virtual int list_versions(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& start, const std::string& stop, std::vector<CacheObjectVersion>& obj_versions, optional_yield y) = 0;
+    //Position of version in the list of versions
+    virtual int get_version_index(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, std::string& index, optional_yield y) = 0;
+
+
+#if 0
 
     virtual int set(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) = 0;
     virtual int get(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) = 0;
@@ -218,13 +264,16 @@ class ObjectDirectory: public Directory {
     virtual int zrank(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& member, std::string& index, optional_yield y) = 0;
     //Return value is the incremented value, else return error
     virtual int incr(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) = 0;
+#endif
 
   private:
 
   protected:
-    std::string build_index(CacheObj* object);
+    //should this be made virtual override as derived classes may want to override it
+    std::string build_index(const std::string& bucket_id, const std::string& obj_name);
 };
 
+//Namespace to store key, value pairs of a block
 class BlockDirectory: public Directory {
   public:
     BlockDirectory() = default;
@@ -237,30 +286,18 @@ class BlockDirectory: public Directory {
     virtual int set(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y) = 0;
     virtual int set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Pipeline* pipeline=nullptr) = 0;
     virtual int get(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) = 0;
-    //FIXME: AMIN: we need to come up with a version for FDB
-	//Pipelined version of get using boost::redis::response for list bucket
-	/*
-    template <size_t N = 100>
-    int get(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y);
-	*/
-    //Pipelined version of get using boost::redis::generic_response
     virtual int get(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y) = 0;
-    virtual int copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string copyName, const std::string copyBucketName, optional_yield y) = 0;
+
+    virtual int copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, optional_yield y) = 0;
     virtual int del(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) = 0;
     virtual int update_field(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& field, std::string& value, optional_yield y) = 0;
 	
     virtual int remove_host(const DoutPrefixProvider* dpp, CacheBlock* block, std::string& value, optional_yield y) = 0;
 	
-    virtual int zadd(const DoutPrefixProvider* dpp, CacheBlock* block, double score, const std::string& member, optional_yield y) = 0;
-    virtual int zrange(const DoutPrefixProvider* dpp, CacheBlock* block, int start, int stop, std::vector<std::string>& members, optional_yield y) = 0;
-    virtual int zrevrange(const DoutPrefixProvider* dpp, CacheBlock* block, int start, int stop, std::vector<std::string>& members, optional_yield y) = 0;
-    virtual int zrem(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& member, optional_yield y) = 0;
-
   private:
 
   protected:
     std::string build_index(CacheBlock* block);
-
 };
 
 
