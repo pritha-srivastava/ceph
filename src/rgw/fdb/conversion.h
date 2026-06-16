@@ -27,6 +27,7 @@
 #include <concepts>
 #include <functional>
 #include <string_view>
+#include <system_error>
 #include <type_traits>
 
 namespace ceph::libfdb::detail {
@@ -121,5 +122,30 @@ inline void convert(const std::span<const std::uint8_t>& in, OutputFunction& fn)
 }
 
 } // namespace ceph::libfdb::from
+
+namespace ceph::libfdb::detail {
+
+inline std::pair<std::string, std::string> to_decoded_kv_pair(const FDBKeyValue kv)
+{
+ std::pair<std::string, std::string> r;
+
+ r.first.assign((const char *)kv.key, static_cast<std::string::size_type>(kv.key_length));
+
+ try
+  {
+    ceph::libfdb::from::convert(std::span<const std::uint8_t>(kv.value, kv.value_length), r.second);
+  }
+ catch(const std::system_error& e)
+  {
+    // This is a bit bound to zpp_bits for the moment, but there's not a more direct way to distinguish this
+    // from a different system_error. We could do that, by using zpp_bits' non-throwing modes and throwing a
+    // special type, but this will do for now.
+    throw ceph::libfdb::libfdb_exception(e.what());
+  }
+
+ return r;
+}
+
+} // namespace ceph::libfdb::detail
 
 #endif

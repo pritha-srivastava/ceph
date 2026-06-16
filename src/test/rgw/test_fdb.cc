@@ -147,7 +147,8 @@ struct janitor final
 
  static void drop_all(ceph::libfdb::database_handle dbh_) {
    lfdb::erase(ceph::libfdb::make_transaction(dbh_),
-               lfdb::select { "", "\xFF" });
+               lfdb::select { "", "\xFF" },
+               lfdb::commit_after_op::commit);
  }
 
  void drop_all() { 
@@ -161,7 +162,8 @@ struct janitor final
    // probably don't actually want to delete them erroneously. So, we stick with our key range...
    // ("500,000,000 records aught to be enough for anybody.") 
    lfdb::erase(ceph::libfdb::make_transaction(dbh_),
-               lfdb::select { make_key(0), make_key(500'000'000) });
+               lfdb::select { make_key(0), make_key(500'000'000) },
+               lfdb::commit_after_op::commit);
    }
 
   void drop_all_keys() {
@@ -287,7 +289,7 @@ TEST_CASE("delete keys in range", "[rgw][fdb]") {
  CHECK(17 == key_count(dbh, selector));
 
  // Erase the entire range:
- lfdb::erase(lfdb::make_transaction(dbh), selector);
+ lfdb::erase(lfdb::make_transaction(dbh), selector, lfdb::commit_after_op::commit);
  CHECK(0 == key_count(dbh, selector));
 }
 
@@ -707,4 +709,3 @@ int main(int argc, char **argv)
 
   return result;
 }
-

@@ -113,6 +113,12 @@ struct libfdb_exception final : std::runtime_error
 
  fdb_error_t fdb_error_value = -1;
 
+ bool retryable() const noexcept
+ {
+  return 0 < fdb_error_value &&
+         fdb_error_predicate(FDB_ERROR_PREDICATE_RETRYABLE, fdb_error_value);
+ }
+
  libfdb_exception(std::string_view msg)
   : std::runtime_error(make_error_string(msg))
  {}
@@ -132,6 +138,11 @@ struct libfdb_exception final : std::runtime_error
   return make_error_string(fmt::format("FoundationDB error {}: {}", ec, fdb_get_error(ec)));
  }
 };
+
+inline bool retryable(const libfdb_exception& e) noexcept
+{
+ return e.retryable();
+}
 
 struct future_value final
 {
@@ -279,7 +290,7 @@ namespace ceph::libfdb::detail {
  * template <typename MappedType = std::pair, typename KeyT = std::string, typename ValueT = std::string> */
 std::pair<std::string, std::string> to_decoded_kv_pair(const FDBKeyValue kv);
 
-struct maybe_commit;
+inline fdb_error_t do_commit(transaction_handle& txn);
 
 inline future_value await_ready_key_range_future(transaction_handle txn, const ceph::libfdb::select&, int); 
 inline future_value await_ready_keyvalue_range_future(transaction_handle txn, const ceph::libfdb::select& key_range, int& iteration);
@@ -507,7 +518,7 @@ class transaction final
     return get_single_value_from_transaction(detail::as_fdb_span(k), [](auto) {});
  }
 
- bool commit();
+ bool commit(fdb_error_t *replay_error = nullptr);
  void destroy() { txn_handle.reset(); }
 
  private:
@@ -522,8 +533,10 @@ class transaction final
  friend inline void set(std::span<const unsigned char>, std::span<const unsigned char>);
  friend inline void set(std::span<const std::uint8_t>, std::span<const std::uint8_t>);
  friend inline void set(transaction_handle, const std::string_view, const auto&, const commit_after_op);
+ friend inline void set(database_handle, std::string_view, const auto&);
  friend inline void set(transaction_handle, std::input_iterator auto, std::input_iterator auto, const commit_after_op);
  friend inline void set(transaction_handle, std::string_view, const ceph::libfdb::concepts::stringview_convertible auto&, const commit_after_op);
+ friend inline void set(database_handle, std::string_view, const ceph::libfdb::concepts::stringview_convertible auto&);
 
  // Clearly, this could use some work-- the trick is disambiguating the iterators, do-able but it will take a little work:
  friend inline void set(transaction_handle txn, std::map<std::string, std::string>::const_iterator b, std::map<std::string, std::string>::const_iterator e, const commit_after_op commit_after);
@@ -533,78 +546,129 @@ class transaction final
 
  friend inline void erase(ceph::libfdb::transaction_handle, std::string_view, const commit_after_op);
  friend inline void erase(ceph::libfdb::transaction_handle, const ceph::libfdb::select&, const commit_after_op);
+ friend inline void erase(ceph::libfdb::database_handle, std::string_view);
+ friend inline void erase(ceph::libfdb::database_handle, const ceph::libfdb::select&);
 
  friend inline bool key_exists(transaction_handle txn, std::string_view k, const commit_after_op commit_after);
 
  // JFW: std::remove_cvref() may let us reduce some of these overloads:
  friend inline bool commit(transaction_handle& txn);
- friend inline bool commit(transaction_handle txn);
+ friend inline fdb_error_t ceph::libfdb::detail::do_commit(transaction_handle& txn);
 
  friend std::generator<std::span<const FDBKeyValue>> ceph::libfdb::detail::generate_FDB_pairs(ceph::libfdb::transaction&, ceph::libfdb::select); 
 
  // Sadly, no std::function_reference<> yet: 
  friend ceph::libfdb::future_value await_future_of(auto fn);
-
- friend struct ceph::libfdb::detail::maybe_commit;
 };
 
 inline bool ceph::libfdb::transaction::get_single_value_from_transaction(const std::span<const std::uint8_t>& key, std::invocable<std::span<const std::uint8_t>> auto&& write_output)
 {
- fdb_bool_t key_was_found = false;
  const fdb_bool_t is_snapshot = false; 
 
- const uint8_t *out_buffer = nullptr;
- int out_len = 0;
-
- for(fdb_error_t r = 0;;) { 
-     ceph::libfdb::future_value fv = fdb_transaction_get(raw_handle(), (const uint8_t *)key.data(), key.size(), is_snapshot);
+ ceph::libfdb::future_value fv = fdb_transaction_get(
+                                    raw_handle(), 
+                                    (const uint8_t *)key.data(), key.size(), 
+                                    is_snapshot);
     
-     if(r = fdb_future_block_until_ready(fv.raw_handle()); 0 != r) {
-        throw libfdb_exception(r);
-     }
-    
-     r = fdb_future_get_value(fv.raw_handle(), &key_was_found, &out_buffer, &out_len);
+  if(fdb_error_t r = fdb_future_block_until_ready(fv.raw_handle()); 0 != r) {
+     throw libfdb_exception(r);
+  }
+ 
+  fdb_bool_t key_was_found = false;
+  const uint8_t *out_buffer = nullptr;
+  int out_len = 0;
 
-     if(0 == r) {
-        // No errors, but no value was found:
-        if(0 == key_was_found) {
-          return false;
-        }
-    
-        write_output(std::span<const std::uint8_t>(out_buffer, out_len));
-  
-        // The happy path is the simple path:
-        return true; 
-     }
-
-     // If we're here, then an error has occured. FoundationDB is fairly particular about it's error handling, and it
-     // frankly I found it hard to understand from the documentation, but the idea is that the fdb_c library can do its
-     // best to handle a whole class of tricky errors, and we can report any others to the application (such as a consistency
-     // error, which FDB has tried very hard to avoid):
-     if(not fdb_error_predicate(FDB_ERROR_PREDICATE_RETRYABLE, r)) { 
-        // errors such as 1025 (transaction_cancelled) mean there's no point in retrying:
-        throw libfdb_exception(r); 
-     }
-
-     // See if we can handle the error:
-     auto error_future = future_value(fdb_transaction_on_error(raw_handle(), r));
-    
-     r = fdb_future_block_until_ready(error_future.raw_handle());
-
-     if(0 == r) {
-       r = fdb_future_get_error(error_future.raw_handle());
-     }
-   
-     // Throw up our hands: 
-     if(0 != r) {
-        throw libfdb_exception(r);
-     }
-
-     // ...try, try again...
+  if(fdb_error_t r = fdb_future_get_value(fv.raw_handle(), &key_was_found, &out_buffer, &out_len); 0 != r) {
+    throw libfdb_exception(r);
   }
 
+  // No errors, but no value was found:
+  if(0 == key_was_found) {
+    return false;
+  }
+ 
+  write_output(std::span<const std::uint8_t>(out_buffer, out_len));
+ 
+  // The happy path is the simple path:
+  return true; 
+}
+
+[[nodiscard]] inline bool ceph::libfdb::transaction::commit(fdb_error_t *replay_error)
+{
+ if(nullptr != replay_error) {
+  *replay_error = 0;
+ }
+
+ // We don't want to try to vivify for an "empty" commit:
+ if(!*this)
+  return false;
+
+ future_value fv = fdb_transaction_commit(raw_handle());
+
+ if(fdb_error_t r = fdb_future_block_until_ready(fv.raw_handle()); 0 != r) {
+  throw libfdb_exception(r);
+ }
+
+ if(fdb_error_t r = fdb_future_get_error(fv.raw_handle()); 0 != r) {
+  future_value ferror_result = fdb_transaction_on_error(raw_handle(), r);
+
+  if(0 != fdb_future_block_until_ready(ferror_result.raw_handle())) {
+    // In their example, they use the first error as the message source, so I will do that also:
+    throw libfdb_exception(r);
+  }
+
+  if(0 != fdb_future_get_error(ferror_result.raw_handle())) {
+    // Destroy the futures AND be sure to invalidate the transaction-- according to the documentation,
+    // this must happen in the specified order (which /should/ currently match the dtor order, but I am
+    // not going to touch this any more right now):
+    fv.destroy(), ferror_result.destroy(), destroy();
+
+    // Again, use the original error:
+    throw libfdb_exception(r);
+  }
+
+  // A false result means on_error() succeeded; the caller should replay the transaction:
+  if(nullptr != replay_error) {
+   *replay_error = r;
+  }
+
+  return false;
+ }
+
+ // Ok:
+ return true;
+}
+
+/* JFW: I may need to rework things into a magical transaction handler after all!
+ *
+  // If we're here, then an error has occured. FoundationDB is fairly particular about it's error handling, and it
+  // frankly I found it hard to understand from the documentation, but the idea is that the fdb_c library can do its
+  // best to handle a whole class of tricky errors, and we can report any others to the application (such as a consistency
+  // error, which FDB has tried very hard to avoid):
+  if(not fdb_error_predicate(FDB_ERROR_PREDICATE_RETRYABLE, r)) { 
+     // errors such as 1025 (transaction_cancelled) mean there's no point in retrying:
+     throw libfdb_exception(r); 
+  }
+
+  // See if we can handle the error:
+  auto error_future = future_value(fdb_transaction_on_error(raw_handle(), r));
+ 
+  r = fdb_future_block_until_ready(error_future.raw_handle());
+
+  if(0 == r) {
+    r = fdb_future_get_error(error_future.raw_handle());
+  }
+ 
+  // Throw up our hands: 
+  if(0 != r) {
+     throw libfdb_exception(r);
+  }
+
+  // ...try, try again...
+ 
+
  return false;
-} 
+} */
   
 } // namespace ceph::libfdb
 
@@ -622,6 +686,15 @@ inline ceph::libfdb::future_value block_until_ready(ceph::libfdb::future_value&&
 
  if(r) {
   throw libfdb_exception(r);
+ }
+
+ return fv;
+}
+
+inline ceph::libfdb::future_value wait_until_ready(ceph::libfdb::future_value&& fv)
+{
+ if(fdb_error_t r = fdb_future_block_until_ready(fv.raw_handle()); 0 != r) {
+   throw libfdb_exception(r);
  }
 
  return fv;
@@ -645,30 +718,34 @@ inline bool get_value_range_from_transaction(transaction& txn, const select& key
  return true;
 }
 
-/* Try to extract a value from a future using the supplied invokable. On error, indicate retry (after
-applying the appopriate retry, etc.); false if value was extracted, true if we need to retry. Throws on
-error. The invokable is responsible for collecting the values appropriately. 
-  JFW: see if we can get a reference implementation of std::function_ref (C++26)
-*/
-inline bool value_or_retry(ceph::libfdb::transaction_handle& txn, ceph::libfdb::future_value& fv,
-                        std::invocable<ceph::libfdb::future_value&> auto extract_fn) 
+inline fdb_error_t value_from_db(ceph::libfdb::future_value& fv,
+                        std::invocable<ceph::libfdb::future_value&> auto extract_fn)
 {
- if(fdb_error_t r = extract_fn(fv); 0 != r) {
-    if(not fdb_error_predicate(FDB_ERROR_PREDICATE_RETRYABLE, r)) { 
-        // errors such as 1025 mean there's no point in retrying:
-        throw ceph::libfdb::libfdb_exception(r); 
-     } 
+ return std::invoke(extract_fn, fv);
+}
 
-    fv = ceph::libfdb::future_value(fdb_transaction_on_error(txn->raw_handle(), r));
+inline bool retry_after_error(ceph::libfdb::transaction_handle& txn, const fdb_error_t r)
+{
+ if(0 == r) {
+   return false;
+ }
 
-    if(fdb_error_t r = fdb_future_block_until_ready(fv.raw_handle()); 0 != r) {
-      throw ceph::libfdb::libfdb_exception(r);
-    }
+ if(not fdb_error_predicate(FDB_ERROR_PREDICATE_RETRYABLE, r)) {
+   // Non-retryable errors cannot be repaired by on_error():
+   throw ceph::libfdb::libfdb_exception(r);
+ }
 
-    return true;
-  }
+ ceph::libfdb::future_value on_error_future(fdb_transaction_on_error(txn->raw_handle(), r));
 
- return false;
+ if(fdb_error_t on_error_r = fdb_future_block_until_ready(on_error_future.raw_handle()); 0 != on_error_r) {
+   throw ceph::libfdb::libfdb_exception(r);
+ }
+
+ if(fdb_error_t on_error_r = fdb_future_get_error(on_error_future.raw_handle()); 0 != on_error_r) {
+   throw ceph::libfdb::libfdb_exception(r);
+ }
+
+ return true;
 }
 
 // Convert FDBKey array into something useful:
@@ -746,7 +823,7 @@ namespace ceph::libfdb::detail {
 
 inline std::vector<ceph::libfdb::select> locate_split_points(ceph::libfdb::database_handle dbh, ceph::libfdb::select selector, const std::int64_t remote_chunk_size)
 {
- using ceph::libfdb::detail::await_future_of;
+ using ceph::libfdb::detail::wait_until_ready;
 
  auto txn = ceph::libfdb::make_transaction(dbh);
 
@@ -756,19 +833,23 @@ inline std::vector<ceph::libfdb::select> locate_split_points(ceph::libfdb::datab
 
  for(bool should_retry = true; should_retry;) {
 
-    auto fv = await_future_of(fdb_transaction_get_range_split_points,
+    auto fv = wait_until_ready(ceph::libfdb::future_value(fdb_transaction_get_range_split_points(
                               txn->raw_handle(),
                               (const std::uint8_t *)selector.begin_key.data(), static_cast<int>(selector.begin_key.length()),
                               (const std::uint8_t *)selector.end_key.data(), static_cast<int>(selector.end_key.length()),
-                              remote_chunk_size); 
+                              remote_chunk_size))); 
 
-    should_retry = value_or_retry(txn, fv, 
+    should_retry = retry_after_error(txn, value_from_db(fv,
                     [&keys, &nkeys](ceph::libfdb::future_value& fv) {
                       return fdb_future_get_key_array(fv.raw_handle(), &keys, &nkeys);
-                   });
+                   }));
+
+    if(not should_retry) {
+      return as_select_seq(keys, nkeys);
+    }
  }
 
- return as_select_seq(keys, nkeys);
+ return {};
 }
 
 // Generators:

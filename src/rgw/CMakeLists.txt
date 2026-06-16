@@ -308,19 +308,18 @@ endif()
 if(WITH_RADOSGW_FDB)
  message("FoundationDB support is active (experimental)")
 
- add_library(rgw_fdb STATIC
-  fdb/base.cc)
+ add_library(rgw_fdb INTERFACE)
 
- target_link_libraries(rgw_fdb PRIVATE
+ target_link_libraries(rgw_fdb INTERFACE
   -lfdb_c
   -lm
   -lrt
  )
 
- target_compile_options(rgw_fdb PRIVATE
+ target_compile_options(rgw_fdb INTERFACE
    -pthread)
 
- target_include_directories(rgw_fdb PRIVATE 
+ target_include_directories(rgw_fdb INTERFACE 
   /usr/include/foundationdb)
 
  target_include_directories(rgw_common PRIVATE 
@@ -339,7 +338,7 @@ if(WITH_RADOSGW_FDB)
  # JFW: there must be a nicer way to refer to this path (or ask it to be installed somewhere?):
  target_include_directories(zpp_bits INTERFACE "${CMAKE_BINARY_DIR}/_deps/zpp_bits-src/")
 
- target_link_libraries(rgw_fdb PRIVATE zpp_bits)
+ target_link_libraries(rgw_fdb INTERFACE zpp_bits)
 
 endif(WITH_RADOSGW_FDB)
 

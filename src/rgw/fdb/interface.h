@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <functional>
 #include <filesystem>
+#include <type_traits>
 
 namespace ceph::libfdb {
 
@@ -100,6 +101,17 @@ inline transaction_handle make_transaction(database_handle dbh, const transactio
 
 namespace ceph::libfdb::detail {
 
+inline fdb_error_t do_commit(transaction_handle& txn)
+{
+ fdb_error_t r = 0;
+
+ if(txn->commit(&r)) {
+  return 0;
+ }
+
+ return r;
+}
+
 // Algorithm helper for gathering converted values into a container (out_values):
 auto value_collector(auto& out_values)
 {
@@ -108,26 +120,68 @@ auto value_collector(auto& out_values)
         }; 
 }
 
-// RAII gadgetry for simplifying some repetetive functions:
-struct maybe_commit final
+// Sadly, a RAII wrapper can't safely capture all of the failure conditions that can occur during an FDB commit without throwing from its dtor.
+// Commit operation, possibly replay if FDB requests it.
+template <typename FnT>
+decltype(auto) maybe_commit(transaction_handle txn, const commit_after_op commit_after, FnT&& fn)
 {
- transaction_handle txn;
+ using result_t = std::invoke_result_t<FnT&, transaction_handle>;
 
- commit_after_op commit_after;
+ if(commit_after_op::commit != commit_after) {
+  return std::invoke(fn, txn);
+ }
 
- maybe_commit(transaction_handle txn_, const commit_after_op commit_after_)
-  : txn(txn_), commit_after(commit_after_)
- {}
+ for(int attempts = 10; attempts; --attempts) {
+  if constexpr (std::is_void_v<result_t>) {
+   std::invoke(fn, txn);
 
- ~maybe_commit()
- {
-  if(std::uncaught_exceptions() || commit_after_op::commit != commit_after) {
-   return;
+   if(ceph::libfdb::commit(txn)) {
+    return;
+   }
   }
 
-  txn->commit();
+  if constexpr (not std::is_void_v<result_t>) {
+   auto result = std::invoke(fn, txn);
+
+   if(ceph::libfdb::commit(txn)) {
+    return result;
+   }
+  }
  }
-};
+
+ throw ceph::libfdb::libfdb_exception("transaction retry limit exceeded");
+}
+
+// Commit operation only once; caller responsible for transaction replay.
+template <typename FnT>
+decltype(auto) commit_noreplay(transaction_handle txn, const commit_after_op commit_after, FnT&& fn)
+{
+ using result_t = std::invoke_result_t<FnT&, transaction_handle>;
+
+ if(commit_after_op::commit != commit_after) {
+  return std::invoke(fn, txn);
+ }
+
+ if constexpr (std::is_void_v<result_t>) {
+  std::invoke(fn, txn);
+
+  if(fdb_error_t r = do_commit(txn); 0 != r) {
+   throw ceph::libfdb::libfdb_exception(r);
+  }
+
+  return;
+ }
+
+ if constexpr (not std::is_void_v<result_t>) {
+  auto result = std::invoke(fn, txn);
+
+  if(fdb_error_t r = do_commit(txn); 0 != r) {
+   throw ceph::libfdb::libfdb_exception(r);
+  }
+
+  return result;
+ }
+}
 
 } // namespace ceph::libfdb::detail
 
@@ -135,9 +189,9 @@ namespace ceph::libfdb {
 
 inline void set(transaction_handle txn, std::string_view k, const auto& v, const commit_after_op commit_after)
 {
- detail::maybe_commit mc(txn, commit_after);
-
- return txn->set(detail::as_fdb_span(k), ceph::libfdb::to::convert(v));
+ return detail::commit_noreplay(txn, commit_after, [&](transaction_handle txn) {
+            return txn->set(detail::as_fdb_span(k), ceph::libfdb::to::convert(v));
+        });
 }
 
 // If someone gives us an explicit transaction handle, they almost certainly don't want to commit 
@@ -150,7 +204,9 @@ inline void set(transaction_handle txn, std::string_view k, const auto& v)
 // ...conversely, with a database handle given, we can assume they DO want to auto-commit:
 inline void set(database_handle dbh, std::string_view k, const auto& v)
 {
- return set(make_transaction(dbh), k, v, commit_after_op::commit);
+ return detail::maybe_commit(make_transaction(dbh), commit_after_op::commit, [&](transaction_handle txn) {
+            return txn->set(detail::as_fdb_span(k), ceph::libfdb::to::convert(v));
+        });
 }
 
 template <template <typename ...> typename AssocT = flat_map, typename IterT>
@@ -158,16 +214,16 @@ requires std::input_iterator<IterT> and requires(const std::iter_value_t<IterT>&
   { kv.first; kv.second; }
 inline void set(transaction_handle txn, IterT b, IterT e, const commit_after_op commit_after)
 {
- detail::maybe_commit mc(txn, commit_after);
-
- std::for_each(b, e, [&txn](const auto& kv) {
+ return detail::commit_noreplay(txn, commit_after, [&](transaction_handle txn) {
+          std::for_each(b, e, [&txn](const auto& kv) {
             txn->set(detail::as_fdb_span(kv.first), ceph::libfdb::to::convert(kv.second)); 
            });
+        });
 }
 
 inline void set(transaction_handle txn, std::map<std::string, std::string>::const_iterator b, std::map<std::string, std::string>::const_iterator e)
 {
- return set(txn, b, e, commit_after_op::commit);
+ return set(txn, b, e, commit_after_op::no_commit);
 }
 
 // There's a "sharp edge" in our underlying serializer that exists to provide maximum performance but for us is just
@@ -177,10 +233,10 @@ inline void set(transaction_handle txn, std::map<std::string, std::string>::cons
 // other calls. Let's force string-like inputs to go down the string-like happy path:
 inline void set(transaction_handle txn, std::string_view k, const ceph::libfdb::concepts::stringview_convertible auto& v, const commit_after_op commit_after)
 {
- detail::maybe_commit mc(txn, commit_after);
-
- return txn->set(detail::as_fdb_span(k),
-                 ceph::libfdb::to::convert(std::string_view(v)));
+ return detail::commit_noreplay(txn, commit_after, [&](transaction_handle txn) {
+            return txn->set(detail::as_fdb_span(k),
+                            ceph::libfdb::to::convert(std::string_view(v)));
+        });
 }
 
 inline void set(transaction_handle txn, std::string_view k, const ceph::libfdb::concepts::stringview_convertible auto& v)
@@ -190,7 +246,10 @@ inline void set(transaction_handle txn, std::string_view k, const ceph::libfdb::
 
 inline void set(database_handle dbh, std::string_view k, const ceph::libfdb::concepts::stringview_convertible auto& v)
 {
- return set(make_transaction(dbh), k, v, commit_after_op::commit);
+ return detail::maybe_commit(make_transaction(dbh), commit_after_op::commit, [&](transaction_handle txn) {
+            return txn->set(detail::as_fdb_span(k),
+                            ceph::libfdb::to::convert(std::string_view(v)));
+        });
 }
 
 } // namespace ceph::libfdb
@@ -200,36 +259,40 @@ namespace ceph::libfdb {
 // erase() in libfdb is clear() in FDB parlance:
 inline void erase(ceph::libfdb::transaction_handle txn, const ceph::libfdb::select& key_range, const commit_after_op commit_after)
 {
- detail::maybe_commit mc(txn, commit_after);
-
- return txn->erase(key_range);
+ return detail::commit_noreplay(txn, commit_after, [&](transaction_handle txn) {
+            return txn->erase(key_range);
+        });
 }
 
 inline void erase(ceph::libfdb::transaction_handle txn, const ceph::libfdb::select& key_range)
 {
- return erase(txn, key_range, commit_after_op::commit);
+ return erase(txn, key_range, commit_after_op::no_commit);
 }
 
 inline void erase(ceph::libfdb::database_handle dbh, const ceph::libfdb::select& key_range)
 {
- return erase(ceph::libfdb::make_transaction(dbh), key_range, commit_after_op::commit);
+ return detail::maybe_commit(ceph::libfdb::make_transaction(dbh), commit_after_op::commit, [&](transaction_handle txn) {
+            return txn->erase(key_range);
+        });
 }
 
 inline void erase(ceph::libfdb::transaction_handle txn, std::string_view k, const commit_after_op commit_after)
 {
- detail::maybe_commit mc(txn, commit_after);
-
- return txn->erase(detail::as_fdb_span(k));
+ return detail::commit_noreplay(txn, commit_after, [&](transaction_handle txn) {
+            return txn->erase(detail::as_fdb_span(k));
+        });
 }
 
 inline void erase(ceph::libfdb::transaction_handle txn, std::string_view k)
 {
- return erase(txn, k, commit_after_op::commit);
+ return erase(txn, k, commit_after_op::no_commit);
 }
 
 inline void erase(ceph::libfdb::database_handle dbh, std::string_view k)
 {
- return erase(make_transaction(dbh), k, commit_after_op::commit);
+ return detail::maybe_commit(make_transaction(dbh), commit_after_op::commit, [&](transaction_handle txn) {
+            return txn->erase(detail::as_fdb_span(k));
+        });
 }
 
 } // namespace ceph::libfdb
@@ -245,9 +308,9 @@ inline bool get(ceph::libfdb::transaction_handle txn, const ceph::libfdb::select
 */
 inline bool get(ceph::libfdb::transaction_handle txn, const ceph::libfdb::select& key_range, auto out_iter, const ceph::libfdb::commit_after_op commit_after)
 {
- detail::maybe_commit mc(txn, commit_after);
-
- return txn->get(key_range, out_iter);
+ return detail::commit_noreplay(txn, commit_after, [&](transaction_handle txn) {
+            return txn->get(key_range, out_iter);
+        });
 }
 
 inline bool get(ceph::libfdb::transaction_handle txn, const ceph::libfdb::select& key_range, auto out_iter)
@@ -257,16 +320,15 @@ inline bool get(ceph::libfdb::transaction_handle txn, const ceph::libfdb::select
 
 inline bool get(ceph::libfdb::database_handle dbh, const ceph::libfdb::select& key_range, auto out_iter)
 {
- return get(ceph::libfdb::make_transaction(dbh), key_range, out_iter, ceph::libfdb::commit_after_op::commit);
+ return get(ceph::libfdb::make_transaction(dbh), key_range, out_iter, ceph::libfdb::commit_after_op::no_commit);
 }
 
 inline bool get(ceph::libfdb::transaction_handle txn, std::string_view key, auto& out_value, const commit_after_op commit_after)
 {
- detail::maybe_commit mc(txn, commit_after);
-
- auto vc = detail::value_collector(out_value); 
-
- return txn->get(detail::as_fdb_span(key), vc);
+ return detail::commit_noreplay(txn, commit_after, [&](transaction_handle txn) {
+            auto vc = detail::value_collector(out_value);
+            return txn->get(detail::as_fdb_span(key), vc);
+        });
 }
 
 inline bool get(ceph::libfdb::transaction_handle txn, std::string_view key, auto& out_value)
@@ -276,17 +338,18 @@ inline bool get(ceph::libfdb::transaction_handle txn, std::string_view key, auto
 
 inline bool get(ceph::libfdb::database_handle dbh, std::string_view key, auto& out_value)
 {
- return get(ceph::libfdb::make_transaction(dbh), key, out_value, commit_after_op::commit);
+ return get(ceph::libfdb::make_transaction(dbh), key, out_value, commit_after_op::no_commit);
 }
 
 // The user can provide an immediate conversion function (no function_ref until C++26):
+// The user function must immediately make a copy of the FDB Future's data, before its lifetime ends:
 // JFW: std::remove_cvref_t will help:
 // JFW: inline bool get(ceph::libfdb::transaction_handle txn, std::string_view key, std::invocable auto&& fn, const commit_after_op commit_after)
 inline bool get(ceph::libfdb::transaction_handle txn, std::string_view key, auto&& fn, const commit_after_op commit_after)
 {
- detail::maybe_commit mc(txn, commit_after);
-
- return txn->get(detail::as_fdb_span(key), fn);
+ return detail::commit_noreplay(txn, commit_after, [&](transaction_handle txn) {
+            return txn->get(detail::as_fdb_span(key), fn);
+        });
 }
 
 inline bool get(ceph::libfdb::transaction_handle txn, std::string_view key, auto&& fn)
@@ -296,7 +359,7 @@ inline bool get(ceph::libfdb::transaction_handle txn, std::string_view key, auto
 
 inline bool get(ceph::libfdb::database_handle dbh, std::string_view key, auto&& fn)
 {
- return get(ceph::libfdb::make_transaction(dbh), key, fn, commit_after_op::commit);
+ return get(ceph::libfdb::make_transaction(dbh), key, fn, commit_after_op::no_commit);
 }
 
 } // namespace ceph::libfdb
@@ -306,9 +369,9 @@ namespace ceph::libfdb {
 // Does a key exist?
 inline bool key_exists(transaction_handle txn, std::string_view k, const commit_after_op commit_after)
 {
- detail::maybe_commit mc(txn, commit_after);
-
- return txn->key_exists(k);
+ return detail::commit_noreplay(txn, commit_after, [&](transaction_handle txn) {
+            return txn->key_exists(k);
+        });
 }
 
 inline bool key_exists(transaction_handle txn, std::string_view k)
@@ -318,7 +381,7 @@ inline bool key_exists(transaction_handle txn, std::string_view k)
 
 inline bool key_exists(database_handle dbh, std::string_view k)
 {
- return key_exists(ceph::libfdb::make_transaction(dbh), k, commit_after_op::commit);
+ return key_exists(ceph::libfdb::make_transaction(dbh), k, commit_after_op::no_commit);
 }
 
 } // namespace ceph::libfdb
@@ -366,4 +429,3 @@ auto block_generator(ceph::libfdb::database_handle dbh, ceph::libfdb::select sel
 } // namespace ceph::libfdb
 
 #endif
-
