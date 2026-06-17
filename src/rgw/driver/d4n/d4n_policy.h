@@ -23,6 +23,12 @@ class ObjectDirectory;
 class BlockDirectory;
 class CacheBlock;
 
+class DirectoryConnection;
+class BucketDirectory;
+class ObjectDirectory;
+class BlockDirectory;
+class CacheBlock;
+
 namespace asio = boost::asio;
 namespace sys = boost::system;
 
@@ -175,6 +181,7 @@ class LFUDAPolicy : public CachePolicy {
 	
     std::optional<asio::steady_timer> rthread_timer;
     std::thread tc;
+	
 
     std::thread lwthread;
     //data structure for accumulating updated blocks

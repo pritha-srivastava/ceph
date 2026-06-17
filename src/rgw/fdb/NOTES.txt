@@ -52,4 +52,3 @@ enum struct streaming_mode_t : int {
 };
 
 ...these are not defined in terms of int or enum as far as I can tell, needs more exploring.
-

@@ -886,5 +886,4 @@ inline std::generator<std::span<const FDBKeyValue>> generate_FDB_pairs(transacti
 
 } // namespace ceph::libfdb::detail
 
-
 #endif
