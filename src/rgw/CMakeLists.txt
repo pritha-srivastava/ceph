@@ -1,7 +1,3 @@
-
-add_executable(radosgw)
-add_library(rgw_common STATIC)
-
 find_program(GPERF gperf
   REQUIRED)
 
@@ -289,13 +285,13 @@ if(WITH_RADOSGW_ARROW_FLIGHT)
 endif(WITH_RADOSGW_ARROW_FLIGHT)
 
 if(WITH_RADOSGW_D4N)
-  target_include_directories(rgw_common PRIVATE
-    rgw/driver/cache
-	rgw/driver/d4n
-	rgw/driver/redis
-	rgw/driver/ssd
-    rgw/driver/shared
-    rgw/driver/)
+#  target_include_directories(rgw_common PRIVATE
+#    rgw/driver/cache
+#	rgw/driver/d4n
+#	rgw/driver/redis
+#	rgw/driver/ssd
+#    rgw/driver/shared
+#    rgw/driver/)
 
   list(APPEND librgw_common_srcs
         driver/redis/rgw_redis_driver.cc
@@ -307,6 +303,18 @@ if(WITH_RADOSGW_D4N)
         driver/d4n/d4n_policy_fdb.cc
         driver/d4n/d4n_policy.cc
         driver/d4n/rgw_sal_d4n.cc)
+endif()
+
+add_library(rgw_common STATIC ${librgw_common_srcs})
+
+if(WITH_RADOSGW_D4N)
+  target_include_directories(rgw_common PRIVATE
+    rgw/driver/cache
+    rgw/driver/d4n
+    rgw/driver/redis
+    rgw/driver/ssd
+    rgw/driver/shared
+    rgw/driver/)
 endif()
 
 if(WITH_RADOSGW_FDB)
@@ -333,8 +341,8 @@ if(WITH_RADOSGW_FDB)
  target_link_libraries(rgw_common PRIVATE
   rgw_fdb)
 
- target_include_directories(radosgw PRIVATE 
-  /usr/include/foundationdb)
+# target_include_directories(radosgw PRIVATE 
+#  /usr/include/foundationdb)
 
  # Use the zpp_bits back-end for serialization:
  add_library(zpp_bits INTERFACE)
