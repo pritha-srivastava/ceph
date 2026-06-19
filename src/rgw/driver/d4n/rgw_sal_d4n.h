@@ -21,7 +21,7 @@
 #include "common/dout.h" 
 #include "rgw_aio_throttle.h"
 
-#include "d4n_policy_driver.h"
+#include "d4n_policy.h"
 
 #include <boost/intrusive/list.hpp>
 #include <boost/asio/io_context.hpp>
