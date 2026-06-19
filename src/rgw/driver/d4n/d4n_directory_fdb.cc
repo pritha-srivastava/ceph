@@ -23,6 +23,80 @@ static std::string encode_score(double score)
   return ss.str();
 }
 
+int FDBDirectory::get_kv(const DoutPrefixProvider* dpp, optional_yield y,
+                       const std::string& key,
+                       const std::string& field,
+                       std::string& out_val)
+{
+  std::map<std::string, std::string> kvs;
+  if (!lfdb::get(FDBconn, key, kvs)) {
+    ldpp_dout(dpp, 0) << "FDBDirectory::" << __func__
+                      << "() ERROR: get returned false" << dendl;
+    return -EIO;
+  }
+  auto it = kvs.find(field);
+  if (it != kvs.end()) {
+    out_val = it->second;
+  }
+  return 0;
+}
+
+int FDBDirectory::set_kv(const DoutPrefixProvider* dpp, optional_yield y,
+                    const std::string& key,
+                    const std::string& field,
+                    const std::string& val)
+{
+  lfdb::set(FDBconn, key, std::map<std::string, std::string>{{field, val}});
+  return 0;
+}
+
+int FDBDirectory::get_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
+                      const std::string& key,
+                      const std::vector<std::string>& fields,
+                      std::map<std::string, std::string>& out_vals)
+{
+  std::map<std::string, std::string> kvs;
+  if (!lfdb::get(FDBconn, key, kvs)) {
+    ldpp_dout(dpp, 0) << "FDBDirectory::" << __func__
+                      << "() ERROR: get returned false" << dendl;
+    return -EIO;
+  }
+  for (const auto& field : fields) {
+    auto it = kvs.find(field);
+    if (it != kvs.end()) {
+      out_vals[field] = it->second;
+    }
+  }
+  return 0;
+}
+
+int FDBDirectory::set_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
+                        const std::string& key,
+                        const std::map<std::string, std::string>& vals)
+{
+  lfdb::set(FDBconn, key, vals);
+  return 0;
+}
+
+int FDBDirectory::set_kv_multi_init_field(const DoutPrefixProvider* dpp, optional_yield y,
+                                    const std::string& key,
+                                    const std::map<std::string, std::string>& always_set,
+                                    const std::string& init_field,
+                                    const std::string& init_val)
+{
+  std::map<std::string, std::string> existing;
+  if (!lfdb::get(FDBconn, key, existing)) {
+    ldpp_dout(dpp, 0) << "FDBDirectory::" << __func__
+                      << "() ERROR: get returned false" << dendl;
+    return -EIO;
+  }
+  std::map<std::string, std::string> to_write(always_set);
+  if (existing.find(init_field) == existing.end()) {
+    to_write[init_field] = init_val;
+  }
+  lfdb::set(FDBconn, key, to_write);
+  return 0;
+}
 
 int FDBBucketDirectory::add_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, optional_yield y, Pipeline* pipeline)
 {

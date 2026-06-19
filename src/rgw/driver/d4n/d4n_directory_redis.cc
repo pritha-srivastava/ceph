@@ -149,6 +149,134 @@ void redis_exec_connection_pool(const DoutPrefixProvider* dpp,
     	redis_exec_cp(dpp, redis_pool, ec, req, resp, y);
 }
 
+int RedisDirectory::get_kv(const DoutPrefixProvider* dpp, optional_yield y,
+                       const std::string& key,
+                       const std::string& field,
+                       std::string& out_val)
+{
+  response<std::optional<std::string>> resp;
+  try {
+    boost::system::error_code ec;
+    request req;
+    req.push("HGET", key, field);
+    redis_exec_connection_pool(dpp, redis_pool, REDISconn, ec, req, resp, y);
+    if (ec) {
+      ldpp_dout(dpp, 0) << "RedisDirectory::" << __func__
+                        << "() ERROR: " << ec.what() << dendl;
+      return -ec.value();
+    }
+  } catch (std::exception& e) {
+    return -EINVAL;
+  }
+  const auto& val = std::get<0>(resp).value();
+  if (val.has_value() && !val->empty()) {
+    out_val = *val;
+  }
+  return 0;
+}
+
+int RedisDirectory::set_kv(const DoutPrefixProvider* dpp, optional_yield y,
+                    const std::string& key,
+                    const std::string& field,
+                    const std::string& val)
+{
+  try {
+    boost::system::error_code ec;
+    response<ignore_t> resp;
+    request req;
+    req.push("HSET", key, field, val);
+    redis_exec_connection_pool(dpp, redis_pool, REDISconn, ec, req, resp, y);
+    if (ec) {
+        ldpp_dout(dpp, 0) << "RedisDirectory::" << __func__
+                          << "() ERROR: " << ec.what() << dendl;
+        return -ec.value();
+    }
+  } catch (std::exception& e) {
+    return -EINVAL;
+  }
+  return 0;
+}
+
+int RedisDirectory::get_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
+                        const std::string& key,
+                        const std::vector<std::string>& fields,
+                        std::map<std::string, std::string>& out_vals)
+{
+  response<std::vector<std::string>> resp;
+  try {
+    boost::system::error_code ec;
+    request req;
+    req.push_range("HMGET", key, fields);
+    redis_exec_connection_pool(dpp, redis_pool, REDISconn, ec, req, resp, y);
+    if (ec) {
+      ldpp_dout(dpp, 0) << "RedisDirectory::" << __func__
+                        << "() ERROR: " << ec.what() << dendl;
+      return -ec.value();
+    }
+  } catch (std::exception& e) {
+    return -EINVAL;
+  }
+  const auto& values = std::get<0>(resp).value();
+  for (size_t i = 0; i < fields.size() && i < values.size(); ++i) {
+    out_vals[fields[i]] = values[i];
+  }
+  return 0;
+}
+
+int RedisDirectory::set_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
+                        const std::string& key,
+                        const std::map<std::string, std::string>& vals)
+{
+  try {
+    boost::system::error_code ec;
+    response<ignore_t> resp;
+    request req;
+    req.push_range("HSET", key, vals);
+    redis_exec_connection_pool(dpp, redis_pool, REDISconn, ec, req, resp, y);
+    if (ec) {
+        ldpp_dout(dpp, 0) << "RedisDirectory::" << __func__
+                          << "() ERROR: " << ec.what() << dendl;
+        return -ec.value();
+    }
+  } catch (std::exception& e) {
+    return -EINVAL;
+  }
+  return 0;
+}
+
+int RedisDirectory::set_kv_multi_init_field(const DoutPrefixProvider* dpp, optional_yield y,
+                                    const std::string& key,
+                                    const std::map<std::string, std::string>& always_set,
+                                    const std::string& init_field,
+                                    const std::string& init_val)
+{
+  try {
+    boost::system::error_code ec;
+    response<
+        ignore_t,
+        ignore_t,
+        ignore_t,
+        response<std::optional<int>, std::optional<int>>
+    > resp;
+    request req;
+    req.push("MULTI");
+    req.push_range("HSET", key, always_set);
+    req.push("HSETNX", key, init_field, init_val);
+    req.push("EXEC");
+    redis_exec_connection_pool(dpp, redis_pool, REDISconn, ec, req, resp, y);
+    if (ec) {
+      ldpp_dout(dpp, 0) << "RedisDirectory::" << __func__
+                        << "() ERROR: " << ec.what() << dendl;
+      return -ec.value();
+    }
+  } catch (std::exception& e) {
+    ldpp_dout(dpp, 0) << "RedisDirectory::" << __func__
+                      << "() ERROR: " << e.what() << dendl;
+    return -EINVAL;
+  }
+  return 0;
+}
+
 int RedisBucketDirectory::zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, double score, const std::string& member, optional_yield y, Pipeline* pipeline)
 {
   try {

@@ -297,8 +297,6 @@ if(WITH_RADOSGW_D4N)
         driver/d4n/d4n_directory_redis.cc
         driver/d4n/d4n_directory_fdb.cc
         driver/d4n/d4n_directory.cc
-        driver/d4n/d4n_policy_redis.cc
-        driver/d4n/d4n_policy_fdb.cc
         driver/d4n/d4n_policy.cc
         driver/d4n/rgw_sal_d4n.cc)
 endif()

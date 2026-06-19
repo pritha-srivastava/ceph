@@ -7,11 +7,14 @@
 #include <boost/heap/fibonacci_heap.hpp>
 #include <boost/system/detail/errc.hpp>
 
+#include "d4n_directory_redis.h"
+#include "d4n_directory_fdb.h"
 #include "driver/cache/rgw_cache_driver.h"
 
 namespace rgw { namespace d4n {
 
 class DirectoryConnection;
+class Directory;
 class BucketDirectory;
 class ObjectDirectory;
 class BlockDirectory;
@@ -159,6 +162,7 @@ class LFUDAPolicy : public CachePolicy {
     int age = 1, weightSum = 0, postedSum = 0;
     optional_yield y = null_yield;
     std::shared_ptr<DirectoryConnection> conn;
+    Directory* dir;
     BlockDirectory* blockDir;
     ObjectDirectory* objDir;
     BucketDirectory* bucketDir;
@@ -170,8 +174,8 @@ class LFUDAPolicy : public CachePolicy {
 	
 
     CacheBlock* get_victim_block(const DoutPrefixProvider* dpp, optional_yield y);
-    virtual int age_sync(const DoutPrefixProvider* dpp, optional_yield y) = 0; 
-    virtual int local_weight_sync(const DoutPrefixProvider* dpp, optional_yield y) = 0; 
+    int age_sync(const DoutPrefixProvider* dpp, optional_yield y);
+    int local_weight_sync(const DoutPrefixProvider* dpp, optional_yield y);
 	
     void rthread_stop() {
       std::lock_guard l{lfuda_lock};
@@ -195,16 +199,36 @@ class LFUDAPolicy : public CachePolicy {
 
 
   public:
-    LFUDAPolicy(std::shared_ptr<DirectoryConnection>& conn, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : CachePolicy(), 
+    LFUDAPolicy(std::shared_ptr<DirectoryConnection>& conn, std::string_view dir_type, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : CachePolicy(), 
                                                                                                              y(y),
-													     conn(conn), 
+													     conn(conn),
 													     cacheDriver(cacheDriver)
 	{
+    if (dir_type == "redis") {
+      auto redis_conn = std::dynamic_pointer_cast<RedisConnection>(this->conn);
+      dir = new RedisDirectory(redis_conn);
+      blockDir = new RedisBlockDirectory(redis_conn);
+      objDir = new RedisObjectDirectory(redis_conn);
+      bucketDir = new RedisBucketDirectory(redis_conn);
+    } else if (dir_type == "fdb") {
+      auto fdb_conn = std::dynamic_pointer_cast<FDBConnection>(this->conn);
+      dir = new FDBDirectory(fdb_conn);
+      blockDir = new FDBBlockDirectory(fdb_conn);
+      objDir = new FDBObjectDirectory(fdb_conn);
+      bucketDir = new FDBBucketDirectory(fdb_conn);
+    }
 	}
     ~LFUDAPolicy() {
+      rthread_stop();
+      delete bucketDir;
+      delete blockDir;
+      delete objDir;
+      quit = true;
+      cond.notify_all();
+      if (tc.joinable()) { tc.join(); }
     } 
 
-    virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver) = 0;
+    virtual int init(CephContext *cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver *_driver) override;
     virtual int exist_key(const std::string& key) override;
     virtual int eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) override;
     virtual bool update_refcount_if_key_exists(const DoutPrefixProvider* dpp, const std::string& key, uint8_t op, optional_yield y) override;
@@ -254,6 +278,27 @@ class LRUPolicy : public CachePolicy {
     virtual bool erase_dirty_object(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) override;
     virtual bool invalidate_dirty_object(const DoutPrefixProvider* dpp, const std::string& key) override { return false; }
     virtual void cleaning(const DoutPrefixProvider* dpp) override {}
+};
+
+class PolicyDriver {
+  private:
+    std::string policyName;
+	std::unique_ptr<CachePolicy> cachePolicy;
+
+  public:
+    PolicyDriver(std::shared_ptr<DirectoryConnection>& conn, std::string directory_type,  rgw::cache::CacheDriver* cacheDriver, const std::string& _policyName, optional_yield y) : policyName(_policyName)
+    {
+      if (policyName == "lfuda") {
+		  cachePolicy = std::make_unique<LFUDAPolicy>(conn, directory_type, cacheDriver, y);
+      } else if (policyName == "lru") {
+		cachePolicy = std::make_unique<LRUPolicy>(cacheDriver);
+      }
+    }
+
+	~PolicyDriver() = default;
+
+    CachePolicy* get_cache_policy() { return cachePolicy.get(); }
+    std::string get_policy_name() { return policyName; }
 };
 
 } } // namespace rgw::d4n
