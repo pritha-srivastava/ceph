@@ -309,45 +309,6 @@ if(WITH_RADOSGW_D4N)
         driver/d4n/rgw_sal_d4n.cc)
 endif()
 
-if(WITH_RADOSGW_FDB)
- message("FoundationDB support is active (experimental)")
-
- add_library(rgw_fdb STATIC
-  fdb/base.cc
-  fdb/bindings.cc)
-
- target_link_libraries(rgw_fdb PRIVATE
-  -lfdb_c
-  -lm
-  -lrt
- )
-
- target_compile_options(rgw_fdb PRIVATE
-   -pthread)
-
- target_include_directories(rgw_fdb PRIVATE 
-  /usr/include/foundationdb)
-
- target_include_directories(rgw_common PRIVATE 
-  /usr/include/foundationdb
-  "${CMAKE_SOURCE_DIR}/src/rgw")
-
- target_link_libraries(rgw_common PRIVATE
-  rgw_fdb)
-
- target_include_directories(radosgw PRIVATE 
-  /usr/include/foundationdb)
-
- # Use the zpp_bits back-end for serialization:
- add_library(zpp_bits INTERFACE)
-
- # JFW: there must be a nicer way to refer to this path (or ask it to be installed somewhere?):
- target_include_directories(zpp_bits INTERFACE "${CMAKE_BINARY_DIR}/_deps/zpp_bits-src/")
-
- target_link_libraries(rgw_fdb PRIVATE zpp_bits)
-
-endif(WITH_RADOSGW_FDB)
-
 if(D4N_USE_FDB_SINK)
  message("Building with FDB support as D4N sink (experimental).")
 

@@ -36,7 +36,7 @@ using std::vector;
 using namespace std::literals::string_literals;
 namespace lfdb = ceph::libfdb;
 
-namespace rgw { namespace d4n {
+namespace rgw::d4n {
 
 using fdb_conn = lfdb::database;
 
@@ -59,6 +59,13 @@ class FDBBucketDirectory: public FDBDirectory, public BucketDirectory {
     virtual int get_range(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start, const std::string& stop, uint64_t offset, uint64_t count, std::vector<std::string>& objects, std::optional<CacheObject>& params, optional_yield y) override;
 
   private:
+    int zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, double score, const std::string& member, optional_yield y, Pipeline* pipeline=nullptr);
+    int zrem(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& member, optional_yield y);
+    int zrange(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start, const std::string& stop, uint64_t offset, uint64_t count, std::vector<std::string>& members, optional_yield y);
+    int zscan(const DoutPrefixProvider* dpp, const std::string& bucket_id, uint64_t cursor, const std::string& pattern, uint64_t count, std::vector<std::string>& members, uint64_t next_cursor, optional_yield y);
+
+
+
     std::shared_ptr<fdb_conn> FDBconn;
 };
 
@@ -75,6 +82,14 @@ class FDBObjectDirectory: public FDBDirectory, public ObjectDirectory {
     virtual int get_version_index(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, std::string& index, optional_yield y) override;
 
   private:
+    int zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, double score, const std::string& member, optional_yield y, Pipeline* pipeline=nullptr);
+    int zrange(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, int start, int stop, std::vector<std::string>& members, optional_yield y);
+    int zrevrange(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& start, const std::string& stop, std::vector<std::string>& members, optional_yield y);
+    int zrem(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& member, optional_yield y);
+    int zremrangebyscore(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, double min, double max, optional_yield y);
+    int zrank(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& member, std::string& index, optional_yield y);
+
+
     std::shared_ptr<fdb_conn> FDBconn;
 };
 
@@ -87,7 +102,6 @@ class FDBBlockDirectory: public FDBDirectory, public BlockDirectory {
     virtual int set(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y) override;
     virtual int set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Pipeline* pipeline=nullptr) override;
     virtual int get(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) override;
-    //Pipelined version of get using boost::redis::generic_response
     virtual int get(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y) override;
 
     virtual int copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, optional_yield y) override;
@@ -102,4 +116,4 @@ class FDBBlockDirectory: public FDBDirectory, public BlockDirectory {
     int set_values(const DoutPrefixProvider* dpp, CacheBlock& block, Container& fdbValues, optional_yield y);
 };
 
-} } // namespace rgw::d4n
+} // namespace rgw::d4n

@@ -209,7 +209,7 @@ inline void set(database_handle dbh, std::string_view k, const auto& v)
         });
 }
 
-template <template <typename ...> typename AssocT = flat_map, typename IterT>
+template <template <typename ...> typename AssocT = fdb_flat_map, typename IterT>
 requires std::input_iterator<IterT> and requires(const std::iter_value_t<IterT>& kv)
   { kv.first; kv.second; }
 inline void set(transaction_handle txn, IterT b, IterT e, const commit_after_op commit_after)

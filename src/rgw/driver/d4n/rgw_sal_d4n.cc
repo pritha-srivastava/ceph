@@ -21,6 +21,7 @@
 #include "d4n_directory.h"
 #include "d4n_directory_redis.h"
 #include "d4n_directory_fdb.h"
+#include "driver/ssd/rgw_ssd_driver.h"
 
 namespace rgw { namespace sal {
 
