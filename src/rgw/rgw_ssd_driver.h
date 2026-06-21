@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <shared_mutex>
 #include <boost/asio.hpp>
+#include "rgw_cache_driver.h"
 
 namespace efs = std::filesystem;
 namespace rgw { namespace cache {

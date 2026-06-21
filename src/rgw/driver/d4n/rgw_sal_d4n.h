@@ -86,7 +86,10 @@ inline std::optional<rgw::d4n::CacheBlock> parse_block_from_cache(const std::str
   return block; 
 }
 
+namespace lfdb = ceph::libfdb;
+
 using boost::redis::connection;
+using fdbase= lfdb::database;
 
 class RGWRemoteD4NGetCB : public RGWHTTPStreamRWRequest::ReceiveCB {
 public:
@@ -245,7 +248,8 @@ private:
 
 class D4NFilterDriver : public FilterDriver {
   private:
-    std::shared_ptr<connection> conn;
+    std::shared_ptr<rgw::d4n::DirectoryConnection> conn;
+
     std::unique_ptr<rgw::cache::CacheDriver> cacheDriver;
     std::unique_ptr<rgw::d4n::ObjectDirectory> objDir;
     std::unique_ptr<rgw::d4n::BlockDirectory> blockDir;
@@ -253,6 +257,8 @@ class D4NFilterDriver : public FilterDriver {
     std::unique_ptr<rgw::d4n::PolicyDriver> policyDriver;
     boost::asio::io_context& io_context;
     optional_yield y;
+    std::string directory_type;
+
     std::unique_ptr<boost::asio::thread_pool> d4n_thread_pool;
     std::unique_ptr<CoroutinePool> d4n_coroutine_pool;
     std::unique_ptr<CoroutinePool> d4n_coroutine_get_pool;
@@ -326,9 +332,12 @@ class D4NFilterDriver : public FilterDriver {
     rgw::d4n::BucketDirectory* get_bucket_dir() { return bucketDir.get(); }
     rgw::d4n::PolicyDriver* get_policy_driver() { return policyDriver.get(); }
     void save_y(optional_yield y) { this->y = y; }
-    std::shared_ptr<connection> get_conn() { return conn; }
+    std::shared_ptr<rgw::d4n::DirectoryConnection> get_conn() { return conn; }
     std::shared_ptr<rgw::d4n::RedisPool> get_redis_pool() { return redis_pool; }
     boost::asio::io_context& get_io_context() { return io_context; }
+
+    std::string get_directory_type(){ return directory_type; }
+
     void shutdown() override;
     auto get_d4n_executor() {
       return d4n_thread_pool->get_executor();
@@ -364,14 +373,16 @@ class D4NFilterBucket : public FilterBucket {
     virtual ~D4NFilterBucket() = default;
    
     virtual std::unique_ptr<Object> get_object(const rgw_obj_key& key) override;
+    
     virtual int list(const DoutPrefixProvider* dpp, ListParams& params, int max,
 		   ListResults& results, optional_yield y) override;
     virtual int remove(const DoutPrefixProvider* dpp, bool delete_children,
 		       optional_yield y) override;
+    virtual int check_empty(const DoutPrefixProvider* dpp, optional_yield y) override;
+    
     virtual int create(const DoutPrefixProvider* dpp,
                        const CreateParams& params,
                        optional_yield y) override;
-    virtual int check_empty(const DoutPrefixProvider* dpp, optional_yield y) override;
     virtual std::unique_ptr<MultipartUpload> get_multipart_upload(
 				const std::string& oid,
 				std::optional<std::string> upload_id=std::nullopt,

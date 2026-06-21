@@ -289,6 +289,8 @@ if(WITH_RADOSGW_D4N)
         rgw_redis_driver.cc
         rgw_ssd_driver.cc
         driver/d4n/d4n_directory.cc
+        driver/d4n/d4n_directory_redis.cc
+        driver/d4n/d4n_directory_fdb.cc
         driver/d4n/d4n_policy.cc
         driver/d4n/d4n_remote_cache_manager.cc
         driver/d4n/rgw_sal_d4n.cc)

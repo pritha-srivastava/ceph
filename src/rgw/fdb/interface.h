@@ -168,7 +168,7 @@ inline void set(database_handle dbh,
           });
 }
 
-template <template <typename ...> typename AssocT = flat_map,
+template <template <typename ...> typename AssocT = fdb_flat_map,
           concepts::key_value_iterator IteratorT>
 inline void set(transaction_handle txn,
                 IteratorT b, IteratorT e,
@@ -187,7 +187,7 @@ inline void set(transaction_handle txn,
           });
 }
 
-template <template <typename ...> typename AssocT = flat_map,
+template <template <typename ...> typename AssocT = fdb_flat_map,
           concepts::key_value_iterator IteratorT>
 inline void set(database_handle dbh, IteratorT b, IteratorT e)
 {
@@ -454,7 +454,7 @@ inline auto pair_generator(const ceph::libfdb::database_handle& dbh, ceph::libfd
 // a recover strategy or other things (you can replay the entire query)-- as new needs arise, this
 // can be made more flexible via selector options, dynamic range-splitting, etc., but so far there
 // has been no need:
-template <typename AssocT = flat_map<std::string, std::string>>
+template <typename AssocT = fdb_flat_map<std::string, std::string>>
 auto block_generator(ceph::libfdb::database_handle dbh, ceph::libfdb::select selector)
 -> std::generator<AssocT>
 {
