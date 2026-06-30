@@ -212,12 +212,42 @@ class Directory {
 public:
     Directory() = default;
     virtual ~Directory() = default;
+
+    // Single field get/set
+    virtual int get_kv(const DoutPrefixProvider* dpp, optional_yield y,
+                       const std::string& key,
+                       const std::string& field,
+                       std::string& out_val) = 0;
+
+    virtual int set_kv(const DoutPrefixProvider* dpp, optional_yield y,
+                       const std::string& key,
+                       const std::string& field,
+                       const std::string& val) = 0;
+
+    // Multi-field get/set
+    virtual int get_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
+                            const std::string& key,
+                            const std::vector<std::string>& fields,
+                            std::map<std::string, std::string>& out_vals) = 0;
+
+    virtual int set_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
+                            const std::string& key,
+                            const std::map<std::string, std::string>& vals) = 0;
+
+    // Interface can be modified futher
+    // Atomic: always write some fields, conditionally init one field only if absent
+    virtual int set_kv_multi_init_field(const DoutPrefixProvider* dpp, optional_yield y,
+                                        const std::string& key,
+                                        const std::map<std::string, std::string>& always_set,
+                                        const std::string& init_field,
+                                        const std::string& init_val) = 0;
+
 };
 
 
 //Namespace to lexicographically order objects belonging to a bucket
 //Should we rename to ObjectDirectory?
-class BucketDirectory: public Directory {
+class BucketDirectory: virtual public Directory {
   public:
     BucketDirectory() = default;
     virtual ~BucketDirectory() = default;
@@ -237,7 +267,7 @@ class BucketDirectory: public Directory {
 //Namespace to order versions of an object in the order in which they were added, with the latest
 //version appearing first
 //Should we rename to ObjectVersionDirectory?
-class ObjectDirectory: public Directory {
+class ObjectDirectory: virtual public Directory {
   public:
     ObjectDirectory() = default;
     virtual ~ObjectDirectory() = default;
@@ -253,24 +283,6 @@ class ObjectDirectory: public Directory {
     //Position of version in the list of versions
     virtual int get_version_index(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, std::string& index, optional_yield y) = 0;
 
-
-#if 0
-
-    virtual int set(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) = 0;
-    virtual int get(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) = 0;
-    virtual int copy(const DoutPrefixProvider* dpp, CacheObj* object, const std::string copyName, const std::string copyBucketName, optional_yield y) = 0;
-    virtual int del(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) = 0;
-    virtual int update_field(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& field, std::string& value, optional_yield y) = 0;
-    virtual int zadd(const DoutPrefixProvider* dpp, CacheObj* object, double score, const std::string& member, optional_yield y, Pipeline* pipeline=nullptr) = 0;
-    virtual int zrange(const DoutPrefixProvider* dpp, CacheObj* object, int start, int stop, std::vector<std::string>& members, optional_yield y) = 0;
-    virtual int zrevrange(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& start, const std::string& stop, std::vector<std::string>& members, optional_yield y) = 0;
-    virtual int zrem(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& member, optional_yield y) = 0;
-    virtual int zremrangebyscore(const DoutPrefixProvider* dpp, CacheObj* object, double min, double max, optional_yield y) = 0;
-    virtual int zrank(const DoutPrefixProvider* dpp, CacheObj* object, const std::string& member, std::string& index, optional_yield y) = 0;
-    //Return value is the incremented value, else return error
-    virtual int incr(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) = 0;
-#endif
-
   private:
 
   protected:
@@ -279,7 +291,7 @@ class ObjectDirectory: public Directory {
 };
 
 //Namespace to store key, value pairs of a block
-class BlockDirectory: public Directory {
+class BlockDirectory: virtual public Directory {
   public:
     BlockDirectory() = default;
     virtual ~BlockDirectory() = default;

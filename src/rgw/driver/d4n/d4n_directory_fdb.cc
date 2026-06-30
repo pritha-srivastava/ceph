@@ -23,9 +23,85 @@ static std::string encode_score(double score)
   return ss.str();
 }
 
+int FDBDirectory::get_kv(const DoutPrefixProvider* dpp, optional_yield y,
+                       const std::string& key,
+                       const std::string& field,
+                       std::string& out_val)
+{
+  std::map<std::string, std::string> kvs;
+  if (!lfdb::get(FDBconn, key, kvs)) {
+    ldpp_dout(dpp, 0) << "FDBDirectory::" << __func__
+                      << "() ERROR: get returned false" << dendl;
+    return -EIO;
+  }
+  auto it = kvs.find(field);
+  if (it != kvs.end()) {
+    out_val = it->second;
+  }
+  return 0;
+}
+
+int FDBDirectory::set_kv(const DoutPrefixProvider* dpp, optional_yield y,
+                    const std::string& key,
+                    const std::string& field,
+                    const std::string& val)
+{
+  lfdb::set(FDBconn, key, std::map<std::string, std::string>{{field, val}});
+  return 0;
+}
+
+int FDBDirectory::get_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
+                      const std::string& key,
+                      const std::vector<std::string>& fields,
+                      std::map<std::string, std::string>& out_vals)
+{
+  std::map<std::string, std::string> kvs;
+  if (!lfdb::get(FDBconn, key, kvs)) {
+    ldpp_dout(dpp, 0) << "FDBDirectory::" << __func__
+                      << "() ERROR: get returned false" << dendl;
+    return -EIO;
+  }
+  for (const auto& field : fields) {
+    auto it = kvs.find(field);
+    if (it != kvs.end()) {
+      out_vals[field] = it->second;
+    }
+  }
+  return 0;
+}
+
+int FDBDirectory::set_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
+                        const std::string& key,
+                        const std::map<std::string, std::string>& vals)
+{
+  lfdb::set(FDBconn, key, vals);
+  return 0;
+}
+
+int FDBDirectory::set_kv_multi_init_field(const DoutPrefixProvider* dpp, optional_yield y,
+                                    const std::string& key,
+                                    const std::map<std::string, std::string>& always_set,
+                                    const std::string& init_field,
+                                    const std::string& init_val)
+{
+  std::map<std::string, std::string> existing;
+  if (!lfdb::get(FDBconn, key, existing)) {
+    ldpp_dout(dpp, 0) << "FDBDirectory::" << __func__
+                      << "() ERROR: get returned false" << dendl;
+    return -EIO;
+  }
+  std::map<std::string, std::string> to_write(always_set);
+  if (existing.find(init_field) == existing.end()) {
+    to_write[init_field] = init_val;
+  }
+  lfdb::set(FDBconn, key, to_write);
+  return 0;
+}
+
+
 int FDBBucketDirectory::add_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, optional_yield y, Pipeline* pipeline)
 {
-  return zadd(dpp, bucket_id, 0, object_name, y, pipeline);
+  return zadd(dpp, bucket_id, 0, object_name, y);
 }
 
 int FDBBucketDirectory::remove_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, optional_yield y)
@@ -47,8 +123,7 @@ int FDBBucketDirectory::zadd(const DoutPrefixProvider* dpp,
                             const std::string& bucket_id,
                             double score,
                             const std::string& member,
-                            optional_yield y,
-                            Pipeline* pipeline)
+                            optional_yield y)
 {
   try {
     auto tr = lfdb::make_transaction(FDBconn);
@@ -426,8 +501,7 @@ int FDBObjectDirectory::zadd(const DoutPrefixProvider* dpp,
 			    const std::string& obj_name,
                             double score,
                             const std::string& member,
-                            optional_yield y,
-                            Pipeline* pipeline)
+                            optional_yield y)
 {
   try {
     auto tr = lfdb::make_transaction(FDBconn);
@@ -706,7 +780,7 @@ int FDBObjectDirectory::add_version(const DoutPrefixProvider* dpp, const std::st
 {
   auto score = ceph::real_clock::to_double(creation_time);
   ldpp_dout(dpp, 10) << "FDBObjectDirectory::" << __func__ << "(): Score of object name: "<< obj_name << " version: " << version << " is: "  << score << dendl;
-  return zadd(dpp, bucket_id, obj_name, score, version, y, pipeline);
+  return zadd(dpp, bucket_id, obj_name, score, version, y);
 }
 
 int FDBObjectDirectory::remove_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, optional_yield y)
@@ -848,7 +922,7 @@ int FDBBlockDirectory::get(const DoutPrefixProvider* dpp, CacheBlock* block, opt
 
   if (lfdb::get(FDBconn, key, out_kvs) != true){
     ldpp_dout(dpp, 0) << "FDBBlockDirectory::" << __func__ << "() ERROR: " << "get function returned false! " << dendl;
-	return -1;
+	return -ENOENT;
   }
 
   block->blockID = std::stoull(out_kvs.at("blockID"));
@@ -891,14 +965,14 @@ int FDBBlockDirectory::get(const DoutPrefixProvider* dpp, std::vector<CacheBlock
           << "FDBBlockDirectory::" << __func__
           << "() ERROR: get function returned false!"
           << dendl;
-      return -1;
+      return -ENOENT;
     }
   }
 
   if (!lfdb::commit(txn)) {
     ldpp_dout(dpp, 0)
       << "FDB commit failed in " << __func__ << dendl;
-    return -1;
+    return -ENOENT;
   }
 
 
@@ -941,7 +1015,7 @@ int FDBBlockDirectory::copy(const DoutPrefixProvider* dpp, CacheBlock* block, co
   // Retrieve the block from the directory in case it has been updated by a remote cache.
   if (this->get(dpp, block, y) < 0){
     ldpp_dout(dpp, 10) << "FDBBlockDirectory::" << __func__ << "(): Could not retrive the object." << dendl;
-	return -1;
+	return -ENOENT;
   }
 
   auto copyBlock = CacheBlock{ .cacheObj = { .objName = copyName, .bucketName = copyBucketName }, .blockID = 0 };
@@ -979,12 +1053,12 @@ int FDBBlockDirectory::update_field(const DoutPrefixProvider* dpp, CacheBlock* b
 
   if (!(ret = exist_key(dpp, block, y))) {
     ldpp_dout(dpp, 10) << "FDBBlockDirectory::" << __func__ << "(): Block does not exist." << dendl;
-	return -1;
+	return -ENOENT;
   }
 
   if (this->get(dpp, block, y) < 0){
     ldpp_dout(dpp, 10) << "FDBBlockDirectory::" << __func__ << "(): Could not retrive the object." << dendl;
-	return -1;
+	return -ENOENT;
   }
 
   if (field == "blockID") {
@@ -1042,12 +1116,12 @@ int FDBBlockDirectory::remove_host(const DoutPrefixProvider* dpp, CacheBlock* bl
 
   if (!(ret = exist_key(dpp, block, y))) {
     ldpp_dout(dpp, 10) << "FDBBlockDirectory::" << __func__ << "(): Block does not exist." << dendl;
-	return -1;
+	return -ENOENT;
   }
 
   if (this->get(dpp, block, y) < 0){
     ldpp_dout(dpp, 10) << "FDBBlockDirectory::" << __func__ << "(): Could not retrive the object." << dendl;
-	return -1;
+	return -ENOENT;
   }
 
   block->cacheObj.hostsList.erase(value);

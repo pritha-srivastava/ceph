@@ -7,7 +7,126 @@
 #include "common/split.h"
 #include "rgw_perf_counters.h"
 
-namespace rgw { namespace d4n {
+namespace rgw::d4n {
+
+int LFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver* _driver) {
+  response<int, int, int, int> resp;
+  static auto obj_callback = [this](
+          const DoutPrefixProvider* dpp, const std::string& key, const std::string& version, bool deleteMarker, uint64_t size, 
+          double creationTime, const rgw_user user, const std::string& etag, const std::string& bucket_name, const std::string& bucket_id,
+          const rgw_obj_key& obj_key, optional_yield y, std::string& restore_val) {
+    update_dirty_object(dpp, key, version, deleteMarker, size, creationTime, user, etag, bucket_name, bucket_id, obj_key, RefCount::NOOP, y, restore_val);
+  };
+
+  static auto block_callback = [this](
+          const DoutPrefixProvider* dpp, const std::string& key, uint64_t offset, uint64_t len, const std::string& version, bool dirty, optional_yield y, std::string& restore_val) {
+    update(dpp, key, offset, len, version, dirty, RefCount::NOOP, y, restore_val);
+  };
+
+  cacheDriver->restore_blocks_objects(dpp, obj_callback, block_callback);
+
+  driver = _driver;
+  if (dpp->get_cct()->_conf->d4n_writecache_enabled) {
+    quit = false;
+    tc = std::thread(&CachePolicy::cleaning, this, dpp);
+  }
+
+  dir->set_kv_multi_init_field(dpp, y,
+      "lfuda",
+      {
+          {"minLocalWeights_sum",     std::to_string(weightSum)},
+          {"minLocalWeights_size",    std::to_string(entries_map.size())},
+          {"minLocalWeights_address", dpp->get_cct()->_conf->rgw_d4n_local_rgw_address}
+      },
+      "age",
+      std::to_string(age)
+  );
+
+  asio::co_spawn(io_context.get_executor(),
+        directory_sync(dpp, y), asio::detached);
+
+  return 0;
+}
+
+int LFUDAPolicy::age_sync(const DoutPrefixProvider* dpp, optional_yield y) {
+  std::string raw;
+  int ret = dir->get_kv(dpp, y, "lfuda", "age", raw);
+  if (ret < 0) return ret;
+
+  int stored_age = raw.empty() ? 0 : std::stoi(raw);
+
+  if (age > stored_age) {
+    ret = dir->set_kv(dpp, y, "lfuda", "age", std::to_string(age));
+    if (ret < 0) return ret;
+  } else {
+    age = stored_age;
+  }
+  return 0;
+}
+
+int LFUDAPolicy::local_weight_sync(const DoutPrefixProvider* dpp, optional_yield y) {
+  if (fabs(weightSum - postedSum) > (postedSum * 0.1)) {
+    std::map<std::string, std::string> fetched;
+    int ret = dir->get_kv_multi(dpp, y, "lfuda",
+                                {"minLocalWeights_sum", "minLocalWeights_size"},
+                                fetched);
+    if (ret < 0) return ret;
+
+    float minAvgWeight = std::stof(fetched.at("minLocalWeights_sum"))
+                        / std::stof(fetched.at("minLocalWeights_size"));
+    float localAvgWeight = entries_map.size()
+        ? static_cast<float>(weightSum) / static_cast<float>(entries_map.size())
+        : 0.0f;
+
+    if (localAvgWeight < minAvgWeight) {
+        ret = dir->set_kv_multi(dpp, y, "lfuda", {
+            {"minLocalWeights_sum",     std::to_string(weightSum)},
+            {"minLocalWeights_size",    std::to_string(entries_map.size())},
+            {"minLocalWeights_address", dpp->get_cct()->_conf->rgw_d4n_local_rgw_address}
+        });
+        if (ret < 0) return ret;
+    } else {
+        weightSum = std::stoi(fetched.at("minLocalWeights_sum"));
+        postedSum = std::stoi(fetched.at("minLocalWeights_sum")); // preserved from original
+    }
+  }
+
+  return dir->set_kv_multi(dpp, y,
+                          dpp->get_cct()->_conf->rgw_d4n_local_rgw_address, {
+                              {"avgLocalWeight_sum",  std::to_string(weightSum)},
+                              {"avgLocalWeight_size", std::to_string(entries_map.size())}
+                          });
+}
+
+asio::awaitable<void> LFUDAPolicy::directory_sync(const DoutPrefixProvider* dpp, optional_yield y) {
+  rthread_timer.emplace(co_await asio::this_coro::executor);
+  co_await asio::this_coro::throw_if_cancelled(true);
+  co_await asio::this_coro::reset_cancellation_state(
+    asio::enable_terminal_cancellation());
+
+  for (;;) try {
+    /* Update age */
+    if (int ret = age_sync(dpp, y) < 0) {
+      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ret << dendl;
+    }
+    
+    /* Update minimum local weight sum */
+    if (int ret = local_weight_sync(dpp, y) < 0) {
+      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ret << dendl;
+    }
+
+    int interval = dpp->get_cct()->_conf->rgw_lfuda_sync_frequency;
+    rthread_timer->expires_after(std::chrono::seconds(interval));
+    co_await rthread_timer->async_wait(asio::use_awaitable);
+  } catch (sys::system_error& e) {
+    if (e.code() == asio::error::operation_aborted) {
+      break;
+    } else {
+      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << e.what() << dendl;
+      continue;
+    }
+  }
+}
 
 /* Changes state to INVALID for dirty objects. An INVALID state indicates that a delete request has been
  issued on an object and it must be deleted rather than written to the backend. This lazy deletion occurs
@@ -84,36 +203,6 @@ int LFUDAPolicy::exist_key(const std::string& key) {
   }
 
   return false;
-}
-
-asio::awaitable<void> LFUDAPolicy::directory_sync(const DoutPrefixProvider* dpp, optional_yield y) {
-  rthread_timer.emplace(co_await asio::this_coro::executor);
-  co_await asio::this_coro::throw_if_cancelled(true);
-  co_await asio::this_coro::reset_cancellation_state(
-    asio::enable_terminal_cancellation());
-
-  for (;;) try {
-    /* Update age */
-    if (int ret = age_sync(dpp, y) < 0) {
-      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ret << dendl;
-    }
-    
-    /* Update minimum local weight sum */
-    if (int ret = local_weight_sync(dpp, y) < 0) {
-      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ret << dendl;
-    }
-
-    int interval = dpp->get_cct()->_conf->rgw_lfuda_sync_frequency;
-    rthread_timer->expires_after(std::chrono::seconds(interval));
-    co_await rthread_timer->async_wait(asio::use_awaitable);
-  } catch (sys::system_error& e) {
-    if (e.code() == asio::error::operation_aborted) {
-      break;
-    } else {
-      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << e.what() << dendl;
-      continue;
-    }
-  }
 }
 
 int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_yield y) {
@@ -911,4 +1000,4 @@ bool LRUPolicy::_erase(const DoutPrefixProvider* dpp, const std::string& key, op
 }
 
 
-} } // namespace rgw::d4n
+} // namespace rgw::d4n

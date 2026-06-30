@@ -11,18 +11,49 @@ using boost::redis::request;
 using boost::redis::response;
 using boost::redis::ignore_t;
 
-class RedisDirectory {
+class RedisDirectory: virtual public Directory {
   public:
 	std::shared_ptr<RedisPool> redis_pool{nullptr}; // Redis connection pool
     void set_redis_pool(std::shared_ptr<RedisPool> pool) {
       	redis_pool = pool;
     }
-    RedisDirectory() {}
+
+    RedisDirectory(std::shared_ptr<RedisConnection>& redis_conn) : REDISconn(redis_conn->get_redis_conn()) {}
+    virtual ~RedisDirectory() = default;
+  
+  virtual int get_kv(const DoutPrefixProvider* dpp, optional_yield y,
+                       const std::string& key,
+                       const std::string& field,
+                       std::string& out_val);
+
+  virtual int set_kv(const DoutPrefixProvider* dpp, optional_yield y,
+                      const std::string& key,
+                      const std::string& field,
+                      const std::string& val);
+
+  virtual int get_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
+                          const std::string& key,
+                          const std::vector<std::string>& fields,
+                          std::map<std::string, std::string>& out_vals);
+
+  virtual int set_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
+                          const std::string& key,
+                          const std::map<std::string, std::string>& vals);
+
+  virtual int set_kv_multi_init_field(const DoutPrefixProvider* dpp, optional_yield y,
+                                      const std::string& key,
+                                      const std::map<std::string, std::string>& always_set,
+                                      const std::string& init_field,
+                                      const std::string& init_val);
+  protected:
+    std::shared_ptr<boost::redis::connection> REDISconn;
+
 };
 
 class RedisBucketDirectory: public RedisDirectory, public BucketDirectory {
   public:
-	RedisBucketDirectory(std::shared_ptr<RedisConnection>& redis_conn): REDISconn(redis_conn->get_redis_conn()) {}
+    RedisBucketDirectory(std::shared_ptr<RedisConnection>& redis_conn): RedisDirectory(redis_conn) {}
+
     virtual int add_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, optional_yield y, Pipeline* pipeline=nullptr) override;
     virtual int remove_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, optional_yield y) override;
     //scan_objects(pattern="photos/*")
@@ -37,12 +68,11 @@ class RedisBucketDirectory: public RedisDirectory, public BucketDirectory {
     int zrange(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start, const std::string& stop, uint64_t offset, uint64_t count, std::vector<std::string>& members, optional_yield y);
     int zscan(const DoutPrefixProvider* dpp, const std::string& bucket_id, uint64_t cursor, const std::string& pattern, uint64_t count, std::vector<std::string>& members, uint64_t next_cursor, optional_yield y);
 
-    std::shared_ptr<boost::redis::connection> REDISconn;
 };
 
 class RedisObjectDirectory: public RedisDirectory, public ObjectDirectory {
   public:
-	RedisObjectDirectory(std::shared_ptr<RedisConnection>& redis_conn): REDISconn(redis_conn->get_redis_conn()) {}
+    RedisObjectDirectory(std::shared_ptr<RedisConnection>& redis_conn): RedisDirectory(redis_conn) {}
 
     virtual int exist_key(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, optional_yield y) override;
 
@@ -53,8 +83,6 @@ class RedisObjectDirectory: public RedisDirectory, public ObjectDirectory {
     virtual int get_version_index(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, std::string& index, optional_yield y) override;
 
   private:
-    std::shared_ptr<boost::redis::connection> REDISconn;
-
     int zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, double score, const std::string& member, optional_yield y, Pipeline* pipeline=nullptr);
     int zrange(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, int start, int stop, std::vector<std::string>& members, optional_yield y);
     int zrevrange(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& start, const std::string& stop, std::vector<std::string>& members, optional_yield y);
@@ -66,7 +94,7 @@ class RedisObjectDirectory: public RedisDirectory, public ObjectDirectory {
 
 class RedisBlockDirectory: public RedisDirectory, public BlockDirectory {
   public:
-	RedisBlockDirectory(std::shared_ptr<RedisConnection>& redis_conn): REDISconn(redis_conn->get_redis_conn()) {}
+    RedisBlockDirectory(std::shared_ptr<RedisConnection>& redis_conn): RedisDirectory(redis_conn) {}
     
     virtual int exist_key(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) override;
 
@@ -87,8 +115,6 @@ class RedisBlockDirectory: public RedisDirectory, public BlockDirectory {
     virtual int remove_host(const DoutPrefixProvider* dpp, CacheBlock* block, std::string& value, optional_yield y) override;
 
   private:
-    std::shared_ptr<boost::redis::connection> REDISconn;
-
     template<SeqContainer Container>
     int set_values(const DoutPrefixProvider* dpp, CacheBlock& block, Container& redisValues, optional_yield y) ;
 };
