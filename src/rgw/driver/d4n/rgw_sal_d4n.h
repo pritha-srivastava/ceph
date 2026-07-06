@@ -127,19 +127,20 @@ class D4NFilterBucket : public FilterBucket {
     bool cache_request{false};
 
     struct FetchContext {
-      std::vector<std::string> objects;
+      std::vector<rgw::d4n::CacheObject> objects;
       bool has_more = false;
       std::string next_cursor_or_start;  // Next cursor for scan_objects or start for get_range
     };
     int fetch_objects_batch(const DoutPrefixProvider* dpp, const ListParams& params, int batch_size,
-                            std::string& cursor_or_start, FetchContext& fetch_ctx, optional_yield y);
-    void filter_and_group_objects(const DoutPrefixProvider* dpp, const std::vector<std::string>& input_objects,
-                                    const ListParams& params, std::vector<std::string>& filtered_objects,
-                                    ListResults& cache_results, ListResults& store_results,
-                                    int& num_objs);
+                            std::string& cursor_or_start, std::string& marker, bool is_first_batch, FetchContext& fetch_ctx, optional_yield y);
     int build_versioned_entries(const DoutPrefixProvider* dpp, const std::string& obj_name,
                               const ListParams& params, std::vector<rgw_bucket_list_entries>& entries,
-                              std::string& last_version, int& num_objs, int max, optional_yield y);
+                              std::string& last_version, int& num_objs, bool& object_exhausted, int max, optional_yield y);
+    int process_objects_batch(const DoutPrefixProvider* dpp, const std::vector<rgw::d4n::CacheObject>& input_objects,
+                              const ListParams& params, std::vector<rgw_bucket_list_entries>& entries,
+                              ListResults& cache_results, ListResults& store_results,
+                              std::string& last_version, int& num_objs, int max,
+                              bool is_truncated, bool& stopped_early, optional_yield y);
     int populate_cache_results(const DoutPrefixProvider* dpp, const std::vector<rgw_bucket_list_entries>& entries,
                                 ListResults& cache_results, optional_yield y);
     void merge_results(const DoutPrefixProvider* dpp, const ListParams& params,
