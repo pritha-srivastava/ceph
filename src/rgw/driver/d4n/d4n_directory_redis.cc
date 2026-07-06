@@ -374,12 +374,12 @@ int RedisBucketDirectory::zrange(const DoutPrefixProvider* dpp, const std::strin
   return 0;
 }
 
-int RedisBucketDirectory::zscan(const DoutPrefixProvider* dpp, const std::string& bucket_id, uint64_t cursor, const std::string& pattern, uint64_t count, std::vector<std::string>& members, uint64_t next_cursor, optional_yield y)
+int RedisBucketDirectory::zscan(const DoutPrefixProvider* dpp, const std::string& bucket_id, uint64_t cursor, const std::string& prefix, uint64_t count, std::vector<CacheObject>& objs_info, uint64_t& next_cursor, optional_yield y)
 {
   try {
     boost::system::error_code ec;
     request req;
-
+    std::string pattern = prefix + "*";
     req.push("ZSCAN", bucket_id, cursor, "MATCH", pattern, "COUNT", count);
 
     boost::redis::generic_response resp;
@@ -401,8 +401,9 @@ int RedisBucketDirectory::zscan(const DoutPrefixProvider* dpp, const std::string
 
         //skip the first 3 values to get the actual member, score
         for (uint64_t i = 3; i < size; i = i+2) {
-          members.emplace_back(root_array[i].value);
-          ldpp_dout(dpp, 20) << "RedisBucketDirectory::" << __func__ << "() member is: " << root_array[i].value << dendl;
+          objs_info.push_back(CacheObject{});
+          objs_info.back().objName = root_array[i].value;
+          ldpp_dout(dpp, 20) << "RedisBucketDirectory::" << __func__ << "() objName is: " << objs_info.back().objName << dendl;
         }
       }
     } else {
@@ -457,15 +458,86 @@ int RedisBucketDirectory::remove_object(const DoutPrefixProvider* dpp, const std
   return zrem(dpp, bucket_id, object_name, y);
 }
 
-//Performs an incremental scan of objects within the specified bucket, returning a subset of results based on the provided cursor position and count.
-int RedisBucketDirectory::scan_objects(const DoutPrefixProvider* dpp, const std::string& bucket_id, uint64_t start_pos, const std::string& pattern, uint64_t count, std::vector<std::string>& objects, std::optional<CacheObject>& params, uint64_t& next_pos, optional_yield y)
+int RedisBucketDirectory::list_objects(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start_token, const std::string& prefix, const std::string& marker, uint64_t count, bool marker_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, optional_yield y)
 {
-  return zscan(dpp, bucket_id, start_pos, pattern, count, objects, next_pos, y);
+  if (!prefix.empty()) {
+    // SCAN_OBJECTS path (with prefix)
+    std::string continuation_token;
+
+    auto ret = scan_objects(
+      dpp,
+      bucket_id,
+      start_token,
+      prefix,
+      marker,
+      marker_inclusive,
+      count,
+      objs_info,
+      continuation_token,
+      y);
+
+    if (ret < 0 ) {
+      ldpp_dout(dpp, 0) << "FDBBucketDirectory::" << __func__ << " scan_objects failed: " << ret << dendl;
+      return ret;
+    }
+  } else {
+    // GET_RANGE path (no prefix)
+    std::string continuation_token;
+    auto ret = get_range(
+      dpp,
+      bucket_id,
+      marker,
+      count,
+      marker_inclusive,
+      objs_info,
+      continuation_token,
+      y);
+
+    if (ret < 0) {
+      ldpp_dout(dpp, 0) << "FDBBucketDirectory::" << __func__ << " get_range failed: " << ret << dendl;
+      return ret;
+    }
+  }
+  return 0;
 }
 
-int RedisBucketDirectory::get_range(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start, const std::string& stop, uint64_t offset, uint64_t count, std::vector<std::string>& objects, std::optional<CacheObject>& params, optional_yield y)
+//Performs an incremental scan of objects within the specified bucket, returning a subset of results based on the provided cursor position and count.
+int RedisBucketDirectory::scan_objects(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start_token, const std::string& prefix, const std::string& marker, uint64_t count, bool marker_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, optional_yield y)
 {
-  return zrange(dpp, bucket_id, start, stop, offset, count, objects, y);
+  uint64_t cursor = start_token.empty() ? 0 : std::stoull(start_token);
+  uint64_t next_cursor = 0;
+  auto ret = zscan(dpp, bucket_id, cursor, prefix, count, objs_info, next_cursor, y);
+  continuation_token = (next_cursor == 0) ? "" : std::to_string(next_cursor);
+  return ret;
+}
+
+int RedisBucketDirectory::get_range(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start, uint64_t count, bool start_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, optional_yield y)
+{
+  std::string redis_start;
+  if (start.empty()) {
+    redis_start = "-";
+  } else {
+    redis_start = (start_inclusive ? "[" : "(") + start;
+  }
+
+  uint64_t fetch_count = count ? count + 1 : 0;
+
+  std::vector<std::string> members;
+  auto ret = zrange(dpp, bucket_id, redis_start, "+", 0, fetch_count, members, y);
+  if (ret < 0) {
+    return ret;
+  }
+
+  uint64_t actual_size = (count == 0) ? members.size() : std::min<uint64_t>(count, members.size());
+  for (uint64_t i = 0; i < actual_size; i++) {
+    objs_info.push_back(CacheObject{});
+    objs_info.back().objName = members[i];
+  }
+
+  if (count && members.size() > count) {
+    continuation_token = objs_info.back().objName;
+  }
+  return 0;
 }
 
 int RedisObjectDirectory::exist_key(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, optional_yield y) 
@@ -970,19 +1042,43 @@ int RedisObjectDirectory::remove_version_by_creation_time(const DoutPrefixProvid
   return zremrangebyscore(dpp, bucket_id, obj_name, creation_time, creation_time, y);;
 }
 
-int RedisObjectDirectory::list_versions(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& start, const std::string& stop, std::vector<CacheObjectVersion>& obj_versions, optional_yield y)
+int RedisObjectDirectory::list_versions(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& marker_version, uint64_t count, std::vector<CacheObjectVersion>& obj_versions, std::string& continuation_token, optional_yield y)
 {
+  continuation_token.clear();
+  // Get starting version index from marker
+  uint64_t start_rank = 0;
+  if(!marker_version.empty()) {
+    std::string index;
+    auto ret = get_version_index(dpp, bucket_id, obj_name, marker_version, index, y);
+    if (ret < 0) {
+      ldpp_dout(dpp, 0) << "D4NFilterBucket::" << __func__ << " zrank failed: " << ret << dendl;
+      return ret;
+    }
+    start_rank = std::stoull(index) + 1; //start version is exclusive
+  }
+  std::string start = std::to_string(start_rank);
+  std::string stop = count ? std::to_string(start_rank + (count + 1) - 1) : "-1";
   std::vector<std::string> members;
   auto ret = zrevrange(dpp, bucket_id, obj_name, start, stop, members, y);
-  obj_versions.reserve(members.size());
-  for (const auto& version : members) {
+  if (ret < 0 ) {
+    return ret;
+  }
+  if (members.empty()) {
+    return -ENOENT;
+  }
+  uint64_t actual_size = count ? std::min<uint64_t>(count, members.size()) : members.size();
+  obj_versions.reserve(actual_size);
+  for (uint64_t i = 0; i < actual_size; i++) {
     auto& obj_version = obj_versions.emplace_back();
     obj_version.bucketId = bucket_id;
     obj_version.objName = obj_name;
-    obj_version.version = version;
+    obj_version.version = members[i];
+  }
+  if(members.size() > count) {
+    continuation_token = members[count - 1];
   }
 
-  return ret;
+  return 0;
 }
 
 int RedisObjectDirectory::get_version_index(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, std::string& index, optional_yield y)
