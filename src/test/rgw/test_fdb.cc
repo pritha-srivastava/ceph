@@ -509,6 +509,315 @@ TEMPLATE_PRODUCT_TEST_CASE("associative data", "[fdb][rgw]",
  CHECK(pearl_msg == out_kvs["pearl"]);
 }
 
+TEST_CASE("person records with name-age storage", "[rgw][fdb]") {
+ janitor j;
+ auto dbh = j.dbh();
+
+ // Create person records, where each person is a map with "name" and "age"
+ std::vector<std::map<std::string, std::string>> people = {
+   {{"name", "Alice"}, {"age", "30"}},
+   {{"name", "Bob"}, {"age", "25"}},
+   {{"name", "Charlie"}, {"age", "35"}},
+   {{"name", "Diana"}, {"age", "28"}},
+   {{"name", "Eve"}, {"age", "32"}}
+ };
+
+ SECTION("store each person under their name as key") {
+   // Store each person map using their name as the database key
+   for(const auto& person : people) {
+     const auto& name = person.at("name");
+     lfdb::set(dbh, name, person);
+   }
+
+   // Retrieve a single person record by name
+   std::map<std::string, std::string> alice_record;
+   CHECK(lfdb::get(dbh, "Alice", alice_record));
+   CHECK("Alice" == alice_record["name"]);
+   CHECK("30" == alice_record["age"]);
+
+   // Retrieve another person
+   std::map<std::string, std::string> bob_record;
+   CHECK(lfdb::get(dbh, "Bob", bob_record));
+   CHECK("Bob" == bob_record["name"]);
+   CHECK("25" == bob_record["age"]);
+ }
+
+ SECTION("query range of person records") {
+   // Store each person individually with name as key
+   for(const auto& person : people) {
+     const auto& name = person.at("name");
+     lfdb::set(dbh, name, person);
+   }
+
+   // Query range by retrieving individual keys
+   // Check that Bob, Charlie, and Diana exist in the range
+   std::map<std::string, std::string> bob_record, charlie_record, diana_record;
+
+   CHECK(lfdb::get(dbh, "Bob", bob_record));
+   CHECK("Bob" == bob_record["name"]);
+   CHECK("25" == bob_record["age"]);
+
+   CHECK(lfdb::get(dbh, "Charlie", charlie_record));
+   CHECK("Charlie" == charlie_record["name"]);
+   CHECK("35" == charlie_record["age"]);
+
+   CHECK(lfdb::get(dbh, "Diana", diana_record));
+   CHECK("Diana" == diana_record["name"]);
+   CHECK("28" == diana_record["age"]);
+ }
+
+ SECTION("query all person records") {
+   // Store each person individually
+   for(const auto& person : people) {
+     const auto& name = person.at("name");
+     lfdb::set(dbh, name, person);
+   }
+
+   // Retrieve all person records individually to verify they exist
+   std::map<std::string, std::string> alice_record, bob_record, charlie_record, diana_record, eve_record;
+
+   CHECK(lfdb::get(dbh, "Alice", alice_record));
+   CHECK("Alice" == alice_record["name"]);
+   CHECK("30" == alice_record["age"]);
+
+   CHECK(lfdb::get(dbh, "Bob", bob_record));
+   CHECK("Bob" == bob_record["name"]);
+   CHECK("25" == bob_record["age"]);
+
+   CHECK(lfdb::get(dbh, "Charlie", charlie_record));
+   CHECK("Charlie" == charlie_record["name"]);
+   CHECK("35" == charlie_record["age"]);
+
+   CHECK(lfdb::get(dbh, "Diana", diana_record));
+   CHECK("Diana" == diana_record["name"]);
+   CHECK("28" == diana_record["age"]);
+
+   CHECK(lfdb::get(dbh, "Eve", eve_record));
+   CHECK("Eve" == eve_record["name"]);
+   CHECK("32" == eve_record["age"]);
+ }
+
+ SECTION("range query using pair_generator") {
+   // Store each person individually
+   for(const auto& person : people) {
+     const auto& name = person.at("name");
+     lfdb::set(dbh, name, person);
+   }
+
+   // Use pair_generator to iterate through range and collect keys
+   // Range: "Bob" to "Eve" (exclusive end, so Bob, Charlie, Diana)
+   std::vector<std::string> keys_in_range;
+
+   for(auto&& [key, value] : lfdb::pair_generator(dbh, lfdb::select{"Bob", "Eve"})) {
+     keys_in_range.push_back(key);
+   }
+
+   // Verify we got exactly 3 keys in lexicographic order
+   REQUIRE(3 == keys_in_range.size());
+   CHECK("Bob" == keys_in_range[0]);
+   CHECK("Charlie" == keys_in_range[1]);
+   CHECK("Diana" == keys_in_range[2]);
+
+   // Now retrieve the values for verification
+   std::map<std::string, std::string> bob_record, charlie_record, diana_record;
+   CHECK(lfdb::get(dbh, "Bob", bob_record));
+   CHECK("25" == bob_record["age"]);
+   CHECK(lfdb::get(dbh, "Charlie", charlie_record));
+   CHECK("35" == charlie_record["age"]);
+   CHECK(lfdb::get(dbh, "Diana", diana_record));
+   CHECK("28" == diana_record["age"]);
+ }
+
+ SECTION("full range query using pair_generator") {
+   // Store each person individually
+   for(const auto& person : people) {
+     const auto& name = person.at("name");
+     lfdb::set(dbh, name, person);
+   }
+
+   // Use pair_generator to get all keys in range
+   std::vector<std::string> all_keys;
+
+   for(auto&& [key, value] : lfdb::pair_generator(dbh, lfdb::select{"Alice", "Zzzz"})) {
+     all_keys.push_back(key);
+   }
+
+   // Verify we got all 5 keys in lexicographic order
+   REQUIRE(5 == all_keys.size());
+   CHECK("Alice" == all_keys[0]);
+   CHECK("Bob" == all_keys[1]);
+   CHECK("Charlie" == all_keys[2]);
+   CHECK("Diana" == all_keys[3]);
+   CHECK("Eve" == all_keys[4]);
+
+   // Retrieve and verify the values
+   std::map<std::string, std::string> record;
+   CHECK(lfdb::get(dbh, "Alice", record));
+   CHECK("30" == record["age"]);
+   CHECK(lfdb::get(dbh, "Eve", record));
+   CHECK("32" == record["age"]);
+ }
+
+ SECTION("efficient range query with simple string values") {
+   // Store person data as simple strings (name:age format)
+   // This allows pair_generator to return both key and value in one call!
+   lfdb::set(dbh, "Alice", "Alice:30");
+   lfdb::set(dbh, "Bob", "Bob:25");
+   lfdb::set(dbh, "Charlie", "Charlie:35");
+   lfdb::set(dbh, "Diana", "Diana:28");
+   lfdb::set(dbh, "Eve", "Eve:32");
+
+   // Now pair_generator returns BOTH key AND value directly - no extra calls needed!
+   std::map<std::string, std::string> range_data;
+
+   for(auto&& [key, value] : lfdb::pair_generator(dbh, lfdb::select{"Bob", "Eve"})) {
+     range_data[key] = value;  // Value is directly usable!
+   }
+
+   // Verify we got 3 records with their values in ONE range query
+   REQUIRE(3 == range_data.size());
+   CHECK("Bob:25" == range_data["Bob"]);
+   CHECK("Charlie:35" == range_data["Charlie"]);
+   CHECK("Diana:28" == range_data["Diana"]);
+
+   // Parse the values if needed
+   auto parse_age = [](const std::string& value) {
+     auto pos = value.find(':');
+     return value.substr(pos + 1);
+   };
+
+   CHECK("25" == parse_age(range_data["Bob"]));
+   CHECK("35" == parse_age(range_data["Charlie"]));
+   CHECK("28" == parse_age(range_data["Diana"]));
+ }
+
+ SECTION("complex person records with multiple fields") {
+   // For complex data with many fields, structured types (maps) are better than concatenation
+   // Example: person with name, age, email, city, phone
+   std::vector<std::map<std::string, std::string>> complex_people = {
+     {{"name", "Alice"}, {"age", "30"}, {"email", "alice@example.com"}, {"city", "NYC"}, {"phone", "555-0001"}},
+     {{"name", "Bob"}, {"age", "25"}, {"email", "bob@example.com"}, {"city", "LA"}, {"phone", "555-0002"}},
+     {{"name", "Charlie"}, {"age", "35"}, {"email", "charlie@example.com"}, {"city", "Chicago"}, {"phone", "555-0003"}},
+     {{"name", "Diana"}, {"age", "28"}, {"email", "diana@example.com"}, {"city", "Boston"}, {"phone", "555-0004"}},
+     {{"name", "Eve"}, {"age", "32"}, {"email", "eve@example.com"}, {"city", "Seattle"}, {"phone", "555-0005"}}
+   };
+
+   // Store complex records
+   for(const auto& person : complex_people) {
+     const auto& name = person.at("name");
+     lfdb::set(dbh, name, person);
+   }
+
+   // Get range of keys first
+   std::vector<std::string> keys_in_range;
+   for(auto&& [key, value] : lfdb::pair_generator(dbh, lfdb::select{"Bob", "Eve"})) {
+     keys_in_range.push_back(key);
+   }
+
+   REQUIRE(3 == keys_in_range.size());
+
+   // Retrieve complex records - requires separate get() calls but provides structured data
+   std::map<std::string, std::string> bob_data, charlie_data, diana_data;
+
+   CHECK(lfdb::get(dbh, "Bob", bob_data));
+   CHECK("Bob" == bob_data["name"]);
+   CHECK("25" == bob_data["age"]);
+   CHECK("bob@example.com" == bob_data["email"]);
+   CHECK("LA" == bob_data["city"]);
+   CHECK("555-0002" == bob_data["phone"]);
+
+   CHECK(lfdb::get(dbh, "Charlie", charlie_data));
+   CHECK("35" == charlie_data["age"]);
+   CHECK("Chicago" == charlie_data["city"]);
+
+   CHECK(lfdb::get(dbh, "Diana", diana_data));
+   CHECK("28" == diana_data["age"]);
+   CHECK("Boston" == diana_data["city"]);
+ }
+
+ SECTION("comparison: simple vs complex data storage") {
+   // Example: Simple string for 2 fields
+   lfdb::set(dbh, "simple_alice", "Alice:30");
+
+   // Example: Complex map for 5+ fields
+   std::map<std::string, std::string> complex_alice = {
+     {"name", "Alice"}, {"age", "30"}, {"email", "alice@example.com"},
+     {"city", "NYC"}, {"phone", "555-0001"}
+   };
+   lfdb::set(dbh, "complex_alice", complex_alice);
+
+   // Retrieve simple: direct from pair_generator
+   std::string simple_value;
+   for(auto&& [key, value] : lfdb::pair_generator(dbh, lfdb::select{"simple_alice", "simple_alicf"})) {
+     simple_value = value;
+   }
+   CHECK("Alice:30" == simple_value);
+
+   // Retrieve complex: requires get() call
+   std::map<std::string, std::string> complex_value;
+   CHECK(lfdb::get(dbh, "complex_alice", complex_value));
+   CHECK("alice@example.com" == complex_value["email"]);
+ }
+
+ SECTION("FUTURE: efficient range query with complex types (requires conversion.h modification)") {
+   // ═══════════════════════════════════════════════════════════════════════════
+   // This section demonstrates the IDEAL usage pattern once from::convert()
+   // supports string_view input (see conversion.h modification proposal below)
+   // ═══════════════════════════════════════════════════════════════════════════
+   //
+   // REQUIRED CHANGE in src/rgw/fdb/conversion.h (around line 112):
+   // Add this overload to ceph::libfdb::from namespace:
+   //
+   //   void convert(std::string_view from, auto& to)
+   // Once implemented, this enables ONE database call to get all keys AND values!
+
+   // Store complex person records
+   for(const auto& person : people) {
+     const auto& name = person.at("name");
+     lfdb::set(dbh, name, person);
+   }
+
+   /* ═══════════════════════════════════════════════════════════════════════════
+      COMMENTED OUT - Requires conversion.h modification to work
+      ═══════════════════════════════════════════════════════════════════════════
+
+   // ✅ EFFICIENT: Get ALL keys AND values in ONE range query!
+   std::map<std::string, std::map<std::string, std::string>> all_people;
+
+   for(auto&& [key, value] : lfdb::pair_generator(dbh, lfdb::select{"Bob", "Eve"})) {
+     std::map<std::string, std::string> person_record;
+     
+     // This line requires the new from::convert(string_view) overload:
+     lfdb::from::convert(value, person_record);  // ← KEY LINE: deserialize in-place!
+     
+     all_people[key] = person_record;
+   }
+
+   // Verify we got 3 records with FULL DATA in ONE database call
+   REQUIRE(3 == all_people.size());
+   CHECK("Bob" == all_people["Bob"]["name"]);
+   CHECK("25" == all_people["Bob"]["age"]);
+   CHECK("Charlie" == all_people["Charlie"]["name"]);
+   CHECK("35" == all_people["Charlie"]["age"]);
+   CHECK("Diana" == all_people["Diana"]["name"]);
+   CHECK("28" == all_people["Diana"]["age"]);
+   */
+
+   // Current workaround (until conversion.h is modified):
+   // Use pair_generator for keys, then get() for each value (N+1 queries)
+   std::vector<std::string> keys;
+   for(auto&& [key, value] : lfdb::pair_generator(dbh, lfdb::select{"Bob", "Eve"})) {
+     keys.push_back(key);
+   }
+
+   REQUIRE(3 == keys.size());
+   CHECK("Bob" == keys[0]);
+   CHECK("Charlie" == keys[1]);
+   CHECK("Diana" == keys[2]);
+ }
+}
+
+
 SCENARIO("implicit transactions", "[fdb][rgw]")
 {
  janitor j;
