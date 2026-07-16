@@ -213,30 +213,30 @@ int D4NFilterBucket::fetch_objects_batch(const DoutPrefixProvider* dpp, const Li
   return 0;
 }
 
-int D4NFilterBucket::build_versioned_entries(const DoutPrefixProvider* dpp, const std::string& obj_name,
-                              const ListParams& params, std::vector<rgw_bucket_list_entries>& entries,
+int D4NFilterBucket::build_versioned_entries(const DoutPrefixProvider* dpp, const rgw::d4n::CacheObject& obj,
+                              const ListParams& params, std::vector<rgw_bucket_dir_entry>& entries,
                               std::string& last_version, int& num_objs, bool& object_exhausted, int max, optional_yield y) {
   std::vector<rgw::d4n::CacheObjectVersion> versions;
+  std::string objName = obj.objName;
+  if (objName[0] == '_') {
+    objName = "_" + obj.objName;
+  }
   if (params.list_versions) {
     uint64_t count = (max > num_objs) ? static_cast<uint64_t>(max - num_objs) : 0;
     if (count == 0) {
         return 0;   // nothing to add, page already at capacity
     }
     auto objDir = this->filter->get_obj_dir();
-    std::string objName = obj_name;
-    if (objName[0] == '_') {
-      objName = "_" + obj_name;
-    }
     std::string bucket_id = this->get_bucket_id();
     std::string start_version;
-    if (params.marker.instance.empty() || params.marker.name != obj_name) {
+    if (params.marker.instance.empty() || params.marker.name != obj.objName) {
       start_version = "";
     } else {
       start_version = params.marker.instance;
     }
 
     std::string continuation_token;
-    auto ret = objDir->list_versions(dpp, bucket_id, objName, start_version, count, versions, continuation_token, y);
+    auto ret = objDir->list_versions(dpp, bucket_id, obj.objName, start_version, count, versions, continuation_token, y);
     if (ret < 0 && ret != -ENOENT) {
       ldpp_dout(dpp, 0) << "D4NFilterBucket::" << __func__ << " list_versions failed: " << ret << dendl;
       return ret;
@@ -246,47 +246,39 @@ int D4NFilterBucket::build_versioned_entries(const DoutPrefixProvider* dpp, cons
     object_exhausted = continuation_token.empty();
   }
 
+  rgw_bucket_dir_entry entry;
+  entry.key.name = objName;
+  if (obj.deleteMarker) {
+    entry.flags |= rgw_bucket_dir_entry::FLAG_DELETE_MARKER;
+  }
+
+  entry.meta.storage_class = "CACHE";
+  entry.meta.size = obj.size;
+  entry.meta.accounted_size = obj.size;
+  entry.meta.etag = obj.etag;
+
+  if (!obj.creationTime.empty()) {
+    try {
+      double time = std::stod(obj.creationTime);
+      entry.meta.mtime = ceph::real_clock::from_double(time);
+    } catch (const std::exception& e) {
+      ldpp_dout(dpp, 0) << "D4NFilterBucket::" << __func__ << " Invalid time value: "
+                        << obj.creationTime << dendl;
+    }
+  }
   if (!versions.empty()) {
     for (size_t i = 0; i < versions.size(); i++) {
       const auto& version = versions[i].version;
       last_version = version;
-      rgw_bucket_list_entries entry;
       entry.flags = rgw_bucket_dir_entry::FLAG_VER;
       if (i == 0) {
         entry.flags |= rgw_bucket_dir_entry::FLAG_CURRENT;
       } else {
         entry.flags |= rgw_bucket_dir_entry::FLAG_VER_MARKER;
       }
-      entry.key = rgw_obj_key{obj_name, version};
-#if 0
-      rgw_bucket_dir_entry result_entry;
-      result_entry.key.name = source_entry.key.name;
-      if (result_entry.key.name[0] == '_') {
-        result_entry.key.name = "_" + source_entry.key.name;
-      }
-      result_entry.key.instance = source_entry.key.instance;
-      result_entry.flags = source_entry.flags;
-
-      if (block.deleteMarker) {
-        result_entry.flags |= rgw_bucket_dir_entry::FLAG_DELETE_MARKER;
-      }
-
-      result_entry.meta.storage_class = "CACHE";
-      result_entry.meta.size = block.cacheObj.size;
-      result_entry.meta.accounted_size = block.cacheObj.size;
-
-      try {
-        double time = std::stod(block.cacheObj.creationTime);
-        result_entry.meta.mtime = ceph::real_clock::from_double(time);
-      } catch (const std::exception& e) {
-        ldpp_dout(dpp, 0) << "D4NFilterBucket::" << __func__ << " Invalid time value: "
-                          << block.cacheObj.creationTime << dendl;
-      }
-
-      result_entry.meta.etag = block.cacheObj.etag;
-      result_entry.meta.owner = block.cacheObj.user_id;
-      result_entry.meta.owner_display_name = block.cacheObj.display_name;
-#endif
+      entry.key.instance = version;
+      entry.meta.owner = versions[i].user_id;
+      entry.meta.owner_display_name = versions[i].display_name;
       entries.emplace_back(entry);
       num_objs++;  // each version counts separately toward max
       if (num_objs == max) {
@@ -295,8 +287,6 @@ int D4NFilterBucket::build_versioned_entries(const DoutPrefixProvider* dpp, cons
     }
   } else if (!params.list_versions) {
     // Single version (current object)
-    rgw_bucket_list_entries entry;
-    entry.key.name = obj_name;
     entries.emplace_back(entry);
     num_objs++;
   }
@@ -307,7 +297,6 @@ int D4NFilterBucket::build_versioned_entries(const DoutPrefixProvider* dpp, cons
 int D4NFilterBucket::process_objects_batch(const DoutPrefixProvider* dpp,
                               const std::vector<rgw::d4n::CacheObject>& input_objects,
                               const ListParams& params,
-                              std::vector<rgw_bucket_list_entries>& entries,
                               ListResults& cache_results,
                               ListResults& store_results,
                               std::string& last_version,
@@ -320,6 +309,7 @@ int D4NFilterBucket::process_objects_batch(const DoutPrefixProvider* dpp,
   stopped_early = false;
   for (size_t idx = 0; idx < input_objects.size(); ++idx) {
     const std::string& obj = input_objects[idx].objName;
+    const rgw::d4n::CacheObject& cache_obj = input_objects[idx];
     //if the current batch being processed has more objects
     bool more_objs_in_cur_batch = (idx + 1 < input_objects.size());
     // 1. Marker filtering
@@ -354,14 +344,14 @@ int D4NFilterBucket::process_objects_batch(const DoutPrefixProvider* dpp,
 
     // 3. Not grouped -- expand versions (or single entry) against remaining budget
     bool object_exhausted = true; // all versions listed
-    int ret = build_versioned_entries(dpp, obj, params, entries, last_version, num_objs, object_exhausted, max, y);
+    int ret = build_versioned_entries(dpp, cache_obj, params, cache_results.objs, last_version, num_objs, object_exhausted, max, y);
     if (ret < 0) return ret;
 
     if (num_objs == max) {
       //more versions still remaining
       if (!object_exhausted || more_objs_in_cur_batch || is_truncated) {
         cache_results.is_truncated = true;
-        cache_results.next_marker.name = entries.empty() ? obj : entries.back().key.name;
+        cache_results.next_marker.name = cache_results.objs.empty() ? obj : cache_results.objs.back().key.name;
         if (params.list_versions && !last_version.empty()) {
           cache_results.next_marker.instance = last_version;
         }
@@ -375,8 +365,8 @@ int D4NFilterBucket::process_objects_batch(const DoutPrefixProvider* dpp,
   return 0;
 }
 
-int D4NFilterBucket::populate_cache_results(const DoutPrefixProvider* dpp, const std::vector<rgw_bucket_list_entries>& entries,
-                                            ListResults& cache_results, optional_yield y)
+int D4NFilterBucket::populate_cache_results(const DoutPrefixProvider* dpp, std::vector<rgw_bucket_dir_entry>& entries,
+                                            optional_yield y)
 {
   if (entries.empty()) {
     return 0;
@@ -403,7 +393,8 @@ int D4NFilterBucket::populate_cache_results(const DoutPrefixProvider* dpp, const
       if (entry.key.instance == "null") {
         blocks[block_idx].cacheObj.objName = "_:null_" + entry.key.name;
       } else {
-        blocks[block_idx].cacheObj.objName = entry.key.get_oid();
+        rgw_obj_key key{entry.key.name, entry.key.instance};
+        blocks[block_idx].cacheObj.objName = key.get_oid();
       }
       blocks[block_idx].cacheObj.bucketName = this->get_bucket_id();
       ldpp_dout(dpp, 20) << "D4NFilterBucket::" << __func__ << " bucketName: " << blocks[block_idx].cacheObj.bucketName << dendl;
@@ -425,37 +416,26 @@ int D4NFilterBucket::populate_cache_results(const DoutPrefixProvider* dpp, const
       }
 
       size_t entry_idx = start + i;
-      const auto& source_entry = entries[entry_idx];
-
-      rgw_bucket_dir_entry result_entry;
-      result_entry.key.name = source_entry.key.name;
-      if (result_entry.key.name[0] == '_') {
-        result_entry.key.name = "_" + source_entry.key.name;
-      }
-      result_entry.key.instance = source_entry.key.instance;
-      result_entry.flags = source_entry.flags;
-
+      auto& source_entry = entries[entry_idx];
       if (block.deleteMarker) {
-        result_entry.flags |= rgw_bucket_dir_entry::FLAG_DELETE_MARKER;
+        source_entry.flags |= rgw_bucket_dir_entry::FLAG_DELETE_MARKER;
       }
 
-      result_entry.meta.storage_class = "CACHE";
-      result_entry.meta.size = block.cacheObj.size;
-      result_entry.meta.accounted_size = block.cacheObj.size;
+      source_entry.meta.storage_class = "CACHE";
+      source_entry.meta.size = block.cacheObj.size;
+      source_entry.meta.accounted_size = block.cacheObj.size;
 
       try {
         double time = std::stod(block.cacheObj.creationTime);
-        result_entry.meta.mtime = ceph::real_clock::from_double(time);
+        source_entry.meta.mtime = ceph::real_clock::from_double(time);
       } catch (const std::exception& e) {
         ldpp_dout(dpp, 0) << "D4NFilterBucket::" << __func__ << " Invalid time value: "
                           << block.cacheObj.creationTime << dendl;
       }
 
-      result_entry.meta.etag = block.cacheObj.etag;
-      result_entry.meta.owner = block.cacheObj.user_id;
-      result_entry.meta.owner_display_name = block.cacheObj.display_name;
-
-      cache_results.objs.emplace_back(result_entry);
+      source_entry.meta.etag = block.cacheObj.etag;
+      source_entry.meta.owner = block.cacheObj.user_id;
+      source_entry.meta.owner_display_name = block.cacheObj.display_name;
     }
   }
 
@@ -629,17 +609,16 @@ int D4NFilterBucket::list(const DoutPrefixProvider* dpp, ListParams& params, int
       if (fetch_ctx.objects.empty()) {
         break;
       }
-      std::vector<rgw_bucket_list_entries> entries;
       bool stopped_early = false;
       // 2. Filter(if needed), group by delimiter and build versioned entries
-      ret = process_objects_batch(dpp, fetch_ctx.objects, params, entries,
-                                 cache_results, store_results, last_version,
-                                 num_objs, max, fetch_ctx.has_more, stopped_early, y);
+      ret = process_objects_batch(dpp, fetch_ctx.objects, params, cache_results,
+                                  store_results, last_version, num_objs, max,
+                                  fetch_ctx.has_more, stopped_early, y);
       if (ret < 0) {
         return ret;
       }
       // 3. Fetch block metadata and populate cache_results.objs
-      ret = populate_cache_results(dpp, entries, cache_results, y);
+      ret = populate_cache_results(dpp, cache_results.objs, y);
       if (ret < 0) {
         return ret;
       }

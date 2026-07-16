@@ -133,16 +133,15 @@ class D4NFilterBucket : public FilterBucket {
     };
     int fetch_objects_batch(const DoutPrefixProvider* dpp, const ListParams& params, int batch_size,
                             std::string& cursor_or_start, std::string& marker, bool is_first_batch, FetchContext& fetch_ctx, optional_yield y);
-    int build_versioned_entries(const DoutPrefixProvider* dpp, const std::string& obj_name,
-                              const ListParams& params, std::vector<rgw_bucket_list_entries>& entries,
+    int build_versioned_entries(const DoutPrefixProvider* dpp, const rgw::d4n::CacheObject& obj,
+                              const ListParams& params, std::vector<rgw_bucket_dir_entry>& entries,
                               std::string& last_version, int& num_objs, bool& object_exhausted, int max, optional_yield y);
     int process_objects_batch(const DoutPrefixProvider* dpp, const std::vector<rgw::d4n::CacheObject>& input_objects,
-                              const ListParams& params, std::vector<rgw_bucket_list_entries>& entries,
-                              ListResults& cache_results, ListResults& store_results,
-                              std::string& last_version, int& num_objs, int max,
-                              bool is_truncated, bool& stopped_early, optional_yield y);
-    int populate_cache_results(const DoutPrefixProvider* dpp, const std::vector<rgw_bucket_list_entries>& entries,
-                                ListResults& cache_results, optional_yield y);
+                              const ListParams& params, ListResults& cache_results,
+                              ListResults& store_results, std::string& last_version,
+                              int& num_objs, int max, bool is_truncated, bool& stopped_early, optional_yield y);
+    int populate_cache_results(const DoutPrefixProvider* dpp, std::vector<rgw_bucket_dir_entry>& entries,
+                                optional_yield y);
     void merge_results(const DoutPrefixProvider* dpp, const ListParams& params,
                         ListResults& cache_results, ListResults& store_results,
                         int max, ListResults& results);

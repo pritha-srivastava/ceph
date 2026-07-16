@@ -175,6 +175,7 @@ struct CacheObject {
   std::string etag;
   uint64_t size; //total object size
   std::string creationTime;
+  bool deleteMarker{false};
 };
 
 //Represents an Object version entry for ListObjectVersions
