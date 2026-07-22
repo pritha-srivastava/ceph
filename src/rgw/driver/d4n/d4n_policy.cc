@@ -105,12 +105,12 @@ asio::awaitable<void> LFUDAPolicy::directory_sync(const DoutPrefixProvider* dpp,
 
   for (;;) try {
     /* Update age */
-    if (int ret = age_sync(dpp, y) < 0) {
+    if (int ret = (age_sync(dpp, y)); ret < 0) {
       ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ret << dendl;
     }
-    
+
     /* Update minimum local weight sum */
-    if (int ret = local_weight_sync(dpp, y) < 0) {
+    if (int ret = (local_weight_sync(dpp, y)); ret < 0) {
       ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << ret << dendl;
     }
 
@@ -124,6 +124,9 @@ asio::awaitable<void> LFUDAPolicy::directory_sync(const DoutPrefixProvider* dpp,
       ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() ERROR: " << e.what() << dendl;
       continue;
     }
+  } catch (const lfdb::libfdb_exception& e) {
+    ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__ << "() FDB ERROR: " << e.what() << dendl;
+    continue;
   }
 }
 
@@ -175,8 +178,10 @@ LFUDAPolicy::~LFUDAPolicy()
   rthread_stop();
   quit = true;
   {
-    std::unique_lock<std::mutex> l(lfuda_cleaning_lock);
-    cond->notify(l);
+    if (cond.has_value()) {
+      std::unique_lock<std::mutex> l(lfuda_cleaning_lock);
+      cond->notify(l);
+    }
   }
   if (watermark_timer.has_value()) {
     watermark_timer->cancel();
@@ -187,8 +192,8 @@ LFUDAPolicy::~LFUDAPolicy()
   }
   if (eviction_timer.has_value()) {
     eviction_timer->cancel();
+    eviction_done_future.wait();
   }
-  eviction_done_future.wait();
   lw_quit = true;
   lw_cond.notify_all();
   if (lwthread.joinable()) { lwthread.join(); }
@@ -316,16 +321,22 @@ int LFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_
   lwthread = std::thread(&LFUDAPolicy::localweight_writer, this, dpp);
   lw_quit = false;
 
-  dir->set_kv_multi_init_field(dpp, y,
-      "lfuda",
-      {
-          {"minLocalWeights_sum",     std::to_string(weightSum)},
-          {"minLocalWeights_size",    std::to_string(entries_map.size())},
-          {"minLocalWeights_address", dpp->get_cct()->_conf->rgw_d4n_local_rgw_address}
-      },
-      "age",
-      std::to_string(age)
-  );
+  try {
+    dir->set_kv_multi_init_field(dpp, y,
+        "lfuda",
+        {
+            {"minLocalWeights_sum",     std::to_string(weightSum)},
+            {"minLocalWeights_size",    std::to_string(entries_map.size())},
+            {"minLocalWeights_address", dpp->get_cct()->_conf->rgw_d4n_local_rgw_address}
+        },
+        "age",
+        std::to_string(age)
+    );
+  } catch (const lfdb::libfdb_exception& e) {
+    ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__
+                      << "() FDB ERROR in set_kv_multi_init_field: " << e.what() << dendl;
+    return -EIO;
+  }
 
   asio::co_spawn(io_context.get_executor(),
         directory_sync(dpp, y), asio::detached);
@@ -347,11 +358,14 @@ int LFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_
           background_eviction_worker(dpp, y);
         },
         [this, dpp](std::exception_ptr e) {
-          if (e) {
-            eviction_done_promise.set_exception(e);
-          } else {
-            eviction_done_promise.set_value();
-          }
+          ldpp_dout(dpp, 10) << "LFUDAPolicy: eviction worker done" << dendl;
+            try {
+              if (e) eviction_done_promise.set_exception(e);
+              else   eviction_done_promise.set_value();
+            } catch (const std::future_error& fe) {
+              ldpp_dout(dpp, 0) << "LFUDAPolicy: DOUBLE SET: " << fe.what() << dendl;
+              ceph_abort_msg("eviction_done_promise set twice");
+            }
           ldpp_dout(dpp, 10) << "Background eviction co-routine stopped" << dendl;
       }
     );
