@@ -153,6 +153,7 @@ void SSDDriver::background_free_space_sync_worker(const DoutPrefixProvider* dpp,
 
 int SSDDriver::initialize(const DoutPrefixProvider* dpp)
 {
+    ldpp_dout(dpp, 0) << "SSDDriver::" << __func__ << "() called" << dendl;
     if(partition_info.location.back() != '/') {
       partition_info.location += "/";
     }
@@ -234,6 +235,7 @@ int SSDDriver::initialize(const DoutPrefixProvider* dpp)
     ldpp_dout(dpp, 20) << "SSDCache: " << __func__ << "(): reserved_space=" << reserved_space << dendl;
 
     free_space_timer.emplace(io_context);
+    free_space_worker_started = true;
     boost::asio::spawn(
         io_context,
         [this, dpp](boost::asio::yield_context yield) {
@@ -241,11 +243,14 @@ int SSDDriver::initialize(const DoutPrefixProvider* dpp)
           background_free_space_sync_worker(dpp, y);
         },
         [this, dpp](std::exception_ptr e) {
-          if (e) {
-            free_space_done_promise.set_exception(e);
-          } else {
-            free_space_done_promise.set_value();
-          }
+          ldpp_dout(dpp, 0) << "SSDDriver: free_space worker done" << dendl;
+            try {
+                if (e) free_space_done_promise.set_exception(e);
+                else   free_space_done_promise.set_value();
+            } catch (const std::future_error& fe) {
+                ldpp_dout(dpp, 0) << "SSDDriver: DOUBLE SET: " << fe.what() << dendl;
+                ceph_abort_msg("free_space_done_promise set twice");
+            }
           ldpp_dout(dpp, 10) << "Background free_space co-routine stopped" << dendl;
       }
     );

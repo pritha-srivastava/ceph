@@ -16,7 +16,15 @@ static constexpr size_t XATTR_OVERHEAD_ESTIMATE = 4096;
 class SSDDriver : public CacheDriver {
 public:
   SSDDriver(Partition& partition_info, boost::asio::io_context& io_context, bool admin) : partition_info(partition_info), io_context(io_context), admin(admin) {}
-  virtual ~SSDDriver() { quit = true; }
+  virtual ~SSDDriver() {
+    quit = true;
+    if (free_space_timer.has_value()) {
+      free_space_timer->cancel();
+    }
+    if (free_space_worker_started) {
+      free_space_done_future.wait();
+    }
+  }
 
   virtual int initialize(const DoutPrefixProvider* dpp) override;
   virtual int put(const DoutPrefixProvider* dpp, const std::string& key, const bufferlist& bl, uint64_t len, const rgw::sal::Attrs& attrs, optional_yield y) override;
@@ -52,6 +60,8 @@ private:
   std::shared_mutex cache_lock;
   std::optional<boost::asio::steady_timer> free_space_timer;
   std::promise<void> free_space_done_promise;
+  std::future<void> free_space_done_future = free_space_done_promise.get_future();
+  bool free_space_worker_started{false};
   inline static std::atomic<bool> quit{false};
   bool admin;
 
