@@ -61,6 +61,7 @@ D4NFilterDriver::~D4NFilterDriver() = default;
 
 int D4NFilterDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
 {
+  ldpp_dout(dpp, 0) << "D4NFilterDriver::" << __func__ << "() called" << dendl;
   namespace net = boost::asio;
   using boost::redis::config;
 
@@ -147,10 +148,9 @@ int D4NFilterDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
   }
 
   policyDriver = std::make_unique<rgw::d4n::PolicyDriver>(conn, directory_type, cacheDriver.get(), "lfuda", this->y);
-  FilterDriver::initialize(cct, dpp);
-
-  cacheDriver->initialize(dpp);
-  policyDriver->get_cache_policy()->init(cct, dpp, io_context, next);
+  if (auto ret = FilterDriver::initialize(cct, dpp); ret < 0) { return ret; }
+  if (auto ret = cacheDriver->initialize(dpp); ret < 0) { return ret; }
+  if (auto ret = policyDriver->get_cache_policy()->init(cct, dpp, io_context, next); ret < 0) { return ret; }
  
   if (dpp->get_cct()->_conf->rgw_d4n_async_remote_put) {
     int thread_pool_size = dpp->get_cct()->_conf->rgw_d4n_thread_pool_size;
