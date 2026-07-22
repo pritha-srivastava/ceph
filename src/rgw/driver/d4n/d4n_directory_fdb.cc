@@ -88,7 +88,6 @@ int FDBDirectory::set_kv_multi_init_field(const DoutPrefixProvider* dpp, optiona
   if (!lfdb::get(FDBconn, key, existing)) {
     ldpp_dout(dpp, 0) << "FDBDirectory::" << __func__
                       << "() ERROR: get returned false" << dendl;
-    return -EIO;
   }
   std::map<std::string, std::string> to_write(always_set);
   if (existing.find(init_field) == existing.end()) {
