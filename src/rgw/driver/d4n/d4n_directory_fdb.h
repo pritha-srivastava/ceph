@@ -94,9 +94,8 @@ class FDBBucketDirectory: public FDBDirectory, public BucketDirectory {
     int fdb_scan(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start_token, const std::string& prefix, uint64_t count, bool marker_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, optional_yield y);
     template<SeqContainer Container>
     int set_values(const DoutPrefixProvider* dpp, CacheObject& obj_info, Container& fdbValues, optional_yield y);
-    int scan_objects(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start_token, const std::string& prefix, const std::string& marker, uint64_t count, bool marker_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, optional_yield y);
-    int get_range(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start, uint64_t count, bool start_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, optional_yield y);
-
+    std::string build_object_index(const std::string& bucket_id, const std::string& obj_name);
+    std::string get_object_subspace(const std::string& bucket_id);
 };
 
 class FDBObjectDirectory: public FDBDirectory, public ObjectDirectory {
@@ -118,6 +117,10 @@ class FDBObjectDirectory: public FDBDirectory, public ObjectDirectory {
     int fdb_rem(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& member, optional_yield y);
     int fdb_remrangebyscore(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, double min, double max, optional_yield y);
     int fdb_rank(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& member, std::string& index, optional_yield y);
+    std::string get_versions_subspace(const std::string& bucket_id, const std::string& obj_name);
+    std::string get_score_subspace(const std::string& bucket_id, const std::string& obj_name);
+    std::string build_versions_index(const std::string& bucket_id, const std::string& obj_name, const std::string& score, const std::string& version);
+    std::string build_version_score_index(const std::string& bucket_id, const std::string& obj_name, const std::string& version);
 
 };
 
