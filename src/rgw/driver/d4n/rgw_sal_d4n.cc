@@ -1802,7 +1802,9 @@ bool D4NFilterObject::check_head_exists_in_cache_get_oid(const DoutPrefixProvide
   rgw::d4n::BlockDirectory* blockDir = this->driver->get_block_dir();
   std::string objName = this->get_oid();
   //object oid does not contain "null" in case the instance is "null", so explicitly populating that
-  if (this->have_instance() && this->get_instance() == "null") {
+  if ((this->have_instance() && this->get_instance() == "null") ||
+	  (this->get_bucket()->versioned() && !this->get_bucket()->versioning_enabled())) 
+  {
     objName = "_:null_" + this->get_name();
   }
   ldpp_dout(dpp, 20) << "D4NFilterObject::" << __func__ << "(): objName: " << objName << dendl;
@@ -2249,6 +2251,11 @@ int D4NFilterObject::D4NFilterReadOp::flush(const DoutPrefixProvider* dpp, rgw::
             ldpp_dout(dpp, 20) << "D4NFilterObject::" << __func__ << " BlockDirectory get failed with ret: " << ret << dendl;
             //should we return from here?
           }
+		  if (source->get_bucket()->versioned() && !source->get_bucket()->versioning_enabled()) {
+            bufferlist bl_val;
+            bl_val.append("null");
+            attrs[RGW_CACHE_ATTR_VERSION_ID] = std::move(bl_val);
+          }
           //if a new version has been written, then do not cache old data locally
           if (dest_version == dest_block.version) {
             dest_block.cacheObj.hostsList.insert(dpp->get_cct()->_conf->rgw_d4n_local_rgw_address);
@@ -2277,10 +2284,10 @@ int D4NFilterObject::D4NFilterReadOp::flush(const DoutPrefixProvider* dpp, rgw::
         }
 
         if (write_to_local_cache) {
-		  ldpp_dout(dpp, 20) << "D4NFilterObject::" << __func__ << " object version in update method is: " << dest_version << dendl;
-		  // destination key is the same as key
-		  auto ret = source->write_if_space_available(dpp, key, bl, bl.length(), attrs, ofs, dest_version, true, std::get<rgw_user>(source->get_bucket()->get_owner()), 
-											           source->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, y);
+	  ldpp_dout(dpp, 20) << "D4NFilterObject::" << __func__ << " object version in update method is: " << dest_version << dendl;
+	  // destination key is the same as key
+	  auto ret = source->write_if_space_available(dpp, key, bl, bl.length(), attrs, ofs, dest_version, true, std::get<rgw_user>(source->get_bucket()->get_owner()), 
+											   source->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, y);
           if (ret == 0) {
             if (ret = source->driver->get_block_dir()->set(dpp, &dest_block, y); ret < 0){
               ldpp_dout(dpp, 20) << "D4NFilterObject::" << __func__ << " BlockDirectory set failed with ret: " << ret << dendl;
@@ -2432,6 +2439,7 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
         int r = -1;
         ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): Info: Fetching from remote cache! " << dendl;
         if ((ret = block_dir->get(dpp, &block, y)) == 0) {
+	  source->set_object_version(version);
           if (block.version != version) {
             // TODO: If data has already been returned for any older versioned block, then return ‘retry’ error
             ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): Info: Version mismatch, draining data for oid: " << oid_in_cache << dendl;
@@ -2458,10 +2466,10 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
             std::string instance = "";
             if (source->have_instance()) {
               instance = source->get_instance();
-			  ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): instance=" << instance << dendl;
-            } else if (!source->get_bucket()->versioned() && source->get_bucket()->versioning_enabled()) {
+	      ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): instance=" << instance << dendl;
+            } else if (source->get_bucket()->versioned() && !source->get_bucket()->versioning_enabled()) {
               instance = "null";
-			}
+	    }
             std::string remote_addr = *(block.cacheObj.hostsList.begin());
             if (!dpp->get_cct()->_conf->rgw_d4n_remote_async_get) {
               ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ << "(): Info: remote_addr: " << remote_addr << dendl;
@@ -2541,7 +2549,7 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
                       dirty,
                       usr,
                       remote_addr,
-					  size,
+		      size,
                       instance
                     };
                   std::unique_ptr<rgw::d4n::RemoteCacheGetOp> remote_get = std::make_unique<rgw::d4n::RemoteCacheGetOp>(driver, op);
