@@ -57,7 +57,12 @@ D4NFilterDriver::D4NFilterDriver(Driver* _next, boost::asio::io_context& io_cont
   cacheDriver = std::make_unique<rgw::cache::SSDDriver>(partition_info, io_context, admin);
 }
 
-D4NFilterDriver::~D4NFilterDriver() = default;
+D4NFilterDriver::~D4NFilterDriver()
+{
+  if (directory_type == "fdb") {
+    ceph::libfdb::shutdown_libfdb();
+  }
+}
 
 int D4NFilterDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
 {
@@ -2187,7 +2192,9 @@ void D4NFilterDriver::shutdown()
     boost::asio::dispatch(redis_conn->get_redis_conn()->get_executor(), [c = redis_conn->get_redis_conn()] { c->cancel(); });
   }
   else if (directory_type == "fdb"){
-  	ceph::libfdb::shutdown_libfdb(); 
+    // shutdown_libfdb() is called in ~D4NFilterDriver(), after pool->finish() drains
+    // the io_context threads. Calling it here would stop the FDB network thread while
+    // directory_sync coroutines may still be blocked in fdb_future_block_until_ready.
   }
 
   cacheDriver.reset();

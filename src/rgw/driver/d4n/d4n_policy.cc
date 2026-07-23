@@ -279,7 +279,7 @@ int LFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_
     }
   };
 
-  static auto block_callback = [this](
+  auto block_callback = [this](
           const DoutPrefixProvider* dpp, const std::string& key, uint64_t offset, uint64_t len, const std::string& version, bool dirty, const rgw_user user, const std::string& bucketName, optional_yield y, std::string& restore_val) {
     update(dpp, key, offset, len, version, dirty, user, bucketName, RefCount::NOOP, y, restore_val);
   };
@@ -337,7 +337,6 @@ int LFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_
                       << "() FDB ERROR in set_kv_multi_init_field: " << e.what() << dendl;
     return -EIO;
   }
-
   asio::co_spawn(io_context.get_executor(),
         directory_sync(dpp, y), asio::detached);
 
