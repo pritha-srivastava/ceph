@@ -1272,7 +1272,7 @@ int D4NFilterObject::calculate_version(const DoutPrefixProvider* dpp, optional_y
 
 int D4NFilterObject::write_if_space_available(const DoutPrefixProvider* dpp, const std::string& key, const bufferlist& bl, uint64_t len, const Attrs& attrs, 
                                                uint64_t ofs, const std::string& version, const bool& dirty, const rgw_user user, const std::string& bucketName, 
-                                               uint8_t op, optional_yield y) {
+                                               uint8_t op, optional_yield y, std::optional<rgw::d4n::CacheBlock*> block) {
   // Fast path: enough space exists, reserve and return
   auto cacheDriver = driver->get_cache_driver();
   uint64_t size = len;
@@ -1300,7 +1300,11 @@ int D4NFilterObject::write_if_space_available(const DoutPrefixProvider* dpp, con
 
   ret = driver->get_cache_driver()->put(dpp, key, bl, len, attrs, y);
   if (ret == 0) {
-	driver->get_policy_driver()->get_cache_policy()->update(dpp, key, ofs, len, version, dirty, user, bucketName, op, y);
+    if (block.has_value()) {
+	  driver->get_policy_driver()->get_cache_policy()->update(dpp, key, ofs, len, version, dirty, user, bucketName, op, y, block);
+    } else {
+	  driver->get_policy_driver()->get_cache_policy()->update(dpp, key, ofs, len, version, dirty, user, bucketName, op, y, std::nullopt);
+    }
   } else {
 	ldpp_dout(dpp, 0) << __func__ << "(): ERROR: Cache driver put call failed, ret=" << ret << dendl;
 	rollback_reservation();
@@ -1342,7 +1346,7 @@ int D4NFilterObject::create_delete_marker(const DoutPrefixProvider* dpp, optiona
   ldpp_dout(dpp, 20) << "D4NFilterObject::" << __func__ << "(): key is: " << key << dendl;
   ldpp_dout(dpp, 20) << "D4NFilterObject::" << __func__ << "(): version stored in update method is: " << version << dendl;
   auto ret = write_if_space_available(dpp, key, bl, bl.length(), attrs, 0, version, true, std::get<rgw_user>(this->get_bucket()->get_owner()),
-                                       this->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, y); // bl.length() is equal to 0
+                                       this->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, y, std::nullopt); // bl.length() is equal to 0
   if (ret == 0) {
 	ret = this->set_head_block_dir_entry(dpp, y, attrs, true, true);
 	if (ret < 0) {
@@ -2231,7 +2235,7 @@ int D4NFilterObject::D4NFilterReadOp::flush(const DoutPrefixProvider* dpp, rgw::
       if(!is_remote) {
         ldpp_dout(dpp, 20) << "D4NFilterObject::" << __func__ << " calling update for offset: " << cur_ofs << " adjusted offset: " << ofs  << " length: " << len << " oid_in_cache: " << oid_in_cache << dendl;
         ldpp_dout(dpp, 20) << "D4NFilterObject::" << __func__ << " version stored in update method is: " << version << " " << source->get_object_version() << dendl;
-        source->driver->get_policy_driver()->get_cache_policy()->update(dpp, oid_in_cache, ofs, len, version, std::nullopt, std::get<rgw_user>(source->get_bucket()->get_owner()), source->get_bucket()->get_name(), rgw::d4n::RefCount::DECR, y);
+        source->driver->get_policy_driver()->get_cache_policy()->update(dpp, oid_in_cache, ofs, len, version, std::nullopt, std::get<rgw_user>(source->get_bucket()->get_owner()), source->get_bucket()->get_name(), rgw::d4n::RefCount::DECR, y, std::nullopt);
       }
       if ((source->dest_object && source->dest_bucket) || is_remote) {
         std::string dest_version;
@@ -2280,11 +2284,17 @@ int D4NFilterObject::D4NFilterReadOp::flush(const DoutPrefixProvider* dpp, rgw::
 
         if (write_to_local_cache) {
 		  ldpp_dout(dpp, 20) << "D4NFilterObject::" << __func__ << " object version in update method is: " << dest_version << dendl;
+		  int ret;
 		  // destination key is the same as key
-		  auto ret = source->write_if_space_available(dpp, key, bl, bl.length(), attrs, ofs, dest_version, true, std::get<rgw_user>(source->get_bucket()->get_owner()), 
-											           source->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, y);
+		  if (is_remote) {
+		    ret = source->write_if_space_available(dpp, key, bl, bl.length(), attrs, ofs, dest_version, true, std::get<rgw_user>(source->get_bucket()->get_owner()), 
+													source->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, y, &dest_block);
+          } else {
+		    ret = source->write_if_space_available(dpp, key, bl, bl.length(), attrs, ofs, dest_version, true, std::get<rgw_user>(source->get_bucket()->get_owner()), 
+													source->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, y, std::nullopt);
+          }
           if (ret == 0) {
-            if (ret = source->driver->get_block_dir()->set(dpp, &dest_block, y); ret < 0){
+            if (ret = source->driver->get_block_dir()->set(dpp, &dest_block, y); ret < 0) {
               ldpp_dout(dpp, 20) << "D4NFilterObject::" << __func__ << " BlockDirectory set failed with ret: " << ret << dendl;
             }
           } else {
@@ -2736,7 +2746,7 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
         block.size = bl.length();
 
 		auto ret = source->write_if_space_available(dpp, oid, bl, bl.length(), attrs, adjusted_start_ofs, version, dirty, std::get<rgw_user>(source->get_bucket()->get_owner()), 
-											           source->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, *y);
+											           source->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, *y, std::nullopt);
 		if (ret == 0) {
 		  std::string objEtag = "";
 		  blocks.emplace_back(block);
@@ -2749,7 +2759,7 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
         dest_block.blockID = adjusted_start_ofs;
         dest_block.size = bl.length();
 		auto ret = source->write_if_space_available(dpp, dest_oid, bl, bl.length(), attrs, adjusted_start_ofs, dest_version, dirty, std::get<rgw_user>(source->get_bucket()->get_owner()), 
-													 source->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, *y);
+													 source->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, *y, std::nullopt);
         if (ret == 0) {
 		  dest_blocks.emplace_back(dest_block);
         }
@@ -2760,7 +2770,7 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
       block.size = bl.length();
       if (!policy->exist_key(oid)) {
 		auto ret = source->write_if_space_available(dpp, oid, bl, bl.length(), attrs, adjusted_start_ofs, version, dirty, std::get<rgw_user>(source->get_bucket()->get_owner()), 
-											           source->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, *y);
+											           source->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, *y, std::nullopt);
         if (ret == 0) {
 		  blocks.emplace_back(block);
         }
@@ -2772,7 +2782,7 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
         dest_block.blockID = adjusted_start_ofs;
         dest_block.size = bl.length();
 		auto ret = source->write_if_space_available(dpp, dest_oid, bl, bl.length(), attrs, adjusted_start_ofs, dest_version, dirty, std::get<rgw_user>(source->get_bucket()->get_owner()), 
-											           source->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, *y);
+											           source->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, *y, std::nullopt);
         if (ret == 0) {
 		  dest_blocks.emplace_back(dest_block);
         }
@@ -2793,7 +2803,7 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
           block.size = bl_rem.length();
           
 		  auto ret = source->write_if_space_available(dpp, oid, bl_rem, bl_rem.length(), attrs, adjusted_start_ofs, version, dirty, std::get<rgw_user>(source->get_bucket()->get_owner()), 
-											           source->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, *y);
+											           source->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, *y, std::nullopt);
           if (ret == 0) {
               blocks.emplace_back(block);
           } else {
@@ -2808,7 +2818,7 @@ int D4NFilterObject::D4NFilterReadOp::D4NFilterGetCB::handle_data(bufferlist& bl
           dest_block.blockID = adjusted_start_ofs;
           dest_block.size = bl_rem.length();
 		  auto ret = source->write_if_space_available(dpp, dest_oid, bl_rem, bl_rem.length(), attrs, adjusted_start_ofs, dest_version, dirty, std::get<rgw_user>(source->get_bucket()->get_owner()), 
-											           source->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, *y);
+											           source->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, *y, std::nullopt);
           if (ret == 0) {
               dest_blocks.emplace_back(dest_block);
           }
@@ -3313,7 +3323,7 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
 
   if (!d4n_writecache) {
     if (cache_request || remote_cache_request) {
-  return -EINVAL;
+	  return -EINVAL;
     }
     ldpp_dout(dpp, 10) << "D4NFilterWriter::" << __func__ << "(): calling next process" << dendl;
     return next->process(std::move(data), offset);
@@ -3338,7 +3348,7 @@ int D4NFilterWriter::process(bufferlist&& data, uint64_t offset)
 	  attrs[RGW_CACHE_ATTR_OBJECT_NS] = std::move(bl_val);
 
 	  auto local_cache_ret = object->write_if_space_available(dpp, oid_in_cache, bl, bl_len, attrs, ofs, version, dirty, std::get<rgw_user>(object->get_bucket()->get_owner()), 
-												   object->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, y);
+												   object->get_bucket()->get_name(), rgw::d4n::RefCount::NOOP, y, std::nullopt);
       if (local_cache_ret < 0) {
         ldpp_dout(dpp, 0) << "D4NFilterWriter::" << __func__ << "(): adding block to local cache failed with ret= " << local_cache_ret << dendl;
       }

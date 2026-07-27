@@ -154,7 +154,7 @@ int LFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_
 
   static auto block_callback = [this](
           const DoutPrefixProvider* dpp, const std::string& key, uint64_t offset, uint64_t len, const std::string& version, bool dirty, const rgw_user user, const std::string& bucketName, optional_yield y, std::string& restore_val) {
-    update(dpp, key, offset, len, version, dirty, user, bucketName, RefCount::NOOP, y, restore_val);
+    update(dpp, key, offset, len, version, dirty, user, bucketName, RefCount::NOOP, y, std::nullopt, restore_val);
   };
 
   cacheDriver->restore_blocks_objects(dpp, obj_callback, block_callback);
@@ -723,13 +723,12 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
 	// Only update victim block's global weight if the block wasn't completely evicted; else, delete block from directory 
     if (update_global_weight) {
 	  block.globalWeight += entry.localWeight;
-	  globalWeight = std::to_string(block.globalWeight);
-	  if (int ret = blockDir->update_field(dpp, &block, "globalWeight", globalWeight, y) < 0) {
-		return ret;
-	  }
-	  //Need to get and then update the host atomically in a remote setup
-	  if ((ret = blockDir->remove_host(dpp, &block, dpp->get_cct()->_conf->rgw_d4n_local_rgw_address, y)) < 0) {
-		ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << ": Failed to remove local host from victim block." << dendl;
+      block.cacheObj.hostsList.clear();
+      block.cacheObj.hostsList.insert(remoteCacheAddress);
+	  // TODO: Need to get and then update the host atomically in a remote setup
+      // Update global weight and remove host in one directory::set call
+	  if (int ret = blockDir->set(dpp, &block, y) < 0) {
+		ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << ": Failed to update victim block entry in directory." << dendl;
 		return ret;
 	  }
     } else {
@@ -779,7 +778,7 @@ bool LFUDAPolicy::update_refcount_if_key_exists(const DoutPrefixProvider* dpp, c
   return true;
 }
 
-void LFUDAPolicy::update(const DoutPrefixProvider* dpp, const std::string& key, uint64_t offset, uint64_t len, const std::string& version, std::optional<bool> dirty, const rgw_user user, const std::string& bucketName, uint8_t op, optional_yield y, std::string& restore_val)
+void LFUDAPolicy::update(const DoutPrefixProvider* dpp, const std::string& key, uint64_t offset, uint64_t len, const std::string& version, std::optional<bool> dirty, const rgw_user user, const std::string& bucketName, uint8_t op, optional_yield y, std::optional<rgw::d4n::CacheBlock*> block, std::string& restore_val)
 {
   ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): updating entry: " << key << dendl;
   using handle_type = boost::heap::fibonacci_heap<LFUDAEntry*, boost::heap::compare<EntryComparator<LFUDAEntry>>>::handle_type;
@@ -867,6 +866,9 @@ void LFUDAPolicy::update(const DoutPrefixProvider* dpp, const std::string& key, 
   if (should_notify) {
     ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): notify_one: "<< dendl;
     lw_cond.notify_one();
+  }
+  if (block.has_value()) { // This parameter is only populated during remote get requests
+    block.value()->globalWeight += age; 
   }
 }
 
@@ -1215,7 +1217,7 @@ int LFUDAPolicy::do_writeback(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, o
       std::string oid_in_cache = rgw::sal::get_key_in_cache(e->key, std::to_string(fst), std::to_string(cur_len));
       ldpp_dout(dpp, 20) << __func__ << "(): oid_in_cache =" << oid_in_cache << dendl;
       //Update in-memory data structure for each block
-      this->update(dpp, oid_in_cache, 0, 0, e->version, false, e->user, e->bucket_name, 0, y);
+      this->update(dpp, oid_in_cache, 0, 0, e->version, false, e->user, e->bucket_name, 0, y, std::nullopt);
 
       rgw::d4n::CacheBlock block;
       block.cacheObj.bucketName = c_obj->get_bucket()->get_bucket_id();
@@ -1239,7 +1241,7 @@ int LFUDAPolicy::do_writeback(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, o
   //head block exists only for delete marker
   if (e->delete_marker) {
     //invoke update() with dirty flag set to false, to update in-memory metadata for head
-    this->update(dpp, e->key, 0, 0, e->version, false, e->user, e->bucket_name, 0, y);
+    this->update(dpp, e->key, 0, 0, e->version, false, e->user, e->bucket_name, 0, y, std::nullopt);
     if ((ret = cacheDriver->set_attr(dpp, e->key, RGW_CACHE_ATTR_DIRTY, "0", y)) < 0) {
       ldpp_dout(dpp, 0) << __func__ << "(): Failed to update dirty attr in cache, ret=" << op_ret << dendl;
     }
@@ -1582,7 +1584,7 @@ int LRUPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional_y
   return 0;
 }
 
-void LRUPolicy::update(const DoutPrefixProvider* dpp, const std::string& key, uint64_t offset, uint64_t len, const std::string& version, std::optional<bool> dirty, const rgw_user user, const std::string& bucketName, uint8_t op, optional_yield y, std::string& restore_val)
+void LRUPolicy::update(const DoutPrefixProvider* dpp, const std::string& key, uint64_t offset, uint64_t len, const std::string& version, std::optional<bool> dirty, const rgw_user user, const std::string& bucketName, uint8_t op, optional_yield y, std::optional<rgw::d4n::CacheBlock*> block, std::string& restore_val)
 {
   const std::lock_guard l(lru_lock);
   _erase(dpp, key, y);
