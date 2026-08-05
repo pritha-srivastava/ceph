@@ -11,6 +11,42 @@ using boost::redis::request;
 using boost::redis::response;
 using boost::redis::ignore_t;
 
+class RedisTransaction : public Transaction {
+public:
+  explicit RedisTransaction(std::shared_ptr<connection> conn, std::shared_ptr<RedisPool> pool)
+    : conn_(conn), pool_(pool) {}
+
+  ~RedisTransaction() override {
+    if (!executed_ && pool_) pool_->release(conn_);
+  }
+
+  // internal use only — called by RedisBlockDirectory/RedisObjectDirectory/etc.
+  request& get_request() { return req_; }
+
+  int commit(const DoutPrefixProvider* dpp, optional_yield y) override;
+  int abort(const DoutPrefixProvider* dpp, optional_yield y) override;
+
+private:
+  int execute_request(const DoutPrefixProvider* dpp, optional_yield y);
+  std::shared_ptr<connection> conn_;
+  std::shared_ptr<RedisPool> pool_;
+  request req_;
+  bool executed_{false};
+};
+
+
+class RedisTransactionFactory : public TransactionFactory {
+public:
+  explicit RedisTransactionFactory(std::shared_ptr<RedisPool> pool) : pool_(pool) {}
+  std::unique_ptr<Transaction> create_transaction(const DoutPrefixProvider* dpp) override {
+    auto conn = pool_->acquire(dpp);
+    return std::make_unique<RedisTransaction>(conn, pool_);
+  }
+private:
+  std::shared_ptr<RedisPool> pool_;
+};
+
+
 class RedisDirectory: virtual public Directory {
   public:
 	std::shared_ptr<RedisPool> redis_pool{nullptr}; // Redis connection pool
@@ -113,12 +149,6 @@ class RedisBlockDirectory: public RedisDirectory, public BlockDirectory {
     virtual int set(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y, Transaction* txn=nullptr) override;
     virtual int set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Transaction* txn=nullptr) override;
     virtual int get(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) override;
-    //Pipelined version of get using boost::redis::response for list bucket
-	/*
-    template <size_t N = 100>
-    int get(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y);
-	*/
-    //Pipelined version of get using boost::redis::generic_response
     virtual int get(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y) override;
     virtual int copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, optional_yield y, Transaction* txn=nullptr) override;
     virtual int del(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Transaction* txn=nullptr) override;

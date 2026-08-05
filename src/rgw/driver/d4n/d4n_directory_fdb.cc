@@ -192,7 +192,7 @@ int FDBBucketDirectory::del(const DoutPrefixProvider* dpp, const std::string& bu
   return 0;
 }
 
-int FDBBucketDirectory::add_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, optional_yield y, Pipeline* pipeline)
+int FDBBucketDirectory::add_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, optional_yield y, Transaction* txn)
 {
   return fdb_add(dpp, bucket_id, 0, object_name, std::move(params), y);
 }
@@ -894,7 +894,7 @@ int FDBBlockDirectory::set_values(const DoutPrefixProvider* dpp,
   return 0;
 }
 
-int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Pipeline* pipeline)
+int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Transaction* txn)
 {
   if (!block) {
     ldpp_dout(dpp, 0) << "FDBBlockDirectory::" << __func__
