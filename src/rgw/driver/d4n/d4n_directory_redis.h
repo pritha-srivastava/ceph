@@ -11,6 +11,42 @@ using boost::redis::request;
 using boost::redis::response;
 using boost::redis::ignore_t;
 
+class RedisTransaction : public Transaction {
+public:
+  explicit RedisTransaction(std::shared_ptr<connection> conn, std::shared_ptr<RedisPool> pool)
+    : conn_(conn), pool_(pool) {}
+
+  ~RedisTransaction() override {
+    if (!executed_ && pool_) pool_->release(conn_);
+  }
+
+  // internal use only — called by RedisBlockDirectory/RedisObjectDirectory/etc.
+  request& get_request() { return req_; }
+
+  int commit(const DoutPrefixProvider* dpp, optional_yield y) override;
+  int abort(const DoutPrefixProvider* dpp, optional_yield y) override;
+
+private:
+  int execute_request(const DoutPrefixProvider* dpp, optional_yield y);
+  std::shared_ptr<connection> conn_;
+  std::shared_ptr<RedisPool> pool_;
+  request req_;
+  bool executed_{false};
+};
+
+
+class RedisTransactionFactory : public TransactionFactory {
+public:
+  explicit RedisTransactionFactory(std::shared_ptr<RedisPool> pool) : pool_(pool) {}
+  std::unique_ptr<Transaction> create_transaction(const DoutPrefixProvider* dpp) override {
+    auto conn = pool_->acquire(dpp);
+    return std::make_unique<RedisTransaction>(conn, pool_);
+  }
+private:
+  std::shared_ptr<RedisPool> pool_;
+};
+
+
 class RedisDirectory: virtual public Directory {
   public:
 	std::shared_ptr<RedisPool> redis_pool{nullptr}; // Redis connection pool
@@ -55,7 +91,7 @@ class RedisBucketDirectory: public RedisDirectory, public BucketDirectory {
 
     virtual int exist_key(const DoutPrefixProvider* dpp, const std::string& bucket_id, optional_yield y) override;
     virtual int del(const DoutPrefixProvider* dpp, const std::string& bucket_id, optional_yield y) override;
-    virtual int add_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, optional_yield y, Pipeline* pipeline=nullptr) override;
+    virtual int add_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, optional_yield y, Transaction* txn=nullptr) override;
     virtual int remove_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, optional_yield y) override;
     virtual int list_objects(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start_token, const std::string& prefix, const std::string& marker, uint64_t count, bool marker_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, optional_yield y) override;
 
@@ -65,7 +101,7 @@ class RedisBucketDirectory: public RedisDirectory, public BucketDirectory {
     int scan_objects(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start_token, const std::string& prefix, const std::string& marker, uint64_t count, bool marker_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, optional_yield y);
     //without prefix, get_range(start="-", end="+")
     int get_range(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start, uint64_t count, bool start_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, optional_yield y);
-    int zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, double score, const std::string& member, optional_yield y, Pipeline* pipeline=nullptr);
+    int zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, double score, const std::string& member, optional_yield y, Transaction* txn=nullptr);
     int zrem(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& member, optional_yield y);
     int zrange(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start, const std::string& stop, uint64_t offset, uint64_t count, std::vector<std::string>& members, optional_yield y);
     int zscan(const DoutPrefixProvider* dpp, const std::string& bucket_id, uint64_t cursor, const std::string& pattern, uint64_t count, std::vector<CacheObject>& objs_info, uint64_t& next_cursor, optional_yield y);
@@ -79,14 +115,14 @@ class RedisObjectDirectory: public RedisDirectory, public ObjectDirectory {
     virtual int exist_key(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, optional_yield y) override;
     virtual int del(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) override;
 
-    virtual int add_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, ceph::real_time& creation_time, std::optional<CacheObjectVersion> params, optional_yield y, Pipeline* pipeline=nullptr);
+    virtual int add_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, ceph::real_time& creation_time, std::optional<CacheObjectVersion> params, optional_yield y, Transaction* txn=nullptr);
     virtual int remove_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, optional_yield y);
     virtual int remove_version_by_creation_time(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const double& creation_time,optional_yield y);
     virtual int list_versions(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& marker_version, uint64_t count, std::vector<CacheObjectVersion>& obj_versions, std::string& continuation_token, optional_yield y);
 
   private:
     int get_version_index(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, std::string& index, optional_yield y);
-    int zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, double score, const std::string& member, optional_yield y, Pipeline* pipeline=nullptr);
+    int zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, double score, const std::string& member, optional_yield y, Transaction* txn=nullptr);
     int zrange(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, int start, int stop, std::vector<std::string>& members, optional_yield y);
     int zrevrange(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& start, const std::string& stop, std::vector<std::string>& members, optional_yield y);
     int zrem(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& member, optional_yield y);
@@ -101,16 +137,9 @@ class RedisBlockDirectory: public RedisDirectory, public BlockDirectory {
     
     virtual int exist_key(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) override;
 
-    //Pipelined version of set
     virtual int set(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y) override;
-    virtual int set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Pipeline* pipeline=nullptr) override;
+    virtual int set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Transaction* txn=nullptr) override;
     virtual int get(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) override;
-    //Pipelined version of get using boost::redis::response for list bucket
-	/*
-    template <size_t N = 100>
-    int get(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y);
-	*/
-    //Pipelined version of get using boost::redis::generic_response
     virtual int get(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y) override;
     virtual int copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, optional_yield y) override;
     virtual int del(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) override;

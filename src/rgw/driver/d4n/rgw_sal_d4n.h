@@ -43,6 +43,7 @@ namespace rgw::d4n {
   class RemoteCacheDeleteOp;
   class RemoteCachePutOp;
   class RemoteCachePutBatch;
+  class RedisTransactionFactory;
 }
 
 namespace rgw::sal {
@@ -267,6 +268,7 @@ class D4NFilterDriver : public FilterDriver {
 
     // Redis connection pool
     std::shared_ptr<rgw::d4n::RedisPool> redis_pool;
+    std::shared_ptr<rgw::d4n::RedisTransactionFactory> txn_factory;
 
   public:
     void initialize_pool(const DoutPrefixProvider *dpp,
@@ -336,6 +338,8 @@ class D4NFilterDriver : public FilterDriver {
     void save_y(optional_yield y) { this->y = y; }
     std::shared_ptr<rgw::d4n::DirectoryConnection> get_conn() { return conn; }
     std::shared_ptr<rgw::d4n::RedisPool> get_redis_pool() { return redis_pool; }
+    std::shared_ptr<rgw::d4n::RedisTransactionFactory> get_txn_factory() { return txn_factory; }
+
     boost::asio::io_context& get_io_context() { return io_context; }
 
     std::string get_directory_type(){ return directory_type; }

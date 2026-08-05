@@ -149,6 +149,40 @@ void redis_exec_connection_pool(const DoutPrefixProvider* dpp,
     	redis_exec_cp(dpp, redis_pool, ec, req, resp, y);
 }
 
+int RedisTransaction::commit(const DoutPrefixProvider* dpp, optional_yield y){
+  int r = execute_request(dpp, y);
+  executed_ = true;
+  if (pool_) pool_->release(conn_);
+  return r;
+}
+
+int RedisTransaction::abort(const DoutPrefixProvider* dpp, optional_yield y){
+  executed_ = true;   // nothing was sent yet, just drop the buffered request
+  if (pool_) pool_->release(conn_);
+  return 0;
+}
+
+int RedisTransaction::execute_request(const DoutPrefixProvider* dpp, optional_yield y)
+{
+  boost::redis::generic_response resp;
+  try {
+    boost::system::error_code ec;
+    executed_ = false;
+    redis_exec_connection_pool(dpp, pool_, conn_, ec, req_, resp, y);
+
+    if (ec) {
+      ldpp_dout(dpp, 0) << "Directory::" << __func__ << "() ERROR: " << ec.what() << dendl;
+      return -ec.value();
+    }
+  } catch (std::exception &e) {
+    ldpp_dout(dpp, 0) << "Directory::" << __func__ << "() ERROR: " << e.what() << dendl;
+    return -EINVAL;
+  }
+  return 0;
+}
+
+
+
 int RedisDirectory::get_kv(const DoutPrefixProvider* dpp, optional_yield y,
                        const std::string& key,
                        const std::string& field,
@@ -267,8 +301,9 @@ int RedisDirectory::set_kv_if_not_exists(const DoutPrefixProvider* dpp, optional
 }
 
 
-int RedisBucketDirectory::zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, double score, const std::string& member, optional_yield y, Pipeline* pipeline)
+int RedisBucketDirectory::zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, double score, const std::string& member, optional_yield y, Transaction* txn)
 {
+/* FIXME: AMIN
   try {
     boost::system::error_code ec;
     if (pipeline && pipeline->is_pipeline()) {
@@ -298,7 +333,7 @@ int RedisBucketDirectory::zadd(const DoutPrefixProvider* dpp, const std::string&
   }
 
   return 0;
-
+*/
 }
 
 int RedisBucketDirectory::zrem(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& member, optional_yield y)
@@ -437,9 +472,9 @@ int RedisBucketDirectory::del(const DoutPrefixProvider* dpp, const std::string& 
   return 0;
 }
 
-int RedisBucketDirectory::add_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, optional_yield y, Pipeline* pipeline)
+int RedisBucketDirectory::add_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, optional_yield y, Transaction* txn)
 {
-  return zadd(dpp, bucket_id, 0, object_name, y, pipeline);
+  return zadd(dpp, bucket_id, 0, object_name, y, txn);
 }
 
 int RedisBucketDirectory::remove_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, optional_yield y)
@@ -839,8 +874,9 @@ int RedisObjectDirectory::update_field(const DoutPrefixProvider* dpp, CacheObj* 
 
 #endif
 
-int RedisObjectDirectory::zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, double score, const std::string& member, optional_yield y, Pipeline* pipeline)
+int RedisObjectDirectory::zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, double score, const std::string& member, optional_yield y, Transaction* txn)
 {
+/* FIXME: AMIN
   std::string key = build_index(bucket_id, obj_name);
   try {
     boost::system::error_code ec;
@@ -870,7 +906,7 @@ int RedisObjectDirectory::zadd(const DoutPrefixProvider* dpp, const std::string&
   }
 
   return 0;
-
+*/
 }
 
 
@@ -1014,11 +1050,11 @@ int RedisObjectDirectory::zrank(const DoutPrefixProvider* dpp, const std::string
   return 0;
 }
 
-int RedisObjectDirectory::add_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, ceph::real_time& creation_time, std::optional<CacheObjectVersion> params, optional_yield y, Pipeline* pipeline)
+int RedisObjectDirectory::add_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, ceph::real_time& creation_time, std::optional<CacheObjectVersion> params, optional_yield y, Transaction* txn)
 {
   auto score = ceph::real_clock::to_double(creation_time);
   ldpp_dout(dpp, 10) << "RedisObjectDirectory::" << __func__ << "(): Score of object name: "<< obj_name << " version: " << version << " is: "  << score << dendl;
-  return zadd(dpp, bucket_id, obj_name, score, version, y, pipeline);
+  return zadd(dpp, bucket_id, obj_name, score, version, y, txn);
 }
 
 int RedisObjectDirectory::remove_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, optional_yield y)
@@ -1156,10 +1192,61 @@ int RedisBlockDirectory::set_values(const DoutPrefixProvider* dpp, CacheBlock& b
   return 0;
 }
 
+int RedisBlockDirectory::set(const DoutPrefixProvider* dpp, CacheBlock* block,
+                              optional_yield y, Transaction* txn) {
+  RedisTransaction* rtxn = nullptr;
+  if (txn) {
+    rtxn = dynamic_cast<RedisTransaction*>(txn);
+    if (!rtxn) {
+      ldpp_dout(dpp, 0) << "ERROR: transaction passed to RedisBlockDirectory is not a RedisTransaction" << dendl;
+      return -EINVAL;
+    }
+  }
+
+  if (!block) {
+    ldpp_dout(dpp, 0) << "RedisBlockDirectory::" << __func__
+                      << "() ERROR: null block pointer" << dendl;
+    return -EINVAL;
+  }
+
+  std::string key = build_index(block);
+  ldpp_dout(dpp, 10) << "RedisBlockDirectory::" << __func__ << "(): index is: " << key << dendl;
+
+  std::map<std::string, std::string> redisValues;
+
+  auto ret = set_values(dpp, *block, redisValues, y);
+  if (ret < 0) {
+    return ret;
+  }
+
+  request req;
+  request& target = rtxn ? rtxn->get_request() : req;
+  target.push_range("HSET", key, redisValues);
+
+  if (rtxn) {
+    return 0;   // batched — caller commits later
+  }
+
+  try {
+    boost::system::error_code ec;
+    response<ignore_t> resp;
+
+    redis_exec_connection_pool(dpp, redis_pool, REDISconn, ec, target, resp, y);
+    if (ec) {
+      ldpp_dout(dpp, 0) << "RedisBlockDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
+      return -ec.value();
+    }
+  } catch (std::exception &e) {
+    ldpp_dout(dpp, 0) << "RedisBlockDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
+    return -EINVAL;
+  }
+
+  return 0;
+}
+
+/*
 int RedisBlockDirectory::set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Pipeline* pipeline)
 {
-  /* For existing keys, call get method beforehand. 
-     Sets completely overwrite existing values. */
   std::string key = build_index(block);
   ldpp_dout(dpp, 10) << "RedisBlockDirectory::" << __func__ << "(): index is: " << key << dendl;
 
@@ -1193,6 +1280,7 @@ int RedisBlockDirectory::set(const DoutPrefixProvider* dpp, CacheBlock* block, o
 
   return 0;
 }
+*/
 
 int RedisBlockDirectory::set(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y)
 {

@@ -125,7 +125,7 @@ int FDBBucketDirectory::del(const DoutPrefixProvider* dpp, const std::string& bu
   return 0;
 }
 
-int FDBBucketDirectory::add_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, optional_yield y, Pipeline* pipeline)
+int FDBBucketDirectory::add_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, optional_yield y, Transaction* txn)
 {
   return fdb_add(dpp, bucket_id, 0, object_name, std::move(params), y);
 }
@@ -719,7 +719,7 @@ int FDBObjectDirectory::fdb_rank(const DoutPrefixProvider* dpp,
   return 0;
 }
 
-int FDBObjectDirectory::add_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, ceph::real_time& creation_time, std::optional<CacheObjectVersion> params, optional_yield y, Pipeline* pipeline)
+int FDBObjectDirectory::add_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, ceph::real_time& creation_time, std::optional<CacheObjectVersion> params, optional_yield y, Transaction* txn)
 {
   auto score = ceph::real_clock::to_double(creation_time);
   ldpp_dout(dpp, 10) << "FDBObjectDirectory::" << __func__ << "(): Score of object name: "<< obj_name << " version: " << version << " is: "  << score << dendl;
@@ -843,7 +843,7 @@ int FDBBlockDirectory::set_values(const DoutPrefixProvider* dpp,
   return 0;
 }
 
-int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Pipeline* pipeline)
+int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Transaction* txn)
 {
   std::string key = build_index(block);
   ldpp_dout(dpp, 10) << "FDBBlockDirectory::" << __func__ << "(): index is: " << key << dendl;
