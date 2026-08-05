@@ -212,6 +212,21 @@ struct CacheBlock {
   /* Blocks use the cacheObj's dirty and hostsList metadata to store their dirty flag values and locations in the block directory. */
 };
 
+
+//Used for Batching/Transaction in Directory
+class Transaction {
+public:
+  virtual ~Transaction() = default;
+  virtual int commit(const DoutPrefixProvider* dpp, optional_yield y) = 0;
+  virtual int abort(const DoutPrefixProvider* dpp, optional_yield y) = 0;
+};
+
+class TransactionFactory {
+public:
+  virtual ~TransactionFactory() = default;
+  virtual std::unique_ptr<Transaction> create_transaction(const DoutPrefixProvider* dpp) = 0;
+};
+
 class Directory {
 public:
     Directory() = default;

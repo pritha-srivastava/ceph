@@ -595,9 +595,9 @@ int RedisBucketDirectory::del(const DoutPrefixProvider* dpp, const std::string& 
   return 0;
 }
 
-int RedisBucketDirectory::add_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, optional_yield y, Pipeline* pipeline)
+int RedisBucketDirectory::add_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, optional_yield y, Transaction* txn)
 {
-  return zadd(dpp, bucket_id, 0, object_name, y, pipeline);
+  return zadd(dpp, bucket_id, 0, object_name, y, txn);
 }
 
 int RedisBucketDirectory::remove_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, optional_yield y, Transaction* txn)
@@ -763,6 +763,7 @@ int RedisObjectDirectory::del(const DoutPrefixProvider* dpp, CacheObj* object, o
 
 int RedisObjectDirectory::zadd(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, double score, const std::string& member, optional_yield y, Transaction* txn)
 {
+/* FIXME: AMIN
   std::string key = build_index(bucket_id, obj_name);
 
   request req;
@@ -990,13 +991,13 @@ int RedisObjectDirectory::zrank(const DoutPrefixProvider* dpp, const std::string
   return 0;
 }
 
-int RedisObjectDirectory::add_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, ceph::real_time& creation_time, std::optional<CacheObjectVersion> params, optional_yield y, Pipeline* pipeline)
+int RedisObjectDirectory::add_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, ceph::real_time& creation_time, std::optional<CacheObjectVersion> params, optional_yield y, Transaction* txn)
 {
   // Redis sorted-set scores are doubles; use microseconds for precision within double's exact-integer range (~9e15)
   auto score = static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(
       creation_time.time_since_epoch()).count());
   ldpp_dout(dpp, 10) << "RedisObjectDirectory::" << __func__ << "(): Score of object name: "<< obj_name << " version: " << version << " is: "  << score << dendl;
-  return zadd(dpp, bucket_id, obj_name, score, version, y, pipeline);
+  return zadd(dpp, bucket_id, obj_name, score, version, y, txn);
 }
 
 int RedisObjectDirectory::remove_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, optional_yield y, Transaction* txn)
@@ -1192,6 +1193,7 @@ int RedisBlockDirectory::set(const DoutPrefixProvider* dpp, CacheBlock* block, o
 
   return 0;
 }
+*/
 
 int RedisBlockDirectory::set(const DoutPrefixProvider* dpp,
                              std::vector<CacheBlock>& blocks,

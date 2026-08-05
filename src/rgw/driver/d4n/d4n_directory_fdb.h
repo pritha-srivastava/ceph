@@ -144,7 +144,7 @@ public:
                    const std::string& object_name,
                    std::optional<CacheObject> params,
                    optional_yield y,
-                   Pipeline* pipeline = nullptr) override;
+                   Transaction* txn=nullptr) override;
 
     virtual int remove_object(const DoutPrefixProvider* dpp,
                       const std::string& bucket_id,
@@ -224,7 +224,7 @@ public:
                     ceph::real_time& creation_time,
                     std::optional<CacheObjectVersion> params,
                     optional_yield y,
-                    Pipeline* pipeline = nullptr) override;
+                    Transaction* txn=nullptr) override;
 
     virtual int remove_version(const DoutPrefixProvider* dpp,
                        const std::string& bucket_id,
@@ -347,7 +347,7 @@ public:
     int set(const DoutPrefixProvider* dpp,
             CacheBlock* block,
             optional_yield y,
-            Pipeline* pipeline = nullptr) override;
+            Transaction* txn=nullptr) override;
 
     int get(const DoutPrefixProvider* dpp,
             CacheBlock* block,
