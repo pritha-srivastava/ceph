@@ -197,14 +197,13 @@ class LFUDAPolicy : public CachePolicy {
     inline static std::atomic<bool> lw_quit{false};
 
     int age = 1, weightSum = 0, postedSum = 0;
+
+    Directory& dir;
+    BlockDirectory& blockDir;
+    ObjectDirectory& objDir;
+    BucketDirectory& bucketDir;
+
     optional_yield y = null_yield;
-
-    std::shared_ptr<DirectoryConnection> conn;
-
-    std::unique_ptr<Directory> dir;
-    std::unique_ptr<BlockDirectory> blockDir;
-    std::unique_ptr<ObjectDirectory> objDir;
-    std::unique_ptr<BucketDirectory> bucketDir;
 
     rgw::sal::Driver* driver;
 	
@@ -263,24 +262,20 @@ class LFUDAPolicy : public CachePolicy {
     asio::awaitable<void> directory_sync(const DoutPrefixProvider* dpp, optional_yield y);
 
   public:
-    LFUDAPolicy(std::shared_ptr<DirectoryConnection>& conn, std::string_view dir_type, rgw::cache::CacheDriver* cacheDriver, optional_yield y) : CachePolicy(cacheDriver), 
-                                                                                                             y(y),
-													     conn(conn) 
+    LFUDAPolicy(Directory& dir,
+             BlockDirectory& blockDir,
+             ObjectDirectory& objDir,
+             BucketDirectory& bucketDir, 
+	     std::string_view dir_type, 
+	     rgw::cache::CacheDriver* cacheDriver, 
+	     optional_yield y) : 
+				 CachePolicy(cacheDriver),
+				 dir(dir),
+			         blockDir(blockDir),
+    				 objDir(objDir),
+    				 bucketDir(bucketDir),
+				 y(y)
     {
-      if (dir_type == "redis") {
-        auto redis_conn = std::dynamic_pointer_cast<RedisConnection>(this->conn);
-        dir       = std::make_unique<RedisDirectory>(redis_conn);
-        blockDir  = std::make_unique<RedisBlockDirectory>(redis_conn);
-        objDir    = std::make_unique<RedisObjectDirectory>(redis_conn);
-        bucketDir = std::make_unique<RedisBucketDirectory>(redis_conn);
-      } else if (dir_type == "fdb") {
-        auto fdb_conn = std::dynamic_pointer_cast<FDBConnection>(this->conn);
-
-        dir       = std::make_unique<FDBDirectory>(fdb_conn);
-        blockDir  = std::make_unique<FDBBlockDirectory>(fdb_conn);
-        objDir    = std::make_unique<FDBObjectDirectory>(fdb_conn);
-        bucketDir = std::make_unique<FDBBucketDirectory>(fdb_conn);
-      }
     }
 
     ~LFUDAPolicy() override;
@@ -345,10 +340,22 @@ class PolicyDriver {
     std::unique_ptr<CachePolicy> cachePolicy;
 
   public:
-    PolicyDriver(std::shared_ptr<DirectoryConnection>& conn, std::string directory_type,  rgw::cache::CacheDriver* cacheDriver, const std::string& _policyName, optional_yield y) : policyName(_policyName)
+    PolicyDriver(Directory& dir,
+             BlockDirectory& blockDir,
+             ObjectDirectory& objDir,
+             BucketDirectory& bucketDir,
+	     std::string directory_type,
+	     rgw::cache::CacheDriver* cacheDriver,
+	     const std::string& _policyName, 
+	     optional_yield y) : policyName(_policyName)
     {
       if (policyName == "lfuda") {
-	cachePolicy = std::make_unique<LFUDAPolicy>(conn, directory_type, cacheDriver, y);
+	cachePolicy = std::make_unique<LFUDAPolicy>(dir,
+             blockDir,
+             objDir,
+             bucketDir,
+	     directory_type, 
+	     cacheDriver, y);
       } else if (policyName == "lru") {
 	cachePolicy = std::make_unique<LRUPolicy>(cacheDriver);
       }

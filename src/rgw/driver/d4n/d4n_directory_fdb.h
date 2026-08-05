@@ -39,13 +39,19 @@ namespace lfdb = ceph::libfdb;
 
 namespace rgw::d4n {
 
+constexpr size_t COMMIT_SIZE = 256;
+
+struct FDBRange {
+  std::string begin;
+  std::string end;
+};
+
 class FDBDirectory : virtual public Directory {
 public:
-    // FoundationDB database handle
-    lfdb::database_handle FDBconn;
+    lfdb::database_handle FDBdb;
 
-    explicit FDBDirectory(const std::shared_ptr<FDBConnection>& fdb_conn)
-      : FDBconn(fdb_conn->get_fdb_conn())
+    explicit FDBDirectory(lfdb::database_handle db)
+      : FDBdb(db)
     {
     }
 
@@ -53,7 +59,7 @@ public:
 
     void set_fdb_database(lfdb::database_handle db)
     {
-        FDBconn = std::move(db);
+        FDBdb = db;
     }
 
     virtual int get_kv(const DoutPrefixProvider* dpp,
@@ -88,8 +94,8 @@ public:
 
 class FDBBucketDirectory : public FDBDirectory, public BucketDirectory {
 public:
-    explicit FDBBucketDirectory(const std::shared_ptr<FDBConnection>& fdb_conn)
-      : FDBDirectory(fdb_conn) {}
+    explicit FDBBucketDirectory(lfdb::database_handle db)
+      : FDBDirectory(db) {}
 
     int exist_key(const DoutPrefixProvider* dpp,
                   const std::string& bucket_id,
@@ -123,6 +129,17 @@ public:
                     optional_yield y);
 
 private:
+    int collect_range(const DoutPrefixProvider* dpp,
+    		      const FDBRange& range,
+  		      const std::string& base,
+		      uint64_t count,
+		      std::vector<CacheObject>& objs_info,
+		      std::string& continuation_token);
+
+    FDBRange build_range(const std::string& base,
+	  	         const std::string& start,
+		         bool inclusive);
+
     int fdb_add(const DoutPrefixProvider* dpp,
                 const std::string& bucket_id,
                 double score,
@@ -160,8 +177,8 @@ private:
 
 class FDBObjectDirectory : public FDBDirectory, public ObjectDirectory {
 public:
-    explicit FDBObjectDirectory(const std::shared_ptr<FDBConnection>& fdb_conn)
-      : FDBDirectory(fdb_conn) {}
+    explicit FDBObjectDirectory(lfdb::database_handle db)
+      : FDBDirectory(db) {}
 
     int exist_key(const DoutPrefixProvider* dpp,
                   const std::string& bucket_id,
@@ -203,6 +220,20 @@ public:
                       optional_yield y);
 
 private:
+    std::string get_versions_range_end(const std::string& versions_subspace) const;
+
+    bool scan_versions(const DoutPrefixProvider* dpp,
+		       const std::string& begin,
+		       const std::string& end,
+		       bool reverse,
+		       std::vector<std::pair<std::string, CacheObjectVersion>>& kvs);
+
+    bool parse_version_key(const std::string& versions_subspace,
+		           const std::string& key,
+		           std::string& score,
+		           std::string& member) const;
+
+
     int fdb_add(const DoutPrefixProvider* dpp,
                 const std::string& bucket_id,
                 const std::string& obj_name,
@@ -267,13 +298,12 @@ private:
 
 class FDBBlockDirectory : public FDBDirectory, public BlockDirectory {
 public:
-    explicit FDBBlockDirectory(const std::shared_ptr<FDBConnection>& fdb_conn)
-      : FDBDirectory(fdb_conn) {}
+    explicit FDBBlockDirectory(lfdb::database_handle db)
+      : FDBDirectory(db) {}
 
     int exist_key(const DoutPrefixProvider* dpp,
                   CacheBlock* block,
                   optional_yield y) override;
-
     int set(const DoutPrefixProvider* dpp,
             std::vector<CacheBlock>& blocks,
             optional_yield y) override;

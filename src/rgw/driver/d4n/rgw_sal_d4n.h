@@ -253,6 +253,7 @@ class D4NFilterDriver : public FilterDriver {
     std::shared_ptr<rgw::d4n::DirectoryConnection> conn;
 
     std::unique_ptr<rgw::cache::CacheDriver> cacheDriver;
+    std::unique_ptr<rgw::d4n::Directory> dir;
     std::unique_ptr<rgw::d4n::ObjectDirectory> objDir;
     std::unique_ptr<rgw::d4n::BlockDirectory> blockDir;
     std::unique_ptr<rgw::d4n::BucketDirectory> bucketDir;
@@ -329,6 +330,7 @@ class D4NFilterDriver : public FilterDriver {
 				  uint64_t olh_epoch,
 				  const std::string& unique_tag) override;
     rgw::cache::CacheDriver* get_cache_driver() { return cacheDriver.get(); }
+    rgw::d4n::Directory* get_dir() { return dir.get(); }
     rgw::d4n::ObjectDirectory* get_obj_dir() { return objDir.get(); }
     rgw::d4n::BlockDirectory* get_block_dir() { return blockDir.get(); }
     rgw::d4n::BucketDirectory* get_bucket_dir() { return bucketDir.get(); }

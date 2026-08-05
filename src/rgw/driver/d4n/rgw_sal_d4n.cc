@@ -87,6 +87,7 @@ int D4NFilterDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
       return -1;
     }
 
+    dir = std::make_unique<rgw::d4n::RedisDirectory>(redis_conn);
     objDir = std::make_unique<rgw::d4n::RedisObjectDirectory>(redis_conn);
     blockDir = std::make_unique<rgw::d4n::RedisBlockDirectory>(redis_conn);
     bucketDir = std::make_unique<rgw::d4n::RedisBucketDirectory>(redis_conn);
@@ -123,19 +124,17 @@ int D4NFilterDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
 	}
 
   }
-  else if (directory_type == "fdb"){
-    conn = std::make_shared<rgw::d4n::FDBConnection>(lfdb::create_database());
-	auto fdb_conn = std::dynamic_pointer_cast<rgw::d4n::FDBConnection>(conn);
-	if (!fdb_conn) {
-      ldpp_dout(dpp, 1) << "Wrong directory type: FDB " << dendl;
-	  return -1;
-	}
-    objDir = std::make_unique<rgw::d4n::FDBObjectDirectory>(fdb_conn);
-    blockDir = std::make_unique<rgw::d4n::FDBBlockDirectory>(fdb_conn);
-    bucketDir = std::make_unique<rgw::d4n::FDBBucketDirectory>(fdb_conn);
+  else if (directory_type == "fdb") {
+    auto fdb_db = lfdb::create_database();
+
+    dir = std::make_unique<rgw::d4n::FDBDirectory>(fdb_db); 
+    objDir = std::make_unique<rgw::d4n::FDBObjectDirectory>(fdb_db);
+    blockDir = std::make_unique<rgw::d4n::FDBBlockDirectory>(fdb_db);
+    bucketDir = std::make_unique<rgw::d4n::FDBBucketDirectory>(fdb_db);
   }
 
-  policyDriver = std::make_unique<rgw::d4n::PolicyDriver>(conn, directory_type, cacheDriver.get(), "lfuda", this->y);
+  //since we are using references here, it is important to initialize policyDriver after the directories.
+  policyDriver = std::make_unique<rgw::d4n::PolicyDriver>(*dir, *blockDir, *objDir, *bucketDir, directory_type, cacheDriver.get(), "lfuda", this->y);
   if (auto ret = FilterDriver::initialize(cct, dpp); ret < 0) {
     ldpp_dout(dpp, 0) << "Failed to initialize filter driver: " << ret << dendl;
     return ret;

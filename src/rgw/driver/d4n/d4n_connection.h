@@ -45,44 +45,4 @@ public:
     }
 };
 
-
-class FDBConnection : public DirectoryConnection {
-private:
-    lfdb::database_handle conn;
-
-public:
-    explicit FDBConnection(lfdb::database_handle c)
-      : conn(c)
-    {
-    }
-
-    std::shared_ptr<void> get_conn() override
-    {
-        return conn;
-    }
-
-    const lfdb::database_handle& get_fdb_conn() const
-    {
-        return conn;
-    }
-};
-
-
-/*
-class FDBConnection : public DirectoryConnection {
-private:
-    std::shared_ptr<fdbase> conn;
-
-public:
-    FDBConnection(std::shared_ptr<fdbase> c) : conn(c) {}
-
-    std::shared_ptr<void> get_conn() override {
-        return conn;
-    }
-
-    std::shared_ptr<fdbase> get_fdb_conn(){
-        return conn;
-    }
-};
-*/
 } //namespace rgw::d4n

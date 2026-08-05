@@ -130,7 +130,7 @@ You want the materialized block list for one object.
 
 ```cpp
 const auto object_blocks = object_block_keyspace(bucket_id, object_name);
-const auto blocks = lfdb::collect<CacheBlock>(FDBconn,
+const auto blocks = lfdb::collect<CacheBlock>(FDBdb,
                                               fdbc::prefix(object_blocks));
 ```
 
@@ -168,7 +168,7 @@ const auto page_options =
   q::query_options{ .result_limit = static_cast<int>(count + 1) };
 
 auto read_page = [&](auto query) {
-  return lfdb::collect<CacheObject>(FDBconn,
+  return lfdb::collect<CacheObject>(FDBdb,
                                     q::with_options(std::move(query),
                                                     page_options));
 };
@@ -238,7 +238,7 @@ const auto page_options =
     .reverse_order = true };
 
 auto read_versions = [&](auto query) {
-  return lfdb::collect<CacheObjectVersion>(FDBconn,
+  return lfdb::collect<CacheObjectVersion>(FDBdb,
                                            q::with_options(std::move(query),
                                                            page_options));
 };
@@ -250,7 +250,7 @@ if (marker_version.empty()) {
 std::string marker_score;
 const auto score_key = version_score_key(bucket_id, object_name, marker_version);
 
-if (!lfdb::get(FDBconn, score_key, marker_score)) {
+if (!lfdb::get(FDBdb, score_key, marker_score)) {
   throw marker_not_found{};
 }
 
@@ -278,7 +278,7 @@ const auto active_cache =
                fdbc::prefix(warm_cache));
 
 for (const auto& [key, object] :
-     lfdb::scan<CacheObject>(FDBconn, active_cache)) {
+     lfdb::scan<CacheObject>(FDBdb, active_cache)) {
   refresh_cache_object(key, object);
 }
 ```
@@ -299,7 +299,7 @@ const auto visible_records =
                 fdbc::prefix(internal_records));
 
 for (const auto& [key, record] :
-     lfdb::scan<Record>(FDBconn, visible_records)) {
+     lfdb::scan<Record>(FDBdb, visible_records)) {
   emit_record(key, record);
 }
 ```
