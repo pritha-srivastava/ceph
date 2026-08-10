@@ -37,7 +37,8 @@ int FDBDirectory::get_kv(const DoutPrefixProvider* dpp, optional_yield y,
 int FDBDirectory::set_kv(const DoutPrefixProvider* dpp, optional_yield y,
                     const std::string& key,
                     const std::string& field,
-                    const std::string& val)
+                    const std::string& val,
+		    Transaction* txn)
 {
   try {
     return lfdb::make_transactor(FDBconn)([&](auto& tr) {
@@ -75,7 +76,9 @@ int FDBDirectory::get_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
 
 int FDBDirectory::set_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
                         const std::string& key,
-                        const std::map<std::string, std::string>& vals)
+                        const std::map<std::string, 
+			std::string>& vals,
+			Transaction* txn)
 {
   try {
     return lfdb::make_transactor(FDBconn)([&](auto& tr) {
@@ -96,7 +99,8 @@ int FDBDirectory::set_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
 int FDBDirectory::set_kv_if_not_exists(const DoutPrefixProvider* dpp, optional_yield y,
                                         const std::string& key,
                                         const std::string& field,
-                                        const std::string& val)
+                                        const std::string& val,
+					Transaction* txn)
 {
   try {
     return lfdb::make_transactor(FDBconn)([&](auto& tr) {
@@ -114,13 +118,13 @@ int FDBDirectory::set_kv_if_not_exists(const DoutPrefixProvider* dpp, optional_y
   }
 }
 
-int FDBBucketDirectory::exist_key(const DoutPrefixProvider* dpp, const std::string& bucket_id, optional_yield y) 
+int FDBBucketDirectory::exist_key(const DoutPrefixProvider* dpp, const std::string& bucket_id, optional_yield y, Transaction* txn) 
 {
   return lfdb::key_exists(FDBconn, bucket_id);
 }
 
 //FIXME: this is a dummy function and should be updated.
-int FDBBucketDirectory::del(const DoutPrefixProvider* dpp, const std::string& bucket_id, optional_yield y)
+int FDBBucketDirectory::del(const DoutPrefixProvider* dpp, const std::string& bucket_id, optional_yield y, Transaction* txn)
 {
   return 0;
 }
@@ -130,12 +134,12 @@ int FDBBucketDirectory::add_object(const DoutPrefixProvider* dpp, const std::str
   return fdb_add(dpp, bucket_id, 0, object_name, std::move(params), y);
 }
 
-int FDBBucketDirectory::remove_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, optional_yield y)
+int FDBBucketDirectory::remove_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, optional_yield y, Transaction* txn)
 {
   return fdb_rem(dpp, bucket_id, object_name, y);
 }
 
-int FDBBucketDirectory::list_objects(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start_token, const std::string& prefix, const std::string& marker, uint64_t count, bool marker_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, optional_yield y)
+int FDBBucketDirectory::list_objects(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start_token, const std::string& prefix, const std::string& marker, uint64_t count, bool marker_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, optional_yield y, Transaction* txn)
 {
   //TODO - check if the two paths can be combined into one
   if (!prefix.empty()) {
@@ -405,13 +409,42 @@ std::string FDBObjectDirectory::build_version_score_index(const DoutPrefixProvid
   return get_score_subspace(dpp, bucket_id, obj_name) + version;
 }
 
-int FDBObjectDirectory::exist_key(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, optional_yield y) 
+int FDBObjectDirectory::exist_key(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, optional_yield y, Transaction* txn) 
 {
   std::string key = build_index(bucket_id, obj_name);
   return lfdb::key_exists(FDBconn, key);
 }
 
-int FDBObjectDirectory::del(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y)
+int FDBObjectDirectory::add_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, ceph::real_time& creation_time, std::optional<CacheObjectVersion> params, optional_yield y, Transaction* txn)
+{
+  auto score = ceph::real_clock::to_double(creation_time);
+  ldpp_dout(dpp, 10) << "FDBObjectDirectory::" << __func__ << "(): Score of object name: "<< obj_name << " version: " << version << " is: "  << score << dendl;
+  return fdb_add(dpp, bucket_id, obj_name, score, version, params, y);
+}
+
+int FDBObjectDirectory::remove_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, optional_yield y, Transaction* txn)
+{
+  return fdb_rem(dpp, bucket_id, obj_name, version, y);
+}
+
+int FDBObjectDirectory::remove_version_by_creation_time(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const double& creation_time,optional_yield y, Transaction* txn)
+{
+  return fdb_remrangebyscore(dpp, bucket_id, obj_name, creation_time, creation_time, y);;
+}
+
+int FDBObjectDirectory::list_versions(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& marker_version, uint64_t count, std::vector<CacheObjectVersion>& obj_versions, std::string& continuation_token, optional_yield y, Transaction* txn)
+{
+  ldpp_dout(dpp, 20) << "D4NFilterBucket::" << __func__ << " obj_name: " << obj_name << dendl;
+  ldpp_dout(dpp, 20) << "D4NFilterBucket::" << __func__ << " marker_version: " << marker_version << dendl;
+  std::vector<std::string> members;
+  auto ret = fdb_revrange(dpp, bucket_id, obj_name, marker_version, count, obj_versions, continuation_token, y);
+  if (ret < 0 ) {
+    return ret;
+  }
+  return 0;
+}
+
+int FDBObjectDirectory::del(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y, Transaction* txn)
 {
   std::string key = build_index(object->bucketName, object->objName);
   lfdb::erase(FDBconn, key);
@@ -719,36 +752,7 @@ int FDBObjectDirectory::fdb_rank(const DoutPrefixProvider* dpp,
   return 0;
 }
 
-int FDBObjectDirectory::add_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, ceph::real_time& creation_time, std::optional<CacheObjectVersion> params, optional_yield y, Transaction* txn)
-{
-  auto score = ceph::real_clock::to_double(creation_time);
-  ldpp_dout(dpp, 10) << "FDBObjectDirectory::" << __func__ << "(): Score of object name: "<< obj_name << " version: " << version << " is: "  << score << dendl;
-  return fdb_add(dpp, bucket_id, obj_name, score, version, params, y);
-}
-
-int FDBObjectDirectory::remove_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, optional_yield y)
-{
-  return fdb_rem(dpp, bucket_id, obj_name, version, y);
-}
-
-int FDBObjectDirectory::remove_version_by_creation_time(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const double& creation_time,optional_yield y)
-{
-  return fdb_remrangebyscore(dpp, bucket_id, obj_name, creation_time, creation_time, y);;
-}
-
-int FDBObjectDirectory::list_versions(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& marker_version, uint64_t count, std::vector<CacheObjectVersion>& obj_versions, std::string& continuation_token, optional_yield y)
-{
-  ldpp_dout(dpp, 20) << "D4NFilterBucket::" << __func__ << " obj_name: " << obj_name << dendl;
-  ldpp_dout(dpp, 20) << "D4NFilterBucket::" << __func__ << " marker_version: " << marker_version << dendl;
-  std::vector<std::string> members;
-  auto ret = fdb_revrange(dpp, bucket_id, obj_name, marker_version, count, obj_versions, continuation_token, y);
-  if (ret < 0 ) {
-    return ret;
-  }
-  return 0;
-}
-
-int FDBBlockDirectory::exist_key(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) 
+int FDBBlockDirectory::exist_key(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Transaction* txn) 
 {
   std::string key = build_index(block);
   return lfdb::key_exists(FDBconn, key);
@@ -860,7 +864,7 @@ int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, CacheBlock* block, opt
 }
 
 
-int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y)
+int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y, Transaction* txn)
 {
   for (auto block : blocks) {
     std::string key = build_index(&block);
@@ -1024,7 +1028,7 @@ int FDBBlockDirectory::get(const DoutPrefixProvider* dpp,
 
 //FIXME: shouldn't copyName reflect block's name instead of object name?
 //the same for redis class.
-int FDBBlockDirectory::copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, optional_yield y)
+int FDBBlockDirectory::copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, optional_yield y, Transaction* txn)
 {
   // Retrieve the block from the directory in case it has been updated by a remote cache.
   if (this->get(dpp, block, y) < 0){
@@ -1053,7 +1057,7 @@ int FDBBlockDirectory::copy(const DoutPrefixProvider* dpp, CacheBlock* block, co
   return 0;
 }
 
-int FDBBlockDirectory::del(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y)
+int FDBBlockDirectory::del(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Transaction* txn)
 {
   std::string key = build_index(block);
   lfdb::erase(FDBconn, key);
