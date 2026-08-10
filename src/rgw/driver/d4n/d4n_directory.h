@@ -224,7 +224,8 @@ public:
     virtual int set_kv(const DoutPrefixProvider* dpp, optional_yield y,
                        const std::string& key,
                        const std::string& field,
-                       const std::string& val) = 0;
+                       const std::string& val,
+		       Transaction* txn) = 0;
 
     // Multi-field get/set
     virtual int get_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
@@ -234,12 +235,14 @@ public:
 
     virtual int set_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
                             const std::string& key,
-                            const std::map<std::string, std::string>& vals) = 0;
+                            const std::map<std::string, std::string>& vals,
+			    Transaction* txn) = 0;
 
     virtual int set_kv_if_not_exists(const DoutPrefixProvider* dpp, optional_yield y,
                                      const std::string& key,
                                      const std::string& field,
-                                     const std::string& val) = 0;
+                                     const std::string& val,
+				     Transaction* txn) = 0;
 
 };
 
@@ -251,11 +254,11 @@ class BucketDirectory: virtual public Directory {
     BucketDirectory() = default;
     virtual ~BucketDirectory() = default;
 
-    virtual int exist_key(const DoutPrefixProvider* dpp, const std::string& bucket_id, optional_yield y) = 0;
-    virtual int del(const DoutPrefixProvider* dpp, const std::string& bucket_id, optional_yield y) = 0;
-    virtual int add_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, optional_yield y, Pipeline* pipeline=nullptr) = 0;
-    virtual int remove_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, optional_yield y) = 0;
-    virtual int list_objects(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start_token, const std::string& prefix, const std::string& marker, uint64_t count, bool marker_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, optional_yield y) = 0;
+    virtual int exist_key(const DoutPrefixProvider* dpp, const std::string& bucket_id, optional_yield y, Transaction* txn = nullptr) = 0;
+    virtual int del(const DoutPrefixProvider* dpp, const std::string& bucket_id, optional_yield y, Transaction* txn = nullptr) = 0;
+    virtual int add_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, optional_yield y, Transaction* txn=nullptr) = 0;
+    virtual int remove_object(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& object_name, optional_yield y, Transaction* txn = nullptr) = 0;
+    virtual int list_objects(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& start_token, const std::string& prefix, const std::string& marker, uint64_t count, bool marker_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, optional_yield y, Transaction* txn = nullptr) = 0;
 
   private:
 };
@@ -269,14 +272,14 @@ class ObjectDirectory: virtual public Directory {
     ObjectDirectory() = default;
     virtual ~ObjectDirectory() = default;
 	
-    virtual int exist_key(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, optional_yield y) = 0;
-    virtual int del(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y) = 0;
+    virtual int exist_key(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, optional_yield y, Transaction* txn = nullptr) = 0;
+    virtual int del(const DoutPrefixProvider* dpp, CacheObj* object, optional_yield y, Transaction* txn = nullptr) = 0;
     //version ordering is a function of creation time, hence adding creation time to the interface
-    virtual int add_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, ceph::real_time& creation_time, std::optional<CacheObjectVersion> params, optional_yield y, Pipeline* pipeline=nullptr) = 0;
-    virtual int remove_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, optional_yield y) = 0;
+    virtual int add_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, ceph::real_time& creation_time, std::optional<CacheObjectVersion> params, optional_yield y, Transaction* txn=nullptr) = 0;
+    virtual int remove_version(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& version, optional_yield y, Transaction* txn = nullptr) = 0;
     //this can be removed and remove_version can be used instead
-    virtual int remove_version_by_creation_time(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, ceph::real_time creation_time, optional_yield y) = 0;
-    virtual int list_versions(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& marker_version, uint64_t count, std::vector<CacheObjectVersion>& obj_versions, std::string& continuation_token, optional_yield y) = 0;
+    virtual int remove_version_by_creation_time(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const double& creation_time, optional_yield y, Transaction* txn = nullptr) = 0;
+    virtual int list_versions(const DoutPrefixProvider* dpp, const std::string& bucket_id, const std::string& obj_name, const std::string& marker_version, uint64_t count, std::vector<CacheObjectVersion>& obj_versions, std::string& continuation_token, optional_yield y, Transaction* txn = nullptr) = 0;
 
   private:
 
@@ -292,16 +295,15 @@ class BlockDirectory: virtual public Directory {
     virtual ~BlockDirectory() = default;
     
 	
-    virtual int exist_key(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) = 0;
+    virtual int exist_key(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Transaction* txn=nullptr) = 0;
 
-    //Pipelined version of set
-    virtual int set(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y) = 0;
-    virtual int set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Pipeline* pipeline=nullptr) = 0;
+    virtual int set(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y, Transaction* txn=nullptr) = 0;
+    virtual int set(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Transaction* txn=nullptr) = 0;
     virtual int get(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) = 0;
     virtual int get(const DoutPrefixProvider* dpp, std::vector<CacheBlock>& blocks, optional_yield y) = 0;
 
-    virtual int copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, optional_yield y) = 0;
-    virtual int del(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y) = 0;
+    virtual int copy(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, optional_yield y, Transaction* txn=nullptr) = 0;
+    virtual int del(const DoutPrefixProvider* dpp, CacheBlock* block, optional_yield y, Transaction* txn=nullptr) = 0;
     virtual int update_field(const DoutPrefixProvider* dpp, CacheBlock* block, const std::string& field, std::string& value, optional_yield y) = 0;
 	
     virtual int remove_host(const DoutPrefixProvider* dpp, CacheBlock* block, std::string& value, optional_yield y) = 0;
@@ -309,7 +311,7 @@ class BlockDirectory: virtual public Directory {
   private:
 
   protected:
-    std::string build_index(CacheBlock* block);
+    std::string build_index(const CacheBlock* block);
 };
 
 } // namespace rgw::d4n
