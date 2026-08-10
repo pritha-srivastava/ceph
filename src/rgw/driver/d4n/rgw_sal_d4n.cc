@@ -144,7 +144,7 @@ int D4NFilterDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
     ldpp_dout(dpp, 0) << "Failed to initialize cache driver: " << ret << dendl;
     return ret;
   }
-  if (auto ret = policyDriver->get_cache_policy()->init(cct, dpp, io_context, next); ret < 0) {
+  if (auto ret = policyDriver->get_cache_policy()->init(cct, dpp, io_context, this); ret < 0) {
     ldpp_dout(dpp, 0) << "Failed to initialize policy driver: " << ret << dendl;
     return ret;
   }

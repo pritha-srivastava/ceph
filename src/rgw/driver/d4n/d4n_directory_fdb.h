@@ -101,7 +101,8 @@ public:
                        optional_yield y,
                        const std::string& key,
                        const std::string& field,
-                       const std::string& val);
+                       const std::string& val,
+		       Transaction* txn);
 
     virtual int get_kv_multi(const DoutPrefixProvider* dpp,
                              optional_yield y,
@@ -112,13 +113,15 @@ public:
     virtual int set_kv_multi(const DoutPrefixProvider* dpp,
                              optional_yield y,
                              const std::string& key,
-                             const std::map<std::string, std::string>& vals);
+                             const std::map<std::string, std::string>& vals,
+			     Transaction* txn);
 
     virtual int set_kv_if_not_exists(const DoutPrefixProvider* dpp,
                                      optional_yield y,
                                      const std::string& key,
                                      const std::string& field,
-                                     const std::string& val);
+                                     const std::string& val,
+				     Transaction* txn);
 };
 
 class FDBBucketDirectory : public FDBDirectory, public BucketDirectory {
@@ -126,27 +129,30 @@ public:
     explicit FDBBucketDirectory(lfdb::database_handle db)
       : FDBDirectory(db) {}
 
-    int exist_key(const DoutPrefixProvider* dpp,
+    virtual int exist_key(const DoutPrefixProvider* dpp,
                   const std::string& bucket_id,
-                  optional_yield y) override;
+                  optional_yield y,
+		  Transaction* txn = nullptr) override;
 
-    int del(const DoutPrefixProvider* dpp,
+    virtual int del(const DoutPrefixProvider* dpp,
             const std::string& bucket_id,
-            optional_yield y) override;
+            optional_yield y, 
+	    Transaction* txn = nullptr) override;
 
-    int add_object(const DoutPrefixProvider* dpp,
+    virtual int add_object(const DoutPrefixProvider* dpp,
                    const std::string& bucket_id,
                    const std::string& object_name,
                    std::optional<CacheObject> params,
                    optional_yield y,
                    Pipeline* pipeline = nullptr) override;
 
-    int remove_object(const DoutPrefixProvider* dpp,
+    virtual int remove_object(const DoutPrefixProvider* dpp,
                       const std::string& bucket_id,
                       const std::string& object_name,
-                      optional_yield y) override;
+                      optional_yield y, 
+		      Transaction* txn = nullptr) override;
 
-    int list_objects(const DoutPrefixProvider* dpp,
+    virtual int list_objects(const DoutPrefixProvider* dpp,
                     const std::string& bucket_id,
                     const std::string& start_token,
                     const std::string& prefix,
@@ -155,7 +161,8 @@ public:
                     bool marker_inclusive,
                     std::vector<CacheObject>& objs_info,
                     std::string& continuation_token,
-                    optional_yield y);
+                    optional_yield y,
+		    Transaction* txn = nullptr);
 
 private:
     int collect_range(const DoutPrefixProvider* dpp,
@@ -199,16 +206,18 @@ public:
     explicit FDBObjectDirectory(lfdb::database_handle db)
       : FDBDirectory(db) {}
 
-    int exist_key(const DoutPrefixProvider* dpp,
+    virtual int exist_key(const DoutPrefixProvider* dpp,
                   const std::string& bucket_id,
                   const std::string& obj_name,
-                  optional_yield y) override;
+                  optional_yield y, 
+		  Transaction* txn = nullptr) override;
 
-    int del(const DoutPrefixProvider* dpp,
+    virtual int del(const DoutPrefixProvider* dpp,
             CacheObj* object,
-            optional_yield y) override;
+            optional_yield y,
+	    Transaction* txn = nullptr) override;
 
-    int add_version(const DoutPrefixProvider* dpp,
+    virtual int add_version(const DoutPrefixProvider* dpp,
                     const std::string& bucket_id,
                     const std::string& obj_name,
                     const std::string& version,
@@ -217,26 +226,34 @@ public:
                     optional_yield y,
                     Pipeline* pipeline = nullptr) override;
 
-    int remove_version(const DoutPrefixProvider* dpp,
+    virtual int remove_version(const DoutPrefixProvider* dpp,
                        const std::string& bucket_id,
                        const std::string& obj_name,
                        const std::string& version,
-                       optional_yield y) override;
+                       optional_yield y,
+		       Transaction* txn = nullptr) override;
 
-    int remove_version_by_creation_time(const DoutPrefixProvider* dpp,
+    virtual int remove_version_by_creation_time(const DoutPrefixProvider* dpp,
                                         const std::string& bucket_id,
                                         const std::string& obj_name,
+<<<<<<< HEAD
                                         ceph::real_time creation_time,
                                         optional_yield y) override;
+=======
+                                        const double& creation_time,
+                                        optional_yield y,
+					Transaction* txn = nullptr) override;
+>>>>>>> 39908fdcbc9 (redis directory with explicit transaction support)
 
-    int list_versions(const DoutPrefixProvider* dpp,
+    virtual int list_versions(const DoutPrefixProvider* dpp,
                       const std::string& bucket_id,
                       const std::string& obj_name,
                       const std::string& marker_version,
                       uint64_t count,
                       std::vector<CacheObjectVersion>& obj_versions,
                       std::string& continuation_token,
-                      optional_yield y);
+                      optional_yield y, 
+		      Transaction* txn = nullptr) override;
 
 private:
     std::string get_versions_range_end(const std::string& versions_subspace) const;
@@ -315,10 +332,17 @@ public:
 
     int exist_key(const DoutPrefixProvider* dpp,
                   CacheBlock* block,
+<<<<<<< HEAD
                   optional_yield y) override;
+=======
+                  optional_yield y,
+		  Transaction* txn = nullptr) override;
+
+>>>>>>> 39908fdcbc9 (redis directory with explicit transaction support)
     int set(const DoutPrefixProvider* dpp,
             std::vector<CacheBlock>& blocks,
-            optional_yield y) override;
+            optional_yield y,
+	    Transaction* txn = nullptr) override;
 
     int set(const DoutPrefixProvider* dpp,
             CacheBlock* block,
@@ -337,11 +361,13 @@ public:
              CacheBlock* block,
              const std::string& copyName,
              const std::string& copyBucketName,
-             optional_yield y) override;
+             optional_yield y,
+	     Transaction* txn = nullptr) override;
 
     int del(const DoutPrefixProvider* dpp,
             CacheBlock* block,
-            optional_yield y) override;
+            optional_yield y,
+	    Transaction* txn = nullptr) override;
 
     int update_field(const DoutPrefixProvider* dpp,
                      CacheBlock* block,

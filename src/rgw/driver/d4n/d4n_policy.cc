@@ -14,7 +14,8 @@ int LFUDAPolicy::age_sync(const DoutPrefixProvider* dpp, optional_yield y) {
   int stored_age = raw.empty() ? 0 : std::stoi(raw);
 
   if (age > stored_age) {
-    ret = dir.set_kv(dpp, y, "lfuda", "age", std::to_string(age));
+    auto txn = this->driver->get_txn_factory()->create_transaction(dpp); 
+    ret = dir->set_kv(dpp, y, "lfuda", "age", std::to_string(age), txn.get());
     if (ret < 0) return ret;
   } else {
     age = stored_age;
@@ -37,11 +38,13 @@ int LFUDAPolicy::local_weight_sync(const DoutPrefixProvider* dpp, optional_yield
         : 0.0f;
 
     if (localAvgWeight < minAvgWeight) {
-        ret = dir.set_kv_multi(dpp, y, "lfuda", {
+        auto txn = this->driver->get_txn_factory()->create_transaction(dpp); 
+        ret = dir->set_kv_multi(dpp, y, "lfuda", {
             {"minLocalWeights_sum",     std::to_string(weightSum)},
             {"minLocalWeights_size",    std::to_string(entries_map.size())},
             {"minLocalWeights_address", dpp->get_cct()->_conf->rgw_d4n_local_rgw_address}
-        });
+        }, txn.get());
+
         if (ret < 0) return ret;
     } else {
         weightSum = std::stoi(fetched.at("minLocalWeights_sum"));
@@ -49,11 +52,13 @@ int LFUDAPolicy::local_weight_sync(const DoutPrefixProvider* dpp, optional_yield
     }
   }
 
-  return dir.set_kv_multi(dpp, y,
+  auto txn = this->driver->get_txn_factory()->create_transaction(dpp); 
+  return dir->set_kv_multi(dpp, y,
                           dpp->get_cct()->_conf->rgw_d4n_local_rgw_address, {
                               {"avgLocalWeight_sum",  std::to_string(weightSum)},
                               {"avgLocalWeight_size", std::to_string(entries_map.size())}
-                          });
+                          },
+			  txn.get());
 }
 
 asio::awaitable<void> LFUDAPolicy::directory_sync(const DoutPrefixProvider* dpp, optional_yield y) {
@@ -116,7 +121,7 @@ LFUDAPolicy::~LFUDAPolicy()
   }
 }
 
-int LFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::Driver* _driver) {
+int LFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_context& io_context, rgw::sal::D4NFilterDriver* _driver) {
   cache_capacity = cacheDriver->get_current_partition_info(dpp).size;
   eviction_watermark_bytes = cache_capacity * EVICTION_WATERMARK;
   target_bytes = cache_capacity * TARGET_WATERMARK;
@@ -233,14 +238,16 @@ int LFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_
   lwthread = std::thread(&LFUDAPolicy::localweight_writer, this, dpp);
   lw_quit = false;
 
-  dir.set_kv_multi(dpp, y,
+  auto txn = this->driver->get_txn_factory()->create_transaction(dpp); 
+  dir->set_kv_multi(dpp, y,
       "lfuda",
       {
           {"minLocalWeights_sum",     std::to_string(weightSum)},
           {"minLocalWeights_size",    std::to_string(entries_map.size())},
           {"minLocalWeights_address", dpp->get_cct()->_conf->rgw_d4n_local_rgw_address}
-      });
-  dir.set_kv_if_not_exists(dpp, y, "lfuda", "age", std::to_string(age));
+      }, 
+      txn.get());
+  dir->set_kv_if_not_exists(dpp, y, "lfuda", "age", std::to_string(age), txn.get());
 
   asio::co_spawn(io_context.get_executor(),
         directory_sync(dpp, y), asio::detached);
