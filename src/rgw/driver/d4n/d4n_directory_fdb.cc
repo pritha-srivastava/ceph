@@ -20,6 +20,45 @@ static std::string encode_score(int64_t score)
   return fmt::format("{:019d}", score);
 }
 
+int FDBTransaction::commit(const DoutPrefixProvider* dpp, optional_yield y)
+{
+  if (executed_) {
+    return -EINVAL;
+  }
+
+  try {
+    fdb_error_t replay_error = 0;
+
+    if (txn_->commit(&replay_error)) {
+      executed_ = true;
+      return 0;
+    }
+
+    executed_ = true;
+    ldpp_dout(dpp, 10)
+      << "FDBTransaction::" << __func__
+      << "() transaction conflict, replay required: "
+      << replay_error << dendl;
+    return -EAGAIN;
+  } catch (const lfdb::libfdb_exception& e) {
+    executed_ = true;
+    ldpp_dout(dpp, 0)
+      << "FDBTransaction::" << __func__
+      << "() ERROR: " << e.what() << dendl;
+    return -EIO;
+  }
+}
+
+int FDBTransaction::abort(const DoutPrefixProvider* dpp, optional_yield y)
+{
+  if (executed_) {
+    return -EINVAL;
+  }
+
+  executed_ = true;
+  txn_.reset();
+  return 0;
+}
 
 int FDBDirectory::get_kv(const DoutPrefixProvider* dpp, optional_yield y,
                        const std::string& key,
@@ -98,13 +137,32 @@ int FDBDirectory::set_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
 }
 
 int FDBDirectory::set_kv_if_not_exists(const DoutPrefixProvider* dpp, optional_yield y,
-                                        const std::string& key,
-                                        const std::string& field,
-                                        const std::string& val)
+    const std::string& key,
+    const std::string& field,
+    const std::string& val,
+    Transaction* txn)
 {
   try {
-    return lfdb::make_transactor(FDBdb)([&](auto& tr) {
+    if (txn) {
+      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
+      if (!fdb_txn) {
+        return -EINVAL;
+      }
+
+      auto& tr = fdb_txn->get_transaction();
       std::map<std::string, std::string> existing;
+
+      lfdb::get(tr, key, existing);
+      if (existing.find(field) == existing.end()) {
+        existing[field] = val;
+        lfdb::set(tr, key, existing);
+      }
+      return 0;
+    }
+
+    return lfdb::make_transactor(FDBconn)([&](auto& tr) {
+      std::map<std::string, std::string> existing;
+
       lfdb::get(tr, key, existing);
       if (existing.find(field) == existing.end()) {
         existing[field] = val;
@@ -113,7 +171,9 @@ int FDBDirectory::set_kv_if_not_exists(const DoutPrefixProvider* dpp, optional_y
       return 0;
     });
   } catch (const lfdb::libfdb_exception& e) {
-    ldpp_dout(dpp, 0) << "FDBDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
+    ldpp_dout(dpp, 0)
+      << "FDBDirectory::" << __func__
+      << "() ERROR: " << e.what() << dendl;
     return -EIO;
   }
 }

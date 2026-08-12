@@ -39,12 +39,41 @@ namespace lfdb = ceph::libfdb;
 
 namespace rgw::d4n {
 
-constexpr size_t COMMIT_SIZE = 256;
+class FDBTransaction : public Transaction {
+public:
+  explicit FDBTransaction(lfdb::database_handle db)
+    : txn_(std::make_unique<lfdb::transaction>(std::move(db))) {}
 
-struct FDBRange {
-  std::string begin;
-  std::string end;
+  ~FDBTransaction() override = default;
+
+  lfdb::transaction& get_transaction()
+  {
+    return *txn_;
+  }
+
+  int commit(const DoutPrefixProvider* dpp, optional_yield y) override;
+  int abort(const DoutPrefixProvider* dpp, optional_yield y) override;
+
+private:
+  std::unique_ptr<lfdb::transaction> txn_;
+  bool executed_{false};
 };
+
+class FDBTransactionFactory : public TransactionFactory {
+public:
+  explicit FDBTransactionFactory(lfdb::database_handle db)
+    : db_(std::move(db)) {}
+
+  std::unique_ptr<Transaction> create_transaction(
+      const DoutPrefixProvider* dpp) override
+  {
+    return std::make_unique<FDBTransaction>(db_);
+  }
+
+private:
+  lfdb::database_handle db_;
+};
+
 
 class FDBDirectory : virtual public Directory {
 public:
