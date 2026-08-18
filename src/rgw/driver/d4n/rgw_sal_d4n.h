@@ -82,18 +82,31 @@ inline std::string get_lease_resource_key(const std::string& bucket_id,
                                           const std::string& operation,
                                           const std::string& uuid)
 {
-  return fmt::format("{}:{}:{}:{}:{}", bucket_id, object_name, version, operation, uuid);
+  // Hierarchical format using '/' separator for prefix matching
+  // Each component is URL-encoded (including '/') to handle '/' in S3 object names
+  // e.g., "bucket123/photos%2F2024%2Fimg.jpg/v1/GET/uuid"
+  return fmt::format("{}/{}/{}/{}/{}",
+                     url_encode(bucket_id, true),
+                     url_encode(object_name, true),
+                     url_encode(version, true),
+                     url_encode(operation, true),
+                     url_encode(uuid, true));
 }
 
 // Builds a lease resource prefix for checking any active leases on an object version
 // for a specific operation type.
-// Format: "<bucket_id>:<object_name>:<version>:<operation>"
+// Hierarchical format using '/' separator for prefix matching
+// e.g., "bucket/object/version/GET" matches all GETs on that version (wildcard on uuid)
 inline std::string get_lease_resource_prefix(const std::string& bucket_id,
                                              const std::string& object_name,
                                              const std::string& version,
                                              const std::string& operation)
 {
-  return fmt::format("{}:{}:{}:{}", bucket_id, object_name, version, operation);
+  return fmt::format("{}/{}/{}/{}",
+                     url_encode(bucket_id, true),
+                     url_encode(object_name, true),
+                     url_encode(version, true),
+                     url_encode(operation, true));
 }
 
 inline std::optional<rgw::d4n::CacheBlock> parse_block_from_cache(const std::string& key)
