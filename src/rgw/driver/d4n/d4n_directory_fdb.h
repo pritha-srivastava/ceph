@@ -39,36 +39,28 @@ namespace lfdb = ceph::libfdb;
 
 namespace rgw::d4n {
 
+
 class FDBTransaction : public Transaction {
 public:
-  explicit FDBTransaction(lfdb::database_handle db)
-    : txn_(std::make_unique<lfdb::transaction>(std::move(db))) {}
+  explicit FDBTransaction(lfdb::database_handle db) : txn_(lfdb::make_transaction(db)) {}
 
   ~FDBTransaction() override = default;
 
-  lfdb::transaction& get_transaction()
-  {
-    return *txn_;
-  }
+  lfdb::transaction_handle& get_transaction() { return txn_; }
 
   int commit(const DoutPrefixProvider* dpp, optional_yield y) override;
   int abort(const DoutPrefixProvider* dpp, optional_yield y) override;
 
 private:
-  std::unique_ptr<lfdb::transaction> txn_;
+  lfdb::transaction_handle txn_;
   bool executed_{false};
 };
 
 class FDBTransactionFactory : public TransactionFactory {
 public:
-  explicit FDBTransactionFactory(lfdb::database_handle db)
-    : db_(std::move(db)) {}
+  explicit FDBTransactionFactory(lfdb::database_handle db) : db_(std::move(db)) {}
 
-  std::unique_ptr<Transaction> create_transaction(
-      const DoutPrefixProvider* dpp) override
-  {
-    return std::make_unique<FDBTransaction>(db_);
-  }
+  std::unique_ptr<Transaction> create_transaction(const DoutPrefixProvider* dpp) override { return std::make_unique<FDBTransaction>(db_); }
 
 private:
   lfdb::database_handle db_;
@@ -96,7 +88,8 @@ public:
                        optional_yield y,
                        const std::string& key,
                        const std::string& field,
-                       std::string& out_val);
+                       std::string& out_val, 
+		       Transaction* txn);
 
     virtual int set_kv(const DoutPrefixProvider* dpp,
                        optional_yield y,
@@ -109,7 +102,8 @@ public:
                              optional_yield y,
                              const std::string& key,
                              const std::vector<std::string>& fields,
-                             std::map<std::string, std::string>& out_vals);
+                             std::map<std::string, std::string>& out_vals, 
+			     Transaction* txn);
 
     virtual int set_kv_multi(const DoutPrefixProvider* dpp,
                              optional_yield y,
@@ -130,30 +124,26 @@ public:
     explicit FDBBucketDirectory(const std::shared_ptr<FDBConnection>& fdb_conn)
       : FDBDirectory(fdb_conn) {}
 
-    virtual int exist_key(const DoutPrefixProvider* dpp,
+    virtual int exist_key(const DoutPrefixProvider* dpp, optional_yield y,
                   const std::string& bucket_id,
-                  optional_yield y,
 		  Transaction* txn = nullptr) override;
 
-    virtual int del(const DoutPrefixProvider* dpp,
+    virtual int del(const DoutPrefixProvider* dpp, optional_yield y,
             const std::string& bucket_id,
-            optional_yield y, 
 	    Transaction* txn = nullptr) override;
 
-    virtual int add_object(const DoutPrefixProvider* dpp,
+    virtual int add_object(const DoutPrefixProvider* dpp, optional_yield y,
                    const std::string& bucket_id,
                    const std::string& object_name,
                    std::optional<CacheObject> params,
-                   optional_yield y,
                    Transaction* txn=nullptr) override;
 
-    virtual int remove_object(const DoutPrefixProvider* dpp,
+    virtual int remove_object(const DoutPrefixProvider* dpp, optional_yield y,
                       const std::string& bucket_id,
                       const std::string& object_name,
-                      optional_yield y, 
 		      Transaction* txn = nullptr) override;
 
-    virtual int list_objects(const DoutPrefixProvider* dpp,
+    virtual int list_objects(const DoutPrefixProvider* dpp, optional_yield y,
                     const std::string& bucket_id,
                     const std::string& start_token,
                     const std::string& prefix,
@@ -162,32 +152,31 @@ public:
                     bool marker_inclusive,
                     std::vector<CacheObject>& objs_info,
                     std::string& continuation_token,
-                    optional_yield y,
 		    Transaction* txn = nullptr);
 
 private:
-    int fdb_add(const DoutPrefixProvider* dpp,
+    int fdb_add(const DoutPrefixProvider* dpp, optional_yield y,
                 const std::string& bucket_id,
                 double score,
                 const std::string& member,
                 std::optional<CacheObject> params,
-                optional_yield y);
+		Transaction* txn = nullptr);
 
-    int fdb_rem(const DoutPrefixProvider* dpp,
+    int fdb_rem(const DoutPrefixProvider* dpp, optional_yield y,
                 const std::string& bucket_id,
                 const std::string& member,
-                optional_yield y);
+		Transaction* txn = nullptr);
 
-    int fdb_range(const DoutPrefixProvider* dpp,
+    int fdb_range(const DoutPrefixProvider* dpp, optional_yield y,
                   const std::string& bucket_id,
                   const std::string& start,
                   uint64_t count,
                   std::vector<CacheObject>& objs_info,
                   std::string& continuation_token,
                   bool start_inclusive,
-                  optional_yield y);
+		  Transaction* txn = nullptr);
 
-    int fdb_scan(const DoutPrefixProvider* dpp,
+    int fdb_scan(const DoutPrefixProvider* dpp, optional_yield y,
                 const std::string& bucket_id,
                 const std::string& start_token,
                 const std::string& prefix,
@@ -195,7 +184,7 @@ private:
                 bool marker_inclusive, 
                 std::vector<CacheObject>& objs_info,
                 std::string& continuation_token,
-                optional_yield y);
+		Transaction* txn = nullptr);
 
     std::string build_object_index(const std::string& bucket_id,const std::string& obj_name);
     std::string get_object_subspace(const std::string& bucket_id);
@@ -206,95 +195,89 @@ public:
     explicit FDBObjectDirectory(const std::shared_ptr<FDBConnection>& fdb_conn)
       : FDBDirectory(fdb_conn) {}
 
-    virtual int exist_key(const DoutPrefixProvider* dpp,
+    virtual int exist_key(const DoutPrefixProvider* dpp, optional_yield y,
                   const std::string& bucket_id,
                   const std::string& obj_name,
-                  optional_yield y, 
 		  Transaction* txn = nullptr) override;
 
-    virtual int del(const DoutPrefixProvider* dpp,
+    virtual int del(const DoutPrefixProvider* dpp, optional_yield y,
             CacheObj* object,
-            optional_yield y,
 	    Transaction* txn = nullptr) override;
 
-    virtual int add_version(const DoutPrefixProvider* dpp,
+    virtual int add_version(const DoutPrefixProvider* dpp, optional_yield y,
                     const std::string& bucket_id,
                     const std::string& obj_name,
                     const std::string& version,
                     ceph::real_time& creation_time,
                     std::optional<CacheObjectVersion> params,
-                    optional_yield y,
                     Transaction* txn=nullptr) override;
 
-    virtual int remove_version(const DoutPrefixProvider* dpp,
+    virtual int remove_version(const DoutPrefixProvider* dpp, optional_yield y,
                        const std::string& bucket_id,
                        const std::string& obj_name,
                        const std::string& version,
-                       optional_yield y,
 		       Transaction* txn = nullptr) override;
 
-    virtual int remove_version_by_creation_time(const DoutPrefixProvider* dpp,
+    virtual int remove_version_by_creation_time(const DoutPrefixProvider* dpp, optional_yield y,
                                         const std::string& bucket_id,
                                         const std::string& obj_name,
                                         const double& creation_time,
-                                        optional_yield y,
 					Transaction* txn = nullptr) override;
 
-    virtual int list_versions(const DoutPrefixProvider* dpp,
+    virtual int list_versions(const DoutPrefixProvider* dpp, optional_yield y,
                       const std::string& bucket_id,
                       const std::string& obj_name,
                       const std::string& marker_version,
                       uint64_t count,
                       std::vector<CacheObjectVersion>& obj_versions,
                       std::string& continuation_token,
-                      optional_yield y, 
 		      Transaction* txn = nullptr) override;
 
 private:
-    int fdb_add(const DoutPrefixProvider* dpp,
+    int fdb_add(const DoutPrefixProvider* dpp, optional_yield y,
                 const std::string& bucket_id,
                 const std::string& obj_name,
                 double score,
                 const std::string& member,
                 std::optional<CacheObjectVersion> params,
-                optional_yield y);
+		Transaction* txn = nullptr);
 
-    int fdb_range(const DoutPrefixProvider* dpp,
+    int fdb_range(const DoutPrefixProvider* dpp, optional_yield y,
                   const std::string& bucket_id,
                   const std::string& obj_name,
                   int start,
                   int stop,
                   std::vector<std::string>& members,
-                  optional_yield y);
+		  Transaction* txn = nullptr);
 
-    int fdb_revrange(const DoutPrefixProvider* dpp,
+    int fdb_revrange(const DoutPrefixProvider* dpp, optional_yield y,
                     const std::string& bucket_id,
                     const std::string& obj_name,
                     const std::string& marker_version,
                     uint64_t count,
                     std::vector<CacheObjectVersion>& obj_versions,
                     std::string& continuation_token,
-                    optional_yield y);
+		    Transaction* txn = nullptr);
 
-    int fdb_rem(const DoutPrefixProvider* dpp,
+    int fdb_rem(const DoutPrefixProvider* dpp, optional_yield y,
                 const std::string& bucket_id,
                 const std::string& obj_name,
                 const std::string& member,
-                optional_yield y);
+		Transaction* txn = nullptr);
 
-    int fdb_remrangebyscore(const DoutPrefixProvider* dpp,
+    int fdb_remrangebyscore(const DoutPrefixProvider* dpp, optional_yield y,
                             const std::string& bucket_id,
                             const std::string& obj_name,
                             double min,
                             double max,
-                            optional_yield y);
+			    Transaction* txn = nullptr);
 
-    int fdb_rank(const DoutPrefixProvider* dpp,
+    int fdb_rank(const DoutPrefixProvider* dpp, optional_yield y,
                  const std::string& bucket_id,
                  const std::string& obj_name,
                  const std::string& member,
                  std::string& index,
-                 optional_yield y);
+		 Transaction* txn = nullptr);
 
     std::string get_versions_subspace(const DoutPrefixProvider* dpp,
                                         const std::string& bucket_id,
@@ -318,51 +301,46 @@ public:
     explicit FDBBlockDirectory(const std::shared_ptr<FDBConnection>& fdb_conn)
       : FDBDirectory(fdb_conn) {}
 
-    int exist_key(const DoutPrefixProvider* dpp,
+    int exist_key(const DoutPrefixProvider* dpp, optional_yield y,
                   CacheBlock* block,
-                  optional_yield y,
 		  Transaction* txn = nullptr) override;
 
-    int set(const DoutPrefixProvider* dpp,
+    int set(const DoutPrefixProvider* dpp, optional_yield y,
             std::vector<CacheBlock>& blocks,
-            optional_yield y,
 	    Transaction* txn = nullptr) override;
 
-    int set(const DoutPrefixProvider* dpp,
+    int set(const DoutPrefixProvider* dpp, optional_yield y,
             CacheBlock* block,
-            optional_yield y,
             Transaction* txn=nullptr) override;
 
-    int get(const DoutPrefixProvider* dpp,
+    int get(const DoutPrefixProvider* dpp, optional_yield y,
             CacheBlock* block,
-            optional_yield y) override;
+            Transaction* txn=nullptr) override;
 
-    int get(const DoutPrefixProvider* dpp,
+    int get(const DoutPrefixProvider* dpp, optional_yield y,
             std::vector<CacheBlock>& blocks,
-            optional_yield y) override;
+            Transaction* txn=nullptr) override;
 
-    int copy(const DoutPrefixProvider* dpp,
+    int copy(const DoutPrefixProvider* dpp, optional_yield y,
              CacheBlock* block,
              const std::string& copyName,
              const std::string& copyBucketName,
-             optional_yield y,
 	     Transaction* txn = nullptr) override;
 
-    int del(const DoutPrefixProvider* dpp,
+    int del(const DoutPrefixProvider* dpp, optional_yield y,
             CacheBlock* block,
-            optional_yield y,
 	    Transaction* txn = nullptr) override;
 
-    int update_field(const DoutPrefixProvider* dpp,
+    int update_field(const DoutPrefixProvider* dpp, optional_yield y,
                      CacheBlock* block,
                      const std::string& field,
                      std::string& value,
-                     optional_yield y) override;
+	    	     Transaction* txn = nullptr) override;
 
-    int remove_host(const DoutPrefixProvider* dpp,
+    int remove_host(const DoutPrefixProvider* dpp, optional_yield y,
                     CacheBlock* block,
                     std::string& value,
-                    optional_yield y) override;
+	    	    Transaction* txn = nullptr) override;
 
 private:
     template <AssociativeContainer Container>
