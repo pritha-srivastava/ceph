@@ -762,7 +762,6 @@ int RedisObjectDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, C
 
 int RedisObjectDirectory::zadd(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, double score, const std::string& member, Transaction* txn)
 {
-/* FIXME: AMIN
   std::string key = build_index(bucket_id, obj_name);
 
   request req;
@@ -1004,9 +1003,11 @@ int RedisObjectDirectory::remove_version(const DoutPrefixProvider* dpp, optional
   return zrem(dpp, y, bucket_id, obj_name, version, txn);
 }
 
-int RedisObjectDirectory::remove_version_by_creation_time(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const double& creation_time, Transaction* txn)
+int RedisObjectDirectory::remove_version_by_creation_time(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, ceph::real_time creation_time, Transaction* txn)
 {
-  return zremrangebyscore(dpp, y, bucket_id, obj_name, creation_time, creation_time, txn);
+  auto min = ceph::real_clock::to_double(creation_time);
+  auto max = ceph::real_clock::to_double(creation_time);
+  return zremrangebyscore(dpp, y, bucket_id, obj_name, min, max, txn);
 }
 
 int RedisObjectDirectory::list_versions(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& marker_version, uint64_t count, std::vector<CacheObjectVersion>& obj_versions, std::string& continuation_token, Transaction* txn)
@@ -1192,7 +1193,6 @@ int RedisBlockDirectory::set(const DoutPrefixProvider* dpp, optional_yield y, Ca
 
   return 0;
 }
-*/
 
 int RedisBlockDirectory::set(const DoutPrefixProvider* dpp, optional_yield y,
                              std::vector<CacheBlock>& blocks,
@@ -1696,7 +1696,7 @@ int RedisBlockDirectory::update_field(const DoutPrefixProvider* dpp, optional_yi
   int ret = -1;
   std::string key = build_index(block);
 
-  if ((ret = exist_key(dpp, block, y))) {
+  if ((ret = exist_key(dpp, y, block, txn))) {
     try {
       if (field == "hosts") { 
 	/* Append rather than overwrite */
@@ -1794,7 +1794,7 @@ int RedisBlockDirectory::remove_host(const DoutPrefixProvider* dpp, optional_yie
       }
 
       if (result.length() == 0) { /* Last host, delete entirely */
-        int ret = del(dpp, block, y); 
+        int ret = del(dpp, y, block, txn); 
         if (ret < 0) {
 		  ldpp_dout(dpp, 10) << "BlockDirectory::" << __func__ << "(): Failed to delete entire block, ret=" << ret << dendl;
         }

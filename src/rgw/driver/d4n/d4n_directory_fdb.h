@@ -39,6 +39,10 @@ namespace lfdb = ceph::libfdb;
 
 namespace rgw::d4n {
 
+struct FDBRange {
+  std::string begin;
+  std::string end;
+};
 
 class FDBTransaction : public Transaction {
 public:
@@ -154,7 +158,6 @@ public:
 		    Transaction* txn = nullptr);
 
 private:
-<<<<<<< HEAD
     int collect_range(const DoutPrefixProvider* dpp,
     		      const FDBRange& range,
   		      const std::string& base,
@@ -166,10 +169,7 @@ private:
 	  	         const std::string& start,
 		         bool inclusive);
 
-    int fdb_add(const DoutPrefixProvider* dpp,
-=======
     int fdb_add(const DoutPrefixProvider* dpp, optional_yield y,
->>>>>>> e6a08054937 (adding explicit fdb transactions)
                 const std::string& bucket_id,
                 double score,
                 const std::string& member,
@@ -181,9 +181,6 @@ private:
                 const std::string& member,
 		Transaction* txn = nullptr);
 
-<<<<<<< HEAD
-    int fdb_scan(const DoutPrefixProvider* dpp,
-=======
     int fdb_range(const DoutPrefixProvider* dpp, optional_yield y,
                   const std::string& bucket_id,
                   const std::string& start,
@@ -194,7 +191,6 @@ private:
 		  Transaction* txn = nullptr);
 
     int fdb_scan(const DoutPrefixProvider* dpp, optional_yield y,
->>>>>>> e6a08054937 (adding explicit fdb transactions)
                 const std::string& bucket_id,
                 const std::string& start_token,
                 const std::string& prefix,
@@ -205,6 +201,7 @@ private:
 		Transaction* txn = nullptr);
 
     std::string build_object_index(const std::string& bucket_id, const std::string& obj_name);
+    std::string get_object_subspace(const std::string& bucket_id);
 };
 
 class FDBObjectDirectory : public FDBDirectory, public ObjectDirectory {
@@ -238,13 +235,8 @@ public:
     virtual int remove_version_by_creation_time(const DoutPrefixProvider* dpp, optional_yield y,
                                         const std::string& bucket_id,
                                         const std::string& obj_name,
-<<<<<<< HEAD
                                         ceph::real_time creation_time,
-                                        optional_yield y) override;
-=======
-                                        const double& creation_time,
 					Transaction* txn = nullptr) override;
->>>>>>> 39908fdcbc9 (redis directory with explicit transaction support)
 
     virtual int list_versions(const DoutPrefixProvider* dpp, optional_yield y,
                       const std::string& bucket_id,
@@ -256,7 +248,6 @@ public:
 		      Transaction* txn = nullptr) override;
 
 private:
-<<<<<<< HEAD
     std::string get_versions_range_end(const std::string& versions_subspace) const;
 
     bool scan_versions(const DoutPrefixProvider* dpp,
@@ -271,10 +262,7 @@ private:
 		           std::string& member) const;
 
 
-    int fdb_add(const DoutPrefixProvider* dpp,
-=======
     int fdb_add(const DoutPrefixProvider* dpp, optional_yield y,
->>>>>>> e6a08054937 (adding explicit fdb transactions)
                 const std::string& bucket_id,
                 const std::string& obj_name,
                 int64_t score,
@@ -282,9 +270,6 @@ private:
                 std::optional<CacheObjectVersion> params,
 		Transaction* txn = nullptr);
 
-<<<<<<< HEAD
-    int fdb_revrange(const DoutPrefixProvider* dpp,
-=======
     int fdb_range(const DoutPrefixProvider* dpp, optional_yield y,
                   const std::string& bucket_id,
                   const std::string& obj_name,
@@ -294,7 +279,6 @@ private:
 		  Transaction* txn = nullptr);
 
     int fdb_revrange(const DoutPrefixProvider* dpp, optional_yield y,
->>>>>>> e6a08054937 (adding explicit fdb transactions)
                     const std::string& bucket_id,
                     const std::string& obj_name,
                     const std::string& marker_version,
@@ -312,15 +296,9 @@ private:
     int fdb_remrangebyscore(const DoutPrefixProvider* dpp, optional_yield y,
                             const std::string& bucket_id,
                             const std::string& obj_name,
-<<<<<<< HEAD
-                            int64_t min,
-                            int64_t max,
-                            optional_yield y);
-=======
                             double min,
                             double max,
 			    Transaction* txn = nullptr);
->>>>>>> e6a08054937 (adding explicit fdb transactions)
 
     int fdb_rank(const DoutPrefixProvider* dpp, optional_yield y,
                  const std::string& bucket_id,
@@ -354,20 +332,9 @@ public:
 
     int exist_key(const DoutPrefixProvider* dpp, optional_yield y,
                   CacheBlock* block,
-<<<<<<< HEAD
-<<<<<<< HEAD
-                  optional_yield y) override;
-=======
-                  optional_yield y,
-		  Transaction* txn = nullptr) override;
-
->>>>>>> 39908fdcbc9 (redis directory with explicit transaction support)
-    int set(const DoutPrefixProvider* dpp,
-=======
 		  Transaction* txn = nullptr) override;
 
     int set(const DoutPrefixProvider* dpp, optional_yield y,
->>>>>>> e6a08054937 (adding explicit fdb transactions)
             std::vector<CacheBlock>& blocks,
 	    Transaction* txn = nullptr) override;
 
