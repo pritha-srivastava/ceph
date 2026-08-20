@@ -206,13 +206,6 @@ class LFUDAPolicy : public CachePolicy {
 
     optional_yield y = null_yield;
 
-    std::shared_ptr<DirectoryConnection> conn;
-
-    std::unique_ptr<Directory> dir;
-    std::unique_ptr<BlockDirectory> blockDir;
-    std::unique_ptr<ObjectDirectory> objDir;
-    std::unique_ptr<BucketDirectory> bucketDir;
-
     rgw::sal::D4NFilterDriver* driver;
 	
     std::optional<asio::steady_timer> rthread_timer;
