@@ -87,7 +87,7 @@ private:
   std::future<void> free_space_done_future = free_space_done_promise.get_future();
   bool free_space_worker_started{false};
   inline static std::atomic<bool> quit{false};
-  bool admin;
+  bool admin{false};
 
   // io backend selection - true = io_uring, false = libaio
   bool use_io_uring = false;
