@@ -163,7 +163,8 @@ private:
   		      const std::string& base,
 		      uint64_t count,
 		      std::vector<CacheObject>& objs_info,
-		      std::string& continuation_token);
+		      std::string& continuation_token,
+		      Transaction* txn);
 
     FDBRange build_range(const std::string& base,
 	  	         const std::string& start,
@@ -181,15 +182,6 @@ private:
                 const std::string& member,
 		Transaction* txn = nullptr);
 
-    int fdb_range(const DoutPrefixProvider* dpp, optional_yield y,
-                  const std::string& bucket_id,
-                  const std::string& start,
-                  uint64_t count,
-                  std::vector<CacheObject>& objs_info,
-                  std::string& continuation_token,
-                  bool start_inclusive,
-		  Transaction* txn = nullptr);
-
     int fdb_scan(const DoutPrefixProvider* dpp, optional_yield y,
                 const std::string& bucket_id,
                 const std::string& start_token,
@@ -201,7 +193,6 @@ private:
 		Transaction* txn = nullptr);
 
     std::string build_object_index(const std::string& bucket_id, const std::string& obj_name);
-    std::string get_object_subspace(const std::string& bucket_id);
 };
 
 class FDBObjectDirectory : public FDBDirectory, public ObjectDirectory {
@@ -251,10 +242,13 @@ private:
     std::string get_versions_range_end(const std::string& versions_subspace) const;
 
     bool scan_versions(const DoutPrefixProvider* dpp,
+		       optional_yield y,
 		       const std::string& begin,
 		       const std::string& end,
 		       bool reverse,
-		       std::vector<std::pair<std::string, CacheObjectVersion>>& kvs);
+		       std::vector<std::pair<std::string, 
+		       CacheObjectVersion>>& kvs,
+		       Transaction* txn);
 
     bool parse_version_key(const std::string& versions_subspace,
 		           const std::string& key,
@@ -269,14 +263,6 @@ private:
                 const std::string& member,
                 std::optional<CacheObjectVersion> params,
 		Transaction* txn = nullptr);
-
-    int fdb_range(const DoutPrefixProvider* dpp, optional_yield y,
-                  const std::string& bucket_id,
-                  const std::string& obj_name,
-                  int start,
-                  int stop,
-                  std::vector<std::string>& members,
-		  Transaction* txn = nullptr);
 
     int fdb_revrange(const DoutPrefixProvider* dpp, optional_yield y,
                     const std::string& bucket_id,
