@@ -857,7 +857,15 @@ int LFUDAPolicy::delete_data_blocks(const DoutPrefixProvider* dpp, LFUDAObjEntry
                                                                     e->version,
                                                                     "GET");
 
-    if (lease->any_active(dpp, lease_prefix)) {
+    auto lease_result = lease->any_active(dpp, lease_prefix);
+    if (lease_result.has_error()) {
+      ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__
+                        << " lease check failed with error=" << lease_result.error
+                        << " for prefix=" << lease_prefix << dendl;
+      // On database error, be conservative: assume lease exists
+      return -EBUSY;
+    }
+    if (lease_result.active) {
       ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__
                          << " active GET lease exists for prefix=" << lease_prefix
                          << " - deferring deletion" << dendl;
@@ -946,6 +954,19 @@ int LFUDAPolicy::do_delete(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, int 
     ret = delete_data_blocks(dpp, e, y);
     if (ret == -EBUSY) {
       std::unique_lock<std::mutex> l(lfuda_cleaning_lock);
+
+      // Track retry count for lease deferrals to prevent infinite loops
+      e->retry_count++;
+      if (e->retry_count >= MAX_CLEANING_RETRY) {
+        ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__
+                          << "() max lease deferral attempts (" << MAX_CLEANING_RETRY
+                          << ") exceeded for key=" << e->key
+                          << " - lease may be stuck, marking as failed" << dendl;
+        l.unlock();
+        // Return error so it goes to failed_entries queue for manual review
+        return -EBUSY;
+      }
+
       //deferring the deletion of the invalid object
       auto v_it = per_obj_versions.find(e->obj_key.name);
       if (v_it != per_obj_versions.end()) {
@@ -953,7 +974,10 @@ int LFUDAPolicy::do_delete(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, int 
         e->creationTime += std::chrono::seconds(interval / 2);
         v_it->second[e->creationTime] = e;
       }
-      ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__ << "(): updated creation time is: " << e->creationTime << dendl;
+      ldpp_dout(dpp, 20) << "LFUDAPolicy::" << __func__
+                         << "() deferring deletion due to active lease"
+                         << " retry_count=" << e->retry_count
+                         << " updated creationTime=" << e->creationTime << dendl;
       l.unlock();
     } else if (ret < 0) {
       ldpp_dout(dpp, 0) << "Failed to delete blocks for: " << e->key << ", ret=" << ret << dendl;

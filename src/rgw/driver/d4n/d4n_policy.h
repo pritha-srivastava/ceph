@@ -169,7 +169,7 @@ class LFUDAPolicy : public CachePolicy {
     struct LFUDAObjEntry : public ObjEntry {
       using handle_type = boost::heap::fibonacci_heap<LFUDAObjEntry*, boost::heap::compare<ObjectComparator<LFUDAObjEntry>>>::handle_type;
       handle_type handle;
-      int retry_count;
+      int retry_count = 0;  // Initialize to 0 to track retry attempts
 
       LFUDAObjEntry(const std::string& key, const std::string& version, bool deleteMarker, uint64_t size,
                      ceph::real_time creationTime, const rgw_user& user, const std::string& etag,

@@ -1874,7 +1874,7 @@ bool D4NFilterObject::check_head_exists_in_cache_get_oid(const DoutPrefixProvide
         this->lease_token = uuid;
 
         // Acquire the lease
-        int rc = lease->acquire(dpp, this->lease_resource, this->lease_holder, this->lease_token, D4N_LEASE_TTL_SECONDS);
+        int rc = lease->acquire(dpp, this->lease_resource, this->lease_holder, this->lease_token, D4N_LEASE_TTL_NANOSECONDS);
         if (rc < 0) {
           ldpp_dout(dpp, 0) << "D4NFilterObject::" << __func__
                             << " failed to acquire lease: rc=" << rc
@@ -2562,7 +2562,7 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
             auto* lease = source->driver->get_lease();
             if (lease && source->lease_acquired) {
               int rc = lease->renew(dpp, source->lease_resource, source->lease_holder, source->lease_token,
-                                    D4N_LEASE_TTL_SECONDS, num_parts);
+                                    D4N_LEASE_TTL_NANOSECONDS, num_parts);
               if (rc < 0) {
                 ldpp_dout(dpp, 0) << "D4NFilterObject::iterate:: " << __func__
                                   << " failed to renew lease before remote GET: rc=" << rc

@@ -20,12 +20,30 @@ static std::string encode_score(int64_t score)
   return fmt::format("{:019d}", score);
 }
 
+// Helper: Convert seconds to nanoseconds for TTL specification
+constexpr uint64_t seconds_to_nanoseconds(uint64_t seconds) {
+  // Check for overflow: max uint64_t / 1e9 ≈ 18.4e9 seconds ≈ 584 years
+  if (seconds > std::numeric_limits<uint64_t>::max() / 1000000000ULL) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return seconds * 1000000000ULL;
+}
+
+// Helper: Convert milliseconds to nanoseconds for TTL specification
+constexpr uint64_t milliseconds_to_nanoseconds(uint64_t milliseconds) {
+  if (milliseconds > std::numeric_limits<uint64_t>::max() / 1000000ULL) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return milliseconds * 1000000ULL;
+}
+
 // Lease metadata structure
 struct LeaseData {
-  uint64_t expiry = 0;
+  uint64_t expiry = 0;          // When the lease expires (epoch nanoseconds)
   std::string holder_id;
   std::string token;
   uint64_t tick_count = 0;
+  std::string last_renewal_id;  // ID of last renewal - for replay detection
 
   bool is_active(uint64_t now) const {
     return expiry > now;
@@ -33,36 +51,51 @@ struct LeaseData {
 };
 
 // Build FDB key for a lease on a resource using FDB directory layer
-std::string make_lease_key(const std::string& resource_name)
+// Uses compiled_key directly to avoid string conversion overhead
+// Parses hierarchical resource names into FDB tuple components
+// Format: "bucket/object/version/operation" or "bucket/object/version/operation/uuid"
+// Note: Components are URL-encoded by the caller to handle '/' in S3 object names
+auto make_lease_key(const std::string& resource_name)
 {
-  return std::string(libfdb_key_view(fdbc::keyspace("d4n") / "leases" / resource_name));
+  auto root = fdbc::keyspace("d4n") / "leases";
+
+  std::vector<std::string> parts;
+  boost::split(parts, resource_name, boost::is_any_of("/"));
+
+  auto key = root;
+  for (const auto& part : parts) {
+    if (!part.empty()) {
+      key = key / part;
+    }
+  }
+  return key;
 }
 
-// Get current time in seconds since epoch
-uint64_t current_time_seconds()
+// Get current time in nanoseconds since epoch
+uint64_t current_time_nanoseconds()
 {
-  const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+  const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::system_clock::now().time_since_epoch()).count();
   return static_cast<uint64_t>(std::max<int64_t>(now, 0));
 }
 
-// Calculate expiry time from TTL
-uint64_t calculate_expiry(uint64_t ttl_seconds)
+// Calculate expiry time from TTL in nanoseconds
+uint64_t calculate_expiry(uint64_t ttl_nanoseconds)
 {
-  const auto now = current_time_seconds();
-  if (ttl_seconds > std::numeric_limits<uint64_t>::max() - now) {
+  const auto now = current_time_nanoseconds();
+  if (ttl_nanoseconds > std::numeric_limits<uint64_t>::max() - now) {
     return std::numeric_limits<uint64_t>::max();
   }
-  return now + ttl_seconds;
+  return now + ttl_nanoseconds;
 }
 
 int FDBLease::acquire(const DoutPrefixProvider* dpp,
                              const std::string& resource_name,
                              const std::string& holder_id,
                              const std::string& token,
-                             uint64_t ttl_seconds)
+                             uint64_t ttl_nanoseconds)
 {
-  if (ttl_seconds == 0) {
+  if (ttl_nanoseconds == 0) {
     ldpp_dout(dpp, 10) << "FDBLease::" << __func__
                        << " invalid TTL=0 for resource=" << resource_name << dendl;
     return -EINVAL;
@@ -78,12 +111,20 @@ int FDBLease::acquire(const DoutPrefixProvider* dpp,
 
   try {
     return lfdb::make_transactor(FDBdb)([&](auto& tr) {
-      const auto now = current_time_seconds();
+      const auto now = current_time_nanoseconds();
 
       // Check if resource already has an active lease
       LeaseData existing_lease;
       if (lfdb::get(tr, fdb_key, existing_lease)) {
         if (existing_lease.is_active(now)) {
+          // Handle transaction replay - if we already acquired this lease
+          // (commit_unknown_result replay), return success instead of -EEXIST
+          if (existing_lease.holder_id == holder_id && existing_lease.token == token) {
+            ldpp_dout(dpp, 20) << "FDBLease::" << __func__
+                               << " lease already acquired by us (replay): resource="
+                               << resource_name << dendl;
+            return 0;  // Idempotent - already acquired by us
+          }
           ldpp_dout(dpp, 10) << "FDBLease::" << __func__
                              << " resource already leased by holder=" << existing_lease.holder_id
                              << " resource=" << resource_name << dendl;
@@ -96,17 +137,19 @@ int FDBLease::acquire(const DoutPrefixProvider* dpp,
 
       // Acquire the lease
       LeaseData new_lease{
-        .expiry = calculate_expiry(ttl_seconds),
+        .expiry = calculate_expiry(ttl_nanoseconds),
         .holder_id = holder_id,
         .token = token,
-        .tick_count = 0
+        .tick_count = 0,
+        .last_renewal_id = ""  // No renewals yet
       };
       lfdb::set(tr, fdb_key, new_lease);
 
+      // NOTE: Log before commit() - may print multiple times on transaction replay
       ldpp_dout(dpp, 20) << "FDBLease::" << __func__
                          << " acquired lease: resource=" << resource_name
                          << " holder=" << holder_id
-                         << " expiry=" << new_lease.expiry << dendl;
+                         << " expiry_ns=" << new_lease.expiry << dendl;
       return 0;
     });
   } catch (const lfdb::libfdb_exception& e) {
@@ -121,10 +164,10 @@ int FDBLease::renew(const DoutPrefixProvider* dpp,
                            const std::string& resource_name,
                            const std::string& holder_id,
                            const std::string& token,
-                           uint64_t ttl_seconds,
+                           uint64_t ttl_nanoseconds,
                            uint64_t max_ticks)
 {
-  if (ttl_seconds == 0) {
+  if (ttl_nanoseconds == 0) {
     ldpp_dout(dpp, 10) << "FDBLease::" << __func__
                        << " invalid TTL=0 for resource=" << resource_name << dendl;
     return -EINVAL;
@@ -136,17 +179,34 @@ int FDBLease::renew(const DoutPrefixProvider* dpp,
     return -EINVAL;
   }
 
+  // Generate unique renewal_id OUTSIDE transaction lambda
+  // This ensures the same ID is used on transaction replay
+  // Format: timestamp_nanoseconds:holder_id:token_hash
+  const uint64_t renewal_timestamp = current_time_nanoseconds();
+  const std::string renewal_id = std::to_string(renewal_timestamp) + ":" +
+                                  holder_id + ":" +
+                                  std::to_string(std::hash<std::string>{}(token));
+
   const auto fdb_key = make_lease_key(resource_name);
 
   try {
     return lfdb::make_transactor(FDBdb)([&](auto& tr) {
       LeaseData existing_lease;
-      const auto now = current_time_seconds();
+      const auto now = current_time_nanoseconds();
 
       if (!lfdb::get(tr, fdb_key, existing_lease)) {
         ldpp_dout(dpp, 10) << "FDBLease::" << __func__
                            << " lease not found: resource=" << resource_name << dendl;
         return -ENOENT;
+      }
+
+      // REPLAY DETECTION: Check if this exact renewal was already applied
+      if (existing_lease.last_renewal_id == renewal_id) {
+        ldpp_dout(dpp, 20) << "FDBLease::" << __func__
+                           << " renewal already applied (transaction replay detected)"
+                           << " renewal_id=" << renewal_id
+                           << " resource=" << resource_name << dendl;
+        return 0;  // Idempotent - this renewal already happened
       }
 
       if (!existing_lease.is_active(now)) {
@@ -175,20 +235,23 @@ int FDBLease::renew(const DoutPrefixProvider* dpp,
         return -EINVAL;  // Lease still held - caller decides what to do
       }
 
-      // Renew the lease with incremented tick count
+      // Renew the lease with incremented tick count and this renewal_id
       LeaseData renewed_lease{
-        .expiry = calculate_expiry(ttl_seconds),
+        .expiry = calculate_expiry(ttl_nanoseconds),
         .holder_id = holder_id,
         .token = token,
-        .tick_count = existing_lease.tick_count + 1
+        .tick_count = existing_lease.tick_count + 1,
+        .last_renewal_id = renewal_id  // Mark this renewal as applied
       };
       lfdb::set(tr, fdb_key, renewed_lease);
 
+      // NOTE: Log before commit() - may print multiple times on transaction replay
       ldpp_dout(dpp, 20) << "FDBLease::" << __func__
                          << " renewed lease: resource=" << resource_name
                          << " holder=" << holder_id
-                         << " new_expiry=" << renewed_lease.expiry
-                         << " tick_count=" << renewed_lease.tick_count << dendl;
+                         << " new_expiry_ns=" << renewed_lease.expiry
+                         << " tick_count=" << renewed_lease.tick_count
+                         << " renewal_id=" << renewal_id << dendl;
       return 0;
     });
   } catch (const lfdb::libfdb_exception& e) {
@@ -216,9 +279,12 @@ int FDBLease::release(const DoutPrefixProvider* dpp,
     return lfdb::make_transactor(FDBdb)([&](auto& tr) {
       LeaseData existing_lease;
       if (!lfdb::get(tr, fdb_key, existing_lease)) {
-        ldpp_dout(dpp, 10) << "FDBLease::" << __func__
-                           << " lease not found: resource=" << resource_name << dendl;
-        return -ENOENT;
+        // Make release() idempotent for transaction replay
+        // If lease not found, it was already released (possibly by replay)
+        ldpp_dout(dpp, 20) << "FDBLease::" << __func__
+                           << " lease not found (already released or replay): resource="
+                           << resource_name << dendl;
+        return 0;  // Idempotent - already released
       }
 
       // Validate ownership
@@ -233,6 +299,7 @@ int FDBLease::release(const DoutPrefixProvider* dpp,
       // Release the lease
       lfdb::erase(tr, fdb_key);
 
+      // NOTE: Log before commit() - may print multiple times on transaction replay
       ldpp_dout(dpp, 20) << "FDBLease::" << __func__
                          << " released lease: resource=" << resource_name
                          << " holder=" << holder_id << dendl;
@@ -246,20 +313,23 @@ int FDBLease::release(const DoutPrefixProvider* dpp,
   }
 }
 
-bool FDBLease::any_active(const DoutPrefixProvider* dpp,
-                          const std::string& resource_prefix)
+LeaseCheckResult FDBLease::any_active(const DoutPrefixProvider* dpp,
+                                      const std::string& resource_prefix)
 {
   if (resource_prefix.empty()) {
     ldpp_dout(dpp, 10) << "FDBLease::" << __func__
                        << " empty resource_prefix" << dendl;
-    return false;
+    return {.active = false, .error = -EINVAL};
   }
 
   // Build prefix for scanning all leases matching this resource
+  // With hierarchical keys, prefix matching now works correctly:
+  // "bucket" prefix will match "bucket/object1", "bucket/object2", etc.
+  // "bucket/obj/v1/GET" prefix will match all "bucket/obj/v1/GET/*" (all uuids)
   const auto prefix_key = make_lease_key(resource_prefix);
 
   try {
-    return lfdb::make_transactor(FDBdb)([&](auto& tr) -> bool {
+    bool has_active = lfdb::make_transactor(FDBdb)([&](auto& tr) -> bool {
       // Use query algebra for prefix scan
       auto gen = lfdb::scan<LeaseData>(tr, q::prefix(prefix_key));
       auto it  = std::ranges::begin(gen);
@@ -278,7 +348,7 @@ bool FDBLease::any_active(const DoutPrefixProvider* dpp,
       }
 
       // Check if any lease is still active and opportunistically cleanup expired ones
-      const auto now = current_time_seconds();
+      const auto now = current_time_nanoseconds();
       int total_leases = rows.size();
       int active_leases = 0;
       std::vector<std::string> expired_keys;
@@ -288,7 +358,7 @@ bool FDBLease::any_active(const DoutPrefixProvider* dpp,
           active_leases++;
           ldpp_dout(dpp, 20) << "FDBLease::" << __func__
                              << " found active lease: holder=" << lease.holder_id
-                             << " expiry=" << lease.expiry << dendl;
+                             << " expiry_ns=" << lease.expiry << dendl;
         } else {
           // Collect expired leases for opportunistic cleanup
           expired_keys.push_back(key);
@@ -305,39 +375,44 @@ bool FDBLease::any_active(const DoutPrefixProvider* dpp,
                            << " cleaned up " << expired_keys.size() << " expired leases" << dendl;
       }
 
-      bool has_active = (active_leases > 0);
+      bool result = (active_leases > 0);
       ldpp_dout(dpp, 20) << "FDBLease::" << __func__
                          << " resource_prefix=" << resource_prefix
                          << " total_leases=" << total_leases
                          << " active_leases=" << active_leases
-                         << " has_active=" << has_active << dendl;
-      return has_active;
+                         << " has_active=" << result << dendl;
+      return result;
     });
+
+    return {.active = has_active, .error = 0};
 
   } catch (const lfdb::libfdb_exception& e) {
     ldpp_dout(dpp, 0) << "FDBLease::" << __func__
                       << " FDB error for resource_prefix=" << resource_prefix
                       << ": " << e.what() << dendl;
-    return false;
+    return {.active = false, .error = -EIO};
   }
 }
 
-bool FDBLease::is_active(const DoutPrefixProvider* dpp,
-                                const std::string& resource_name,
-                                const std::string& holder_id,
-                                const std::string& token)
+LeaseCheckResult FDBLease::is_active(const DoutPrefixProvider* dpp,
+                                     const std::string& resource_name,
+                                     const std::string& holder_id,
+                                     const std::string& token)
 {
   if (resource_name.empty() || holder_id.empty() || token.empty()) {
     ldpp_dout(dpp, 10) << "FDBLease::" << __func__
                        << " empty resource_name/holder_id/token" << dendl;
-    return false;
+    return {.active = false, .error = -EINVAL};
   }
 
   const auto fdb_key = make_lease_key(resource_name);
 
   try {
     // Atomic check-and-cleanup in single transaction to avoid TOCTOU race
-    return lfdb::make_transactor(FDBdb)([&](auto& tr) -> bool {
+    // NOTE: If callers use is_active() to authorize a later FDB update,
+    // consider sharing the transaction: read the lease key in the update
+    // transaction itself - FDB will retry if the lease changes
+    bool active = lfdb::make_transactor(FDBdb)([&](auto& tr) -> bool {
       LeaseData lease;
       if (!lfdb::get(tr, fdb_key, lease)) {
         ldpp_dout(dpp, 20) << "FDBLease::" << __func__
@@ -346,11 +421,11 @@ bool FDBLease::is_active(const DoutPrefixProvider* dpp,
       }
 
       // Check expiry and opportunistically cleanup if expired
-      const auto now = current_time_seconds();
+      const auto now = current_time_nanoseconds();
       if (!lease.is_active(now)) {
         ldpp_dout(dpp, 20) << "FDBLease::" << __func__
                            << " lease expired: resource=" << resource_name
-                           << " expiry=" << lease.expiry << " - deleting" << dendl;
+                           << " expiry_ns=" << lease.expiry << " - deleting" << dendl;
         // Opportunistic cleanup: delete in same transaction (atomic)
         lfdb::erase(tr, fdb_key);
         return false;
@@ -368,15 +443,17 @@ bool FDBLease::is_active(const DoutPrefixProvider* dpp,
       ldpp_dout(dpp, 20) << "FDBLease::" << __func__
                          << " lease is active: resource=" << resource_name
                          << " holder=" << holder_id
-                         << " expiry=" << lease.expiry << dendl;
+                         << " expiry_ns=" << lease.expiry << dendl;
       return true;
     });
+
+    return {.active = active, .error = 0};
 
   } catch (const lfdb::libfdb_exception& e) {
     ldpp_dout(dpp, 0) << "FDBLease::" << __func__
                       << " FDB error for resource=" << resource_name
                       << ": " << e.what() << dendl;
-    return false;
+    return {.active = false, .error = -EIO};
   }
 }
 

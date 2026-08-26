@@ -62,13 +62,13 @@ public:
                 const std::string& resource_name,
                 const std::string& holder_id,
                 const std::string& token,
-                uint64_t ttl_seconds) override;
+                uint64_t ttl_nanoseconds) override;
 
     int renew(const DoutPrefixProvider* dpp,
               const std::string& resource_name,
               const std::string& holder_id,
               const std::string& token,
-              uint64_t ttl_seconds,
+              uint64_t ttl_nanoseconds,
               uint64_t max_ticks = 0) override;
 
     int release(const DoutPrefixProvider* dpp,
@@ -76,13 +76,13 @@ public:
                 const std::string& holder_id,
                 const std::string& token) override;
 
-    bool any_active(const DoutPrefixProvider* dpp,
-                    const std::string& resource_prefix) override;
+    LeaseCheckResult any_active(const DoutPrefixProvider* dpp,
+                                 const std::string& resource_prefix) override;
 
-    bool is_active(const DoutPrefixProvider* dpp,
-                   const std::string& resource_name,
-                   const std::string& holder_id,
-                   const std::string& token) override;
+    LeaseCheckResult is_active(const DoutPrefixProvider* dpp,
+                                const std::string& resource_name,
+                                const std::string& holder_id,
+                                const std::string& token) override;
 
 private:
     lfdb::database_handle FDBdb;

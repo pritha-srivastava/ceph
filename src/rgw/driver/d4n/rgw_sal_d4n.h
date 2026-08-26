@@ -70,8 +70,9 @@ inline std::string get_versioned_head_block_name(const std::string& version, con
   return "_:" + version + "_" + obj_name;
 }
 
-// Lease TTL for GET operations to prevent concurrent deletion (in seconds)
-constexpr uint64_t D4N_LEASE_TTL_SECONDS = 30;
+// Lease TTL for GET operations to prevent concurrent deletion (in nanoseconds)
+// 30 seconds = 30,000,000,000 nanoseconds
+constexpr uint64_t D4N_LEASE_TTL_NANOSECONDS = 30'000'000'000ULL;
 
 // Builds a unique lease resource key for preventing concurrent GET/PUT conflicts.
 // Format: "<bucket_id>:<object_name>:<version>:<operation>:<uuid>"
