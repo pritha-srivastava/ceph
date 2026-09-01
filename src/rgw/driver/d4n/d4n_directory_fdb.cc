@@ -44,7 +44,7 @@ int FDBTransaction::commit(const DoutPrefixProvider* dpp, optional_yield y)
     }
 
     executed_ = true;
-    ldpp_dout(dpp, 10) << "FDBTransaction::" << __func__ << "() transaction conflict, replay required" << dendl;
+    ldpp_dout(dpp, 10) << "FDBTransaction::" << __func__ << "() transaction failed, replay required" << dendl;
     return -EAGAIN;
   } catch (const lfdb::libfdb_exception& e) {
     executed_ = true;
@@ -65,10 +65,10 @@ int FDBTransaction::abort(const DoutPrefixProvider* dpp, optional_yield y)
 }
 
 template <typename Func>
-int FDBDirectory::with_fdb_transaction(Transaction* txn, Func&& func)
+int FDBDirectory::with_fdb_transaction(std::optional<std::reference_wrapper<Transaction>> txn, Func&& func)
 {
   if (txn) {
-    auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
+    auto* fdb_txn = dynamic_cast<FDBTransaction*>(&txn->get());
     if (!fdb_txn) {
       return -EINVAL;
     }
@@ -83,42 +83,40 @@ int FDBDirectory::with_fdb_transaction(Transaction* txn, Func&& func)
 }
 
 
-int FDBDirectory::get_kv(const DoutPrefixProvider* dpp, optional_yield y, const std::string& key, const std::string& field, std::string& out_val, Transaction* txn)
+int FDBDirectory::get_kv(const DoutPrefixProvider* dpp,
+                         optional_yield y,
+                         const std::string& key,
+                         const std::string& field,
+                         std::string& out_val,
+                         std::optional<std::reference_wrapper<Transaction>> txn)
 {
   try {
-    auto get = [&](auto& tr) {
+    return with_fdb_transaction(txn, [&](auto& tr) {
       std::map<std::string, std::string> kvs;
+
       if (!lfdb::get(tr, key, kvs)) {
         return -ENOENT;
       }
+
       auto it = kvs.find(field);
       if (it == kvs.end()) {
         return -ENOENT;
       }
+
       out_val = it->second;
       return 0;
-    };
-
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-      auto& tr = fdb_txn->get_transaction();
-      return get(tr);
-    }
-
-    return lfdb::make_transactor(FDBdb)(get);
+    });
   } catch (const lfdb::libfdb_exception& e) {
     ldpp_dout(dpp, 0) << "FDBDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
   }
+  return 0; //remove this AMIN
 }
 
 
 int FDBDirectory::set_kv(const DoutPrefixProvider* dpp, optional_yield y,
-    const std::string& key, const std::string& field,
-    const std::string& val, Transaction* txn)
+		    const std::string& key, const std::string& field,
+		    const std::string& val, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   try {
     auto set = [&](auto& tr) {
@@ -129,27 +127,16 @@ int FDBDirectory::set_kv(const DoutPrefixProvider* dpp, optional_yield y,
       return 0;
     };
 
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-      auto& tr = fdb_txn->get_transaction();
-      return set(tr);
-    }
-
-    return lfdb::make_transactor(FDBdb)(set);
+    return with_fdb_transaction(txn, set);
   } catch (const lfdb::libfdb_exception& e) {
-    ldpp_dout(dpp, 0)
-      << "FDBDirectory::" << __func__
-      << "() ERROR: " << e.what() << dendl;
+    ldpp_dout(dpp, 0) << "FDBDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
   }
 }
 
 int FDBDirectory::get_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
-    const std::string& key, const std::vector<std::string>& fields,
-    std::map<std::string, std::string>& out_vals, Transaction* txn)
+		    const std::string& key, const std::vector<std::string>& fields,
+		    std::map<std::string, std::string>& out_vals, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   try {
     auto get = [&](auto& tr) {
@@ -169,20 +156,9 @@ int FDBDirectory::get_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
       return 0;
     };
 
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-      auto& tr = fdb_txn->get_transaction();
-      return get(tr);
-    }
-
-    return lfdb::make_transactor(FDBdb)(get);
+    return with_fdb_transaction(txn, get);
   } catch (const lfdb::libfdb_exception& e) {
-    ldpp_dout(dpp, 0)
-      << "FDBDirectory::" << __func__
-      << "() ERROR: " << e.what() << dendl;
+    ldpp_dout(dpp, 0) << "FDBDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
   }
 }
@@ -190,7 +166,7 @@ int FDBDirectory::get_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
 int FDBDirectory::set_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
     const std::string& key,
     const std::map<std::string, std::string>& vals,
-    Transaction* txn)
+    std::optional<std::reference_wrapper<Transaction>> txn)
 {
   try {
     auto set = [&](auto& tr) {
@@ -203,122 +179,78 @@ int FDBDirectory::set_kv_multi(const DoutPrefixProvider* dpp, optional_yield y,
       return 0;
     };
 
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-      auto& tr = fdb_txn->get_transaction();
-      return set(tr);
-    }
-
-    return lfdb::make_transactor(FDBdb)(set);
+    return with_fdb_transaction(txn, set);
   } catch (const lfdb::libfdb_exception& e) {
-    ldpp_dout(dpp, 0)
-      << "FDBDirectory::" << __func__
-      << "() ERROR: " << e.what() << dendl;
+    ldpp_dout(dpp, 0) << "FDBDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
   }
 }
-
 
 int FDBDirectory::set_kv_if_not_exists(const DoutPrefixProvider* dpp, optional_yield y,
                                         const std::string& key,
                                         const std::string& field,
                                         const std::string& val,
-					Transaction* txn)
+                                        std::optional<std::reference_wrapper<Transaction>> txn)
 {
   try {
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-
-      auto& tr = fdb_txn->get_transaction();
+    auto set = [&](auto& tr) {
       std::map<std::string, std::string> existing;
-
       lfdb::get(tr, key, existing);
       if (existing.find(field) == existing.end()) {
         existing[field] = val;
         lfdb::set(tr, key, existing);
       }
       return 0;
-    }
+    };
 
-    return lfdb::make_transactor(FDBdb)([&](auto& tr) {
-      std::map<std::string, std::string> existing;
-
-      lfdb::get(tr, key, existing);
-      if (existing.find(field) == existing.end()) {
-        existing[field] = val;
-        lfdb::set(tr, key, existing);
-      }
-      return 0;
-    });
+    return with_fdb_transaction(txn, set);
   } catch (const lfdb::libfdb_exception& e) {
-    ldpp_dout(dpp, 0)
-      << "FDBDirectory::" << __func__
-      << "() ERROR: " << e.what() << dendl;
+    ldpp_dout(dpp, 0) << "FDBDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
   }
 }
 
-int FDBBucketDirectory::exist_key(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, Transaction* txn)
+int FDBBucketDirectory::exist_key(const DoutPrefixProvider* dpp, optional_yield y,
+                                   const std::string& bucket_id, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   try {
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-      auto& tr = fdb_txn->get_transaction();
+    auto exists = [&](auto& tr) {
       return lfdb::key_exists(tr, bucket_id);
-    }
+    };
 
-    return lfdb::make_transactor(FDBdb)([&](auto& tr) {
-      return lfdb::key_exists(tr, bucket_id);
-    });
+    return with_fdb_transaction(txn, exists);
   } catch (const lfdb::libfdb_exception& e) {
     ldpp_dout(dpp, 0) << "FDBBucketDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
   }
 }
 
-int FDBBucketDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, Transaction* txn)
+
+int FDBBucketDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   try {
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-      auto& tr = fdb_txn->get_transaction();
+    auto erase = [&](auto &tr) {
       lfdb::erase(tr, bucket_id);
       return 0;
-    }
-
-    return lfdb::make_transactor(FDBdb)([&](auto& tr) {
-      lfdb::erase(tr, bucket_id);
-      return 0;
-    });
+    };
+    return with_fdb_transaction(txn, erase);
   } catch (const lfdb::libfdb_exception& e) {
-    ldpp_dout(dpp, 0) << "FDBObjectDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
+    ldpp_dout(dpp, 0) << "FDBBucketDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
   }
 }
 
-int FDBBucketDirectory::add_object(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, Transaction* txn)
+int FDBBucketDirectory::add_object(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   return fdb_add(dpp, y, bucket_id, 0, object_name, std::move(params), txn);
 }
 
-int FDBBucketDirectory::remove_object(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& object_name, Transaction* txn)
+int FDBBucketDirectory::remove_object(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& object_name, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   return fdb_rem(dpp, y, bucket_id, object_name, txn);
 }
 
-int FDBBucketDirectory::list_objects(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& start_token, const std::string& prefix, const std::string& marker, uint64_t count, bool marker_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, Transaction* txn)
+int FDBBucketDirectory::list_objects(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& start_token, const std::string& prefix, const std::string& marker, uint64_t count, bool marker_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   return fdb_scan(dpp, y, bucket_id, marker, prefix, count, marker_inclusive, objs_info, continuation_token, txn);
 }
@@ -335,7 +267,7 @@ int FDBBucketDirectory::collect_range(const DoutPrefixProvider* dpp,
 		    uint64_t count,
 		    std::vector<CacheObject>& objs_info,
 		    std::string& continuation_token,
-		    Transaction* txn)
+		    std::optional<std::reference_wrapper<Transaction>> txn)
 {
   objs_info.clear();
   continuation_token.clear();
@@ -351,9 +283,7 @@ int FDBBucketDirectory::collect_range(const DoutPrefixProvider* dpp,
          lfdb::scan<CacheObject>(tr, selector)) {
 
       if (key.size() < base.size()) {
-        ldpp_dout(dpp, 0)
-            << "FDBBucketDirectory::" << __func__
-            << "() malformed key: " << key << dendl;
+        ldpp_dout(dpp, 0) << "FDBBucketDirectory::" << __func__ << "() malformed key: " << key << dendl;
         continue;
       }
 
@@ -380,26 +310,9 @@ int FDBBucketDirectory::collect_range(const DoutPrefixProvider* dpp,
   };
 
   try {
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-
-      auto& tr = fdb_txn->get_transaction();
-      return collect_transaction(tr);
-    }
-
-    return lfdb::make_transactor(FDBdb)(
-        [&](auto& tr) -> int {
-          return collect_transaction(tr);
-        });
-
+    return with_fdb_transaction(txn, collect_transaction);
   } catch (const lfdb::libfdb_exception& e) {
-    ldpp_dout(dpp, 0)
-        << "FDBBucketDirectory::" << __func__
-        << "() ERROR: " << e.what() << dendl;
-
+    ldpp_dout(dpp, 0) << "FDBBucketDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
   }
 }
@@ -426,7 +339,7 @@ int FDBBucketDirectory::fdb_add(const DoutPrefixProvider* dpp, optional_yield y,
                                 double score,
                                 const std::string& member,
                                 std::optional<CacheObject> params,
-                                Transaction* txn)
+                                std::optional<std::reference_wrapper<Transaction>> txn)
 {
   if (!params) {
     return -EINVAL;
@@ -434,26 +347,14 @@ int FDBBucketDirectory::fdb_add(const DoutPrefixProvider* dpp, optional_yield y,
 
   try {
     std::string member_key = build_object_index(bucket_id, member);
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-      auto& tr = fdb_txn->get_transaction();
-
-      lfdb::set(tr, member_key, *params);
-
-      return 0;
-    }
-
-    return lfdb::make_transactor(FDBdb)([&](auto& tr) {
+    auto set = [&](auto& tr) {
       lfdb::set(tr, member_key, *params);
       return 0;
-    });
+    };
+
+    return with_fdb_transaction(txn, set);
   } catch (const lfdb::libfdb_exception& e) {
-    ldpp_dout(dpp, 0)
-      << "FDBBucketDirectory::" << __func__
-      << "() ERROR: " << e.what() << dendl;
+    ldpp_dout(dpp, 0) << "FDBBucketDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
   }
 }
@@ -461,28 +362,17 @@ int FDBBucketDirectory::fdb_add(const DoutPrefixProvider* dpp, optional_yield y,
 int FDBBucketDirectory::fdb_rem(const DoutPrefixProvider* dpp, optional_yield y,
                                 const std::string& bucket_id,
                                 const std::string& member,
-                                Transaction* txn)
+                                std::optional<std::reference_wrapper<Transaction>> txn)
 {
   try {
     std::string member_key = build_object_index(bucket_id, member);
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-      auto& tr = fdb_txn->get_transaction();
+    auto rem = [&](auto& tr) {
       lfdb::erase(tr, member_key);
       return 0;
-    }
-
-    return lfdb::make_transactor(FDBdb)([&](auto& tr) {
-      lfdb::erase(tr, member_key);
-      return 0;
-    });
+    };
+    return with_fdb_transaction(txn, rem);
   } catch (const lfdb::libfdb_exception& e) {
-    ldpp_dout(dpp, 0)
-      << "FDBBucketDirectory::" << __func__
-      << "() ERROR: " << e.what() << dendl;
+    ldpp_dout(dpp, 0) << "FDBBucketDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
   }
 }
@@ -496,7 +386,7 @@ int FDBBucketDirectory::fdb_scan(const DoutPrefixProvider* dpp, optional_yield y
                                  bool marker_inclusive,
                                  std::vector<CacheObject>& objs_info,
                                  std::string& continuation_token,
-                                 Transaction* txn)
+                                 std::optional<std::reference_wrapper<Transaction>> txn)
 {
   continuation_token.clear();
 
@@ -516,9 +406,7 @@ int FDBBucketDirectory::fdb_scan(const DoutPrefixProvider* dpp, optional_yield y
       return -ENOENT;
     }
 
-    ldpp_dout(dpp, 20)
-        << "FDBBucketDirectory::" << __func__
-        << "() prefix_begin: " << prefix_begin << dendl;
+    ldpp_dout(dpp, 20) << "FDBBucketDirectory::" << __func__ << "() prefix_begin: " << prefix_begin << dendl;
 
     const auto page_query = q::with_options(
         object_query,
@@ -533,9 +421,7 @@ int FDBBucketDirectory::fdb_scan(const DoutPrefixProvider* dpp, optional_yield y
       std::vector<std::pair<std::string, CacheObject>> rows;
       const int limit = fdb_page_read_limit(count);
 
-      for (int n = 0;
-           (limit == 0 || n < limit) && it != end;
-           ++n, ++it) {
+      for (int n = 0; (limit == 0 || n < limit) && it != end; ++n, ++it) {
         rows.push_back(*it);
       }
 
@@ -543,10 +429,7 @@ int FDBBucketDirectory::fdb_scan(const DoutPrefixProvider* dpp, optional_yield y
         return -ENOENT;
       }
 
-      const auto returned = (count == 0)
-          ? std::size(rows)
-          : std::min(std::size(rows),
-                     static_cast<std::size_t>(count));
+      const auto returned = (count == 0) ? std::size(rows) : std::min(std::size(rows), static_cast<std::size_t>(count));
 
       objs_info.reserve(returned);
 
@@ -560,32 +443,14 @@ int FDBBucketDirectory::fdb_scan(const DoutPrefixProvider* dpp, optional_yield y
 
       return 0;
     };
-
-    // Use the caller's transaction when one was supplied.
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-
-      auto& tr = fdb_txn->get_transaction();
-      return scan_transaction(tr);
-    }
-
-    // Otherwise create and commit our own transaction.
-    return lfdb::make_transactor(FDBdb)(
-        [&](auto& tr) -> int {
-          return scan_transaction(tr);
-        });
-
+    return with_fdb_transaction(txn, scan_transaction);    
   } catch (const lfdb::libfdb_exception& e) {
-    ldpp_dout(dpp, 0)
-        << "FDBBucketDirectory::" << __func__
-        << "() ERROR: " << e.what() << dendl;
-
+    ldpp_dout(dpp, 0) << "FDBBucketDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
   }
 }
+
+
 
 /*
   Key formats:
@@ -629,23 +494,14 @@ std::string FDBObjectDirectory::build_version_score_index(const DoutPrefixProvid
   return subspace + std::string(libfdb_key_view(fdbc::key(version)));
 }
 
-int FDBObjectDirectory::exist_key(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, Transaction* txn)
+int FDBObjectDirectory::exist_key(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   try {
     std::string key = build_index(bucket_id, obj_name);
-
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-      auto& tr = fdb_txn->get_transaction();
+    auto exists = [&](auto& tr) {
       return lfdb::key_exists(tr, key);
-    }
-
-    return lfdb::make_transactor(FDBdb)([&](auto& tr) {
-      return lfdb::key_exists(tr, key);
-    });
+    };
+    return with_fdb_transaction(txn, exists);
   } catch (const lfdb::libfdb_exception& e) {
     ldpp_dout(dpp, 0) << "FDBObjectDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
@@ -653,25 +509,15 @@ int FDBObjectDirectory::exist_key(const DoutPrefixProvider* dpp, optional_yield 
 }
 
 
-int FDBObjectDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, CacheObj* object, Transaction* txn)
+int FDBObjectDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, CacheObj* object, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   try {
     std::string key = build_index(object->bucketName, object->objName);
-
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-      auto& tr = fdb_txn->get_transaction();
+    auto remove = [&](auto& tr) {
       lfdb::erase(tr, key);
       return 0;
-    }
-
-    return lfdb::make_transactor(FDBdb)([&](auto& tr) {
-      lfdb::erase(tr, key);
-      return 0;
-    });
+    };
+    return with_fdb_transaction(txn, remove);
   } catch (const lfdb::libfdb_exception& e) {
     ldpp_dout(dpp, 0) << "FDBObjectDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
@@ -683,7 +529,7 @@ std::string FDBObjectDirectory::get_versions_range_end(const std::string& versio
     return versions_subspace + "\xff";
 }
 
-bool FDBObjectDirectory::scan_versions(const DoutPrefixProvider* dpp, optional_yield y, const std::string& begin, const std::string& end, bool reverse, std::vector<std::pair<std::string, CacheObjectVersion>>& kvs, Transaction* txn)
+bool FDBObjectDirectory::scan_versions(const DoutPrefixProvider* dpp, optional_yield y, const std::string& begin, const std::string& end, bool reverse, std::vector<std::pair<std::string, CacheObjectVersion>>& kvs, std::optional<std::reference_wrapper<Transaction>> txn)
 {
     try {
         auto range = lfdb::select{begin, end};
@@ -695,21 +541,7 @@ bool FDBObjectDirectory::scan_versions(const DoutPrefixProvider* dpp, optional_y
             }
             return !kvs.empty();
         };
-
-        if (txn) {
-            auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-            if (!fdb_txn) {
-                return false;
-            }
-
-            auto& tr = fdb_txn->get_transaction();
-            return scan_transaction(tr);
-        }
-
-        return lfdb::make_transactor(FDBdb)([&](auto& tr) -> bool {
-            return scan_transaction(tr);
-        });
-
+      return with_fdb_transaction(txn, scan_transaction);
     } catch (const lfdb::libfdb_exception& e) {
         ldpp_dout(dpp, 0) << "FDBObjectDirectory::scan_versions ERROR: " << e.what() << dendl;
         return false;
@@ -717,30 +549,20 @@ bool FDBObjectDirectory::scan_versions(const DoutPrefixProvider* dpp, optional_y
 }
 
 bool FDBObjectDirectory::parse_version_key(
-    const std::string& versions_subspace,
-    const std::string& key,
-    std::string& score,
-    std::string& member) const
+		    const std::string& versions_subspace,
+		    const std::string& key,
+		    std::string& score,
+		    std::string& member) const
 {
     size_t score_start = versions_subspace.size();
-
-    size_t score_end =
-        key.find('/', score_start);
-
+    size_t score_end = key.find('/', score_start);
 
     if (score_end == std::string::npos) {
         return false;
     }
 
-
-    score = key.substr(
-        score_start,
-        score_end - score_start);
-
-
-    member =
-        key.substr(score_end + 1);
-
+    score = key.substr(score_start, score_end - score_start);
+    member = key.substr(score_end + 1);
 
     return true;
 }
@@ -751,7 +573,7 @@ int FDBObjectDirectory::fdb_add(const DoutPrefixProvider* dpp, optional_yield y,
                                 int64_t score,
                                 const std::string& version,
                                 std::optional<CacheObjectVersion> params,
-                                Transaction* txn)
+                                std::optional<std::reference_wrapper<Transaction>> txn)
 {
   if (!params) {
     return -EINVAL;
@@ -779,16 +601,7 @@ int FDBObjectDirectory::fdb_add(const DoutPrefixProvider* dpp, optional_yield y,
       return 0;
     };
 
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-      auto& tr = fdb_txn->get_transaction();
-      return add(tr);
-    }
-
-    return lfdb::make_transactor(FDBdb)(add);
+    return with_fdb_transaction(txn, add);
   } catch (const lfdb::libfdb_exception& e) {
     ldpp_dout(dpp, 0) << "FDBObjectDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
@@ -802,18 +615,15 @@ int FDBObjectDirectory::fdb_revrange(const DoutPrefixProvider* dpp, optional_yie
 		    uint64_t count,
 		    std::vector<CacheObjectVersion>& obj_versions,
 		    std::string& continuation_token,
-		    Transaction* txn)
+		    std::optional<std::reference_wrapper<Transaction>> txn)
 {
   continuation_token.clear();
   obj_versions.clear();
 
   try {
-    const std::string versions_subspace =
-        get_versions_subspace(dpp, bucket_id, obj_name);
+    const std::string versions_subspace = get_versions_subspace(dpp, bucket_id, obj_name);
 
-    ldpp_dout(dpp, 20)
-        << "FDBObjectDirectory::" << __func__
-        << "() versions_subspace: " << versions_subspace
+    ldpp_dout(dpp, 20) << "FDBObjectDirectory::" << __func__ << "() versions_subspace: " << versions_subspace
         << dendl;
 
     // Build the eligible key range using query algebra.  Both branches produce
@@ -843,20 +653,14 @@ int FDBObjectDirectory::fdb_revrange(const DoutPrefixProvider* dpp, optional_yie
         // ending_before gives:
         // [versions_subspace, marker_key)
         // which excludes the marker itself.
-        versions_query =
-            q::ending_before(
-                q::prefix(versions_subspace),
-                marker_key);
+        versions_query = q::ending_before(q::prefix(versions_subspace), marker_key);
       }
 
       if (q::is_empty(versions_query)) {
         return -ENOENT;
       }
 
-      const auto page_query =
-          q::with_options(
-              versions_query,
-              q::query_options{
+      const auto page_query = q::with_options(versions_query, q::query_options{
                   .result_limit = fdb_page_read_limit(count),
                   .reverse_order = true
               });
@@ -885,23 +689,9 @@ int FDBObjectDirectory::fdb_revrange(const DoutPrefixProvider* dpp, optional_yie
       for (const auto& [key, value] : rows) {
         obj_versions.push_back(value);
 
-        ldpp_dout(dpp, 20)
-            << "FDBObjectDirectory::" << __func__
-            << "() version: "
-            << obj_versions.back().version
-            << dendl;
-
-        ldpp_dout(dpp, 20)
-            << "FDBObjectDirectory::" << __func__
-            << "() user_id: "
-            << obj_versions.back().user_id
-            << dendl;
-
-        ldpp_dout(dpp, 20)
-            << "FDBObjectDirectory::" << __func__
-            << "() display_name: "
-            << obj_versions.back().display_name
-            << dendl;
+        ldpp_dout(dpp, 20) << "FDBObjectDirectory::" << __func__ << "() version: " << obj_versions.back().version << dendl;
+        ldpp_dout(dpp, 20) << "FDBObjectDirectory::" << __func__ << "() user_id: " << obj_versions.back().user_id << dendl;
+        ldpp_dout(dpp, 20) << "FDBObjectDirectory::" << __func__ << "() display_name: " << obj_versions.back().display_name << dendl;
 
         if (count && obj_versions.size() == count) {
           if (rows.size() > count) {
@@ -913,28 +703,9 @@ int FDBObjectDirectory::fdb_revrange(const DoutPrefixProvider* dpp, optional_yie
 
       return 0;
     };
-
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-
-      auto& tr = fdb_txn->get_transaction();
-      return revrange_transaction(tr);
-    }
-
-    return lfdb::make_transactor(FDBdb)(
-        [&](auto& tr) -> int {
-          return revrange_transaction(tr);
-        });
-
+    return with_fdb_transaction(txn, revrange_transaction);
   } catch (const lfdb::libfdb_exception& e) {
-    ldpp_dout(dpp, 0)
-        << "FDBObjectDirectory::" << __func__
-        << "() ERROR: " << e.what()
-        << dendl;
-
+    ldpp_dout(dpp, 0) << "FDBObjectDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
   }
 }
@@ -943,7 +714,7 @@ int FDBObjectDirectory::fdb_rem(const DoutPrefixProvider* dpp, optional_yield y,
                                 const std::string& bucket_id,
                                 const std::string& obj_name,
                                 const std::string& version,
-                                Transaction* txn)
+                                std::optional<std::reference_wrapper<Transaction>> txn)
 {
   try {
     auto rem = [&](auto& tr) {
@@ -961,16 +732,7 @@ int FDBObjectDirectory::fdb_rem(const DoutPrefixProvider* dpp, optional_yield y,
       return 0;
     };
 
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-      auto& tr = fdb_txn->get_transaction();
-      return rem(tr);
-    }
-
-    return lfdb::make_transactor(FDBdb)(rem);
+    return with_fdb_transaction(txn, rem);
   } catch (const lfdb::libfdb_exception& e) {
     ldpp_dout(dpp, 0) << "FDBObjectDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
@@ -982,7 +744,7 @@ int FDBObjectDirectory::fdb_remrangebyscore(const DoutPrefixProvider* dpp, optio
                                             const std::string& obj_name,
                                             double min,
                                             double max,
-                                            Transaction* txn)
+                                            std::optional<std::reference_wrapper<Transaction>> txn)
 {
   try {
     const std::string versions_subspace = get_versions_subspace(dpp, bucket_id, obj_name);
@@ -994,23 +756,15 @@ int FDBObjectDirectory::fdb_remrangebyscore(const DoutPrefixProvider* dpp, optio
       return -ENOENT;
     }
 
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-      auto& tr = fdb_txn->get_transaction();
+    auto erase = [&](auto& tr) -> int {
       lfdb::erase(tr, score_range);
       return 0;
-    }
+    };
 
-    return lfdb::make_transactor(FDBdb)([&](auto& tr) -> int {
-      lfdb::erase(tr, score_range);
-      return 0;
-    });
+    return with_fdb_transaction(txn, erase);
   } catch (const lfdb::libfdb_exception& e) {
     ldpp_dout(dpp, 0) << "FDBObjectDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
-    return -EINVAL;
+    return -EIO;
   }
 }
 
@@ -1019,18 +773,12 @@ int FDBObjectDirectory::fdb_rank(const DoutPrefixProvider* dpp, optional_yield y
                                  const std::string& obj_name,
                                  const std::string& member,
                                  std::string& index,
-                                 Transaction* txn)
+                                 std::optional<std::reference_wrapper<Transaction>> txn)
 {
   try {
     const std::string versions_subspace = get_versions_subspace(dpp, bucket_id, obj_name);
 
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-
-      auto& tr = fdb_txn->get_transaction();
+    auto find_version = [&](auto& tr) -> int {
       const auto kvs = lfdb::collect<CacheObjectVersion>(tr, q::prefix(versions_subspace));
 
       if (kvs.empty()) {
@@ -1045,31 +793,16 @@ int FDBObjectDirectory::fdb_rank(const DoutPrefixProvider* dpp, optional_yield y
       }
 
       return -ENOENT;
-    }
+    };
 
-    return lfdb::make_transactor(FDBdb)([&](auto& tr) -> int {
-      const auto kvs = lfdb::collect<CacheObjectVersion>(tr, q::prefix(versions_subspace));
-
-      if (kvs.empty()) {
-        return -ENOENT;
-      }
-
-      for (size_t i = 0; i < kvs.size(); ++i) {
-        if (kvs[i].second.version == member) {
-          index = std::to_string(i);
-          return 0;
-        }
-      }
-
-      return -ENOENT;
-    });
+    return with_fdb_transaction(txn, find_version);
   } catch (const lfdb::libfdb_exception& e) {
     ldpp_dout(dpp, 0) << "FDBObjectDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
-    return -EINVAL;
+    return -EIO;
   }
 }
 
-int FDBObjectDirectory::add_version(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& version, ceph::real_time& creation_time, std::optional<CacheObjectVersion> params, Transaction* txn)
+int FDBObjectDirectory::add_version(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& version, ceph::real_time& creation_time, std::optional<CacheObjectVersion> params, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   auto score = std::chrono::duration_cast<std::chrono::nanoseconds>(
       creation_time.time_since_epoch()).count();
@@ -1077,19 +810,19 @@ int FDBObjectDirectory::add_version(const DoutPrefixProvider* dpp, optional_yiel
   return fdb_add(dpp, y, bucket_id, obj_name, score, version, params, txn);
 }
 
-int FDBObjectDirectory::remove_version(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& version, Transaction* txn)
+int FDBObjectDirectory::remove_version(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& version, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   return fdb_rem(dpp, y, bucket_id, obj_name, version, txn);
 }
 
-int FDBObjectDirectory::remove_version_by_creation_time(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, ceph::real_time creation_time, Transaction* txn)
+int FDBObjectDirectory::remove_version_by_creation_time(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, ceph::real_time creation_time, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   auto score = std::chrono::duration_cast<std::chrono::nanoseconds>(
       creation_time.time_since_epoch()).count();
   return fdb_remrangebyscore(dpp, y, bucket_id, obj_name, score, score, txn);
 }
 
-int FDBObjectDirectory::list_versions(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& marker_version, uint64_t count, std::vector<CacheObjectVersion>& obj_versions, std::string& continuation_token, Transaction* txn)
+int FDBObjectDirectory::list_versions(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& marker_version, uint64_t count, std::vector<CacheObjectVersion>& obj_versions, std::string& continuation_token, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   ldpp_dout(dpp, 20) << "D4NFilterBucket::" << __func__ << " obj_name: " << obj_name << dendl;
   ldpp_dout(dpp, 20) << "D4NFilterBucket::" << __func__ << " marker_version: " << marker_version << dendl;
@@ -1101,29 +834,19 @@ int FDBObjectDirectory::list_versions(const DoutPrefixProvider* dpp, optional_yi
   return 0;
 }
 
-int FDBBlockDirectory::exist_key(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, Transaction* txn)
+int FDBBlockDirectory::exist_key(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   try {
     std::string key = build_index(block);
-
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-      auto& tr = fdb_txn->get_transaction();
+    auto exists = [&](auto& tr) {
       return lfdb::key_exists(tr, key);
-    }
-
-    return lfdb::make_transactor(FDBdb)([&](auto& tr) {
-      return lfdb::key_exists(tr, key);
-    });
+    };
+    return with_fdb_transaction(txn, exists);
   } catch (const lfdb::libfdb_exception& e) {
     ldpp_dout(dpp, 0) << "FDBBlockDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
   }
 }
-
 
 template<AssociativeContainer Container>
 int FDBBlockDirectory::set_values(const DoutPrefixProvider* dpp,
@@ -1214,7 +937,7 @@ int FDBBlockDirectory::set_values(const DoutPrefixProvider* dpp,
   return 0;
 }
 
-int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, Transaction* txn)
+int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   if (!block) {
     ldpp_dout(dpp, 0) << "FDBBlockDirectory::" << __func__
@@ -1232,20 +955,11 @@ int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, optional_yield y, Cach
       return ret;
     }
 
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-      auto& tr = fdb_txn->get_transaction();
+    auto set = [&](auto& tr) {
       lfdb::set(tr, key, fdbValues);
       return 0;
-    }
-
-    return lfdb::make_transactor(FDBdb)([&](auto& tr) {
-      lfdb::set(tr, key, fdbValues);
-      return 0;
-    });
+    };
+    return with_fdb_transaction(txn, set);
   } catch (const lfdb::libfdb_exception& e) {
     ldpp_dout(dpp, 0) << "FDBBlockDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
@@ -1253,7 +967,7 @@ int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, optional_yield y, Cach
 }
 
 /* In this function, if a transaction is supplied, all the blocks will be set in the same transaction */
-int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, optional_yield y, std::vector<CacheBlock>& blocks, Transaction* txn)
+int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, optional_yield y, std::vector<CacheBlock>& blocks, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   try {
     auto set_blocks = [&](auto& tr) {
@@ -1273,23 +987,14 @@ int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, optional_yield y, std:
       return 0;
     };
 
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-      auto& tr = fdb_txn->get_transaction();
-      return set_blocks(tr);
-    }
-
-    return lfdb::make_transactor(FDBdb)(set_blocks);
+    return with_fdb_transaction(txn, set_blocks);
   } catch (const lfdb::libfdb_exception& e) {
     ldpp_dout(dpp, 0) << "FDBBlockDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
   }
 }
 
-int FDBBlockDirectory::get(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, Transaction* txn)
+int FDBBlockDirectory::get(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   if (!block) {
     ldpp_dout(dpp, 0) << "FDBBlockDirectory::" << __func__
@@ -1343,17 +1048,7 @@ int FDBBlockDirectory::get(const DoutPrefixProvider* dpp, optional_yield y, Cach
 
       return 0;
     };
-
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-      auto& tr = fdb_txn->get_transaction();
-      return get_block(tr);
-    }
-
-    return lfdb::make_transactor(FDBdb)(get_block);
+    return with_fdb_transaction(txn, get_block);
   } catch (const lfdb::libfdb_exception& e) {
     ldpp_dout(dpp, 0) << "FDBBlockDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
@@ -1363,7 +1058,7 @@ int FDBBlockDirectory::get(const DoutPrefixProvider* dpp, optional_yield y, Cach
   }
 }
 
-int FDBBlockDirectory::get(const DoutPrefixProvider* dpp, optional_yield y, std::vector<CacheBlock>& blocks, Transaction* txn)
+int FDBBlockDirectory::get(const DoutPrefixProvider* dpp, optional_yield y, std::vector<CacheBlock>& blocks, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   try {
     auto get_blocks = [&](auto& tr) {
@@ -1422,16 +1117,7 @@ int FDBBlockDirectory::get(const DoutPrefixProvider* dpp, optional_yield y, std:
       return 0;
     };
 
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-      auto& tr = fdb_txn->get_transaction();
-      return get_blocks(tr);
-    }
-
-    return lfdb::make_transactor(FDBdb)(get_blocks);
+    return with_fdb_transaction(txn, get_blocks);
   } catch (const lfdb::libfdb_exception& e) {
     ldpp_dout(dpp, 0) << "FDBBlockDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
@@ -1441,7 +1127,7 @@ int FDBBlockDirectory::get(const DoutPrefixProvider* dpp, optional_yield y, std:
   }
 }
 
-int FDBBlockDirectory::copy(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, Transaction* txn)
+int FDBBlockDirectory::copy(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   if (block == nullptr) {
     ldpp_dout(dpp, 0) << "FDBBlockDirectory::" << __func__
@@ -1474,7 +1160,7 @@ int FDBBlockDirectory::copy(const DoutPrefixProvider* dpp, optional_yield y, Cac
   return this->set(dpp, y, &copyBlock, txn);
 }
 
-int FDBBlockDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, Transaction* txn)
+int FDBBlockDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   if (block == nullptr) {
     return -EINVAL;
@@ -1482,21 +1168,11 @@ int FDBBlockDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, Cach
 
   try {
     std::string key = build_index(block);
-
-    if (txn) {
-      auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
-      if (!fdb_txn) {
-        return -EINVAL;
-      }
-      auto& tr = fdb_txn->get_transaction();
+    auto del = [&](auto& tr) {
       lfdb::erase(tr, key);
       return 0;
-    }
-
-    return lfdb::make_transactor(FDBdb)([&](auto& tr) {
-      lfdb::erase(tr, key);
-      return 0;
-    });
+    };
+    return with_fdb_transaction(txn, del);
   } catch (const lfdb::libfdb_exception& e) {
     ldpp_dout(dpp, 0) << "FDBBlockDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EIO;
@@ -1504,7 +1180,7 @@ int FDBBlockDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, Cach
 }
 
 
-int FDBBlockDirectory::update_field(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& field, std::string& value, Transaction* txn)
+int FDBBlockDirectory::update_field(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& field, std::string& value, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   int ret = -1;
   if (block == nullptr) {
@@ -1570,7 +1246,7 @@ int FDBBlockDirectory::update_field(const DoutPrefixProvider* dpp, optional_yiel
 
 }
 
-int FDBBlockDirectory::remove_host(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& value, Transaction* txn)
+int FDBBlockDirectory::remove_host(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& value, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   int ret = -1;
 

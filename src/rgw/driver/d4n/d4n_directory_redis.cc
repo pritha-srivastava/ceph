@@ -182,7 +182,7 @@ int RedisTransaction::execute_request(const DoutPrefixProvider* dpp, optional_yi
 }
 
 int RedisDirectory::prepare_request(const DoutPrefixProvider* dpp,
-                                    Transaction* txn,
+                                    std::optional<std::reference_wrapper<Transaction>> txn,
                                     request& req,
                                     RedisTransaction*& rtxn,
                                     request*& target)
@@ -190,7 +190,7 @@ int RedisDirectory::prepare_request(const DoutPrefixProvider* dpp,
   rtxn = nullptr;
 
   if (txn) {
-    rtxn = dynamic_cast<RedisTransaction*>(txn);
+    rtxn = dynamic_cast<RedisTransaction*>(&txn->get());
     if (!rtxn) {
       ldpp_dout(dpp, 0) << "RedisDirectory::" << __func__
                         << "(): transaction is not a RedisTransaction"
@@ -210,7 +210,7 @@ int RedisDirectory::set_kv(const DoutPrefixProvider* dpp,
                            const std::string& key,
                            const std::string& field,
                            const std::string& val,
-                           Transaction* txn)
+                           std::optional<std::reference_wrapper<Transaction>> txn)
 {
   request req;
   RedisTransaction* rtxn = nullptr;
@@ -246,7 +246,7 @@ int RedisDirectory::get_kv(const DoutPrefixProvider* dpp, optional_yield y,
                        const std::string& key,
                        const std::string& field,
                        std::string& out_val,
-                       Transaction* txn)
+                       std::optional<std::reference_wrapper<Transaction>> txn)
 {
   response<std::optional<std::string>> resp;
   try {
@@ -273,7 +273,7 @@ int RedisDirectory::set_kv_multi(const DoutPrefixProvider* dpp,
                                  optional_yield y,
                                  const std::string& key,
                                  const std::map<std::string, std::string>& vals,
-                                 Transaction* txn)
+                                 std::optional<std::reference_wrapper<Transaction>> txn)
 {
   request req;
   RedisTransaction* rtxn = nullptr;
@@ -309,7 +309,7 @@ int RedisDirectory::get_kv_multi(const DoutPrefixProvider* dpp, optional_yield y
                         const std::string& key,
                         const std::vector<std::string>& fields,
                         std::map<std::string, std::string>& out_vals,
-			Transaction* txn)
+			std::optional<std::reference_wrapper<Transaction>> txn)
 {
   response<std::vector<std::string>> resp;
   try {
@@ -337,7 +337,7 @@ int RedisDirectory::set_kv_if_not_exists(const DoutPrefixProvider* dpp,
                                          const std::string& key,
                                          const std::string& field,
                                          const std::string& val,
-                                         Transaction* txn)
+                                         std::optional<std::reference_wrapper<Transaction>> txn)
 {
   request req;
   RedisTransaction* rtxn = nullptr;
@@ -373,7 +373,7 @@ int RedisBucketDirectory::zadd(const DoutPrefixProvider* dpp, optional_yield y,
                                const std::string& bucket_id,
                                double score,
                                const std::string& member,
-                               Transaction* txn)
+                               std::optional<std::reference_wrapper<Transaction>> txn)
 {
   request req;
   RedisTransaction* rtxn = nullptr;
@@ -416,7 +416,7 @@ int RedisBucketDirectory::zadd(const DoutPrefixProvider* dpp, optional_yield y,
 int RedisBucketDirectory::zrem(const DoutPrefixProvider* dpp, optional_yield y,
                                 const std::string& bucket_id,
                                 const std::string& member,
-                                Transaction* txn)
+                                std::optional<std::reference_wrapper<Transaction>> txn)
 {
   request req;
   RedisTransaction* rtxn = nullptr;
@@ -456,7 +456,7 @@ int RedisBucketDirectory::zrem(const DoutPrefixProvider* dpp, optional_yield y,
   return 0;
 }
 
-int RedisBucketDirectory::zrange(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& start, const std::string& stop, uint64_t offset, uint64_t count, std::vector<std::string>& members, Transaction* txn)
+int RedisBucketDirectory::zrange(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& start, const std::string& stop, uint64_t offset, uint64_t count, std::vector<std::string>& members, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   request req;
   RedisTransaction* rtxn = nullptr;
@@ -500,7 +500,7 @@ int RedisBucketDirectory::zrange(const DoutPrefixProvider* dpp, optional_yield y
   return 0;
 }
 
-int RedisBucketDirectory::zscan(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, uint64_t cursor, const std::string& prefix, uint64_t count, std::vector<CacheObject>& objs_info, uint64_t& next_cursor, Transaction* txn)
+int RedisBucketDirectory::zscan(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, uint64_t cursor, const std::string& prefix, uint64_t count, std::vector<CacheObject>& objs_info, uint64_t& next_cursor, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   request req;
   RedisTransaction* rtxn = nullptr;
@@ -552,7 +552,7 @@ int RedisBucketDirectory::zscan(const DoutPrefixProvider* dpp, optional_yield y,
   return 0;
 }
 
-int RedisBucketDirectory::exist_key(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, Transaction* txn)
+int RedisBucketDirectory::exist_key(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   request req;
   RedisTransaction* rtxn = nullptr;
@@ -589,22 +589,22 @@ int RedisBucketDirectory::exist_key(const DoutPrefixProvider* dpp, optional_yiel
 }
 
 //FIXME: this is a dummy function and should be updated.
-int RedisBucketDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, Transaction* txn)
+int RedisBucketDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   return 0;
 }
 
-int RedisBucketDirectory::add_object(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, Transaction* txn)
+int RedisBucketDirectory::add_object(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   return zadd(dpp, y, bucket_id, 0, object_name, txn);
 }
 
-int RedisBucketDirectory::remove_object(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& object_name, Transaction* txn)
+int RedisBucketDirectory::remove_object(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& object_name, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   return zrem(dpp, y, bucket_id, object_name, txn);
 }
 
-int RedisBucketDirectory::list_objects(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& start_token, const std::string& prefix, const std::string& marker, uint64_t count, bool marker_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, Transaction* txn)
+int RedisBucketDirectory::list_objects(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& start_token, const std::string& prefix, const std::string& marker, uint64_t count, bool marker_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   if (!prefix.empty()) {
     // SCAN_OBJECTS path (with prefix)
@@ -650,7 +650,7 @@ int RedisBucketDirectory::list_objects(const DoutPrefixProvider* dpp, optional_y
 }
 
 //Performs an incremental scan of objects within the specified bucket, returning a subset of results based on the provided cursor position and count.
-int RedisBucketDirectory::scan_objects(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& start_token, const std::string& prefix, const std::string& marker, uint64_t count, bool marker_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, Transaction* txn)
+int RedisBucketDirectory::scan_objects(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& start_token, const std::string& prefix, const std::string& marker, uint64_t count, bool marker_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   uint64_t cursor = start_token.empty() ? 0 : std::stoull(start_token);
   uint64_t next_cursor = 0;
@@ -659,7 +659,7 @@ int RedisBucketDirectory::scan_objects(const DoutPrefixProvider* dpp, optional_y
   return ret;
 }
 
-int RedisBucketDirectory::get_range(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& start, uint64_t count, bool start_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, Transaction* txn)
+int RedisBucketDirectory::get_range(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& start, uint64_t count, bool start_inclusive, std::vector<CacheObject>& objs_info, std::string& continuation_token, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   std::string redis_start;
   if (start.empty()) {
@@ -688,7 +688,7 @@ int RedisBucketDirectory::get_range(const DoutPrefixProvider* dpp, optional_yiel
   return 0;
 }
 
-int RedisObjectDirectory::exist_key(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, Transaction* txn) 
+int RedisObjectDirectory::exist_key(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, std::optional<std::reference_wrapper<Transaction>> txn) 
 {
   request req;
   RedisTransaction* rtxn = nullptr;
@@ -720,7 +720,7 @@ int RedisObjectDirectory::exist_key(const DoutPrefixProvider* dpp, optional_yiel
   return std::get<0>(resp).value();
 }
 
-int RedisObjectDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, CacheObj* object, Transaction* txn) 
+int RedisObjectDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, CacheObj* object, std::optional<std::reference_wrapper<Transaction>> txn) 
 {
   std::string key = build_index(object->bucketName, object->objName);
   ldpp_dout(dpp, 10) << "RedisObjectDirectory::" << __func__ << "(): index is: " << key << dendl;
@@ -760,7 +760,7 @@ int RedisObjectDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, C
   return 0; 
 }
 
-int RedisObjectDirectory::zadd(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, double score, const std::string& member, Transaction* txn)
+int RedisObjectDirectory::zadd(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, double score, const std::string& member, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   std::string key = build_index(bucket_id, obj_name);
 
@@ -799,7 +799,7 @@ int RedisObjectDirectory::zadd(const DoutPrefixProvider* dpp, optional_yield y, 
 }
 
 
-int RedisObjectDirectory::zrange(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, int start, int stop, std::vector<std::string>& members, Transaction* txn)
+int RedisObjectDirectory::zrange(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, int start, int stop, std::vector<std::string>& members, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   std::string key = build_index(bucket_id, obj_name);
 
@@ -840,7 +840,7 @@ int RedisObjectDirectory::zrange(const DoutPrefixProvider* dpp, optional_yield y
   return 0;
 }
 
-int RedisObjectDirectory::zrevrange(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& start, const std::string& stop, std::vector<std::string>& members, Transaction* txn)
+int RedisObjectDirectory::zrevrange(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& start, const std::string& stop, std::vector<std::string>& members, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   std::string key = build_index(bucket_id, obj_name);
 
@@ -876,7 +876,7 @@ int RedisObjectDirectory::zrevrange(const DoutPrefixProvider* dpp, optional_yiel
   return 0;
 }
 
-int RedisObjectDirectory::zrem(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& member, Transaction* txn)
+int RedisObjectDirectory::zrem(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& member, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   std::string key = build_index(bucket_id, obj_name);
 
@@ -915,7 +915,7 @@ int RedisObjectDirectory::zrem(const DoutPrefixProvider* dpp, optional_yield y, 
   return 0;
 }
 
-int RedisObjectDirectory::zremrangebyscore(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, double min, double max, Transaction* txn)
+int RedisObjectDirectory::zremrangebyscore(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, double min, double max, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   std::string key = build_index(bucket_id, obj_name);
 
@@ -954,7 +954,7 @@ int RedisObjectDirectory::zremrangebyscore(const DoutPrefixProvider* dpp, option
   return 0;
 }
 
-int RedisObjectDirectory::zrank(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& member, std::string& index, Transaction* txn)
+int RedisObjectDirectory::zrank(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& member, std::string& index, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   std::string key = build_index(bucket_id, obj_name);
 
@@ -989,7 +989,7 @@ int RedisObjectDirectory::zrank(const DoutPrefixProvider* dpp, optional_yield y,
   return 0;
 }
 
-int RedisObjectDirectory::add_version(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& version, ceph::real_time& creation_time, std::optional<CacheObjectVersion> params, Transaction* txn)
+int RedisObjectDirectory::add_version(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& version, ceph::real_time& creation_time, std::optional<CacheObjectVersion> params, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   // Redis sorted-set scores are doubles; use microseconds for precision within double's exact-integer range (~9e15)
   auto score = static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(
@@ -998,19 +998,19 @@ int RedisObjectDirectory::add_version(const DoutPrefixProvider* dpp, optional_yi
   return zadd(dpp, y, bucket_id, obj_name, score, version, txn);
 }
 
-int RedisObjectDirectory::remove_version(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& version, Transaction* txn)
+int RedisObjectDirectory::remove_version(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& version, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   return zrem(dpp, y, bucket_id, obj_name, version, txn);
 }
 
-int RedisObjectDirectory::remove_version_by_creation_time(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, ceph::real_time creation_time, Transaction* txn)
+int RedisObjectDirectory::remove_version_by_creation_time(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, ceph::real_time creation_time, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   auto min = ceph::real_clock::to_double(creation_time);
   auto max = ceph::real_clock::to_double(creation_time);
   return zremrangebyscore(dpp, y, bucket_id, obj_name, min, max, txn);
 }
 
-int RedisObjectDirectory::list_versions(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& marker_version, uint64_t count, std::vector<CacheObjectVersion>& obj_versions, std::string& continuation_token, Transaction* txn)
+int RedisObjectDirectory::list_versions(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& marker_version, uint64_t count, std::vector<CacheObjectVersion>& obj_versions, std::string& continuation_token, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   continuation_token.clear();
   // Get starting version index from marker
@@ -1049,12 +1049,12 @@ int RedisObjectDirectory::list_versions(const DoutPrefixProvider* dpp, optional_
   return 0;
 }
 
-int RedisObjectDirectory::get_version_index(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& version, std::string& index, Transaction* txn)
+int RedisObjectDirectory::get_version_index(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& version, std::string& index, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   return zrank(dpp, y, bucket_id, obj_name, version, index, txn);
 }
 
-int RedisBlockDirectory::exist_key(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, Transaction* txn) 
+int RedisBlockDirectory::exist_key(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, std::optional<std::reference_wrapper<Transaction>> txn) 
 {
   request req;
   RedisTransaction* rtxn = nullptr;
@@ -1149,7 +1149,7 @@ int RedisBlockDirectory::set_values(const DoutPrefixProvider* dpp, CacheBlock& b
   return 0;
 }
 
-int RedisBlockDirectory::set(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, Transaction* txn)
+int RedisBlockDirectory::set(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   if (!block) {
     ldpp_dout(dpp, 0) << "RedisBlockDirectory::" << __func__
@@ -1196,7 +1196,7 @@ int RedisBlockDirectory::set(const DoutPrefixProvider* dpp, optional_yield y, Ca
 
 int RedisBlockDirectory::set(const DoutPrefixProvider* dpp, optional_yield y,
                              std::vector<CacheBlock>& blocks,
-                             Transaction* txn)
+                             std::optional<std::reference_wrapper<Transaction>> txn)
 {
   request req;
   RedisTransaction* rtxn = nullptr;
@@ -1296,7 +1296,7 @@ void parse_response(T t, std::vector<std::vector<std::string>>& responses)
     });
 }
 
-int RedisBlockDirectory::get(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, Transaction* txn) 
+int RedisBlockDirectory::get(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, std::optional<std::reference_wrapper<Transaction>> txn) 
 {
   std::string key = build_index(block);
   ldpp_dout(dpp, 10) << "RedisBlockDirectory::" << __func__ << "(): index is: " << key << dendl;
@@ -1367,7 +1367,7 @@ int RedisBlockDirectory::get(const DoutPrefixProvider* dpp, optional_yield y, Ca
   return 0;
 }
 
-int RedisBlockDirectory::get(const DoutPrefixProvider* dpp, optional_yield y, std::vector<CacheBlock>& blocks, Transaction* txn)
+int RedisBlockDirectory::get(const DoutPrefixProvider* dpp, optional_yield y, std::vector<CacheBlock>& blocks, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   if (blocks.empty())
     return 0;
@@ -1509,7 +1509,7 @@ int RedisBlockDirectory::copy(const DoutPrefixProvider* dpp, optional_yield y,
                               CacheBlock* block,
                               const std::string& copyName,
                               const std::string& copyBucketName,
-                              Transaction* txn)
+                              std::optional<std::reference_wrapper<Transaction>> txn)
 {
   if (!block) {
     ldpp_dout(dpp, 0) << "RedisBlockDirectory::" << __func__
@@ -1564,7 +1564,7 @@ int RedisBlockDirectory::copy(const DoutPrefixProvider* dpp, optional_yield y,
 
 int RedisBlockDirectory::del(const DoutPrefixProvider* dpp, optional_yield y,
                              CacheBlock* block,
-                             Transaction* txn)
+                             std::optional<std::reference_wrapper<Transaction>> txn)
 {
   if (!block) {
     ldpp_dout(dpp, 0) << "RedisBlockDirectory::" << __func__
@@ -1691,7 +1691,7 @@ int RedisBlockDirectory::del(const DoutPrefixProvider* dpp, CacheBlock* block, o
 
 //FIXME: We cannot guarantee atomicty for update_field and remove_host functions unless we use Redis lua script.
 //TODO: update these functions accrodingly.
-int RedisBlockDirectory::update_field(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& field, std::string& value, Transaction* txn)
+int RedisBlockDirectory::update_field(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& field, std::string& value, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   int ret = -1;
   std::string key = build_index(block);
@@ -1755,7 +1755,7 @@ int RedisBlockDirectory::update_field(const DoutPrefixProvider* dpp, optional_yi
   return ret;
 }
 
-int RedisBlockDirectory::remove_host(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& value, Transaction* txn)
+int RedisBlockDirectory::remove_host(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& value, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   std::string key = build_index(block);
   std::string tmpVal = value;
