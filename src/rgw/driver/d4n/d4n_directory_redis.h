@@ -155,7 +155,7 @@ class RedisBlockDirectory: public RedisDirectory, public BlockDirectory {
     virtual int copy(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, Transaction* txn = nullptr) override;
     virtual int del(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, Transaction* txn = nullptr) override;
     virtual int update_field(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& field, std::string& value, Transaction* txn = nullptr) override;
-    virtual int remove_host(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, std::string& value, Transaction* txn = nullptr) override;
+    virtual int remove_host(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& value, Transaction* txn = nullptr) override;
 
   private:
     template<AssociativeContainer Container>

@@ -120,6 +120,9 @@ public:
                                      const std::string& field,
                                      const std::string& val,
 				     Transaction* txn);
+protected:
+  template <typename Func> int with_fdb_transaction(Transaction* txn, Func&& func);
+
 };
 
 class FDBBucketDirectory : public FDBDirectory, public BucketDirectory {
@@ -354,7 +357,7 @@ public:
 
     int remove_host(const DoutPrefixProvider* dpp, optional_yield y,
                     CacheBlock* block,
-                    std::string& value,
+                    const std::string& value,
 	    	    Transaction* txn = nullptr) override;
 
 private:

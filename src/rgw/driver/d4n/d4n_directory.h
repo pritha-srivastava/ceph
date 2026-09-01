@@ -322,7 +322,7 @@ class BlockDirectory: virtual public Directory {
     virtual int del(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, Transaction* txn=nullptr) = 0;
     virtual int update_field(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& field, std::string& value, Transaction* txn=nullptr) = 0;
 	
-    virtual int remove_host(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, std::string& value, Transaction* txn=nullptr) = 0;
+    virtual int remove_host(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& value, Transaction* txn=nullptr) = 0;
 	
   private:
 

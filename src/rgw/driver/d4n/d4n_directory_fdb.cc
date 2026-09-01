@@ -64,6 +64,25 @@ int FDBTransaction::abort(const DoutPrefixProvider* dpp, optional_yield y)
   return 0;
 }
 
+template <typename Func>
+int FDBDirectory::with_fdb_transaction(Transaction* txn, Func&& func)
+{
+  if (txn) {
+    auto* fdb_txn = dynamic_cast<FDBTransaction*>(txn);
+    if (!fdb_txn) {
+      return -EINVAL;
+    }
+
+    auto& tr = fdb_txn->get_transaction();
+    return func(tr);
+  }
+
+  return lfdb::make_transactor(FDBdb)([&](auto& tr) {
+    return func(tr);
+  });
+}
+
+
 int FDBDirectory::get_kv(const DoutPrefixProvider* dpp, optional_yield y, const std::string& key, const std::string& field, std::string& out_val, Transaction* txn)
 {
   try {
@@ -797,6 +816,8 @@ int FDBObjectDirectory::fdb_revrange(const DoutPrefixProvider* dpp, optional_yie
         << "() versions_subspace: " << versions_subspace
         << dendl;
 
+    // Build the eligible key range using query algebra.  Both branches produce
+    // q::interval so the variable can hold either without type erasure.
     auto revrange_transaction = [&](auto& tr) -> int {
       q::interval versions_query = q::prefix(versions_subspace);
 
@@ -804,6 +825,8 @@ int FDBObjectDirectory::fdb_revrange(const DoutPrefixProvider* dpp, optional_yie
         // Resolve the marker's score using the same transaction.
         std::string marker_score;
 
+        // Point lookup: resolve the marker's encoded score via the reverse index
+        // rather than scanning for it.
         const std::string score_key =
             build_version_score_index(dpp, bucket_id, obj_name, marker_version);
 
@@ -879,13 +902,13 @@ int FDBObjectDirectory::fdb_revrange(const DoutPrefixProvider* dpp, optional_yie
             << "() display_name: "
             << obj_versions.back().display_name
             << dendl;
-      }
 
-      // fdb_page_read_limit(count) returns count + 1, so if
-      // we received more than count rows, there is another page.
-      if (count && rows.size() > count && !obj_versions.empty()) {
-        obj_versions.resize(count);
-        continuation_token = obj_versions.back().version;
+        if (count && obj_versions.size() == count) {
+          if (rows.size() > count) {
+            continuation_token = obj_versions.back().version;
+          }
+          break;
+        }
       }
 
       return 0;
@@ -1547,7 +1570,7 @@ int FDBBlockDirectory::update_field(const DoutPrefixProvider* dpp, optional_yiel
 
 }
 
-int FDBBlockDirectory::remove_host(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, std::string& value, Transaction* txn)
+int FDBBlockDirectory::remove_host(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& value, Transaction* txn)
 {
   int ret = -1;
 

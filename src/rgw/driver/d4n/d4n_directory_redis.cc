@@ -171,11 +171,11 @@ int RedisTransaction::execute_request(const DoutPrefixProvider* dpp, optional_yi
     redis_exec_connection_pool(dpp, pool_, conn_, ec, req_, resp, y);
 
     if (ec) {
-      ldpp_dout(dpp, 0) << "Directory::" << __func__ << "() ERROR: " << ec.what() << dendl;
+      ldpp_dout(dpp, 0) << "RedisTransaction - Directory::" << __func__ << "() ERROR: " << ec.what() << dendl;
       return -ec.value();
     }
   } catch (std::exception &e) {
-    ldpp_dout(dpp, 0) << "Directory::" << __func__ << "() ERROR: " << e.what() << dendl;
+    ldpp_dout(dpp, 0) << "RedisTransaction - Directory::" << __func__ << "() ERROR: " << e.what() << dendl;
     return -EINVAL;
   }
   return 0;
@@ -1755,9 +1755,10 @@ int RedisBlockDirectory::update_field(const DoutPrefixProvider* dpp, optional_yi
   return ret;
 }
 
-int RedisBlockDirectory::remove_host(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, std::string& value, Transaction* txn)
+int RedisBlockDirectory::remove_host(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& value, Transaction* txn)
 {
   std::string key = build_index(block);
+  std::string tmpVal = value;
 
   try {
     {
@@ -1779,9 +1780,9 @@ int RedisBlockDirectory::remove_host(const DoutPrefixProvider* dpp, optional_yie
       }
 
       std::string result = std::get<0>(resp).value().value();
-      auto it = result.find(value);
+      auto it = result.find(tmpVal);
       if (it != std::string::npos) { 
-	result.erase(result.begin() + it, result.begin() + it + value.size());
+	result.erase(result.begin() + it, result.begin() + it + tmpVal.size());
       } else {
 	ldpp_dout(dpp, 10) << "RedisBlockDirectory::" << __func__ << "(): Host was not found." << dendl;
 	return -ENOENT;
@@ -1801,14 +1802,14 @@ int RedisBlockDirectory::remove_host(const DoutPrefixProvider* dpp, optional_yie
 		return ret;
       }
 
-      value = result;
+      tmpVal = result;
     }
 
     {
       boost::system::error_code ec;
       response<ignore_t> resp;
       request req;
-      req.push("HSET", key, "hosts", value);
+      req.push("HSET", key, "hosts", tmpVal);
 
     redis_exec_connection_pool(dpp, redis_pool, REDISconn, ec, req, resp, y);
 
