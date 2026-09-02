@@ -238,7 +238,14 @@ int LFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_
   lwthread = std::thread(&LFUDAPolicy::localweight_writer, this, dpp);
   lw_quit = false;
 
-  auto txn = this->driver->get_txn_factory()->create_transaction(dpp); 
+  auto txn_factory = this->driver->get_txn_factory();
+  if (!txn_factory) {
+    ldpp_dout(dpp, 0) << "LFUDAPolicy::init(): transaction factory is not initialized" << dendl;
+    return -EINVAL;
+  }
+  auto txn = txn_factory->create_transaction(dpp);
+
+ 
   dir.set_kv_multi(dpp, y,
       "lfuda",
       {

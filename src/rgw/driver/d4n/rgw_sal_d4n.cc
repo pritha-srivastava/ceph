@@ -108,23 +108,19 @@ int D4NFilterDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
 
     txn_factory = std::make_shared<rgw::d4n::RedisTransactionFactory>(redis_pool);
 
-	auto redisObjDir =
-    	dynamic_cast<rgw::d4n::RedisObjectDirectory*>(objDir.get());
-	auto redisBlockDir =
-    	dynamic_cast<rgw::d4n::RedisBlockDirectory*>(blockDir.get());
-	auto redisBucketDir =
-    	dynamic_cast<rgw::d4n::RedisBucketDirectory*>(bucketDir.get());
+    auto redisObjDir =	dynamic_cast<rgw::d4n::RedisObjectDirectory*>(objDir.get());
+    auto redisBlockDir = dynamic_cast<rgw::d4n::RedisBlockDirectory*>(blockDir.get());
+    auto redisBucketDir = dynamic_cast<rgw::d4n::RedisBucketDirectory*>(bucketDir.get());
 
-	if (redisObjDir) {
-    	  redisObjDir->set_redis_pool(redis_pool);
-	}
-	if (redisBlockDir) {
-    	  redisBlockDir->set_redis_pool(redis_pool);
-	}
-	if (redisBucketDir) {
-    	  redisBucketDir->set_redis_pool(redis_pool);
-	}
-
+    if (redisObjDir) {
+      redisObjDir->set_redis_pool(redis_pool);
+    }
+    if (redisBlockDir) {
+      redisBlockDir->set_redis_pool(redis_pool);
+    }
+    if (redisBucketDir) {
+      redisBucketDir->set_redis_pool(redis_pool);
+    }
   }
   else if (directory_type == "fdb") {
     auto fdb_db = lfdb::create_database();
@@ -133,6 +129,8 @@ int D4NFilterDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
     objDir = std::make_unique<rgw::d4n::FDBObjectDirectory>(fdb_db);
     blockDir = std::make_unique<rgw::d4n::FDBBlockDirectory>(fdb_db);
     bucketDir = std::make_unique<rgw::d4n::FDBBucketDirectory>(fdb_db);
+
+    txn_factory = std::make_shared<rgw::d4n::FDBTransactionFactory>(fdb_db);
   }
 
   //since we are using references here, it is important to initialize policyDriver after the directories.
