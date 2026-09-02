@@ -25,10 +25,12 @@ static std::string encode_score(int64_t score)
 // Returns 0 when count==0 (unbounded).
 static int fdb_page_read_limit(uint64_t count)
 {
-  if (count == 0) return 0;
-  return count < static_cast<uint64_t>(std::numeric_limits<int>::max())
-       ? static_cast<int>(count + 1)
-       : std::numeric_limits<int>::max();
+  if (count == 0) {
+    return 0;
+  }
+
+  constexpr auto max = static_cast<uint64_t>(std::numeric_limits<int>::max());
+  return static_cast<int>(count >= max ? max : count + 1);
 }
 
 int FDBTransaction::commit(const DoutPrefixProvider* dpp, optional_yield y)

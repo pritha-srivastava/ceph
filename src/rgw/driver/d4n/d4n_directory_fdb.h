@@ -44,6 +44,9 @@ struct FDBRange {
   std::string end;
 };
 
+// FDB Transactions are not thread-safe and must not be accessed concurrently.
+// A Transaction instance must be used by a single thread at a time.
+// Otherwise we have to change the architecture to be thread safe including "executed_" member variable.
 class FDBTransaction : public Transaction {
 public:
   explicit FDBTransaction(lfdb::database_handle db) : txn_(lfdb::make_transaction(db)) {}
