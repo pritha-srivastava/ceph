@@ -125,6 +125,11 @@ public:
 				     std::optional<std::reference_wrapper<Transaction>> txn);
 protected:
   template <typename Func> int with_fdb_transaction(std::optional<std::reference_wrapper<Transaction>> txn, Func&& func);
+  template <typename Func> int fdb_invoke(const DoutPrefixProvider* dpp,
+		    std::optional<std::reference_wrapper<Transaction>> txn,
+		    Func&& operation,
+		    std::source_location whence = std::source_location::current());
+
 
 };
 
@@ -365,10 +370,9 @@ public:
 
 private:
     template <AssociativeContainer Container>
-    int set_values(const DoutPrefixProvider* dpp,
-                   CacheBlock& block,
-                   Container& fdbValues,
-                   optional_yield y);
+    int set_values(const DoutPrefixProvider* dpp, CacheBlock& block, Container& fdbValues, optional_yield y);
+
+    int populate_block(CacheBlock* block, const std::map<std::string, std::string>& kvs) const;
 };
 
 } // namespace rgw::d4n
