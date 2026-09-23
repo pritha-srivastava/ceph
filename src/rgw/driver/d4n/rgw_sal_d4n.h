@@ -28,6 +28,7 @@
 
 #include "driver/d4n/d4n_backend.h"
 #include "driver/d4n/d4n_policy.h"
+#include "rgw/ceph_fdb.h"
 #include "driver/d4n/d4n_remote_cache_manager.h"
 
 #include <boost/intrusive/list.hpp>
@@ -38,6 +39,8 @@
 #include <boost/asio/experimental/concurrent_channel.hpp>
 #include <boost/compat/function_ref.hpp>
 
+#include <variant>
+#include <memory>
 #include <array>
 #include <charconv>
 #include <expected>
@@ -413,6 +416,12 @@ class D4NFilterDriver : public FilterDriver {
         boost::compat::function_ref<int(rgw::d4n::Transaction&)> body, unsigned max_attempts = 5,
         std::source_location whence = std::source_location::current());
 
+    rgw::d4n::TransactionResult execute_with_transaction(const DoutPrefixProvider *dpp, optional_yield y,
+        boost::compat::function_ref<int(rgw::d4n::Transaction&)> fn,
+        std::optional<rgw::d4n::Transaction> txn = std::nullopt,
+        bool auto_commit = true,
+        unsigned max_attempts = 5);
+
     int populate_listing_metadata(const DoutPrefixProvider *dpp, const std::string& bucket_id,
                                   std::vector<rgw_bucket_dir_entry>& entries, optional_yield y);
 
@@ -422,6 +431,14 @@ class D4NFilterDriver : public FilterDriver {
 
     bool uses_fdb() const noexcept;
     bool uses_redis() const noexcept;
+    std::shared_ptr<rgw::d4n::Backend> get_backend() const { return backend; }
+
+    // Get FDB database handle (throws if not using FDB backend)
+    ceph::libfdb::database_handle get_fdb_database() const;
+
+    /* Create a Redis transaction (throws if not using Redis backend).
+       Caller must keep the returned RedisTransaction alive to execute it. */
+    std::unique_ptr<rgw::d4n::RedisTransaction> create_redis_transaction(const DoutPrefixProvider* dpp) const;
 
     void shutdown() override;
     void finalize() override;
@@ -451,7 +468,44 @@ class D4NFilterBucket : public FilterBucket {
     D4NFilterDriver* filter;
     bool cache_request{false};
     bool return_blocks{false}; // indicates whether dir_blocks should be populated
-    std::unordered_map<std::string, rgw::d4n::CacheBlock> dir_blocks; // for use in bucket removal
+    std::unordered_map<std::string, rgw::d4n::CacheBlock> bkt_remove_blocks;
+    std::unordered_map<std::string, std::vector<std::string>> bkt_remove_objects;
+
+    // Stores object name and backend-specific transaction for cross-page version removal
+    struct BucketRemoveTransaction {
+      std::string object_name;
+      std::variant<std::monostate, // for representing no transaction state
+                   ceph::libfdb::transaction_handle,
+                   std::unique_ptr<rgw::d4n::RedisTransaction>> backend_txn;
+
+      void reset() {
+        object_name.clear();
+        backend_txn = std::monostate{};
+      }
+
+      bool has_transaction() const {
+        return !std::holds_alternative<std::monostate>(backend_txn);
+      }
+
+      bool is_fdb_transaction() const {
+        return std::holds_alternative<ceph::libfdb::transaction_handle>(backend_txn);
+      }
+
+      bool is_redis_transaction() const {
+        return std::holds_alternative<std::unique_ptr<rgw::d4n::RedisTransaction>>(backend_txn);
+      }
+
+      // Get FDB transaction reference - throws if not FDB
+      ceph::libfdb::transaction_handle& get_fdb_transaction() {
+        return std::get<ceph::libfdb::transaction_handle>(backend_txn);
+      }
+
+      // Get Redis transaction reference - throws if not Redis
+      rgw::d4n::RedisTransaction& get_redis_transaction() {
+        return *std::get<std::unique_ptr<rgw::d4n::RedisTransaction>>(backend_txn);
+      }
+    };
+    BucketRemoveTransaction bkt_remove_txn;
 
     struct FetchContext {
       std::vector<rgw::d4n::CacheObject> objects;
@@ -485,6 +539,8 @@ class D4NFilterBucket : public FilterBucket {
     void merge_results(const DoutPrefixProvider* dpp, const ListParams& params,
                         ListResults& cache_results, ListResults& store_results,
                         int max, ListResults& results);
+    int process_remove_objects(const DoutPrefixProvider* dpp, bool delete_children,
+                               optional_yield y);
 
   public:
     D4NFilterBucket(std::unique_ptr<Bucket> _next, D4NFilterDriver* _filter) :

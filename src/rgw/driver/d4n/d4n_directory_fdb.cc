@@ -795,6 +795,37 @@ TransactionResult FDBBackend::execute(const DoutPrefixProvider *dpp, optional_yi
   return TransactionResult(std::move(result), exhausted);
 }
 
+TransactionResult FDBBackend::execute_with_transaction(const DoutPrefixProvider *dpp, optional_yield y,
+    const boost::compat::function_ref<int(Transaction&)> fn, std::optional<Transaction> txn,
+    const bool auto_commit, const unsigned max_attempts)
+{
+  // Case 1: Pre-existing transaction provided; use it without committing
+  // (auto_commit flag is ignored when transaction is provided)
+  if (txn.has_value()) {
+    const auto *view = std::get_if<fdb_txn_ref>(&*txn);
+    if (!view || !view->get()) {
+      return TransactionResult(errno_result {std::unexpected(-EINVAL)}, false);
+    }
+
+    // Execute function with borrowed transaction (no commit)
+    Transaction txn_ref = *txn;
+    if (const auto ret = fn(txn_ref); 0 > ret) {
+      return TransactionResult(errno_result {std::unexpected(ret)}, false);
+    }
+    return TransactionResult(errno_result {std::expected<void, int>{}}, false);
+  }
+
+  // Case 2: No transaction provided and auto_commit = true; use managed transactor
+  if (auto_commit) {
+    return execute(dpp, y, fn, max_attempts);
+  }
+
+  // Case 3: No transaction and auto_commit = false
+  /* This case is not supported because the transaction would go out of scope
+     before the caller can commit it. */
+  return TransactionResult(errno_result {std::unexpected(-EINVAL)}, false);
+}
+
 int FDBDirectory::get_kv(const DoutPrefixProvider* dpp,
                          optional_yield y,
                          const std::string& key,
@@ -1478,7 +1509,6 @@ int FDBBlockDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, Cach
     lfdb::erase(tr, key);
   });
 }
-
 
 int FDBBlockDirectory::update_field(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& field, std::string& value, std::optional<Transaction> txn)
 {

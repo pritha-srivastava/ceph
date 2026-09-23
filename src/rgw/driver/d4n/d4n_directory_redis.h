@@ -85,11 +85,11 @@ public:
 
 public:
   request& get_request() noexcept { return req_; }
+  int execute_request(const DoutPrefixProvider* dpp, optional_yield y);
 
 private:
   friend struct RedisBackend;
   friend class RedisDirectory;
-  int execute_request(const DoutPrefixProvider* dpp, optional_yield y);
 
 };
 

@@ -846,6 +846,47 @@ TransactionResult RedisBackend::execute(const DoutPrefixProvider *dpp, optional_
   return TransactionResult(errno_result {std::unexpected(-EAGAIN)}, true);
 }
 
+TransactionResult RedisBackend::execute_with_transaction(const DoutPrefixProvider *dpp, optional_yield y,
+    const boost::compat::function_ref<int(Transaction&)> fn, std::optional<Transaction> txn,
+    const bool auto_commit, const unsigned max_attempts)
+{
+  // Case 1: Pre-existing transaction provided; use it without committing
+  if (txn.has_value()) {
+    const auto *view = std::get_if<redis_txn_ref>(&*txn);
+    if (!view) {
+      return TransactionResult(errno_result {std::unexpected(-EINVAL)}, false);
+    }
+
+    // Execute function with borrowed transaction (adds to pipeline)
+    Transaction txn_ref = *txn;
+    if (const auto ret = fn(txn_ref); 0 > ret) {
+      return TransactionResult(errno_result {std::unexpected(ret)}, false);
+    }
+
+    // If auto_commit requested with pre-existing transaction, execute the pipeline now
+    if (auto_commit) {
+      RedisTransaction& redis_txn = view->get();
+      const int completion = redis_txn.execute_request(dpp, y);
+      if (0 != completion) {
+        return TransactionResult(errno_result {std::unexpected(completion)}, false);
+      }
+    }
+
+    // Success: either committed or caller will commit later
+    return TransactionResult(errno_result {std::expected<void, int>{}}, false);
+  }
+
+  // Case 2: No transaction provided and auto_commit = true; use standard execute (creates and commits)
+  if (auto_commit) {
+    return execute(dpp, y, fn, max_attempts);
+  }
+
+  // Case 3: No transaction and auto_commit = false
+  /* This case is not supported because the transaction would go out of scope
+     before the caller can commit it. */
+  return TransactionResult(errno_result {std::unexpected(-EINVAL)}, false);
+}
+
 int RedisTransaction::execute_request(const DoutPrefixProvider* dpp, optional_yield y)
 {
   if (0 == req_.get_commands()) {
@@ -1309,7 +1350,31 @@ int RedisBucketDirectory::exist_key(const DoutPrefixProvider* dpp, optional_yiel
 //FIXME: this is a dummy function and should be updated.
 int RedisBucketDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, std::optional<Transaction> txn)
 {
-  return 0;
+  ldpp_dout(dpp, 10) << "RedisBucketDirectory::" << __func__ << "(): index is: " << bucket_id << dendl;
+
+  try {
+    boost::system::error_code ec;
+    response<int> resp;
+    request req;
+    req.push("ZREMRANGEBYSCORE", bucket_id, "-inf", "+inf");
+
+    redis_exec_connection_pool(dpp, redis_pool, REDISconn, ec, req, resp, y);
+
+    if (!std::get<0>(resp).value()) {
+      ldpp_dout(dpp, 10) << "RedisBucketDirectory::" << __func__ << "(): No values deleted." << dendl;
+      return -ENOENT;
+    }
+
+    if (ec) {
+      ldpp_dout(dpp, 0) << "RedisBucketDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
+      return -ec.value();
+    }
+  } catch (std::exception &e) {
+    ldpp_dout(dpp, 0) << "RedisBucketDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
+    return -EINVAL;
+  }
+
+  return 0; 
 }
 
 int RedisBucketDirectory::add_object(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, std::optional<Transaction> txn)
