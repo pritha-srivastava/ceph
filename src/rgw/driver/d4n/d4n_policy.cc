@@ -1152,7 +1152,7 @@ int LFUDAPolicy::mark_data_blocks_dir_clean(const DoutPrefixProvider* dpp, LFUDA
 
     rgw::d4n::CacheBlock block {
       .cacheObj = {
-        .objName = e->obj_key.get_oid(),
+        .objName = e->obj_key.name,
         .bucketName = e->bucket_id,
       },
       .blockID = static_cast<uint64_t>(fst),
