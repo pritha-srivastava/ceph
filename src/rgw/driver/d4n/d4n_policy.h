@@ -269,6 +269,11 @@ class LFUDAPolicy : public CachePolicy {
     virtual void background_eviction_worker(const DoutPrefixProvider* dpp, optional_yield y);
     int do_delete(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, int interval, optional_yield y);
     int do_writeback(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, optional_yield y);
+    // On a backend-call error during writeback, re-check whether the bucket still
+    // exists. Returns true iff a fresh load_bucket reports the bucket is gone
+    // (-ENOENT); used to disambiguate "bucket deleted" (route to do_delete) from
+    // transient errors / resharding (retry).
+    bool check_if_bucket_deleted(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, optional_yield y);
     //helper method to create LFUDAObjEntry, add it to o_entries_map and per_obj_versions
     LFUDAObjEntry* create_obj_entry(const DoutPrefixProvider* dpp, const std::string& dirty_obj_key, const std::string& version,
                                               bool deleteMarker, uint64_t size, ceph::real_time creationTime,

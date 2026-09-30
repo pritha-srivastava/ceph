@@ -1240,6 +1240,35 @@ int LFUDAPolicy::mark_local_blocks_clean(const DoutPrefixProvider* dpp, LFUDAObj
   return 0;  // Return success even if some individual updates failed
 }
 
+/* On a backend-call error during writeback, re-check whether the bucket still
+ * exists. A backend write/delete against a deleted bucket surfaces as -ENOENT,
+ * but that code is ambiguous. load_bucket is the safe disambiguator.
+ * Returns true iff the bucket is confirmed gone, so the caller
+ * can route the dirty entry to do_delete instead of dropping user data on a
+ * transient error.
+*/
+bool LFUDAPolicy::check_if_bucket_deleted(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, optional_yield y)
+{
+  std::unique_ptr<rgw::sal::Bucket> bucket;
+  rgw_bucket b = rgw_bucket(e->user.tenant, e->bucket_name, e->bucket_id);
+  int ret = driver->get_next()->load_bucket(dpp, b, &bucket, y);
+  if (ret == -ENOENT) {
+    ldpp_dout(dpp, 5) << "LFUDAPolicy::" << __func__
+                      << "(): bucket confirmed deleted (load_bucket -ENOENT), key="
+                      << e->key << dendl;
+    return true;
+  }
+  if (ret < 0) {
+    // Not a definitive bucket-gone signal (transient error / reshard): treat the
+    // bucket as present so the caller keeps the original error and retries.
+    ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__
+                       << "(): load_bucket returned ret=" << ret
+                       << " (not -ENOENT); treating bucket as present, key="
+                       << e->key << dendl;
+  }
+  return false;
+}
+
 /* As part of the cleaning process, this method reads an object from the cache
  * and writes it to the backend store. It marks the object clean in the directory
  * It is also responsible for correctly updating the version in the directory.
@@ -1277,9 +1306,14 @@ int LFUDAPolicy::do_writeback(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, o
       return 0;  // Already cleaned by another RGW
     }
   } else if (ret == -ENOENT) {
+    // Versioned HEAD directory entry is gone (object/bucket deleted, or head block
+    // already reaped). The object can never be written back and its local dirty
+    // cache blocks must not be leaked: route to do_delete via -ECANCELED, which
+    // transitions the entry to State::INVALID for cleanup.
     ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__
-                       << "(): versioned HEAD not found, object may be deleted, key=" << e->key << dendl;
-    return ret;
+                       << "(): versioned HEAD not found, object may be deleted; routing to do_delete, key="
+                       << e->key << dendl;
+    return -ECANCELED;
   } else {
     ldpp_dout(dpp, 0) << "LFUDAPolicy::" << __func__
                       << "(): Failed to get versioned HEAD, ret=" << ret << dendl;
@@ -1400,7 +1434,15 @@ int LFUDAPolicy::do_writeback(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, o
   ret = driver->get_next()->load_bucket(dpp, c_rgw_bucket, &c_bucket, y);
   if (ret < 0) {
     ldpp_dout(dpp, 10) << __func__ << "(): load_bucket() returned ret=" << ret << dendl;
-    return ret;
+    if (ret == -ENOENT) {
+      // Bucket was deleted underneath us. Do not retry the writeback (the object can
+      // never be written back) and do not leak its cache/directory entries: route to
+      // do_delete via -ECANCELED, which transitions the entry to State::INVALID.
+      ldpp_dout(dpp, 5) << __func__ << "(): bucket gone; routing entry to do_delete, key="
+                        << e->key << dendl;
+      return -ECANCELED;
+    }
+    return ret;   // transient errors (EIO/timeout/...) stay retryable
   }
 
   std::unique_ptr<rgw::sal::Object> c_obj = c_bucket->get_object(e->obj_key);
@@ -1432,6 +1474,11 @@ int LFUDAPolicy::do_writeback(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, o
       ldpp_dout(dpp, 20) << __func__ << "delete_obj version_id=" << version_id << dendl;
     } else {
       ldpp_dout(dpp, 20) << __func__ << "delete_obj returned ret=" << op_ret << dendl;
+      if (check_if_bucket_deleted(dpp, e, y)) {
+        ldpp_dout(dpp, 5) << __func__ << "(): bucket gone during delete_obj; routing entry to do_delete, key="
+                          << e->key << dendl;
+        return -ECANCELED;
+      }
       return op_ret;
     }
   } else { //end-if delete_marker
@@ -1549,6 +1596,11 @@ int LFUDAPolicy::do_writeback(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, o
 
     if (op_ret < 0) {
       ldpp_dout(dpp, 20) << __func__ << "processor->complete() returned ret=" << op_ret << dendl;
+      if (check_if_bucket_deleted(dpp, e, y)) {
+        ldpp_dout(dpp, 5) << __func__ << "(): bucket gone during processor->complete(); routing entry to do_delete, key="
+                          << e->key << dendl;
+        return -ECANCELED;
+      }
       return op_ret;
     }
   } //end-else if delete_marker
