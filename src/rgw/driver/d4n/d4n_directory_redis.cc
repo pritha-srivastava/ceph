@@ -1354,7 +1354,7 @@ int RedisObjectDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, C
     return ret;
 
   try {
-    target->push_range("ZREM", object->bucketName, object->objName);
+    target->push("DEL", key);
 
     if (rtxn) {
       return 0;   // batched — caller commits later
@@ -1627,9 +1627,8 @@ int RedisObjectDirectory::remove_version(const DoutPrefixProvider* dpp, optional
 
 int RedisObjectDirectory::remove_version_by_creation_time(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, ceph::real_time creation_time, std::optional<std::reference_wrapper<Transaction>> txn)
 {
-  auto min = ceph::real_clock::to_double(creation_time);
-  auto max = ceph::real_clock::to_double(creation_time);
-  return zremrangebyscore(dpp, y, bucket_id, obj_name, min, max, txn);
+  auto score = std::chrono::duration_cast<std::chrono::microseconds>(creation_time.time_since_epoch()).count();
+  return zremrangebyscore(dpp, y, bucket_id, obj_name, score, score, txn);
 }
 
 int RedisObjectDirectory::list_versions(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& marker_version, uint64_t count, std::vector<CacheObjectVersion>& obj_versions, std::string& continuation_token, std::optional<std::reference_wrapper<Transaction>> txn)
