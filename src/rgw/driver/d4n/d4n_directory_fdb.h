@@ -200,11 +200,6 @@ public:
                       const std::string& object_name,
 		      std::optional<std::reference_wrapper<Transaction>> txn) override;
 
-    virtual int remove_objects(const DoutPrefixProvider* dpp, optional_yield y,
-			       std::vector<std::pair<const std::string&, 
-						     const std::string&>> objects,
-			       std::optional<std::reference_wrapper<Transaction>> txn) override;
-
     virtual int list_objects(const DoutPrefixProvider* dpp, optional_yield y,
                     const std::string& bucket_id,
                     const std::string& start_token,
@@ -281,12 +276,6 @@ public:
                        const std::string& obj_name,
                        const std::string& version,
 		       std::optional<std::reference_wrapper<Transaction>> txn) override;
-
-    virtual int remove_versions(const DoutPrefixProvider* dpp, optional_yield y,
-			        std::vector<std::tuple<const std::string&,
-						       const std::string&,
-						       const std::string&>> to_remove, 
-			        std::optional<std::reference_wrapper<Transaction>> txn) override;
 
     virtual int remove_version_by_creation_time(const DoutPrefixProvider* dpp, optional_yield y,
                                         const std::string& bucket_id,
@@ -405,7 +394,7 @@ public:
 
     int del(const DoutPrefixProvider* dpp, optional_yield y,
             std::vector<CacheBlock>& blocks,
-	    std::optional<std::reference_wrapper<Transaction>> txn) override;
+			std::optional<std::reference_wrapper<Transaction>> txn) override;
 
     int update_field(const DoutPrefixProvider* dpp, optional_yield y,
                      CacheBlock* block,
