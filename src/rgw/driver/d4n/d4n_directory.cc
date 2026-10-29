@@ -104,15 +104,15 @@ std::string ObjectDirectory::build_index(const std::string& bucket_id, const std
   return key;
 }
 
-std::string BlockDirectory::build_index(const CacheBlock* block) 
+std::string BlockDirectory::build_index(const CacheBlock& block) 
 {
-  std::string key = url_encode(block->cacheObj.bucketName, true) + "#" + url_encode(block->cacheObj.objName, true) + "/block/";
+  std::string key = url_encode(block.cacheObj.bucketName, true) + "#" + url_encode(block.cacheObj.objName, true) + "/block/";
 
-  if (block->size > 0) {
-    key += block->version + "/";
+  if (block.size > 0) {
+    key += block.version + "/";
   }
 
-  key += std::to_string(block->blockID) + "/" + std::to_string(block->size);
+  key += std::to_string(block.blockID) + "/" + std::to_string(block.size);
 
   return key;
 }

@@ -1279,7 +1279,7 @@ int FDBObjectDirectory::list_versions(const DoutPrefixProvider* dpp, optional_yi
 int FDBBlockDirectory::exist_key(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, std::optional<Transaction> txn)
 {
   return fdb_invoke(FDBdb, dpp, txn, [&](auto& tr) {
-    std::string key = build_index(block);
+    std::string key = build_index(*block);
     ldpp_dout(dpp, 20) << "FDBBlockDirectory::" << __func__ << " key: " << key << dendl;
     return lfdb::key_exists(tr, key);
   });
@@ -1295,7 +1295,7 @@ try
   }
 
   const auto write_block = [&](auto& tr) {
-    std::string key = build_index(block);
+    std::string key = build_index(*block);
     ldpp_dout(dpp, 10) << "FDBBlockDirectory::" << __func__ << "(): index is: " << key << dendl;
 
     const auto fdbValues = encode_fields(*block);
@@ -1315,7 +1315,7 @@ int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, optional_yield y, std:
 {
   return fdb_invoke(FDBdb, dpp, txn, [&](auto& tr) {
     for (auto& block : blocks) {
-      std::string key = build_index(&block);
+      std::string key = build_index(block);
       ldpp_dout(dpp, 10) << "FDBBlockDirectory::" << __func__ << "(): index is: " << key << dendl;
       const auto fdbValues = encode_fields(block);
 
@@ -1384,7 +1384,7 @@ FDBBlockDirectory::find(const DoutPrefixProvider *dpp, optional_yield y, const C
                         std::optional<Transaction> txn)
 try
  {
-  const auto key = build_index(&block);
+  const auto key = build_index(block);
   std::optional<CacheBlock> found;
   const auto find_block = [this, &key](auto& tr) { return read_block(tr, key); };
   if (const int ret = fdb_invoke(FDBdb, dpp, txn, key, std::source_location::current(),
@@ -1411,7 +1411,7 @@ try
     std::vector<std::optional<CacheBlock>> values;
     values.reserve(blocks.size());
     for (const auto& block : blocks) {
-      values.push_back(read_block(tr, build_index(&block)));
+      values.push_back(read_block(tr, build_index(block)));
     }
 
     return values;
@@ -1474,7 +1474,7 @@ int FDBBlockDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, Cach
   }
 
   return fdb_invoke(FDBdb, dpp, txn, [&](auto& tr) {
-    std::string key = build_index(block);
+    std::string key = build_index(*block);
     lfdb::erase(tr, key);
   });
 }
