@@ -1189,7 +1189,31 @@ int RedisBucketDirectory::exist_key(const DoutPrefixProvider* dpp, optional_yiel
 //FIXME: this is a dummy function and should be updated.
 int RedisBucketDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, std::optional<std::reference_wrapper<Transaction>> txn)
 {
-  return 0;
+  ldpp_dout(dpp, 10) << "RedisBucketDirectory::" << __func__ << "(): index is: " << bucket_id << dendl;
+
+  try {
+    boost::system::error_code ec;
+    response<int> resp;
+    request req;
+    req.push("ZREMRANGEBYSCORE", bucket_id, "-inf", "+inf");
+
+    redis_exec_connection_pool(dpp, redis_pool, REDISconn, ec, req, resp, y);
+
+    if (!std::get<0>(resp).value()) {
+      ldpp_dout(dpp, 10) << "RedisBucketDirectory::" << __func__ << "(): No values deleted." << dendl;
+      return -ENOENT;
+    }
+
+    if (ec) {
+      ldpp_dout(dpp, 0) << "RedisBucketDirectory::" << __func__ << "() ERROR: " << ec.what() << dendl;
+      return -ec.value();
+    }
+  } catch (std::exception &e) {
+    ldpp_dout(dpp, 0) << "RedisBucketDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
+    return -EINVAL;
+  }
+
+  return 0; 
 }
 
 int RedisBucketDirectory::add_object(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& object_name, std::optional<CacheObject> params, std::optional<std::reference_wrapper<Transaction>> txn)
@@ -1330,7 +1354,7 @@ int RedisObjectDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, C
     return ret;
 
   try {
-    target->push_range("DEL", key);
+    target->push("DEL", key);
 
     if (rtxn) {
       return 0;   // batched — caller commits later
@@ -1603,9 +1627,8 @@ int RedisObjectDirectory::remove_version(const DoutPrefixProvider* dpp, optional
 
 int RedisObjectDirectory::remove_version_by_creation_time(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, ceph::real_time creation_time, std::optional<std::reference_wrapper<Transaction>> txn)
 {
-  auto min = ceph::real_clock::to_double(creation_time);
-  auto max = ceph::real_clock::to_double(creation_time);
-  return zremrangebyscore(dpp, y, bucket_id, obj_name, min, max, txn);
+  auto score = std::chrono::duration_cast<std::chrono::microseconds>(creation_time.time_since_epoch()).count();
+  return zremrangebyscore(dpp, y, bucket_id, obj_name, score, score, txn);
 }
 
 int RedisObjectDirectory::list_versions(const DoutPrefixProvider* dpp, optional_yield y, const std::string& bucket_id, const std::string& obj_name, const std::string& marker_version, uint64_t count, std::vector<CacheObjectVersion>& obj_versions, std::string& continuation_token, std::optional<std::reference_wrapper<Transaction>> txn)
@@ -1668,7 +1691,7 @@ int RedisBlockDirectory::exist_key(const DoutPrefixProvider* dpp, optional_yield
 
   response<int> resp;
   try {
-    std::string key = build_index(block);
+    std::string key = build_index(*block);
     boost::system::error_code ec;
     target->push("EXISTS", key);
 
@@ -1755,7 +1778,7 @@ int RedisBlockDirectory::set(const DoutPrefixProvider* dpp, optional_yield y, Ca
                       << "() ERROR: null block pointer" << dendl;
     return -EINVAL;
   }
-  std::string key = build_index(block);
+  std::string key = build_index(*block);
   ldpp_dout(dpp, 10) << "RedisBlockDirectory::" << __func__ << "(): index is: " << key << dendl;
 
   std::map<std::string, std::string> redisValues;
@@ -1805,7 +1828,7 @@ int RedisBlockDirectory::set(const DoutPrefixProvider* dpp, optional_yield y,
 
   try {
     for (auto& block : blocks) {
-      std::string key = build_index(&block);
+      std::string key = build_index(block);
       ldpp_dout(dpp, 10)
         << "RedisBlockDirectory::" << __func__
         << "(): index is: " << key << dendl;
@@ -1897,7 +1920,7 @@ void parse_response(T t, std::vector<std::vector<std::string>>& responses)
 
 int RedisBlockDirectory::get(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, std::optional<std::reference_wrapper<Transaction>> txn) 
 {
-  std::string key = build_index(block);
+  std::string key = build_index(*block);
   ldpp_dout(dpp, 10) << "RedisBlockDirectory::" << __func__ << "(): index is: " << key << dendl;
 
   try {
@@ -1975,7 +1998,7 @@ int RedisBlockDirectory::get(const DoutPrefixProvider* dpp, optional_yield y, st
   boost::redis::generic_response resp;
   request req;
   for (auto& block : blocks) {
-    std::string key = build_index(&block);
+    std::string key = build_index(block);
     std::vector<std::string> fields;
     ldpp_dout(dpp, 10) << "RedisBlockDirectory::" << __func__ << "(): index is: " << key << dendl;
 
@@ -2026,7 +2049,7 @@ int RedisBlockDirectory::get(const DoutPrefixProvider* dpp, optional_yield y, st
   for (auto& element : resp.value()) {
     ldpp_dout(dpp, 10) << "RedisBlockDirectory::" << __func__ << "(): i is: " << i << dendl;
     CacheBlock* block = &blocks[i];
-    std::string key = build_index(block);
+    std::string key = build_index(*block);
     ldpp_dout(dpp, 10) << "RedisBlockDirectory::" << __func__ << "(): index is: " << key << dendl;
     if (element.data_type == boost::redis::resp3::type::array || element.data_type == boost::redis::resp3::type::map) {
       num_elements = element.aggregate_size;
@@ -2126,7 +2149,7 @@ int RedisBlockDirectory::copy(const DoutPrefixProvider* dpp, optional_yield y,
   if (int ret = prepare_request(dpp, txn, req, rtxn, target); ret < 0)
     return ret;
 
-  std::string key = build_index(block);
+  std::string key = build_index(*block);
   auto copyBlock = CacheBlock{
     .cacheObj = {
       .objName = copyName,
@@ -2134,7 +2157,7 @@ int RedisBlockDirectory::copy(const DoutPrefixProvider* dpp, optional_yield y,
     },
     .blockID = 0
   };
-  std::string copyKey = build_index(&copyBlock);
+  std::string copyKey = build_index(copyBlock);
 
   try {
     target->push("COPY", key, copyKey);
@@ -2181,7 +2204,7 @@ int RedisBlockDirectory::del(const DoutPrefixProvider* dpp, optional_yield y,
   if (int ret = prepare_request(dpp, txn, req, rtxn, target); ret < 0)
     return ret;
 
-  std::string key = build_index(block);
+  std::string key = build_index(*block);
   ldpp_dout(dpp, 10)
     << "RedisBlockDirectory::" << __func__
     << "(): index is: " << key << dendl;
@@ -2218,6 +2241,52 @@ int RedisBlockDirectory::del(const DoutPrefixProvider* dpp, optional_yield y,
     return -EINVAL;
   }
 
+  return 0;
+}
+
+int RedisBlockDirectory::del(const DoutPrefixProvider* dpp, optional_yield y,
+                             std::vector<CacheBlock>& blocks,
+                             std::optional<std::reference_wrapper<Transaction>> txn)
+{
+  if (blocks.empty())
+    return 0;
+
+  boost::redis::generic_response resp;
+  request req;
+  RedisTransaction* rtxn = nullptr;
+  request* target = nullptr;
+  if (int ret = prepare_request(dpp, txn, req, rtxn, target); ret < 0)
+    return ret;
+
+  try {
+    for (auto& block : blocks) {
+      std::string key = build_index(&block);
+      ldpp_dout(dpp, 10)
+		<< "RedisBlockDirectory::" << __func__
+		<< "(): index is: " << key << dendl;
+
+	  target->push("DEL", key);
+    } //end - for
+
+    if (rtxn) {
+      return 0;  // batched — caller commits later
+    }
+
+    boost::system::error_code ec;
+    response<int> resp;
+
+    redis_exec_connection_pool(dpp, redis_pool, REDISconn, ec, *target, resp, y);
+
+    if (ec) {
+      ldpp_dout(dpp, 0)
+		<< "RedisBlockDirectory::" << __func__
+		<< "() ERROR: " << ec.what() << dendl;
+      return -ec.value();
+    }
+  } catch (std::exception &e) {
+    ldpp_dout(dpp, 0) << "RedisBlockDirectory::" << __func__ << "() ERROR: " << e.what() << dendl;
+    return -EINVAL;
+  }
   return 0;
 }
 
@@ -2297,7 +2366,7 @@ int RedisBlockDirectory::del(const DoutPrefixProvider* dpp, CacheBlock* block, o
 int RedisBlockDirectory::update_field(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& field, std::string& value, std::optional<std::reference_wrapper<Transaction>> txn)
 {
   int ret = -1;
-  std::string key = build_index(block);
+  std::string key = build_index(*block);
 
   if ((ret = exist_key(dpp, y, block, txn))) {
     try {
@@ -2360,7 +2429,7 @@ int RedisBlockDirectory::update_field(const DoutPrefixProvider* dpp, optional_yi
 
 int RedisBlockDirectory::remove_host(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& value, std::optional<std::reference_wrapper<Transaction>> txn)
 {
-  std::string key = build_index(block);
+  std::string key = build_index(*block);
   std::string tmpVal = value;
 
   try {
