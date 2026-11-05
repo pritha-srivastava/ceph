@@ -193,6 +193,7 @@ class RedisBlockDirectory: public RedisDirectory, public BlockDirectory {
     virtual int get(const DoutPrefixProvider* dpp, optional_yield y, std::vector<CacheBlock>& blocks, std::optional<std::reference_wrapper<Transaction>> txn) override;
     virtual int copy(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& copyName, const std::string& copyBucketName, std::optional<std::reference_wrapper<Transaction>> txn) override;
     virtual int del(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, std::optional<std::reference_wrapper<Transaction>> txn) override;
+    virtual int del(const DoutPrefixProvider* dpp, optional_yield y, std::vector<CacheBlock>& blocks, std::optional<std::reference_wrapper<Transaction>> txn) override;
     virtual int update_field(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& field, std::string& value, std::optional<std::reference_wrapper<Transaction>> txn) override;
     virtual int remove_host(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& value, std::optional<std::reference_wrapper<Transaction>> txn) override;
 

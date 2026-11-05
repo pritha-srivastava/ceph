@@ -31,6 +31,14 @@ int LFUDAPolicy::age_sync(const DoutPrefixProvider* dpp, optional_yield y) {
   return 0;
 }
 
+/* Minimum local weight describes the global average minimum local weight across all participating caches
+ * in the D4N cluster. This value is compared to the local weight of the victim block (to be evicted) to 
+ * decide if it should be remotely pushed to that cache. minLocalWeights is posted in three parts: sum, 
+ * size, and the address of the cache the title belongs to. This is so the average minimum local weight 
+ * can easily be calculated for use within the LFUDA logic without complicating its global maintenance 
+ * when updates are necessary. Similarly, avgLocalWeight is kept in the directory for each cache (with 
+ * the unique cache address acting as the key) for situations where closer caches with comparably low 
+ * average local weights are preferred as the target for remote evictions. */
 int LFUDAPolicy::local_weight_sync(const DoutPrefixProvider* dpp, optional_yield y) {
   auto txn = this->driver->get_txn_factory()->create_transaction(dpp); 
   if (fabs(weightSum - postedSum) > (postedSum * 0.1)) {
@@ -262,6 +270,9 @@ int LFUDAPolicy::init(CephContext* cct, const DoutPrefixProvider* dpp, asio::io_
     return -EINVAL;
   }
   auto txn = txn_factory->create_transaction(dpp);
+  /* We overwrite the minimum local weight values upon initialization because the 
+   * new RGW node is empty and will therefore always have the minimum average weight of 
+   * zero. */ 
   dir.set_kv_multi(dpp, y,
       "lfuda",
       {
@@ -601,80 +612,98 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
 	}
 
 	bufferlist bl = obj_attrs[RGW_CACHE_ATTR_INVALID];
-	if (!bl.length()) {
-	  // we use nullptr for transaction since we don't want to do all operations in one transaction
-	  if ((ret = blockDir.get(dpp, y, &block, std::nullopt)) < 0) {
-		ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Unable to retrieve victim block's hostsList." << dendl;
-		return ret;
+	constexpr int max_retries = 2; // 2 attempts total (1 initial + 1 retry)
+	for (int attempt = 0; attempt < max_retries; ++attempt) {
+	  if (attempt > 0) {
+		ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): retrying directory transaction, attempt=" << attempt + 1 << dendl;
 	  }
 
-	  ldpp_dout(dpp, 20) << __func__ << "(): " << __LINE__ << ": Victim host list size is " << block.cacheObj.hostsList.size() << dendl;
-
-	  /* The following part takes care of updating the weight (globalWeight) of the block if this is the last copy in a remote setup
-	   * and is pushed out to a remote cache where space is available. */
-	  if (block.cacheObj.hostsList.size() == 1 && *(block.cacheObj.hostsList.begin()) == dpp->get_cct()->_conf->rgw_d4n_local_rgw_address) { // Last copy
-		update_global_weight = false;
-		if (block.globalWeight) {
-		  entry.localWeight += block.globalWeight;
-		  block.globalWeight = 0;
+	  auto txn = driver->get_txn_factory()->create_transaction(dpp); 
+	  if (!bl.length()) {
+		if ((ret = blockDir.get(dpp, y, &block, *txn)) < 0) {
+		  ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Unable to retrieve victim block's hostsList." << dendl;
+		  return ret;
 		}
 
-		if (!remoteCacheAddress.empty()) {
-		  if (entry.localWeight > avgWeight) {
-			rgw::d4n::RemoteCachePutOp::RemoteCachePutOpData op;
-			op.bucket_name = entry.bucketName;
-			op.object_name = object_name;
-			op.offset = block.blockID;
-			op.len = block.size;
-			op.version = block.version;
-			op.dirty = false;
-			op.bucket_owner = entry.user;
-			op.remote_addr = remoteCacheAddress;
-			op.obj_size = block.cacheObj.size;
-			op.instance_id = instance_id;
-			// old_version left default (empty) - not applicable for eviction
-			std::unique_ptr<rgw::d4n::RemoteCachePutOp> remote_put = std::make_unique<rgw::d4n::RemoteCachePutOp>(driver, op, true);
-			if ((ret = remote_put->send_and_complete_request(dpp, y, &out_bl)) < 0){
-			  ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << ": Sending to remote has failed: " << remoteCacheAddress << dendl;
-			  return ret;
+		ldpp_dout(dpp, 20) << __func__ << "(): " << __LINE__ << ": Victim host list size is " << block.cacheObj.hostsList.size() << dendl;
+
+		/* The following part takes care of updating the weight (globalWeight) of the block if this is the last copy in a remote setup
+		 * and is pushed out to a remote cache where space is available. */
+		if (block.cacheObj.hostsList.size() == 1 && *(block.cacheObj.hostsList.begin()) == dpp->get_cct()->_conf->rgw_d4n_local_rgw_address) { // Last copy
+		  update_global_weight = false;
+		  if (block.globalWeight) {
+			entry.localWeight += block.globalWeight;
+			block.globalWeight = 0;
+		  }
+
+		  if (!remoteCacheAddress.empty()) {
+			if (entry.localWeight > avgWeight) {
+			  rgw::d4n::RemoteCachePutOp::RemoteCachePutOpData op;
+			  op.bucket_name = entry.bucketName;
+			  op.object_name = object_name;
+			  op.offset = block.blockID;
+			  op.len = block.size;
+			  op.version = block.version;
+			  op.dirty = false;
+			  op.bucket_owner = entry.user;
+			  op.remote_addr = remoteCacheAddress;
+			  op.obj_size = block.cacheObj.size;
+			  op.instance_id = instance_id;
+			  // old_version left default (empty) - not applicable for eviction
+			  std::unique_ptr<rgw::d4n::RemoteCachePutOp> remote_put = std::make_unique<rgw::d4n::RemoteCachePutOp>(driver, op, true);
+			  if ((ret = remote_put->send_and_complete_request(dpp, y, &out_bl)) < 0){
+				ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << ": Sending to remote has failed: " << remoteCacheAddress << dendl;
+				return ret;
+			  }
+			  ldpp_dout(dpp, 20) << __func__ << "(): " << __LINE__ << ": Sending to remote is done." << dendl;
+			  update_global_weight = true;
 			}
-			ldpp_dout(dpp, 20) << __func__ << "(): " << __LINE__ << ": Sending to remote is done." << dendl;
-			update_global_weight = true;
 		  }
 		}
 	  }
-    }
 
-	// Only update victim block's global weight if the block wasn't completely evicted; else, delete block from directory
-    if (update_global_weight) {
-      block.globalWeight += entry.localWeight;
-      block.cacheObj.hostsList.clear();
-      block.cacheObj.hostsList.insert(remoteCacheAddress);
-      // TODO: Need to get and then update the host atomically in a remote setup
-      // Update global weight and remove host in one directory::set call
-      //auto txn = this->driver->get_txn_factory()->create_transaction(dpp); 
-      if (int ret = blockDir.set(dpp, y, &block, std::nullopt) < 0) {
-	ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << ": Failed to update victim block entry in directory." << dendl;
-	return ret;
-      }
-    } else {
-      //auto txn = this->driver->get_txn_factory()->create_transaction(dpp); 
-      if ((ret = blockDir.del(dpp, y, &block, std::nullopt)) < 0) {
-	ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << " Failed to delete victim block." << dendl;
-	return ret;
-      }
-    } 
+	  // Only update victim block's global weight if the block wasn't completely evicted; else, delete block from directory
+	  if (update_global_weight) {
+		block.globalWeight += entry.localWeight;
+		if (int ret = blockDir.remove_host(dpp, y, &block, dpp->get_cct()->_conf->rgw_d4n_local_rgw_address, *txn); ret < 0) {
+		  ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << ": Failed to remove local host from victim block." << dendl;
+		  return ret;
+		}
+		if (int ret = blockDir.set_kv(dpp, y, blockDir.build_index(block), "globalWeight", std::to_string(block.globalWeight), *txn) < 0) {
+		  ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << ": Failed to update global weight for victim block." << dendl;
+		  return ret;
+		}
+	  } else {
+		if ((ret = blockDir.del(dpp, y, &block, *txn)) < 0) {
+		  ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << " Failed to delete victim block." << dendl;
+		  return ret;
+		}
+	  } 
+	  ret = txn->commit(dpp, y);
+	  if (ret < 0) {
+		// Retry on transaction conflict
+		if ((ret == -EAGAIN || ret == -EBUSY) && attempt + 1 < max_retries) {
+		  ldpp_dout(dpp, 10) << __func__ << "(): transaction conflict on block eviction , retrying" << dendl;
+		  continue;
+		}
+		ldpp_dout(dpp, 0) << __func__ << "(): failed to commit block eviction transaction, ret=" << ret << dendl;
+		return ret;
+	  }
 
-    if ((ret = cacheDriver->delete_data(dpp, entry.key, y)) < 0) {
-      ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << ": Failed to delete victim block from cache." << dendl;
-      return ret;
-    }
+	  // Transaction committed successfully - break out of retry loop
+	  break;
+	} // end retry loop
 
-    ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Block " << block.cacheObj.objName << " has been evicted." << dendl;
+	if ((ret = cacheDriver->delete_data(dpp, entry.key, y)) < 0) {
+	  ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << ": Failed to delete victim block from cache." << dendl;
+	  return ret;
+	}
 
-    if (perfcounter) {
-      perfcounter->inc(l_rgw_d4n_cache_evictions);
-    }
+	ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Block " << block.cacheObj.objName << " has been evicted." << dendl;
+
+	if (perfcounter) {
+	  perfcounter->inc(l_rgw_d4n_cache_evictions);
+	}
   }
 
   return 0;
