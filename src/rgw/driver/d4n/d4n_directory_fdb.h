@@ -158,11 +158,12 @@ public:
                     const std::string& start_token,
                     const std::string& prefix,
                     const std::string& marker,
+                    std::string_view end_marker,
                     uint64_t count,
                     bool marker_inclusive,
                     std::vector<CacheObject>& objs_info,
                     std::string& continuation_token,
-                    std::optional<Transaction> txn);
+                    std::optional<Transaction> txn) override;
 
 private:
     static fdbc::compiled_key object_listing_subspace(std::string_view bucket_id);
