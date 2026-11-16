@@ -141,7 +141,7 @@ class BlockDirectoryFixture: public ::testing::Test {
       cfg.addr.host = env->redisHost.substr(0, env->redisHost.find(":"));
       cfg.addr.port = env->redisHost.substr(env->redisHost.find(":") + 1, env->redisHost.length()); 
 
-	  redis_pool = redis_pool = std::make_shared<rgw::d4n::RedisPool>(&io, cfg, 8);
+      redis_pool = redis_pool = std::make_shared<rgw::d4n::RedisPool>(&io, cfg, 8);
       conn->async_run(cfg, {}, net::detached);
     } 
 
@@ -156,7 +156,8 @@ class BlockDirectoryFixture: public ::testing::Test {
     net::io_context io;
     std::shared_ptr<connection> conn;
     std::shared_ptr<rgw::d4n::RedisConnection> redis_conn;
-	std::shared_ptr<rgw::d4n::RedisPool> redis_pool; 
+    std::shared_ptr<rgw::d4n::RedisPool> redis_pool; 
+    std::shared_ptr<rgw::d4n::TransactionFactory> txn_factory;
 
     std::vector<std::string> vals{"0", "", "0", "0", "0", 
                                    "testName", "testBucket", "", "0", env->redisHost};
@@ -171,11 +172,8 @@ void rethrow(std::exception_ptr eptr) {
 TEST_F(ObjectDirectoryFixture, AddVersion)
 {
   boost::asio::spawn(io, [this] (boost::asio::yield_context yield) {
-	auto r_conn = redis_conn->get_redis_conn();
-	rgw::d4n::Pipeline p = rgw::d4n::Pipeline(r_conn, redis_pool);
-    p.start();
-    ASSERT_EQ(0, dir->add_version(env->dpp, obj->bucketName, obj->objName, version, time, std::nullopt, yield, &p));
-	p.execute(env->dpp, optional_yield{yield});
+    auto r_conn = redis_conn->get_redis_conn();
+    ASSERT_EQ(0, dir->add_version(env->dpp, yield, obj->bucketName, obj->objName, version, time, std::nullopt, std::nullopt));
 
     boost::system::error_code ec;
     request req;
@@ -199,11 +197,8 @@ TEST_F(ObjectDirectoryFixture, AddVersion)
 TEST_F(ObjectDirectoryFixture, RemoveVersion)
 {
   boost::asio::spawn(io, [this] (boost::asio::yield_context yield) {
-	auto r_conn = redis_conn->get_redis_conn();
-	rgw::d4n::Pipeline p = rgw::d4n::Pipeline(r_conn, redis_pool);
-    p.start();
-    ASSERT_EQ(0, dir->add_version(env->dpp, obj->bucketName, obj->objName, version, time, std::nullopt, yield, &p));
-	p.execute(env->dpp, optional_yield{yield});
+    auto r_conn = redis_conn->get_redis_conn();
+    ASSERT_EQ(0, dir->add_version(env->dpp, yield, obj->bucketName, obj->objName, version, time, std::nullopt, std::nullopt));
 
     {
       boost::system::error_code ec;
@@ -217,7 +212,7 @@ TEST_F(ObjectDirectoryFixture, RemoveVersion)
       EXPECT_EQ(std::get<0>(resp).value(), 1);
     }
 
-    ASSERT_EQ(0, dir->remove_version(env->dpp, obj->bucketName, obj->objName, version, yield));
+    ASSERT_EQ(0, dir->remove_version(env->dpp, yield, obj->bucketName, obj->objName, version, std::nullopt));
 
     {
       boost::system::error_code ec;
@@ -242,11 +237,8 @@ TEST_F(ObjectDirectoryFixture, RemoveVersion)
 TEST_F(ObjectDirectoryFixture, RemoveVersionCreationTime)
 {
   boost::asio::spawn(io, [this] (boost::asio::yield_context yield) {
-	auto r_conn = redis_conn->get_redis_conn();
-	rgw::d4n::Pipeline p = rgw::d4n::Pipeline(r_conn, redis_pool);
-    p.start();
-    ASSERT_EQ(0, dir->add_version(env->dpp, obj->bucketName, obj->objName, version, time, std::nullopt, yield, &p));
-	p.execute(env->dpp, optional_yield{yield});
+    auto r_conn = redis_conn->get_redis_conn();
+    ASSERT_EQ(0, dir->add_version(env->dpp, yield, obj->bucketName, obj->objName, version, time, std::nullopt, std::nullopt));
 
     {
       boost::system::error_code ec;
@@ -260,7 +252,7 @@ TEST_F(ObjectDirectoryFixture, RemoveVersionCreationTime)
       EXPECT_EQ(std::get<0>(resp).value(), 1);
     }
 
-    ASSERT_EQ(0, dir->remove_version_by_creation_time(env->dpp, obj->bucketName, obj->objName, time, yield));
+    ASSERT_EQ(0, dir->remove_version_by_creation_time(env->dpp, yield, obj->bucketName, obj->objName, time, std::nullopt));
 
     {
       boost::system::error_code ec;
@@ -286,17 +278,14 @@ TEST_F(ObjectDirectoryFixture, ListVersions)
 {
   boost::asio::spawn(io, [this] (boost::asio::yield_context yield) {
 	auto r_conn = redis_conn->get_redis_conn();
-	rgw::d4n::Pipeline p = rgw::d4n::Pipeline(r_conn, redis_pool);
 	ceph::real_time time_next = real_clock::now();
     std::string version_next = "test_version_next";
-    p.start();
-    ASSERT_EQ(0, dir->add_version(env->dpp, obj->bucketName, obj->objName, version, time, std::nullopt, yield, &p));
-    ASSERT_EQ(0, dir->add_version(env->dpp, obj->bucketName, obj->objName, version_next, time_next, std::nullopt, yield, &p));
-	p.execute(env->dpp, optional_yield{yield});
+    ASSERT_EQ(0, dir->add_version(env->dpp, yield, obj->bucketName, obj->objName, version, time, std::nullopt, std::nullopt));
+    ASSERT_EQ(0, dir->add_version(env->dpp, yield, obj->bucketName, obj->objName, version_next, time, std::nullopt, std::nullopt));
 
 	std::vector<rgw::d4n::CacheObjectVersion> obj_versions;
 	std::string continuation_token;
-    ASSERT_EQ(0, dir->list_versions(env->dpp, obj->bucketName, obj->objName, "", 2, obj_versions, continuation_token, yield));
+    ASSERT_EQ(0, dir->list_versions(env->dpp, yield, obj->bucketName, obj->objName, "", 2, obj_versions, continuation_token, std::nullopt));
 	auto out = rgw::d4n::CacheObjectVersion{
       .objName = obj->objName,
       .bucketId = obj->bucketName,
@@ -317,13 +306,10 @@ TEST_F(ObjectDirectoryFixture, ListVersions)
 TEST_F(ObjectDirectoryFixture, Delete)
 {
   boost::asio::spawn(io, [this] (boost::asio::yield_context yield) {
-	auto r_conn = redis_conn->get_redis_conn();
-	rgw::d4n::Pipeline p = rgw::d4n::Pipeline(r_conn, redis_pool);
-    p.start();
-    ASSERT_EQ(0, dir->add_version(env->dpp, obj->bucketName, obj->objName, version, time, std::nullopt, yield, &p));
-	p.execute(env->dpp, optional_yield{yield});
+    auto r_conn = redis_conn->get_redis_conn();
+    ASSERT_EQ(0, dir->add_version(env->dpp, yield, obj->bucketName, obj->objName, version, time, std::nullopt, std::nullopt));
 
-    EXPECT_EQ(0, dir->del(env->dpp, obj, yield));
+    EXPECT_EQ(0, dir->del(env->dpp, yield, obj, std::nullopt));
 
     boost::system::error_code ec;
     request req;
@@ -346,7 +332,7 @@ TEST_F(ObjectDirectoryFixture, Delete)
 TEST_F(BlockDirectoryFixture, SetYield)
 {
   boost::asio::spawn(io, [this] (boost::asio::yield_context yield) {
-    ASSERT_EQ(0, dir->set(env->dpp, block, optional_yield{yield}));
+    ASSERT_EQ(0, dir->set(env->dpp, optional_yield{yield}, block, std::nullopt));
 
     boost::system::error_code ec;
     request req;
@@ -369,7 +355,7 @@ TEST_F(BlockDirectoryFixture, SetYield)
 TEST_F(BlockDirectoryFixture, GetYield)
 {
   boost::asio::spawn(io, [this] (boost::asio::yield_context yield) {
-    ASSERT_EQ(0, dir->set(env->dpp, block, optional_yield{yield}));
+    ASSERT_EQ(0, dir->set(env->dpp, optional_yield{yield}, block, std::nullopt));
 
     {
       boost::system::error_code ec;
@@ -383,7 +369,7 @@ TEST_F(BlockDirectoryFixture, GetYield)
       EXPECT_EQ(std::get<0>(resp).value(), 0);
     }
 
-    ASSERT_EQ(0, dir->get(env->dpp, block, optional_yield{yield}));
+    ASSERT_EQ(0, dir->get(env->dpp, optional_yield{yield}, block, std::nullopt));
     EXPECT_EQ(block->cacheObj.objName, "newoid");
 
     {
@@ -437,7 +423,7 @@ TEST_F(BlockDirectoryFixture, CopyYield)
 TEST_F(BlockDirectoryFixture, DelYield)
 {
   boost::asio::spawn(io, [this] (boost::asio::yield_context yield) {
-    ASSERT_EQ(0, dir->set(env->dpp, block, optional_yield{yield}));
+    ASSERT_EQ(0, dir->set(env->dpp, optional_yield{yield}, block, std::nullopt));
 
     {
       boost::system::error_code ec;
@@ -451,7 +437,7 @@ TEST_F(BlockDirectoryFixture, DelYield)
       EXPECT_EQ(std::get<0>(resp).value(), 1);
     }
 
-    ASSERT_EQ(0, dir->del(env->dpp, block, optional_yield{yield}));
+    ASSERT_EQ(0, dir->del(env->dpp, optional_yield{yield}, block, std::nullopt));
 
     {
       boost::system::error_code ec;
@@ -475,11 +461,11 @@ TEST_F(BlockDirectoryFixture, DelYield)
 TEST_F(BlockDirectoryFixture, UpdateFieldYield)
 {
   boost::asio::spawn(io, [this] (boost::asio::yield_context yield) {
-    ASSERT_EQ(0, dir->set(env->dpp, block, optional_yield{yield}));
+    ASSERT_EQ(0, dir->set(env->dpp, optional_yield{yield}, block, std::nullopt));
     std::string oid = "newTestName";
     std::string host = "127.0.0.1:5000";
-    ASSERT_EQ(0, dir->update_field(env->dpp, block, "objName", oid, optional_yield{yield}));
-    ASSERT_EQ(0, dir->update_field(env->dpp, block, "hosts", host, optional_yield{yield}));
+    ASSERT_EQ(0, dir->update_field(env->dpp, optional_yield{yield}, block, "objName", oid, std::nullopt));
+    ASSERT_EQ(0, dir->update_field(env->dpp, optional_yield{yield}, block, "hosts", host, std::nullopt));
 
     boost::system::error_code ec;
     request req;
@@ -504,10 +490,10 @@ TEST_F(BlockDirectoryFixture, RemoveHostYield)
 {
   boost::asio::spawn(io, [this] (boost::asio::yield_context yield) {
     block->cacheObj.hostsList.insert("127.0.0.1:6000");
-    ASSERT_EQ(0, dir->set(env->dpp, block, optional_yield{yield}));
+    ASSERT_EQ(0, dir->set(env->dpp, optional_yield{yield}, block, std::nullopt));
     {
       std::string host = "127.0.0.1:6379";
-      ASSERT_EQ(0, dir->remove_host(env->dpp, block, host, optional_yield{yield}));
+      ASSERT_EQ(0, dir->remove_host(env->dpp, optional_yield{yield}, block, host, std::nullopt));
     }
 
     {
@@ -526,7 +512,7 @@ TEST_F(BlockDirectoryFixture, RemoveHostYield)
 
     {
       std::string host = "127.0.0.1:6000";
-      ASSERT_EQ(0, dir->remove_host(env->dpp, block, host, optional_yield{yield}));
+      ASSERT_EQ(0, dir->remove_host(env->dpp, optional_yield{yield}, block, host, std::nullopt));
     }
 
     {
