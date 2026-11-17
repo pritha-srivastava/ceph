@@ -5193,9 +5193,9 @@ options:
   type: str
   level: advanced
   desc: local Redis cache address
-  long_desc: This is the address used to configure the Redis cache backend connection. The default
-    value is the same address used by Redis without any additional configuration. The SSD cache
-    does not use this option.
+  long_desc: This host:port address configures the Redis cache backend and the Redis D4N
+    directory. The default uses Redis's standard address. The SSD cache and the
+    FoundationDB D4N directory do not use this option.
   default: 127.0.0.1:6379
   services:
   - rgw
