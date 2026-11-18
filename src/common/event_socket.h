@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,9 +18,11 @@
 #ifndef CEPH_COMMON_EVENT_SOCKET_H
 #define CEPH_COMMON_EVENT_SOCKET_H
 
-#include "include/event_type.h"
 #include <unistd.h>
+#if defined(__FreeBSD__) || defined(__APPLE__)
 #include <errno.h>
+#endif
+#include "include/event_type.h"
 
 class EventSocket {
   int socket;

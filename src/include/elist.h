@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,6 +15,10 @@
 
 #ifndef CEPH_ELIST_H
 #define CEPH_ELIST_H
+
+#include <cstddef> // for size_t
+
+#include "include/ceph_assert.h"
 
 /*
  * elist: embedded list.
@@ -36,20 +41,22 @@ public:
     
     item(T i=0) : _prev(this), _next(this) {}
     ~item() { 
-      assert(!is_on_list());
+      ceph_assert(!is_on_list());
     }
 
-    // no copying!
-    item(const item& other);
-    const item& operator= (const item& right);
+    item(const item& other) = delete;
+    const item& operator= (const item& right) = delete;
 
     
     bool empty() const { return _prev == this; }
     bool is_on_list() const { return !empty(); }
+    bool is_singular() const {
+      return is_on_list() && _prev == _next;
+    }
 
     bool remove_myself() {
       if (_next == this) {
-	assert(_prev == this);
+	ceph_assert(_prev == this);
 	return false;
       }
       _next->_prev = _prev;
@@ -59,14 +66,14 @@ public:
     }
 
     void insert_after(item *other) {
-      assert(other->empty());
+      ceph_assert(other->empty());
       other->_prev = this;
       other->_next = _next;
       _next->_prev = other;
       _next = other;
     }
     void insert_before(item *other) {
-      assert(other->empty());
+      ceph_assert(other->empty());
       other->_next = this;
       other->_prev = _prev;
       _prev->_next = other;
@@ -74,7 +81,7 @@ public:
     }
 
     T get_item(size_t offset) {
-      assert(offset);
+      ceph_assert(offset);
       return (T)(((char *)this) - offset); 
     }
   };
@@ -89,7 +96,7 @@ public:
 
   elist(size_t o) : _head(NULL), item_offset(o) {}
   ~elist() { 
-    assert(_head.empty());
+    ceph_assert(_head.empty());
   }
 
   bool empty() const {
@@ -113,20 +120,20 @@ public:
   }
 
   T front(size_t o=0) {
-    assert(!_head.empty());
+    ceph_assert(!_head.empty());
     return _head._next->get_item(o ? o : item_offset);
   }
   T back(size_t o=0) {
-    assert(!_head.empty());
+    ceph_assert(!_head.empty());
     return _head._prev->get_item(o ? o : item_offset);
   }
 
   void pop_front() {
-    assert(!empty());
+    ceph_assert(!empty());
     _head._next->remove_myself();
   }
   void pop_back() {
-    assert(!empty());
+    ceph_assert(!empty());
     _head._prev->remove_myself();
   }
 
@@ -149,14 +156,14 @@ public:
     iterator(item *h, size_t o, mode_t m) :
       head(h), cur(h->_next), next(cur->_next), item_offset(o),
       mode(m) {
-      assert(item_offset > 0);
+      ceph_assert(item_offset > 0);
     }
     T operator*() {
       return cur->get_item(item_offset);
     }
     iterator& operator++() {
-      assert(cur);
-      assert(cur != head);
+      ceph_assert(cur);
+      ceph_assert(cur != head);
       if (mode == MAGIC) {
 	// if 'cur' appears to be valid, use that.  otherwise,
 	// use cached 'next'.

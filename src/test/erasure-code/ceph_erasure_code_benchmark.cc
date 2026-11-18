@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph distributed storage system
  *
@@ -27,12 +28,21 @@
 #include "global/global_context.h"
 #include "global/global_init.h"
 #include "common/ceph_argparse.h"
+#include "common/ceph_context.h"
 #include "common/config.h"
 #include "common/Clock.h"
 #include "include/utime.h"
 #include "erasure-code/ErasureCodePlugin.h"
 #include "erasure-code/ErasureCode.h"
 #include "ceph_erasure_code_benchmark.h"
+
+using std::cerr;
+using std::cout;
+using std::map;
+using std::set;
+using std::string;
+using std::stringstream;
+using std::vector;
 
 namespace po = boost::program_options;
 
@@ -42,11 +52,11 @@ int ErasureCodeBench::setup(int argc, char** argv) {
   desc.add_options()
     ("help,h", "produce help message")
     ("verbose,v", "explain what happens")
-    ("size,s", po::value<int>()->default_value(1024 * 1024),
+    ("size,s", po::value<int>()->default_value(80 * 1024 * 1024),
      "size of the buffer to be encoded")
-    ("iterations,i", po::value<int>()->default_value(1),
+    ("iterations,i", po::value<int>()->default_value(100),
      "number of encode/decode runs")
-    ("plugin,p", po::value<string>()->default_value("jerasure"),
+    ("plugin,p", po::value<string>()->default_value("isa"),
      "erasure code plugin name")
     ("workload,w", po::value<string>()->default_value("encode"),
      "run either encode or decode")
@@ -71,7 +81,7 @@ int ErasureCodeBench::setup(int argc, char** argv) {
     vm);
   po::notify(vm);
 
-  vector<const char *> ceph_options, def_args;
+  vector<const char *> ceph_options;
   vector<string> ceph_option_strings = po::collect_unrecognized(
     parsed.options, po::include_positional);
   ceph_options.reserve(ceph_option_strings.size());
@@ -82,11 +92,11 @@ int ErasureCodeBench::setup(int argc, char** argv) {
   }
 
   cct = global_init(
-    &def_args, ceph_options, CEPH_ENTITY_TYPE_CLIENT,
+    NULL, ceph_options, CEPH_ENTITY_TYPE_CLIENT,
     CODE_ENVIRONMENT_UTILITY,
     CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
   common_init_finish(g_ceph_context);
-  g_ceph_context->_conf->apply_changes(NULL);
+  g_ceph_context->_conf.apply_changes(nullptr);
 
   if (vm.count("help")) {
     cout << desc << std::endl;
@@ -101,7 +111,7 @@ int ErasureCodeBench::setup(int argc, char** argv) {
       std::vector<std::string> strs;
       boost::split(strs, *i, boost::is_any_of("="));
       if (strs.size() != 2) {
-	cerr << "--parameter " << *i << " ignored because it does not contain exactly one =" << endl;
+	cerr << "--parameter " << *i << " ignored because it does not contain exactly one =" << std::endl;
       } else {
 	profile[strs[0]] = strs[1];
       }
@@ -120,15 +130,20 @@ int ErasureCodeBench::setup(int argc, char** argv) {
     exhaustive_erasures = false;
   if (vm.count("erased") > 0)
     erased = vm["erased"].as<vector<int> >();
-
-  k = atoi(profile["k"].c_str());
-  m = atoi(profile["m"].c_str());
   
+  try {
+    k = stoi(profile["k"]);
+    m = stoi(profile["m"]);
+  } catch (const std::logic_error& e) {
+    cout << "Invalid k and/or m: k=" << profile["k"] << ", m=" << profile["m"] 
+         << " (" << e.what() << ")" << std::endl;
+    return -EINVAL;
+  }
   if (k <= 0) {
-    cout << "parameter k is " << k << ". But k needs to be > 0." << endl;
+    cout << "parameter k is " << k << ". But k needs to be > 0." << std::endl;
     return -EINVAL;
   } else if ( m < 0 ) {
-    cout << "parameter m is " << m << ". But m needs to be >= 0." << endl;
+    cout << "parameter m is " << m << ". But m needs to be >= 0." << std::endl;
     return -EINVAL;
   } 
 
@@ -153,45 +168,36 @@ int ErasureCodeBench::encode()
   ErasureCodeInterfaceRef erasure_code;
   stringstream messages;
   int code = instance.factory(plugin,
-			      g_conf->erasure_code_dir,
+			      g_conf().get_val<std::string>("erasure_code_dir"),
 			      profile, &erasure_code, &messages);
   if (code) {
-    cerr << messages.str() << endl;
+    cerr << messages.str() << std::endl;
     return code;
-  }
-
-  if (erasure_code->get_data_chunk_count() != (unsigned int)k ||
-      (erasure_code->get_chunk_count() - erasure_code->get_data_chunk_count()
-       != (unsigned int)m)) {
-    cout << "parameter k is " << k << "/m is " << m << ". But data chunk count is "
-      << erasure_code->get_data_chunk_count() <<"/parity chunk count is "
-      << erasure_code->get_chunk_count() - erasure_code->get_data_chunk_count() << endl;
-    return -EINVAL;
   }
 
   bufferlist in;
   in.append(string(in_size, 'X'));
   in.rebuild_aligned(ErasureCode::SIMD_ALIGN);
-  set<int> want_to_encode;
-  for (int i = 0; i < k + m; i++) {
+  shard_id_set want_to_encode;
+  for (shard_id_t i; i < k + m; ++i) {
     want_to_encode.insert(i);
   }
   utime_t begin_time = ceph_clock_now();
   for (int i = 0; i < max_iterations; i++) {
-    map<int,bufferlist> encoded;
+    shard_id_map<bufferlist> encoded(erasure_code->get_chunk_count());
     code = erasure_code->encode(want_to_encode, in, &encoded);
     if (code)
       return code;
   }
   utime_t end_time = ceph_clock_now();
-  cout << (end_time - begin_time) << "\t" << (max_iterations * (in_size / 1024)) << endl;
+  cout << (end_time - begin_time) << "\t" << (max_iterations * (in_size / 1024)) << std::endl;
   return 0;
 }
 
-static void display_chunks(const map<int,bufferlist> &chunks,
+static void display_chunks(const shard_id_map<bufferlist> &chunks,
 			   unsigned int chunk_count) {
   cout << "chunks ";
-  for (unsigned int chunk = 0; chunk < chunk_count; chunk++) {
+  for (shard_id_t chunk; chunk < chunk_count; ++chunk) {
     if (chunks.count(chunk) == 0) {
       cout << "(" << chunk << ")";
     } else {
@@ -199,12 +205,12 @@ static void display_chunks(const map<int,bufferlist> &chunks,
     }
     cout << " ";
   }
-  cout << "(X) is an erased chunk" << endl;
+  cout << "(X) is an erased chunk" << std::endl;
 }
 
-int ErasureCodeBench::decode_erasures(const map<int,bufferlist> &all_chunks,
-				      const map<int,bufferlist> &chunks,
-				      unsigned i,
+int ErasureCodeBench::decode_erasures(const shard_id_map<bufferlist> &all_chunks,
+				      const shard_id_map<bufferlist> &chunks,
+				      shard_id_t shard,
 				      unsigned want_erasures,
 				      ErasureCodeInterfaceRef erasure_code)
 {
@@ -213,37 +219,37 @@ int ErasureCodeBench::decode_erasures(const map<int,bufferlist> &all_chunks,
   if (want_erasures == 0) {
     if (verbose)
       display_chunks(chunks, erasure_code->get_chunk_count());
-    set<int> want_to_read;
-    for (unsigned int chunk = 0; chunk < erasure_code->get_chunk_count(); chunk++)
+    shard_id_set want_to_read;
+    for (shard_id_t chunk; chunk < erasure_code->get_chunk_count(); ++chunk)
       if (chunks.count(chunk) == 0)
 	want_to_read.insert(chunk);
 
-    map<int,bufferlist> decoded;
-    code = erasure_code->decode(want_to_read, chunks, &decoded);
+    shard_id_map<bufferlist> decoded(erasure_code->get_chunk_count());
+    code = erasure_code->decode(want_to_read, chunks, &decoded, 0);
     if (code)
       return code;
-    for (set<int>::iterator chunk = want_to_read.begin();
+    for (shard_id_set::const_iterator chunk = want_to_read.begin();
 	 chunk != want_to_read.end();
 	 ++chunk) {
       if (all_chunks.find(*chunk)->second.length() != decoded[*chunk].length()) {
 	cerr << "chunk " << *chunk << " length=" << all_chunks.find(*chunk)->second.length()
-	     << " decoded with length=" << decoded[*chunk].length() << endl;
+	     << " decoded with length=" << decoded[*chunk].length() << std::endl;
 	return -1;
       }
       bufferlist tmp = all_chunks.find(*chunk)->second;
       if (!tmp.contents_equal(decoded[*chunk])) {
 	cerr << "chunk " << *chunk
-	     << " content and recovered content are different" << endl;
+	     << " content and recovered content are different" << std::endl;
 	return -1;
       }
     }
     return 0;
   }
 
-  for (; i < erasure_code->get_chunk_count(); i++) {
-    map<int,bufferlist> one_less = chunks;
-    one_less.erase(i);
-    code = decode_erasures(all_chunks, one_less, i + 1, want_erasures - 1, erasure_code);
+  for (; shard < erasure_code->get_chunk_count(); ++shard) {
+    shard_id_map<bufferlist> one_less = chunks;
+    one_less.erase(shard);
+    code = decode_erasures(all_chunks, one_less, shard + 1, want_erasures - 1, erasure_code);
     if (code)
       return code;
   }
@@ -257,72 +263,65 @@ int ErasureCodeBench::decode()
   ErasureCodeInterfaceRef erasure_code;
   stringstream messages;
   int code = instance.factory(plugin,
-			      g_conf->erasure_code_dir,
+			      g_conf().get_val<std::string>("erasure_code_dir"),
 			      profile, &erasure_code, &messages);
   if (code) {
-    cerr << messages.str() << endl;
+    cerr << messages.str() << std::endl;
     return code;
   }
-  if (erasure_code->get_data_chunk_count() != (unsigned int)k ||
-      (erasure_code->get_chunk_count() - erasure_code->get_data_chunk_count()
-       != (unsigned int)m)) {
-    cout << "parameter k is " << k << "/m is " << m << ". But data chunk count is "
-      << erasure_code->get_data_chunk_count() <<"/parity chunk count is "
-      << erasure_code->get_chunk_count() - erasure_code->get_data_chunk_count() << endl;
-    return -EINVAL;
-  }
+
   bufferlist in;
   in.append(string(in_size, 'X'));
   in.rebuild_aligned(ErasureCode::SIMD_ALIGN);
 
-  set<int> want_to_encode;
-  for (int i = 0; i < k + m; i++) {
+  shard_id_set want_to_encode;
+  for (shard_id_t i; i < k + m; ++i) {
     want_to_encode.insert(i);
   }
 
-  map<int,bufferlist> encoded;
+  shard_id_map<bufferlist> encoded(erasure_code->get_chunk_count());
   code = erasure_code->encode(want_to_encode, in, &encoded);
   if (code)
     return code;
 
-  set<int> want_to_read = want_to_encode;
+  shard_id_set want_to_read = want_to_encode;
 
   if (erased.size() > 0) {
     for (vector<int>::const_iterator i = erased.begin();
 	 i != erased.end();
 	 ++i)
-      encoded.erase(*i);
+      encoded.erase(shard_id_t(*i));
     display_chunks(encoded, erasure_code->get_chunk_count());
   }
 
   utime_t begin_time = ceph_clock_now();
   for (int i = 0; i < max_iterations; i++) {
     if (exhaustive_erasures) {
-      code = decode_erasures(encoded, encoded, 0, erasures, erasure_code);
+      code = decode_erasures(encoded, encoded, shard_id_t(0), erasures, erasure_code);
       if (code)
 	return code;
     } else if (erased.size() > 0) {
-      map<int,bufferlist> decoded;
-      code = erasure_code->decode(want_to_read, encoded, &decoded);
+      shard_id_map<bufferlist> decoded(erasure_code->get_chunk_count());
+      code = erasure_code->decode(want_to_read, encoded, &decoded, 0);
       if (code)
 	return code;
     } else {
-      map<int,bufferlist> chunks = encoded;
+      shard_id_map<bufferlist> chunks = encoded;
       for (int j = 0; j < erasures; j++) {
 	int erasure;
 	do {
 	  erasure = rand() % ( k + m );
-	} while(chunks.count(erasure) == 0);
-	chunks.erase(erasure);
+	} while(chunks.count(shard_id_t(erasure)) == 0);
+	chunks.erase(shard_id_t(erasure));
       }
-      map<int,bufferlist> decoded;
-      code = erasure_code->decode(want_to_read, chunks, &decoded);
+      shard_id_map<bufferlist> decoded(erasure_code->get_chunk_count());
+      code = erasure_code->decode(want_to_read, chunks, &decoded, 0);
       if (code)
 	return code;
     }
   }
   utime_t end_time = ceph_clock_now();
-  cout << (end_time - begin_time) << "\t" << (max_iterations * (in_size / 1024)) << endl;
+  cout << (end_time - begin_time) << "\t" << (max_iterations * (in_size / 1024)) << std::endl;
   return 0;
 }
 
@@ -334,18 +333,18 @@ int main(int argc, char** argv) {
       return err;
     return ecbench.run();
   } catch(po::error &e) {
-    cerr << e.what() << endl; 
+    cerr << e.what() << std::endl;
     return 1;
   }
 }
 
 /*
  * Local Variables:
- * compile-command: "cd ../.. ; make -j4 ceph_erasure_code_benchmark &&
+ * compile-command: "cd ../../../build ; make -j4 ceph_erasure_code_benchmark &&
  *   valgrind --tool=memcheck --leak-check=full \
- *      ./ceph_erasure_code_benchmark \
- *      --plugin jerasure \
- *      --parameter directory=.libs \
+ *      ./bin/ceph_erasure_code_benchmark \
+ *      --plugin isa \
+ *      --parameter directory=lib \
  *      --parameter technique=reed_sol_van \
  *      --parameter k=2 \
  *      --parameter m=2 \

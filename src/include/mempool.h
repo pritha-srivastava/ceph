@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,23 +15,28 @@
 
 #ifndef _CEPH_INCLUDE_MEMPOOL_H
 #define _CEPH_INCLUDE_MEMPOOL_H
-#include <iostream>
-#include <fstream>
 
 #include <cstddef>
 #include <map>
 #include <unordered_map>
 #include <set>
 #include <vector>
-#include <assert.h>
 #include <list>
 #include <mutex>
-#include <atomic>
-#include <climits>
 #include <typeinfo>
+#include <boost/container/flat_set.hpp>
+#include <boost/container/flat_map.hpp>
 
-#include <common/Formatter.h>
-#include "include/assert.h"
+#if defined(_GNU_SOURCE)
+#  define MEMPOOL_SCHED_GETCPU
+#  include <sched.h>
+#endif
+
+#include "common/Formatter.h"
+#include "include/ceph_assert.h"
+#include "include/compact_map.h"
+#include "include/compact_set.h"
+#include "include/compat.h"
 
 
 /*
@@ -66,15 +72,15 @@ automatically created (name is same as in DEFINE_MEMORY_POOLS_HELPER).
 That namespace contains a set of common STL containers that are predefined
 with the appropriate allocators.
 
-Thus for mempool "unittest_1" we have automatically available to us:
+Thus for mempool "osd" we have automatically available to us:
 
-   mempool::unittest_1::map
-   mempool::unittest_1::multimap
-   mempool::unittest_1::set
-   mempool::unittest_1::multiset
-   mempool::unittest_1::list
-   mempool::unittest_1::vector
-   mempool::unittest_1::unordered_map
+   mempool::osd::map
+   mempool::osd::multimap
+   mempool::osd::set
+   mempool::osd::multiset
+   mempool::osd::list
+   mempool::osd::vector
+   mempool::osd::unordered_map
 
 
 Putting objects in a mempool
@@ -92,7 +98,7 @@ For a class:
 
 Then, in an appropriate .cc file,
 
-  MEMPOOL_DEFINE_OBJECT_FACTORY(Foo, foo, unittest_1);
+  MEMPOOL_DEFINE_OBJECT_FACTORY(Foo, foo, osd);
 
 The second argument can generally be identical to the first, except
 when the type contains a nested scope.  For example, for
@@ -104,10 +110,16 @@ BlueStore::Onode, we need to do
 (This is just because we need to name some static variables and we
 can't use :: in a variable name.)
 
+XXX Note: the new operator hard-codes the allocation size to the size of the
+object given in MEMPOOL_DEFINE_OBJECT_FACTORY. For this reason, you cannot
+incorporate mempools into a base class without also defining a helper/factory
+for the child class as well (as the base class is usually smaller than the
+child class).
+
 In order to use the STL containers, simply use the namespaced variant
 of the container type.  For example,
 
-  mempool::unittest_1::map<int> myvec;
+  mempool::osd::map<int> myvec;
 
 Introspection
 -------------
@@ -141,14 +153,33 @@ namespace mempool {
 
 #define DEFINE_MEMORY_POOLS_HELPER(f) \
   f(bloom_filter)		      \
-  f(bluestore_meta_onode)	      \
-  f(bluestore_meta_other)	      \
   f(bluestore_alloc)		      \
+  f(bluestore_cache_data)	      \
+  f(bluestore_cache_onode)	      \
+  f(bluestore_cache_meta)	      \
+  f(bluestore_cache_other)	      \
+  f(bluestore_cache_buffer)	      \
+  f(bluestore_extent)		      \
+  f(bluestore_blob)		      \
+  f(bluestore_shared_blob)	      \
+  f(bluestore_inline_bl)	      \
+  f(bluestore_fsck)		      \
+  f(bluestore_txc)		      \
+  f(bluestore_writing_deferred)      \
+  f(bluestore_writing)		      \
   f(bluefs)			      \
+  f(bluefs_file_reader)              \
+  f(bluefs_file_writer)              \
+  f(buffer_anon)		      \
   f(buffer_meta)		      \
-  f(buffer_data)		      \
   f(osd)			      \
+  f(osd_mapbl)			      \
+  f(osd_pglog)			      \
+  f(osdmap)			      \
   f(osdmap_mapping)		      \
+  f(pgmap)			      \
+  f(mds_co)			      \
+  f(ec_extent_cache)                  \
   f(unittest_1)			      \
   f(unittest_2)
 
@@ -167,32 +198,51 @@ extern void set_debug_mode(bool d);
 // --------------------------------------------------------------
 class pool_t;
 
-// we shard pool stats across many shard_t's to reduce the amount
-// of cacheline ping pong.
 enum {
-  num_shard_bits = 5
-};
-enum {
-  num_shards = 1 << num_shard_bits
+#if defined(MEMPOOL_SCHED_GETCPU)
+  MIN_SHARDS = 1,        //1
+#else
+  MIN_SHARDS = 1<<5,     //32
+#endif
+  DEFAULT_SHARDS = 1<<5, //32
+  MAX_SHARDS = 1<<7      //128
 };
 
-// align shard to a cacheline
-struct shard_t {
-  std::atomic<size_t> bytes = {0};
-  std::atomic<size_t> items = {0};
-  char __padding[128 - sizeof(std::atomic<size_t>)*2];
-} __attribute__ ((aligned (128)));
-
-static_assert(sizeof(shard_t) == 128, "shard_t should be cacheline-sized");
+int pick_a_shard_int(void);
+size_t get_num_shards(void);
 
 struct stats_t {
-  ssize_t items = 0;
-  ssize_t bytes = 0;
+  std::atomic<size_t> items = {0};
+  std::atomic<size_t> bytes = {0};
+
   void dump(ceph::Formatter *f) const {
     f->dump_int("items", items);
     f->dump_int("bytes", bytes);
   }
+
+  stats_t& operator+=(const stats_t& o) {
+    items += o.items;
+    bytes += o.bytes;
+    return *this;
+  }
 };
+
+// Align shard to a cacheline, group stats for all mempools in the
+// same shard to improve cache line density.
+//
+// It would be possible to retrieve the value at runtime (for instance
+// with getconf LEVEL1_DCACHE_LINESIZE or grep -m1 cache_alignment
+// /proc/cpuinfo). It is easier to hard code the largest cache
+// linesize for all known processors (128 bytes). If the actual cache
+// linesize is smaller on a given processor, it will just waste a few
+// bytes.
+//
+struct shard_t {
+  stats_t pool[num_pools];
+} __attribute__ ((aligned (128)));
+static_assert(sizeof(shard_t)%128 == 0, "shard_t should be cacheline-sized");
+
+extern std::unique_ptr<shard_t[]> shards;
 
 pool_t& get_pool(pool_index_t ix);
 const char *get_pool_name(pool_index_t ix);
@@ -200,7 +250,13 @@ const char *get_pool_name(pool_index_t ix);
 struct type_t {
   const char *type_name;
   size_t item_size;
-  std::atomic<ssize_t> items = {0};  // signed
+  struct type_shard_t {
+    std::atomic<ssize_t> items = {0}; // signed
+    char __padding[128 - sizeof(std::atomic<ssize_t>)];
+  } __attribute__ ((aligned (128)));
+  static_assert(sizeof(type_shard_t) == 128,
+                "type_shard_t should be cacheline-sized");
+  std::unique_ptr<type_shard_t[]> shards = std::make_unique<type_shard_t[]>(get_num_shards());
 };
 
 struct type_info_hash {
@@ -210,25 +266,21 @@ struct type_info_hash {
 };
 
 class pool_t {
-  shard_t shard[num_shards];
-
   mutable std::mutex lock;  // only used for types list
   std::unordered_map<const char *, type_t> type_map;
 
+  template<pool_index_t, typename T>
+  friend class pool_allocator;
 public:
+  pool_index_t pool_index;
+
   //
   // How much this pool consumes. O(<num_shards>)
   //
   size_t allocated_bytes() const;
   size_t allocated_items() const;
 
-  shard_t* pick_a_shard() {
-    // Dirt cheap, see:
-    //   http://fossies.org/dox/glibc-2.24/pthread__self_8c_source.html
-    size_t me = (size_t)pthread_self();
-    size_t i = (me >> 3) & ((1 << num_shard_bits) - 1);
-    return &shard[i];
-  }
+  void adjust_count(ssize_t items, ssize_t bytes);
 
   type_t *get_type(const std::type_info& ti, size_t size) {
     std::lock_guard<std::mutex> l(lock);
@@ -246,11 +298,10 @@ public:
   void get_stats(stats_t *total,
 		 std::map<std::string, stats_t> *by_type) const;
 
-  void dump(ceph::Formatter *f) const;
+  void dump(ceph::Formatter *f, stats_t *ptotal=0) const;
 };
 
-// skip unittest_[12] by default
-void dump(ceph::Formatter *f, size_t skip=2);
+void dump(ceph::Formatter *f);
 
 
 // STL allocator for use with containers.  All actual state
@@ -293,11 +344,12 @@ public:
 
   T* allocate(size_t n, void *p = nullptr) {
     size_t total = sizeof(T) * n;
-    shard_t *shard = pool->pick_a_shard();
-    shard->bytes += total;
-    shard->items += n;
+    const auto shid = pick_a_shard_int();
+    auto& shard = shards[shid].pool[pool->pool_index];
+    shard.bytes += total;
+    shard.items += n;
     if (type) {
-      type->items += n;
+      type->shards[shid].items += n;
     }
     T* r = reinterpret_cast<T*>(new char[total]);
     return r;
@@ -305,22 +357,24 @@ public:
 
   void deallocate(T* p, size_t n) {
     size_t total = sizeof(T) * n;
-    shard_t *shard = pool->pick_a_shard();
-    shard->bytes -= total;
-    shard->items -= n;
+    const auto shid = pick_a_shard_int();
+    auto& shard = shards[shid].pool[pool->pool_index];
+    shard.bytes -= total;
+    shard.items -= n;
     if (type) {
-      type->items -= n;
+      type->shards[shid].items -= n;
     }
     delete[] reinterpret_cast<char*>(p);
   }
 
   T* allocate_aligned(size_t n, size_t align, void *p = nullptr) {
     size_t total = sizeof(T) * n;
-    shard_t *shard = pool->pick_a_shard();
-    shard->bytes += total;
-    shard->items += n;
+    const auto shid = pick_a_shard_int();
+    auto& shard = shards[shid].pool[pool->pool_index];
+    shard.bytes += total;
+    shard.items += n;
     if (type) {
-      type->items += n;
+      type->shards[shid].items += n;
     }
     char *ptr;
     int rc = ::posix_memalign((void**)(void*)&ptr, align, total);
@@ -332,13 +386,14 @@ public:
 
   void deallocate_aligned(T* p, size_t n) {
     size_t total = sizeof(T) * n;
-    shard_t *shard = pool->pick_a_shard();
-    shard->bytes -= total;
-    shard->items -= n;
+    const auto shid = pick_a_shard_int();
+    auto& shard = shards[shid].pool[pool->pool_index];
+    shard.bytes -= total;
+    shard.items -= n;
     if (type) {
-      type->items -= n;
+      type->shards[shid].items -= n;
     }
-    ::free(p);
+    aligned_free(p);
   }
 
   void destroy(T* p) {
@@ -376,14 +431,33 @@ public:
                                                                         \
     template<typename k,typename v, typename cmp = std::less<k> >	\
     using map = std::map<k, v, cmp,					\
-			 pool_allocator<std::pair<k,v>>>;		\
+			 pool_allocator<std::pair<const k,v>>>;		\
+                                                                        \
+    template<typename k,typename v, typename cmp = std::less<k> >       \
+    using compact_map = compact_map<k, v, cmp,                          \
+			 pool_allocator<std::pair<const k,v>>>;         \
+                                                                        \
+    template<typename k,typename v, typename cmp = std::less<k> >       \
+    using compact_multimap = compact_multimap<k, v, cmp,                \
+			 pool_allocator<std::pair<const k,v>>>;         \
+                                                                        \
+    template<typename k, typename cmp = std::less<k> >                  \
+    using compact_set = compact_set<k, cmp, pool_allocator<k>>;         \
                                                                         \
     template<typename k,typename v, typename cmp = std::less<k> >	\
     using multimap = std::multimap<k,v,cmp,				\
-				   pool_allocator<std::pair<k,v>>>;	\
+				   pool_allocator<std::pair<const k,	\
+							    v>>>;	\
                                                                         \
     template<typename k, typename cmp = std::less<k> >			\
     using set = std::set<k,cmp,pool_allocator<k>>;			\
+                                                                        \
+    template<typename k, typename cmp = std::less<k> >			\
+    using flat_set = boost::container::flat_set<k,cmp,pool_allocator<k>>; \
+									\
+    template<typename k, typename v, typename cmp = std::less<k> >	\
+    using flat_map = boost::container::flat_map<k,v,cmp,		\
+						pool_allocator<std::pair<k,v>>>; \
                                                                         \
     template<typename v>						\
     using list = std::list<v,pool_allocator<v>>;			\
@@ -395,7 +469,7 @@ public:
 	     typename h=std::hash<k>,					\
 	     typename eq = std::equal_to<k>>				\
     using unordered_map =						\
-      std::unordered_map<k,v,h,eq,pool_allocator<std::pair<k,v>>>;	\
+      std::unordered_map<k,v,h,eq,pool_allocator<std::pair<const k,v>>>;\
                                                                         \
     inline size_t allocated_bytes() {					\
       return mempool::get_pool(id).allocated_bytes();			\
@@ -411,7 +485,40 @@ DEFINE_MEMORY_POOLS_HELPER(P)
 
 };
 
+// the elements allocated by mempool is in the same memory space as the ones
+// allocated by the default allocator. so compare them in an efficient way:
+// libstdc++'s std::equal is specialized to use memcmp if T is integer or
+// pointer. this is good enough for our usecase. use
+// std::is_trivially_copyable<T> to expand the support to more types if
+// nececssary.
+template<typename T, mempool::pool_index_t pool_index>
+bool operator==(const std::vector<T, std::allocator<T>>& lhs,
+		const std::vector<T, mempool::pool_allocator<pool_index, T>>& rhs)
+{
+  return (lhs.size() == rhs.size() &&
+	  std::equal(lhs.begin(), lhs.end(), rhs.begin()));
+}
 
+template<typename T, mempool::pool_index_t pool_index>
+bool operator!=(const std::vector<T, std::allocator<T>>& lhs,
+		const std::vector<T, mempool::pool_allocator<pool_index, T>>& rhs)
+{
+  return !(lhs == rhs);
+}
+
+template<typename T, mempool::pool_index_t pool_index>
+bool operator==(const std::vector<T, mempool::pool_allocator<pool_index, T>>& lhs,
+		const std::vector<T, std::allocator<T>>& rhs)
+{
+  return rhs == lhs;
+}
+
+template<typename T, mempool::pool_index_t pool_index>
+bool operator!=(const std::vector<T, mempool::pool_allocator<pool_index, T>>& lhs,
+		const std::vector<T, std::allocator<T>>& rhs)
+{
+  return !(lhs == rhs);
+}
 
 // Use this for any type that is contained by a container (unless it
 // is a class you defined; see below).
@@ -439,10 +546,10 @@ DEFINE_MEMORY_POOLS_HELPER(P)
 #define MEMPOOL_CLASS_HELPERS()						\
   void *operator new(size_t size);					\
   void *operator new[](size_t size) noexcept {				\
-    assert(0 == "no array new");					\
+    ceph_abort_msg("no array new");					\
     return nullptr; }							\
   void  operator delete(void *);					\
-  void  operator delete[](void *) { assert(0 == "no array delete"); }
+  void  operator delete[](void *) { ceph_abort_msg("no array delete"); }
 
 
 // Use this in some particular .cc file to match each class with a

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -13,39 +14,30 @@
  */
 
 #include "Cond.h"
-#include "Mutex.h"
-#include "Thread.h"
 #include "Timer.h"
 
-#include "common/config.h"
-#include "include/Context.h"
 
 #define dout_subsys ceph_subsys_timer
 #undef dout_prefix
 #define dout_prefix *_dout << "timer(" << this << ")."
 
-#include <sstream>
-#include <signal.h>
-#include <sys/time.h>
-#include <math.h>
+using std::pair;
 
+using ceph::operator <<;
 
-class SafeTimerThread : public Thread {
-  SafeTimer *parent;
+template <class Mutex>
+class CommonSafeTimerThread : public Thread {
+  CommonSafeTimer<Mutex> *parent;
 public:
-  explicit SafeTimerThread(SafeTimer *s) : parent(s) {}
+  explicit CommonSafeTimerThread(CommonSafeTimer<Mutex> *s) : parent(s) {}
   void *entry() override {
     parent->timer_thread();
     return NULL;
   }
 };
 
-
-
-typedef std::multimap < utime_t, Context *> scheduled_map_t;
-typedef std::map < Context*, scheduled_map_t::iterator > event_lookup_map_t;
-
-SafeTimer::SafeTimer(CephContext *cct_, Mutex &l, bool safe_callbacks)
+template <class Mutex>
+CommonSafeTimer<Mutex>::CommonSafeTimer(CephContext *cct_, Mutex &l, bool safe_callbacks)
   : cct(cct_), lock(l),
     safe_callbacks(safe_callbacks),
     thread(NULL),
@@ -53,89 +45,121 @@ SafeTimer::SafeTimer(CephContext *cct_, Mutex &l, bool safe_callbacks)
 {
 }
 
-SafeTimer::~SafeTimer()
+template <class Mutex>
+CommonSafeTimer<Mutex>::~CommonSafeTimer()
 {
-  assert(thread == NULL);
+  ceph_assert(thread == NULL);
 }
 
-void SafeTimer::init()
+template <class Mutex>
+void CommonSafeTimer<Mutex>::init()
 {
   ldout(cct,10) << "init" << dendl;
-  thread = new SafeTimerThread(this);
+  thread = new CommonSafeTimerThread<Mutex>(this);
   thread->create("safe_timer");
 }
 
-void SafeTimer::shutdown()
+template <class Mutex>
+void CommonSafeTimer<Mutex>::shutdown()
 {
   ldout(cct,10) << "shutdown" << dendl;
   if (thread) {
-    assert(lock.is_locked());
+    ceph_assert(ceph_mutex_is_locked(lock));
     cancel_all_events();
     stopping = true;
-    cond.Signal();
-    lock.Unlock();
+    cond.notify_all();
+    lock.unlock();
     thread->join();
-    lock.Lock();
+    lock.lock();
     delete thread;
     thread = NULL;
   }
 }
 
-void SafeTimer::timer_thread()
+template <class Mutex>
+void CommonSafeTimer<Mutex>::timer_thread()
 {
-  lock.Lock();
+  std::unique_lock l{lock};
   ldout(cct,10) << "timer_thread starting" << dendl;
   while (!stopping) {
-    utime_t now = ceph_clock_now();
+    auto now = clock_t::now();
 
     while (!schedule.empty()) {
-      scheduled_map_t::iterator p = schedule.begin();
+      auto p = schedule.begin();
 
       // is the future now?
-      if (p->first > now)
-	break;
+      #if defined(_WIN32)
+      if (p->first - now > std::chrono::milliseconds(1)) {
+        // std::condition_variable::wait_for uses SleepConditionVariableSRW
+        // on Windows, which has millisecond precision. Deltas <1ms will
+        // lead to busy loops, which should be avoided. This situation is
+        // quite common since "wait_for" often returns ~1ms earlier than
+        // requested.
+        break;
+      }
+      #else // !_WIN32
+      if (p->first > now) {
+        break;
+      }
+      #endif
 
+      ldout(cct, 20) << "timer_thread going to execute and remove the top of a schedule sized " << schedule.size() << dendl;
       Context *callback = p->second;
       events.erase(callback);
       schedule.erase(p);
       ldout(cct,10) << "timer_thread executing " << callback << dendl;
       
-      if (!safe_callbacks)
-	lock.Unlock();
-      callback->complete(0);
-      if (!safe_callbacks)
-	lock.Lock();
+      if (!safe_callbacks) {
+	l.unlock();
+	callback->complete(0);
+	l.lock();
+      } else {
+	callback->complete(0);
+      }
     }
 
     // recheck stopping if we dropped the lock
     if (!safe_callbacks && stopping)
       break;
 
-    ldout(cct,20) << "timer_thread going to sleep" << dendl;
-    if (schedule.empty())
-      cond.Wait(lock);
-    else
-      cond.WaitUntil(lock, schedule.begin()->first);
+    if (schedule.empty()) {
+      ldout(cct, 20) << "timer_thread going to sleep with an empty schedule" << dendl;
+      cond.wait(l);
+    } else {
+      ldout(cct, 20) << "timer_thread going to sleep with a schedule size " << schedule.size() << dendl;
+      auto when = schedule.begin()->first;
+      cond.wait_until(l, when);
+    }
     ldout(cct,20) << "timer_thread awake" << dendl;
   }
   ldout(cct,10) << "timer_thread exiting" << dendl;
-  lock.Unlock();
 }
 
-void SafeTimer::add_event_after(double seconds, Context *callback)
+template <class Mutex>
+Context* CommonSafeTimer<Mutex>::add_event_after(double seconds, Context *callback)
 {
-  assert(lock.is_locked());
-
-  utime_t when = ceph_clock_now();
-  when += seconds;
-  add_event_at(when, callback);
+  return add_event_after(ceph::make_timespan(seconds), callback);
 }
 
-void SafeTimer::add_event_at(utime_t when, Context *callback)
+template <class Mutex>
+Context* CommonSafeTimer<Mutex>::add_event_after(ceph::timespan duration, Context *callback)
 {
-  assert(lock.is_locked());
-  ldout(cct,10) << "add_event_at " << when << " -> " << callback << dendl;
+  ceph_assert(ceph_mutex_is_locked(lock));
 
+  auto when = clock_t::now() + duration;
+  return add_event_at(when, callback);
+}
+
+template <class Mutex>
+Context* CommonSafeTimer<Mutex>::add_event_at(CommonSafeTimer<Mutex>::clock_t::time_point when, Context *callback)
+{
+  ceph_assert(ceph_mutex_is_locked(lock));
+  ldout(cct,10) << __func__ << " " << when << " -> " << callback << dendl;
+  if (stopping) {
+    ldout(cct,5) << __func__ << " already shutdown, event not added" << dendl;
+    delete callback;
+    return nullptr;
+  }
   scheduled_map_t::value_type s_val(when, callback);
   scheduled_map_t::iterator i = schedule.insert(s_val);
 
@@ -143,18 +167,32 @@ void SafeTimer::add_event_at(utime_t when, Context *callback)
   pair < event_lookup_map_t::iterator, bool > rval(events.insert(e_val));
 
   /* If you hit this, you tried to insert the same Context* twice. */
-  assert(rval.second);
+  ceph_assert(rval.second);
 
   /* If the event we have just inserted comes before everything else, we need to
    * adjust our timeout. */
   if (i == schedule.begin())
-    cond.Signal();
-
+    cond.notify_all();
+  return callback;
 }
 
-bool SafeTimer::cancel_event(Context *callback)
+template <class Mutex>
+Context* CommonSafeTimer<Mutex>::add_event_at(ceph::real_clock::time_point when, Context *callback)
 {
-  assert(lock.is_locked());
+  ceph_assert(ceph_mutex_is_locked(lock));
+  // convert from real_clock to mono_clock
+  auto mono_now = ceph::mono_clock::now();
+  auto real_now = ceph::real_clock::now();
+  const auto delta = when - real_now;
+  const auto mono_atime = (mono_now +
+			   std::chrono::ceil<clock_t::duration>(delta));
+  return add_event_at(mono_atime, callback);
+}
+
+template <class Mutex>
+bool CommonSafeTimer<Mutex>::cancel_event(Context *callback)
+{
+  ceph_assert(ceph_mutex_is_locked(lock));
   
   auto p = events.find(callback);
   if (p == events.end()) {
@@ -170,11 +208,12 @@ bool SafeTimer::cancel_event(Context *callback)
   return true;
 }
 
-void SafeTimer::cancel_all_events()
+template <class Mutex>
+void CommonSafeTimer<Mutex>::cancel_all_events()
 {
   ldout(cct,10) << "cancel_all_events" << dendl;
-  assert(lock.is_locked());
-  
+  ceph_assert(ceph_mutex_is_locked(lock));
+
   while (!events.empty()) {
     auto p = events.begin();
     ldout(cct,10) << " cancelled " << p->second->first << " -> " << p->first << dendl;
@@ -184,7 +223,8 @@ void SafeTimer::cancel_all_events()
   }
 }
 
-void SafeTimer::dump(const char *caller) const
+template <class Mutex>
+void CommonSafeTimer<Mutex>::dump(const char *caller) const
 {
   if (!caller)
     caller = "";
@@ -195,3 +235,6 @@ void SafeTimer::dump(const char *caller) const
        ++s)
     ldout(cct,10) << " " << s->first << "->" << s->second << dendl;
 }
+
+template class CommonSafeTimer<ceph::mutex>;
+template class CommonSafeTimer<ceph::fair_mutex>;

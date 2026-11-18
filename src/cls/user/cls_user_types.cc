@@ -1,9 +1,17 @@
-// -*- mode:C; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "cls/user/cls_user_types.h"
 #include "common/Formatter.h"
 #include "common/ceph_json.h"
+#include "include/utime.h"
+
+using std::list;
+using std::string;
+
+using ceph::Formatter;
+using ceph::bufferlist;
+using ceph::real_clock;
 
 void cls_user_gen_test_bucket(cls_user_bucket *bucket, int i)
 {
@@ -11,8 +19,6 @@ void cls_user_gen_test_bucket(cls_user_bucket *bucket, int i)
   snprintf(buf, sizeof(buf), ".%d", i);
 
   bucket->name = string("buck") + buf;
-  bucket->data_pool = string(".data.pool") + buf;
-  bucket->index_pool = string(".index.pool") + buf;
   bucket->marker = string("mark") + buf;
   bucket->bucket_id = string("bucket.id") + buf;
 }
@@ -20,19 +26,18 @@ void cls_user_gen_test_bucket(cls_user_bucket *bucket, int i)
 void cls_user_bucket::dump(Formatter *f) const
 {
   encode_json("name", name, f);
-  encode_json("data_pool", data_pool,f);
-  encode_json("data_extra_pool", data_extra_pool,f);
-  encode_json("index_pool", index_pool,f);
   encode_json("marker", marker,f);
   encode_json("bucket_id", bucket_id,f);
 }
 
-void cls_user_bucket::generate_test_instances(list<cls_user_bucket*>& ls)
+list<cls_user_bucket> cls_user_bucket::generate_test_instances()
 {
-  ls.push_back(new cls_user_bucket);
-  cls_user_bucket *b = new cls_user_bucket;
-  cls_user_gen_test_bucket(b, 0);
-  ls.push_back(b);
+  list<cls_user_bucket> ls;
+  ls.emplace_back();
+  cls_user_bucket b;
+  cls_user_gen_test_bucket(&b, 0);
+  ls.push_back(std::move(b));
+  return ls;
 }
 
 void cls_user_bucket_entry::dump(Formatter *f) const
@@ -55,12 +60,14 @@ void cls_user_gen_test_bucket_entry(cls_user_bucket_entry *entry, int i)
   entry->user_stats_sync = true;
 }
 
-void cls_user_bucket_entry::generate_test_instances(list<cls_user_bucket_entry*>& ls)
+list<cls_user_bucket_entry> cls_user_bucket_entry::generate_test_instances()
 {
-  ls.push_back(new cls_user_bucket_entry);
-  cls_user_bucket_entry *entry = new cls_user_bucket_entry;
-  cls_user_gen_test_bucket_entry(entry, 0);
-  ls.push_back(entry);
+  list<cls_user_bucket_entry> ls;
+  ls.emplace_back();
+  cls_user_bucket_entry entry;
+  cls_user_gen_test_bucket_entry(&entry, 0);
+  ls.push_back(std::move(entry));
+  return ls;
 }
 
 void cls_user_gen_test_stats(cls_user_stats *s)
@@ -77,12 +84,14 @@ void cls_user_stats::dump(Formatter *f) const
   f->dump_int("total_bytes_rounded", total_bytes_rounded);
 }
 
-void cls_user_stats::generate_test_instances(list<cls_user_stats*>& ls)
+list<cls_user_stats> cls_user_stats::generate_test_instances()
 {
-  ls.push_back(new cls_user_stats);
-  cls_user_stats *s = new cls_user_stats;
-  cls_user_gen_test_stats(s);
-  ls.push_back(s);
+  list<cls_user_stats> ls;
+  ls.emplace_back();
+  cls_user_stats s;
+  cls_user_gen_test_stats(&s);
+  ls.push_back(std::move(s));
+  return ls;
 }
 
 void cls_user_gen_test_header(cls_user_header *h)
@@ -99,10 +108,48 @@ void cls_user_header::dump(Formatter *f) const
   encode_json("last_stats_update", utime_t(last_stats_update), f);
 }
 
-void cls_user_header::generate_test_instances(list<cls_user_header*>& ls)
+list<cls_user_header> cls_user_header::generate_test_instances()
 {
-  ls.push_back(new cls_user_header);
-  cls_user_header *h = new cls_user_header;
-  cls_user_gen_test_header(h);
-  ls.push_back(h);
+  list<cls_user_header> ls;
+  ls.emplace_back();
+  cls_user_header h;
+  cls_user_gen_test_header(&h);
+  ls.push_back(std::move(h));
+  return ls;
+}
+
+
+void cls_user_account_header::dump(ceph::Formatter* f) const
+{
+  encode_json("count", count, f);
+}
+
+std::list<cls_user_account_header> cls_user_account_header::generate_test_instances()
+{
+  std::list<cls_user_account_header> ls;
+  ls.emplace_back();
+  return ls;
+}
+
+void cls_user_account_resource::dump(ceph::Formatter* f) const
+{
+  encode_json("name", name, f);
+  encode_json("path", path, f);
+  // skip metadata
+}
+
+void cls_user_gen_test_resource(cls_user_account_resource& r)
+{
+  r.name = "name";
+  r.path = "path";
+}
+
+std::list<cls_user_account_resource> cls_user_account_resource::generate_test_instances()
+{
+  std::list<cls_user_account_resource> ls;
+  ls.emplace_back();
+  cls_user_account_resource p;
+  cls_user_gen_test_resource(p);
+  ls.push_back(std::move(p));
+  return ls;
 }

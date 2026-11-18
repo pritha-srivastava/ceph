@@ -1,31 +1,31 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_MIRRORING_WATCHER_H
 #define CEPH_LIBRBD_MIRRORING_WATCHER_H
 
 #include "include/int_types.h"
+#include "include/rados/librados_fwd.hpp"
 #include "cls/rbd/cls_rbd_types.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/Watcher.h"
 #include "librbd/mirroring_watcher/Types.h"
 
-namespace librados {
-  class IoCtx;
-}
-
 namespace librbd {
 
+namespace asio { struct ContextWQ; }
 namespace watcher {
+namespace util {
 template <typename> struct HandlePayloadVisitor;
+}
 }
 
 template <typename ImageCtxT = librbd::ImageCtx>
 class MirroringWatcher : public Watcher {
-  friend struct watcher::HandlePayloadVisitor<MirroringWatcher<ImageCtxT>>;
+  friend struct watcher::util::HandlePayloadVisitor<MirroringWatcher<ImageCtxT>>;
 
 public:
-  MirroringWatcher(librados::IoCtx &io_ctx, ContextWQ *work_queue);
+  MirroringWatcher(librados::IoCtx &io_ctx, asio::ContextWQ *work_queue);
 
   static int notify_mode_updated(librados::IoCtx &io_ctx,
                                  cls::rbd::MirrorMode mirror_mode);
@@ -43,12 +43,10 @@ public:
                                    const std::string &global_image_id,
                                    Context *on_finish);
 
-  virtual void handle_mode_updated(cls::rbd::MirrorMode mirror_mode,
-                                   Context *on_ack) = 0;
+  virtual void handle_mode_updated(cls::rbd::MirrorMode mirror_mode) = 0;
   virtual void handle_image_updated(cls::rbd::MirrorImageState state,
                                     const std::string &image_id,
-                                    const std::string &global_image_id,
-                                    Context *on_ack) = 0;
+                                    const std::string &global_image_id) = 0;
 
 private:
   bool handle_payload(const mirroring_watcher::ModeUpdatedPayload &payload,
@@ -58,8 +56,8 @@ private:
   bool handle_payload(const mirroring_watcher::UnknownPayload &payload,
                       Context *on_notify_ack);
 
-  virtual void handle_notify(uint64_t notify_id, uint64_t handle,
-                             uint64_t notifier_id, bufferlist &bl);
+  void handle_notify(uint64_t notify_id, uint64_t handle,
+                     uint64_t notifier_id, bufferlist &bl) override;
 };
 
 } // namespace librbd

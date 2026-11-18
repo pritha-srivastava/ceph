@@ -1,0 +1,373 @@
+import { HttpClientTestingModule, HttpTestingController } from '@angular/common/http/testing';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { ReactiveFormsModule } from '@angular/forms';
+import { Router } from '@angular/router';
+import { RouterTestingModule } from '@angular/router/testing';
+
+import _ from 'lodash';
+
+import { of as observableOf } from 'rxjs';
+
+import { MgrModuleService } from '~/app/shared/api/mgr-module.service';
+import { NotificationType } from '~/app/shared/enum/notification-type.enum';
+import { LoadingStatus } from '~/app/shared/forms/cd-form';
+import { NotificationService } from '~/app/shared/services/notification.service';
+import { SharedModule } from '~/app/shared/shared.module';
+import { configureTestBed } from '~/testing/unit-test-helper';
+import { TelemetryComponent } from './telemetry.component';
+
+describe('TelemetryComponent', () => {
+  let component: TelemetryComponent;
+  let fixture: ComponentFixture<TelemetryComponent>;
+  let mgrModuleService: MgrModuleService;
+  let options: any;
+  let configs: any;
+  let httpTesting: HttpTestingController;
+  let router: Router;
+
+  const optionsNames = [
+    'channel_basic',
+    'channel_crash',
+    'channel_device',
+    'channel_ident',
+    'channel_perf',
+    'contact',
+    'description',
+    'device_url',
+    'enabled',
+    'interval',
+    'last_opt_revision',
+    'leaderboard',
+    'log_level',
+    'log_to_cluster',
+    'log_to_cluster_level',
+    'log_to_file',
+    'organization',
+    'proxy',
+    'url'
+  ];
+
+  configureTestBed({
+    declarations: [TelemetryComponent],
+    imports: [HttpClientTestingModule, ReactiveFormsModule, RouterTestingModule, SharedModule]
+  });
+
+  describe('configForm', () => {
+    beforeEach(() => {
+      fixture = TestBed.createComponent(TelemetryComponent);
+      component = fixture.componentInstance;
+      mgrModuleService = TestBed.inject(MgrModuleService);
+      options = {};
+      configs = {};
+      optionsNames.forEach((name) => (options[name] = { name }));
+      optionsNames.forEach((name) => (configs[name] = true));
+      spyOn(mgrModuleService, 'getOptions').and.callFake(() => observableOf(options));
+      spyOn(mgrModuleService, 'getConfig').and.callFake(() => observableOf(configs));
+      fixture.detectChanges();
+      httpTesting = TestBed.inject(HttpTestingController);
+      router = TestBed.inject(Router);
+      spyOn(router, 'navigate');
+    });
+
+    it('should create', () => {
+      expect(component).toBeTruthy();
+    });
+
+    it('should show/hide ident fields on checking/unchecking', () => {
+      const getContactField = () =>
+        fixture.debugElement.nativeElement.querySelector('input[id=contact]');
+      const getDescriptionField = () =>
+        fixture.debugElement.nativeElement.querySelector('input[id=description]');
+      const checkVisibility = () => {
+        if (component.showContactInfo) {
+          expect(getContactField()).toBeTruthy();
+          expect(getDescriptionField()).toBeTruthy();
+        } else {
+          expect(getContactField()).toBeFalsy();
+          expect(getDescriptionField()).toBeFalsy();
+        }
+      };
+
+      // Initial check.
+      checkVisibility();
+
+      // toggle fields.
+      component.toggleIdent();
+      fixture.detectChanges();
+      checkVisibility();
+
+      // toggle fields again.
+      component.toggleIdent();
+      fixture.detectChanges();
+      checkVisibility();
+    });
+
+    it('should set module enability to true correctly', () => {
+      expect(component.moduleEnabled).toBeTruthy();
+    });
+
+    it('should set module enability to false correctly', () => {
+      configs['enabled'] = false;
+      component.ngOnInit();
+      expect(component.moduleEnabled).toBeFalsy();
+    });
+
+    it('should filter options list correctly', () => {
+      _.forEach(Object.keys(component.options), (option) => {
+        expect(component.requiredFields).toContain(option);
+      });
+    });
+
+    it('should disable the Telemetry module', () => {
+      const message = 'Module disabled message.';
+      const followUpFunc = function () {
+        return 'followUp';
+      };
+      component.disableModule(message, followUpFunc);
+      const req = httpTesting.expectOne('api/telemetry');
+      expect(req.request.method).toBe('PUT');
+      expect(req.request.body).toEqual({
+        enable: false
+      });
+      req.flush({});
+    });
+
+    it('should disable the Telemetry module with default parameters', () => {
+      component.disableModule();
+      const req = httpTesting.expectOne('api/telemetry');
+      expect(req.request.method).toBe('PUT');
+      expect(req.request.body).toEqual({
+        enable: false
+      });
+      req.flush({});
+      expect(router.navigate).toHaveBeenCalledWith(['']);
+    });
+  });
+
+  describe('previewForm', () => {
+    let notificationService: NotificationService;
+
+    beforeEach(() => {
+      fixture = TestBed.createComponent(TelemetryComponent);
+      component = fixture.componentInstance;
+      fixture.detectChanges();
+      httpTesting = TestBed.inject(HttpTestingController);
+      router = TestBed.inject(Router);
+      notificationService = TestBed.inject(NotificationService);
+      spyOn(router, 'navigate');
+      spyOn(notificationService, 'show');
+    });
+
+    it('should create', () => {
+      expect(component).toBeTruthy();
+    });
+
+    describe('licenseAgrmt validation', () => {
+      beforeEach(() => {
+        component.report = { report: { report_id: 42, channels_available: [] } };
+        component.reportId = 42;
+        component['createPreviewForm']();
+        component.loading = LoadingStatus.Ready;
+        component.step = 2;
+        fixture.detectChanges();
+      });
+
+      it('should render the "This field is required." message when unchecked and dirty', () => {
+        component.previewForm.get('licenseAgrmt').setValue(false);
+        component.previewForm.get('licenseAgrmt').markAsDirty();
+        fixture.detectChanges();
+
+        const errorEl = fixture.nativeElement.querySelector('span.invalid-feedback') as HTMLElement;
+
+        expect(errorEl).toBeTruthy();
+        expect(errorEl.textContent.trim()).toBe('This field is required.');
+      });
+
+      it('should not render the "This field is required." message when checked', () => {
+        component.previewForm.get('licenseAgrmt').setValue(true);
+        component.previewForm.get('licenseAgrmt').markAsDirty();
+        fixture.detectChanges();
+
+        const errorEl = fixture.nativeElement.querySelector('span.invalid-feedback');
+        expect(errorEl).toBeFalsy();
+      });
+    });
+
+    it('should only replace the ranges and values of a JSON object', () => {
+      expect(
+        JSON.parse(
+          component.replacerTest({
+            ranges: [
+              [null, -1],
+              [0, 511],
+              [512, 1023]
+            ],
+            values: [
+              [0, 0, 0],
+              [0, 0, 0],
+              [0, 0, 0]
+            ],
+            other: [
+              [0, 0, 0],
+              [0, 0, 0],
+              [0, 0, 0]
+            ]
+          })
+        )
+      ).toStrictEqual({
+        ranges: ['[null,-1]', '[0,511]', '[512,1023]'],
+        values: ['[0,0,0]', '[0,0,0]', '[0,0,0]'],
+        other: [
+          [0, 0, 0],
+          [0, 0, 0],
+          [0, 0, 0]
+        ]
+      });
+
+      expect(
+        JSON.parse(
+          component.replacerTest({
+            ranges: [
+              [null, -1],
+              [0, 511],
+              [512, 1023]
+            ],
+            values: [
+              [0, 0, 0],
+              [0, 0, 0],
+              [0, 0, 0]
+            ],
+            other: true
+          })
+        )
+      ).toStrictEqual({
+        ranges: ['[null,-1]', '[0,511]', '[512,1023]'],
+        values: ['[0,0,0]', '[0,0,0]', '[0,0,0]'],
+        other: true
+      });
+
+      expect(
+        JSON.parse(
+          component.replacerTest({
+            ranges: [
+              [null, -1],
+              [0, 511],
+              [512, 1023]
+            ],
+            values: [
+              [0, 0, 0],
+              [0, 0, 0],
+              [0, 0, 0]
+            ],
+            other: 1
+          })
+        )
+      ).toStrictEqual({
+        ranges: ['[null,-1]', '[0,511]', '[512,1023]'],
+        values: ['[0,0,0]', '[0,0,0]', '[0,0,0]'],
+        other: 1
+      });
+
+      expect(
+        JSON.parse(
+          component.replacerTest({
+            ranges: [
+              [null, -1],
+              [0, 511],
+              [512, 1023]
+            ],
+            values: [
+              [0, 0, 0],
+              [0, 0, 0],
+              [0, 0, 0]
+            ],
+            other: { value: 0 }
+          })
+        )
+      ).toStrictEqual({
+        ranges: ['[null,-1]', '[0,511]', '[512,1023]'],
+        values: ['[0,0,0]', '[0,0,0]', '[0,0,0]'],
+        other: { value: 0 }
+      });
+    });
+
+    it('should remove perf channel fields from a report', () => {
+      expect(
+        JSON.parse(
+          component.formatReportTest({
+            perf_counters: {},
+            stats_per_pool: {},
+            stats_per_pg: {},
+            io_rate: {},
+            osd_perf_histograms: {},
+            mempool: {},
+            heap_stats: {},
+            rocksdb_stats: {}
+          })
+        )
+      ).toStrictEqual({});
+
+      expect(
+        JSON.parse(
+          component.formatReportTest({
+            perf_counters: {},
+            stats_per_pool: {},
+            stats_per_pg: {},
+            io_rate: {},
+            osd_perf_histograms: {},
+            mempool: {},
+            heap_stats: {},
+            rocksdb_stats: {},
+            other: {}
+          })
+        )
+      ).toStrictEqual({
+        other: {}
+      });
+    });
+
+    it('should submit when telemetry is not yet enabled', () => {
+      component.moduleEnabled = false;
+      component.onSubmit();
+      const req1 = httpTesting.expectOne('api/telemetry');
+      expect(req1.request.method).toBe('PUT');
+      expect(req1.request.body).toEqual({
+        enable: true,
+        license_name: 'sharing-1-0'
+      });
+      req1.flush({});
+      const req2 = httpTesting.expectOne({
+        url: 'api/mgr/module/telemetry',
+        method: 'PUT'
+      });
+      expect(req2.request.body).toEqual({
+        config: {}
+      });
+      req2.flush({});
+      expect(router.url).toBe('/');
+      expect(notificationService.show).toHaveBeenCalledWith(
+        NotificationType.success,
+        'The Telemetry module has been configured and activated successfully.'
+      );
+    });
+
+    it('should only update config when telemetry is already enabled', () => {
+      component.moduleEnabled = true;
+      component.onSubmit();
+      httpTesting.expectNone('api/telemetry');
+      const req = httpTesting.expectOne({
+        url: 'api/mgr/module/telemetry',
+        method: 'PUT'
+      });
+      expect(req.request.body).toEqual({
+        config: {}
+      });
+      req.flush({});
+      expect(router.url).toBe('/');
+      expect(notificationService.show).toHaveBeenCalledWith(
+        NotificationType.success,
+        'Telemetry configuration has been updated successfully.'
+      );
+    });
+  });
+});

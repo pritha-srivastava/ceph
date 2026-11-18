@@ -1,0 +1,69 @@
+<cd-rbd-tabs></cd-rbd-tabs>
+
+<cd-table
+  [data]="images"
+  columnMode="flex"
+  [columns]="columns"
+  identifier="id"
+  forceIdentifier="true"
+  selectionType="single"
+  [status]="tableStatus"
+  [autoReload]="-1"
+  (fetchData)="taskListService.fetch()"
+  (updateSelection)="updateSelection($event)"
+>
+  <div class="table-actions">
+    <cd-table-actions
+      class="btn-group"
+      [permission]="permission"
+      [selection]="selection"
+      [tableActions]="tableActions"
+    >
+    </cd-table-actions>
+    @if (permission.delete) {
+      <button
+        cdsButton="tertiary"
+        type="button"
+        (click)="purgeModal()"
+        [disabled]="disablePurgeBtn"
+      >
+        <ng-container i18n>Purge Trash</ng-container>
+        <svg
+          class="cds--btn__icon"
+          cdsIcon="close"
+          size="16"
+        ></svg>
+      </button>
+    }
+  </div>
+</cd-table>
+
+<ng-template
+  #expiresTpl
+  let-row="data.row"
+  let-value="data.value"
+>
+  @if (row.cdIsExpired) {
+    <ng-container i18n>Expired at</ng-container>
+  }
+
+  @if (!row.cdIsExpired) {
+    <ng-container i18n>Protected until</ng-container>
+  }
+
+  {{ value | cdDate }}
+</ng-template>
+
+<ng-template
+  #deleteTpl
+  let-expiresAt="expiresAt"
+  let-isExpired="isExpired"
+>
+  @if (!isExpired) {
+    <p class="text-danger">
+      <strong>
+        <ng-container i18n>This image is protected until {{ expiresAt | cdDate }}.</ng-container>
+      </strong>
+    </p>
+  }
+</ng-template>

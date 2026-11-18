@@ -1,36 +1,106 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
-#include <errno.h>
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
-#include "common/debug.h"
-#include "mdstypes.h"
 #include "mds/flock.h"
+#include "common/debug.h"
+#include "common/Formatter.h"
+#include "include/ceph_fs_encoder.h"
+#include "include/container_ios.h"
+#include "mdstypes.h"
+
+#include <iostream>
 
 #define dout_subsys ceph_subsys_mds
 
+using std::list;
+using std::pair;
+using std::multimap;
+
 static multimap<ceph_filelock, ceph_lock_state_t*> global_waiting_locks;
+
+std::ostream& operator<<(std::ostream& out, const ceph_filelock& l) {
+  out << "start: " << l.start << ", length: " << l.length
+      << ", client: " << l.client << ", owner: " << l.owner
+      << ", pid: " << l.pid << ", type: " << (int)l.type
+      << std::endl;
+  return out;
+}
+
+static void remove_global_waiting(ceph_filelock &fl, ceph_lock_state_t *lock_state)
+{
+  for (auto p = global_waiting_locks.find(fl);
+       p != global_waiting_locks.end(); ) {
+    if (p->first != fl)
+      break;
+    if (p->second == lock_state) {
+      global_waiting_locks.erase(p);
+      break;
+    }
+    ++p;
+  }
+}
 
 ceph_lock_state_t::~ceph_lock_state_t()
 {
   if (type == CEPH_LOCK_FCNTL) {
     for (auto p = waiting_locks.begin(); p != waiting_locks.end(); ++p) {
-      for (auto q = global_waiting_locks.find(p->second);
-	   q != global_waiting_locks.end(); ) {
-	if (q->first != p->second)
-	  break;
-	if (q->second == this) {
-	  global_waiting_locks.erase(q);
-	  break;
-	}
-	++q;
-      }
+      remove_global_waiting(p->second, this);
     }
   }
 }
 
+void ceph_lock_state_t::encode(ceph::bufferlist& bl) const {
+  using ceph::encode;
+  encode(held_locks, bl);
+  encode(client_held_lock_counts, bl);
+}
+
+void ceph_lock_state_t::decode(ceph::bufferlist::const_iterator& bl) {
+  using ceph::decode;
+  decode(held_locks, bl);
+  decode(client_held_lock_counts, bl);
+}
+
+void ceph_lock_state_t::dump(ceph::Formatter *f) const {
+  // do not dump fields which are not persisted:
+  // - type: set in constructor
+  // - waiting_locks: runtime-only field
+  // - client_waiting_lock_counts: runtime-only field
+  f->dump_int("held_locks", held_locks.size());
+  for (auto &p : held_locks) {
+    f->open_object_section("lock");
+    f->dump_int("start", p.second.start);
+    f->dump_int("length", p.second.length);
+    f->dump_int("client", p.second.client);
+    f->dump_int("owner", p.second.owner);
+    f->dump_int("pid", p.second.pid);
+    f->dump_int("type", p.second.type);
+    f->close_section();
+  }
+  f->dump_int("client_held_lock_counts", client_held_lock_counts.size());
+  for (auto &p : client_held_lock_counts) {
+    f->open_object_section("client");
+    f->dump_int("client_id", p.first.v);
+    f->dump_int("count", p.second);
+    f->close_section();
+  }
+}
+
+
+std::list<ceph_lock_state_t> ceph_lock_state_t::generate_test_instances() {
+  std::list<ceph_lock_state_t> ls;
+  ls.push_back(ceph_lock_state_t(NULL, 0));
+  ls.push_back(ceph_lock_state_t(NULL, 1));
+  ls.back().held_locks.insert(std::make_pair(1, ceph_filelock()));
+  ls.back().waiting_locks.insert(std::make_pair(1, ceph_filelock()));
+  ls.back().client_held_lock_counts.insert(std::make_pair(1, 1));
+  ls.back().client_waiting_lock_counts.insert(std::make_pair(1, 1));
+  return ls;
+}
+
 bool ceph_lock_state_t::is_waiting(const ceph_filelock &fl) const
 {
-  multimap<uint64_t, ceph_filelock>::const_iterator p = waiting_locks.find(fl.start);
+  auto p = waiting_locks.lower_bound(fl.start);
   while (p != waiting_locks.end()) {
     if (p->second.start > fl.start)
       return false;
@@ -44,12 +114,15 @@ bool ceph_lock_state_t::is_waiting(const ceph_filelock &fl) const
 
 void ceph_lock_state_t::remove_waiting(const ceph_filelock& fl)
 {
-  for (auto p = waiting_locks.find(fl.start);
+  for (auto p = waiting_locks.lower_bound(fl.start);
        p != waiting_locks.end(); ) {
     if (p->second.start > fl.start)
       break;
     if (p->second.length == fl.length &&
 	ceph_filelock_owner_equal(p->second, fl)) {
+      if (type == CEPH_LOCK_FCNTL) {
+	remove_global_waiting(p->second, this);
+      }
       waiting_locks.erase(p);
       --client_waiting_lock_counts[(client_t)fl.client];
       if (!client_waiting_lock_counts[(client_t)fl.client]) {
@@ -58,19 +131,6 @@ void ceph_lock_state_t::remove_waiting(const ceph_filelock& fl)
       break;
     }
     ++p;
-  }
-
-  if (type == CEPH_LOCK_FCNTL) {
-    for (auto q = global_waiting_locks.find(fl);
-	 q != global_waiting_locks.end(); ) {
-      if (q->first != fl)
-	break;
-      if (q->second == this) {
-	global_waiting_locks.erase(q);
-	break;
-      }
-      ++q;
-    }
   }
 }
 
@@ -86,7 +146,7 @@ bool ceph_lock_state_t::is_deadlock(const ceph_filelock& fl,
     return false;
 
   // find conflict locks' owners
-  set<ceph_filelock> lock_owners;
+  std::set<ceph_filelock> lock_owners;
   for (auto p = overlapping_locks.begin();
        p != overlapping_locks.end();
        ++p) {
@@ -141,6 +201,7 @@ bool ceph_lock_state_t::is_deadlock(const ceph_filelock& fl,
 void ceph_lock_state_t::add_waiting(const ceph_filelock& fl)
 {
   waiting_locks.insert(pair<uint64_t, ceph_filelock>(fl.start, fl));
+  ++client_waiting_lock_counts[(client_t)fl.client];
   if (type == CEPH_LOCK_FCNTL) {
     global_waiting_locks.insert(pair<ceph_filelock,ceph_lock_state_t*>(fl, this));
   }
@@ -200,8 +261,6 @@ bool ceph_lock_state_t::add_lock(ceph_filelock& new_lock,
   if (ret) {
     ++client_held_lock_counts[(client_t)new_lock.client];
   }
-  else if (wait_on_fail && !replay)
-    ++client_waiting_lock_counts[(client_t)new_lock.client];
   return ret;
 }
 
@@ -229,8 +288,7 @@ void ceph_lock_state_t::look_for_lock(ceph_filelock& testing_lock)
   testing_lock.type = CEPH_LOCK_UNLOCK;
 }
 
-void ceph_lock_state_t::remove_lock(ceph_filelock removal_lock,
-                 list<ceph_filelock>& activated_locks)
+void ceph_lock_state_t::remove_lock(ceph_filelock removal_lock)
 {
   list<multimap<uint64_t, ceph_filelock>::iterator> overlapping_locks,
     self_overlapping_locks;
@@ -320,16 +378,8 @@ bool ceph_lock_state_t::remove_all_from (client_t client)
 	++iter;
 	continue;
       }
-
-      for (auto p = global_waiting_locks.find(iter->second);
-	   p != global_waiting_locks.end(); ) {
-	if (p->first != iter->second)
-	  break;
-	if (p->second == this) {
-	  global_waiting_locks.erase(p);
-	  break;
-	}
-	++p;
+      if (type == CEPH_LOCK_FCNTL) {
+	remove_global_waiting(iter->second, this);
       }
       waiting_locks.erase(iter++);
     }
@@ -607,4 +657,22 @@ ceph_lock_state_t::contains_exclusive_lock(list<multimap<uint64_t,
     if (CEPH_LOCK_EXCL == (*iter)->second.type) return &(*iter)->second;
   }
   return NULL;
+}
+
+std::ostream& operator<<(std::ostream &out, const ceph_lock_state_t &l) {
+  out << "ceph_lock_state_t. held_locks.size()=" << l.held_locks.size()
+      << ", waiting_locks.size()=" << l.waiting_locks.size()
+      << ", client_held_lock_counts -- " << l.client_held_lock_counts
+      << "\n client_waiting_lock_counts -- " << l.client_waiting_lock_counts
+      << "\n held_locks -- ";
+    for (auto iter = l.held_locks.begin();
+         iter != l.held_locks.end();
+         ++iter)
+      out << iter->second;
+    out << "\n waiting_locks -- ";
+    for (auto iter =l.waiting_locks.begin();
+         iter != l.waiting_locks.end();
+         ++iter)
+      out << iter->second << "\n";
+  return out;
 }

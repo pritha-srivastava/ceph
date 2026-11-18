@@ -1,0 +1,13 @@
+@if (!key) {
+  <cds-tag
+    class="tags-{{ value }}"
+    ngClass="{{ value | colorClassFromText }}"
+    [ngbTooltip]="tooltipText"
+  >
+    {{ value }}
+  </cds-tag>
+} @else {
+  <cds-tag class="tag-background-primary badge-{{ key }}-{{ value }}">
+    {{ key }}: {{ value }}
+  </cds-tag>
+}

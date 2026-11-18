@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_JOURNAL_DISABLED_POLICY_H
 #define CEPH_LIBRBD_JOURNAL_DISABLED_POLICY_H
@@ -14,14 +14,14 @@ namespace journal {
 
 class DisabledPolicy : public Policy {
 public:
-  virtual bool append_disabled() const {
+  bool append_disabled() const override {
     return true;
   }
-  virtual bool journal_disabled() const {
+  bool journal_disabled() const override {
     return true;
   }
-  virtual void allocate_tag_on_lock(Context *on_finish) {
-    assert(false);
+  void allocate_tag_on_lock(Context *on_finish) override {
+    ceph_abort();
   }
 };
 

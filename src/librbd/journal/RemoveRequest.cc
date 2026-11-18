@@ -1,12 +1,11 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "common/dout.h"
 #include "common/errno.h"
 #include "common/Timer.h"
-#include "common/WorkQueue.h"
 #include "journal/Settings.h"
-#include "include/assert.h"
+#include "include/ceph_assert.h"
 #include "librbd/Utils.h"
 #include "librbd/journal/RemoveRequest.h"
 
@@ -22,12 +21,11 @@ namespace journal {
 
 template<typename I>
 RemoveRequest<I>::RemoveRequest(IoCtx &ioctx, const std::string &image_id,
-                                              const std::string &client_id,
-                                              ContextWQ *op_work_queue,
-                                              Context *on_finish)
-  : m_image_id(image_id), m_image_client_id(client_id),
+                                const std::string &client_id,
+                                ContextWQ *op_work_queue,
+                                Context *on_finish)
+  : m_ioctx(ioctx), m_image_id(image_id), m_image_client_id(client_id),
     m_op_work_queue(op_work_queue), m_on_finish(on_finish) {
-  m_ioctx.dup(ioctx);
   m_cct = reinterpret_cast<CephContext *>(m_ioctx.cct());
 }
 
@@ -43,8 +41,8 @@ void RemoveRequest<I>::stat_journal() {
   ldout(m_cct, 20) << this << " " << __func__ << dendl;
 
   ImageCtx::get_timer_instance(m_cct, &m_timer, &m_timer_lock);
-  m_journaler = new Journaler(m_op_work_queue, m_timer, m_timer_lock,
-                              m_ioctx, m_image_id, m_image_client_id, {});
+  m_journaler = new Journaler(m_op_work_queue, m_timer, m_timer_lock, m_ioctx,
+                              m_image_id, m_image_client_id, {}, nullptr);
 
   using klass = RemoveRequest<I>;
   Context *ctx = create_context_callback<klass, &klass::handle_stat_journal>(this);

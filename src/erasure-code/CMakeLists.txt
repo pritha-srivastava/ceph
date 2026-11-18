@@ -1,10 +1,14 @@
 ## erasure code plugins
 
-set(erasure_plugin_dir ${CMAKE_INSTALL_PKGLIBDIR}/erasure-code)
+set(erasure_plugin_dir ${CEPH_INSTALL_PKGLIBDIR}/erasure-code)
 
 #jerasure subdir must be before shec so jerasure & neon obj libs are declared
-include_directories(jerasure/jerasure/include)
-include_directories(jerasure/gf-complete/include)
+if(WITH_SYSTEM_JERASURE)
+  include_directories(SYSTEM ${Jerasure_INCLUDE_DIRS})
+else()
+  include_directories(SYSTEM jerasure/jerasure/include)
+  include_directories(SYSTEM jerasure/gf-complete/include)
+endif()
 include_directories(jerasure)
 
 # legacy jerasure flavors. these are left here for backward compatibility
@@ -20,16 +24,17 @@ endif()
 add_subdirectory(jerasure)
 add_subdirectory(lrc)
 add_subdirectory(shec)
+add_subdirectory(clay)
+add_subdirectory(consistency)
 
-if (HAVE_BETTER_YASM_ELF64)
+if(WITH_EC_ISA_PLUGIN)
   add_subdirectory(isa)
   set(EC_ISA_LIB ec_isa)
-  set(EC_ISA_EMBEDDED_LIB cephd_ec_isa)
-endif (HAVE_BETTER_YASM_ELF64)
+endif()
 
-add_library(erasure_code STATIC ErasureCodePlugin.cc)
-target_link_libraries(erasure_code ${CMAKE_DL_LIBS})
-add_dependencies(erasure_code ${CMAKE_SOURCE_DIR}/src/ceph_ver.h)
+add_library(erasure_code OBJECT ErasureCodePlugin.cc)
+target_link_libraries(erasure_code $<$<PLATFORM_ID:Windows>:dlfcn_win32>
+                      ${CMAKE_DL_LIBS})
 
 add_library(erasure_code_objs OBJECT ErasureCode.cc)
 
@@ -37,11 +42,5 @@ add_custom_target(erasure_code_plugins DEPENDS
     ${EC_ISA_LIB}
     ec_lrc
     ec_jerasure
-    ec_shec)
-
-if(WITH_EMBEDDED)
-  include(MergeStaticLibraries)
-  add_library(cephd_ec_base STATIC $<TARGET_OBJECTS:erasure_code_objs>)
-  set_target_properties(cephd_ec_base PROPERTIES COMPILE_DEFINITIONS BUILDING_FOR_EMBEDDED)
-  merge_static_libraries(cephd_ec cephd_ec_base ${EC_ISA_EMBEDDED_LIB} cephd_ec_jerasure cephd_ec_lrc cephd_ec_shec)
-endif()
+    ec_shec
+    ec_clay)

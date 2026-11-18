@@ -1,0 +1,325 @@
+<cds-modal
+  size="lg"
+  [open]="open"
+  [hasScrollingContent]="true"
+  (overlaySelected)="closeModal()"
+>
+  <cds-modal-header (closeSelect)="closeModal()">
+    <h3
+      cdsModalHeaderHeading
+      i18n
+    >
+      Import multi-site tokens
+    </h3>
+  </cds-modal-header>
+
+  <div
+    cdsModalContent
+    [hasForm]="true"
+  >
+    <form
+      name="importTokenForm"
+      #frm="ngForm"
+      [formGroup]="importTokenForm"
+      novalidate
+    >
+      <div class="form-item">
+        <cd-alert-panel type="info">
+          <ul>
+            <li i18n>
+              This feature allows you to configure a connection between your primary and secondary
+              Ceph clusters for data replication. By importing a token, you establish a link between
+              the clusters, enabling data synchronization.
+            </li>
+            <li i18n>
+              To obtain the token, generate it from your primary Ceph cluster. This token includes
+              encoded information about the primary cluster's endpoint, access key, and secret key.
+            </li>
+            <li i18n>
+              The secondary zone represents the destination cluster where your data will be
+              replicated.
+            </li>
+          </ul>
+        </cd-alert-panel>
+      </div>
+      <legend
+        class="cd-header"
+        i18n
+      >
+        Zone Details
+      </legend>
+      <div class="form-item">
+        <cds-text-label
+          labelInputID="realmToken"
+          [invalid]="realmTokenRef.isInvalid"
+          [invalidText]="realmTokenError"
+          cdRequiredField="Token"
+          i18n
+          >Token
+          <input
+            cdsText
+            cdValidate
+            #realmTokenRef="cdValidate"
+            type="text"
+            id="realmToken"
+            name="realmToken"
+            formControlName="realmToken"
+            modal-primary-focus
+            [invalid]="realmTokenRef.isInvalid"
+          />
+        </cds-text-label>
+        <ng-template #realmTokenError>
+          <ng-container
+            *ngTemplateOutlet="
+              validationErrors;
+              context: { control: importTokenForm.get('realmToken') }
+            "
+          ></ng-container>
+        </ng-template>
+      </div>
+
+      <div class="form-item">
+        <cds-text-label
+          labelInputID="zoneName"
+          [invalid]="zoneNameRef.isInvalid"
+          [invalidText]="zoneNameError"
+          cdRequiredField="Secondary Zone Name"
+          i18n
+          >Secondary Zone Name
+          <input
+            cdsText
+            cdValidate
+            #zoneNameRef="cdValidate"
+            type="text"
+            placeholder="Zone name..."
+            id="zoneName"
+            name="zoneName"
+            formControlName="zoneName"
+            [invalid]="zoneNameRef.isInvalid"
+          />
+        </cds-text-label>
+        <ng-template #zoneNameError>
+          <ng-container
+            *ngTemplateOutlet="
+              validationErrors;
+              context: { control: importTokenForm.get('zoneName') }
+            "
+          ></ng-container>
+        </ng-template>
+      </div>
+
+      <div class="form-item">
+        <cds-checkbox
+          id="archive_zone"
+          formControlName="archive_zone"
+        >
+          <span i18n>Archive</span>
+          <cd-help-text i18n
+            >Enable archival storage to keep all object versions and protect data from deletion or
+            corruption.</cd-help-text
+          >
+        </cds-checkbox>
+      </div>
+
+      <legend
+        class="cd-header"
+        i18n
+      >
+        Service Details
+      </legend>
+      <div class="form-item">
+        <cds-checkbox
+          id="unmanaged"
+          formControlName="unmanaged"
+        >
+          <span i18n>Unmanaged</span>
+          <cd-help-text i18n
+            >If set to true, the orchestrator will not start nor stop any service instance
+            associated with this service. Placement and all other properties will be
+            ignored.</cd-help-text
+          >
+        </cds-checkbox>
+      </div>
+
+      <!-- Placement -->
+      @if (!importTokenForm.controls.unmanaged.value) {
+        <div
+          class="form-item"
+          cdsRow
+        >
+          <div cdsCol>
+            <cds-select
+              formControlName="placement"
+              label="Placement"
+              i18n-label
+              id="placement"
+            >
+              <option
+                i18n
+                value="hosts"
+              >
+                Hosts
+              </option>
+              <option
+                i18n
+                value="label"
+              >
+                Label
+              </option>
+            </cds-select>
+          </div>
+        </div>
+      }
+
+      <!-- Label -->
+      @if (
+        !importTokenForm.controls.unmanaged.value &&
+        importTokenForm.controls.placement.value === 'label'
+      ) {
+        <div
+          class="form-item"
+          cdsRow
+        >
+          <div cdsCol>
+            <cds-combo-box
+              cdComboBoxSearchReset
+              label="Label"
+              type="single"
+              formControlName="label"
+              i18n-label
+              [items]="labels"
+              [appendInline]="true"
+              id="label"
+              [invalid]="importTokenForm.showError('label', frm)"
+              [invalidText]="labelError"
+              selectionFeedback="top-after-reopen"
+              placeholder="Select label..."
+              i18n-placeholder
+            >
+              <cds-dropdown-list></cds-dropdown-list>
+            </cds-combo-box>
+            <ng-template #labelError>
+              <ng-container
+                *ngTemplateOutlet="
+                  validationErrors;
+                  context: { control: importTokenForm.get('label') }
+                "
+              ></ng-container>
+            </ng-template>
+          </div>
+        </div>
+      }
+
+      <!-- Hosts -->
+      @if (
+        !importTokenForm.controls.unmanaged.value &&
+        importTokenForm.getValue('placement') === 'hosts'
+      ) {
+        <div
+          class="form-item"
+          cdsRow
+        >
+          <div cdsCol>
+            <cds-combo-box
+              cdComboBoxSearchReset
+              label="Hosts"
+              type="multi"
+              formControlName="hosts"
+              id="hosts"
+              name="hosts"
+              [items]="hosts"
+              [appendInline]="true"
+              selectionFeedback="top-after-reopen"
+              (selected)="multiSelector($event)"
+              placeholder="Select hosts..."
+              i18n-placeholder
+            >
+              <cds-dropdown-list></cds-dropdown-list>
+            </cds-combo-box>
+          </div>
+        </div>
+      }
+
+      <!-- count -->
+      @if (!importTokenForm.controls.unmanaged.value) {
+        <div
+          class="form-item"
+          cdsRow
+        >
+          <div cdsCol>
+            <cds-number
+              cdValidate
+              #countRef="cdValidate"
+              formControlName="count"
+              label="Count"
+              i18n-label
+              [min]="1"
+              [invalid]="countRef.isInvalid"
+              [invalidText]="countError"
+              [helperText]="countHelper"
+            ></cds-number>
+            <ng-template #countHelper>
+              <span i18n>Only that number of service instances will be created.</span>
+            </ng-template>
+            <ng-template #countError>
+              <ng-container
+                *ngTemplateOutlet="
+                  validationErrors;
+                  context: { control: importTokenForm.get('count') }
+                "
+              ></ng-container>
+            </ng-template>
+          </div>
+        </div>
+      }
+
+      <!-- RGW -->
+      @if (!importTokenForm.controls.unmanaged.value) {
+        <!-- rgw_frontend_port -->
+        <div
+          class="form-item"
+          cdsRow
+        >
+          <div cdsCol>
+            <cds-number
+              cdValidate
+              #portRef="cdValidate"
+              formControlName="rgw_frontend_port"
+              label="Port"
+              i18n-label
+              [min]="1"
+              [max]="65535"
+              [invalid]="portRef.isInvalid"
+              [invalidText]="portError"
+            ></cds-number>
+            <ng-template #portError>
+              <ng-container
+                *ngTemplateOutlet="
+                  validationErrors;
+                  context: { control: importTokenForm.get('rgw_frontend_port') }
+                "
+              ></ng-container>
+            </ng-template>
+          </div>
+        </div>
+      }
+    </form>
+  </div>
+  <cd-form-button-panel
+    (submitActionEvent)="onSubmit()"
+    [submitText]="actionLabels.IMPORT"
+    [form]="importTokenForm"
+    [modalForm]="true"
+  ></cd-form-button-panel>
+
+  <ng-template
+    #validationErrors
+    let-control="control"
+  >
+    @if (control?.errors) {
+      @for (err of control.errors | keyvalue; track err.key) {
+        <span class="invalid-feedback">{{ INVALID_TEXTS[err.key] }}</span>
+      }
+    }
+  </ng-template>
+</cds-modal>

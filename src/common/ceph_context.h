@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,39 +16,94 @@
 #ifndef CEPH_CEPHCONTEXT_H
 #define CEPH_CEPHCONTEXT_H
 
-#include <iosfwd>
-#include <stdint.h>
-#include <string>
+#include <atomic>
+#include <map>
+#include <memory>
 #include <set>
+#include <string>
+#include <string_view>
+#include <typeinfo>
+#include <typeindex>
+#include <vector>
 
-#include "include/assert.h"
-#include "include/buffer_fwd.h"
-#include "include/atomic.h"
+#include <boost/intrusive_ptr.hpp>
+
+#include "include/any.h"
+#include "include/common_fwd.h"
+#include "include/compat.h"
+
 #include "common/cmdparse.h"
-#include "include/Spinlock.h"
+#include "common/code_environment.h"
+#include "msg/msg_types.h"
+#ifdef WITH_CRIMSON
+#include "crimson/common/config_proxy.h"
+#else
+#include "common/config_proxy.h"
+#include "include/spinlock.h"
+#endif
+
+
+#include "common/debug_level_guard.h"
 #include "crush/CrushLocation.h"
-#include <boost/noncopyable.hpp>
+
+#ifdef HAVE_BREAKPAD
+namespace google_breakpad {
+  class ExceptionHandler;
+}
+#endif
 
 class AdminSocket;
-class CephContextServiceThread;
-class PerfCountersCollection;
-class PerfCounters;
-class md_config_obs_t;
-struct md_config_t;
-class CephContextHook;
-class CephContextObs;
-class CryptoHandler;
+class AdminSocketHook;
+class MonMap;
+
+namespace ceph::common {
+  class CephContextServiceThread;
+  class CephContextObs;
+  class CephContextHook;
+}
 
 namespace ceph {
   class PluginRegistry;
   class HeartbeatMap;
   namespace logging {
     class Log;
+    class SubsystemMap;
   }
 }
 
-using ceph::bufferlist;
+#ifdef WITH_CRIMSON
+namespace crimson::common {
+class CephContext {
+public:
+  CephContext();
+  CephContext(uint32_t,
+	      code_environment_t=CODE_ENVIRONMENT_UTILITY,
+	      int = 0)
+    : CephContext{}
+  {}
+  CephContext(CephContext&&) = default;
+  ~CephContext();
 
+  uint32_t get_module_type() const;
+  bool check_experimental_feature_enabled(const std::string& feature) {
+    // everything crimson is experimental...
+    return true;
+  }
+  CryptoRandom* random() const;
+  PerfCountersCollectionImpl* get_perfcounters_collection();
+  crimson::common::ConfigProxy& _conf;
+  crimson::common::PerfCountersCollection& _perf_counters_collection;
+  CephContext* get();
+  void put();
+private:
+  std::unique_ptr<CryptoRandom> _crypto_random;
+  unsigned nref = 1;
+};
+}
+#else
+#ifdef __cplusplus
+namespace ceph::common {
+#endif
 /* A CephContext represents the context held by a single library user.
  * There can be multiple CephContexts in the same process.
  *
@@ -57,24 +113,49 @@ using ceph::bufferlist;
  */
 class CephContext {
 public:
-  CephContext(uint32_t module_type_, int init_flags_ = 0);
+  CephContext(uint32_t module_type_,
+              enum code_environment_t code_env=CODE_ENVIRONMENT_UTILITY,
+              int init_flags_ = 0);
+  struct create_options {
+    enum code_environment_t code_env=CODE_ENVIRONMENT_UTILITY;
+    int init_flags = 0;
+    std::function<ceph::logging::Log* (const ceph::logging::SubsystemMap *)> create_log;
+  };
+  CephContext(uint32_t module_type_,
+	      const create_options& options);
+  CephContext(const CephContext&) = delete;
+  CephContext& operator =(const CephContext&) = delete;
+  CephContext(CephContext&&) = delete;
+  CephContext& operator =(CephContext&&) = delete;
+
+  bool _finished = false;
+  ~CephContext();
 
   // ref count!
 private:
-  ~CephContext();
-  atomic_t nref;
+  std::atomic<unsigned> nref;
 public:
   CephContext *get() {
-    nref.inc();
+    ++nref;
     return this;
   }
   void put();
 
-  md_config_t *_conf;
+  ConfigProxy _conf;
   ceph::logging::Log *_log;
+#ifdef HAVE_BREAKPAD
+  std::unique_ptr<google_breakpad::ExceptionHandler> _ex_handler;
+  static_assert(sizeof(std::unique_ptr<google_breakpad::ExceptionHandler>) == sizeof(std::unique_ptr<char>));
+#else
+  // Reserve the space for the case when part of ceph is compiled with and other without HAVE_BREAKPAD
+  std::unique_ptr<char> _ex_handler;
+#endif
 
   /* init ceph::crypto */
   void init_crypto();
+
+  /// shutdown crypto (should match init_crypto calls)
+  void shutdown_crypto();
 
   /* Start the Ceph Context's service thread */
   void start_service_thread();
@@ -85,6 +166,11 @@ public:
   /* Get the module type (client, mon, osd, mds, etc.) */
   uint32_t get_module_type() const;
 
+  // this is here only for testing purposes!
+  void _set_module_type(uint32_t t) {
+    _module_type = t;
+  }
+
   void set_init_flags(int flags);
   int get_init_flags() const;
 
@@ -94,22 +180,6 @@ public:
   ceph::HeartbeatMap *get_heartbeat_map() {
     return _heartbeat_map;
   }
-
-  /**
-   * Enable the performance counter, currently we only have counter for the
-   * number of total/unhealthy workers.
-   */
-  void enable_perf_counter();
-
-  /**
-   * Disable the performance counter.
-   */
-  void disable_perf_counter();
-
-  /**
-   * Refresh perf counter values.
-   */
-  void refresh_perf_values();
 
   /**
    * Get the admin socket associated with this CephContext.
@@ -124,34 +194,56 @@ public:
   /**
    * process an admin socket command
    */
-  void do_command(std::string command, cmdmap_t& cmdmap, std::string format,
-		  bufferlist *out);
+  int do_command(std::string_view command, const cmdmap_t& cmdmap,
+		 Formatter *f,
+		 std::ostream& errss,
+		 ceph::bufferlist *out);
+  int _do_command(std::string_view command, const cmdmap_t& cmdmap,
+		  Formatter *f,
+		  std::ostream& errss,
+		  ceph::bufferlist *out);
 
-  template<typename T>
-  void lookup_or_create_singleton_object(T*& p, const std::string &name) {
-    ceph_spin_lock(&_associated_objs_lock);
-    if (!_associated_objs.count(name)) {
-      p = new T(this);
-      _associated_objs[name] = new TypedSingletonWrapper<T>(p);
-    } else {
-      TypedSingletonWrapper<T> *wrapper =
-        dynamic_cast<TypedSingletonWrapper<T> *>(_associated_objs[name]);
-      assert(wrapper != NULL);
-      p = wrapper->singleton;
+  static constexpr std::size_t largest_singleton = 8 * 72;
+
+  template<typename T, typename... Args>
+  T& lookup_or_create_singleton_object(std::string_view name,
+				       bool drop_on_fork,
+				       Args&&... args) {
+    static_assert(sizeof(T) <= largest_singleton,
+		  "Please increase largest_singleton.");
+    std::lock_guard lg(associated_objs_lock);
+    std::type_index type = typeid(T);
+
+    auto i = associated_objs.find(std::make_pair(name, type));
+    if (i == associated_objs.cend()) {
+      if (drop_on_fork) {
+	associated_objs_drop_on_fork.insert(std::string(name));
+      }
+      i = associated_objs.emplace_hint(
+	i,
+	std::piecewise_construct,
+	std::forward_as_tuple(name, type),
+	std::forward_as_tuple(std::in_place_type<T>,
+			      std::forward<Args>(args)...));
     }
-    ceph_spin_unlock(&_associated_objs_lock);
+    return ceph::any_cast<T&>(i->second);
   }
+
   /**
    * get a crypto handler
    */
-  CryptoHandler *get_crypto_handler(int type);
+  CryptoManager *get_crypto_manager() {
+    return _crypto_mgr.get();
+  }
+
+  CryptoRandom* random() const { return _crypto_random.get(); }
 
   /// check if experimental feature is enable, and emit appropriate warnings
   bool check_experimental_feature_enabled(const std::string& feature);
   bool check_experimental_feature_enabled(const std::string& feature,
 					  std::ostream *message);
 
-  PluginRegistry *get_plugin_registry() {
+  ceph::PluginRegistry *get_plugin_registry() {
     return _plugin_registry;
   }
 
@@ -166,7 +258,7 @@ public:
     return _set_gid;
   }
 
-  void set_uid_gid_strings(std::string u, std::string g) {
+  void set_uid_gid_strings(const std::string &u, const std::string &g) {
     _set_uid_string = u;
     _set_gid_string = g;
   }
@@ -185,43 +277,39 @@ public:
   };
 
   void register_fork_watcher(ForkWatcher *w) {
-    ceph_spin_lock(&_fork_watchers_lock);
+    std::lock_guard lg(_fork_watchers_lock);
     _fork_watchers.push_back(w);
-    ceph_spin_unlock(&_fork_watchers_lock);
   }
 
-  void notify_pre_fork() {
-    ceph_spin_lock(&_fork_watchers_lock);
-    for (auto &&t : _fork_watchers)
-      t->handle_pre_fork();
-    ceph_spin_unlock(&_fork_watchers_lock);
-  }
+  void drop_temp_messenger_obj();
+  void notify_pre_fork();
+  void notify_post_fork();
 
-  void notify_post_fork() {
-    ceph_spin_lock(&_fork_watchers_lock);
-    for (auto &&t : _fork_watchers)
-      t->handle_post_fork();
-    ceph_spin_unlock(&_fork_watchers_lock);
+  /**
+   * update CephContext with a copy of the passed in MonMap mon addrs
+   *
+   * @param mm MonMap to extract and update mon addrs
+   */
+  void set_mon_addrs(const MonMap& mm);
+  void set_mon_addrs(const std::vector<entity_addrvec_t>& in) {
+    auto ptr = std::make_shared<std::vector<entity_addrvec_t>>(in);
+#ifdef __cpp_lib_atomic_shared_ptr
+    _mon_addrs.store(std::move(ptr), std::memory_order_relaxed);
+#else
+    atomic_store_explicit(&_mon_addrs, std::move(ptr), std::memory_order_relaxed);
+#endif
+  }
+  std::shared_ptr<std::vector<entity_addrvec_t>> get_mon_addrs() const {
+#ifdef __cpp_lib_atomic_shared_ptr
+    auto ptr = _mon_addrs.load(std::memory_order_relaxed);
+#else
+    auto ptr = atomic_load_explicit(&_mon_addrs, std::memory_order_relaxed);
+#endif
+    return ptr;
   }
 
 private:
-  struct SingletonWrapper : boost::noncopyable {
-    virtual ~SingletonWrapper() {}
-  };
 
-  template <typename T>
-  struct TypedSingletonWrapper : public SingletonWrapper {
-    TypedSingletonWrapper(T *p) : singleton(p) {
-    }
-    virtual ~TypedSingletonWrapper() {
-      delete singleton;
-    }
-
-    T *singleton;
-  };
-
-  CephContext(const CephContext &rhs);
-  CephContext &operator=(const CephContext &rhs);
 
   /* Stop and join the Ceph Context's service thread */
   void join_service_thread();
@@ -235,12 +323,20 @@ private:
   std::string _set_uid_string;
   std::string _set_gid_string;
 
-  bool _crypto_inited;
+  int _crypto_inited;
+
+#ifdef __cpp_lib_atomic_shared_ptr
+  std::atomic<std::shared_ptr<std::vector<entity_addrvec_t>>> _mon_addrs;
+#else
+  std::shared_ptr<std::vector<entity_addrvec_t>> _mon_addrs;
+#endif
 
   /* libcommon service thread.
    * SIGHUP wakes this thread, which then reopens logfiles */
   friend class CephContextServiceThread;
   CephContextServiceThread *_service_thread;
+
+  using md_config_obs_t = ceph::md_config_obs_impl<ConfigProxy>;
 
   md_config_obs_t *_log_obs;
 
@@ -248,7 +344,7 @@ private:
   AdminSocket *_admin_socket;
 
   /* lock which protects service thread creation, destruction, etc. */
-  ceph_spinlock_t _service_thread_lock;
+  ceph::spinlock _service_thread_lock;
 
   /* The collection of profiling loggers associated with this context */
   PerfCountersCollection *_perf_counters_collection;
@@ -259,27 +355,54 @@ private:
 
   ceph::HeartbeatMap *_heartbeat_map;
 
-  ceph_spinlock_t _associated_objs_lock;
-  std::map<std::string, SingletonWrapper*> _associated_objs;
+  ceph::spinlock associated_objs_lock;
 
-  ceph_spinlock_t _fork_watchers_lock;
+  struct associated_objs_cmp {
+    using is_transparent = std::true_type;
+    template<typename T, typename U>
+    bool operator ()(const std::pair<T, std::type_index>& l,
+		     const std::pair<U, std::type_index>& r) const noexcept {
+      return ((l.first < r.first)  ||
+	      (l.first == r.first && l.second < r.second));
+    }
+  };
+
+  std::map<std::pair<std::string, std::type_index>,
+	   ceph::immobile_any<largest_singleton>,
+	   associated_objs_cmp> associated_objs;
+  std::set<std::string> associated_objs_drop_on_fork;
+
+  ceph::spinlock _fork_watchers_lock;
   std::vector<ForkWatcher*> _fork_watchers;
 
   // crypto
-  CryptoHandler *_crypto_none;
-  CryptoHandler *_crypto_aes;
+  std::unique_ptr<CryptoRandom> _crypto_random;
+  std::unique_ptr<CryptoManager> _crypto_mgr;
 
   // experimental
   CephContextObs *_cct_obs;
-  ceph_spinlock_t _feature_lock;
+  ceph::spinlock _feature_lock;
   std::set<std::string> _experimental_features;
 
-  PluginRegistry *_plugin_registry;
+  ceph::PluginRegistry* _plugin_registry;
 
+  DebugLevelGuard _debug_level_guard;
+
+#ifdef CEPH_DEBUG_MUTEX
   md_config_obs_t *_lockdep_obs;
+#endif
 
+  std::unique_ptr<AdminSocketHook> _msgr_hook;
+  ceph::mutex _msgr_hook_lock = ceph::make_mutex("CephContext::msgr_hook");
 public:
-  CrushLocation crush_location;
+  TOPNSPC::crush::CrushLocation crush_location;
+
+  /// Check debug subsystem levels and auto-revert any that have been
+  /// above high_debug_level_threshold for longer than
+  /// high_debug_level_reset_timeout. Called from daemon tick functions.
+  void check_debug_level_guard();
+  void modify_msgr_hook(std::function<AdminSocketHook*(void)> create,
+			std::function<void(AdminSocketHook*)> add);
 private:
 
   enum {
@@ -288,10 +411,59 @@ private:
     l_cct_unhealthy_workers,
     l_cct_last
   };
-  PerfCounters *_cct_perf;
-  ceph_spinlock_t _cct_perf_lock;
+  enum {
+    l_mempool_first = 873222,
+    l_mempool_bytes,
+    l_mempool_items,
+    l_mempool_last
+  };
+  // This is just how PerfCounters indices work, we have a bunch of
+  // bare enums all over.
+  enum {
+    // Picked by grepping for the current highest value and adding 1000
+    l_service_first = 1001000,
+    l_service_unique_id,
+    l_service_last
+  };
+  PerfCounters *_cct_perf = nullptr;
+  PerfCounters* _mempool_perf = nullptr;
+  std::vector<std::string> _mempool_perf_names, _mempool_perf_descriptions;
+  std::string service_unique_id;
+  PerfCounters* _service_perf = nullptr;
+
+  /**
+   * Enable the performance counters.
+   */
+  void _enable_perf_counter();
+
+  /**
+   * Disable the performance counter.
+   */
+  void _disable_perf_counter();
+
+  /**
+   * Refresh perf counter values.
+   */
+  void _refresh_perf_values();
 
   friend class CephContextObs;
 };
+#ifdef __cplusplus
+}
+#endif
+#endif	// WITH_CRIMSON
 
+#if !defined(WITH_CRIMSON) && defined(__cplusplus)
+namespace ceph::common {
+inline void intrusive_ptr_add_ref(CephContext* cct)
+{
+  cct->get();
+}
+
+inline void intrusive_ptr_release(CephContext* cct)
+{
+  cct->put();
+}
+}
+#endif // !defined(WITH_CRIMSON) && defined(__cplusplus)
 #endif

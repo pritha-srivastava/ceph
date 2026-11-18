@@ -1,8 +1,7 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
-#ifndef RGW_LDAP_H
-#define RGW_LDAP_H
+#pragma once
 
 #include "acconfig.h"
 
@@ -38,7 +37,7 @@ namespace rgw {
     using lock_guard = std::lock_guard<std::mutex>;
 
     LDAPHelper(std::string _uri, std::string _binddn, std::string _bindpw,
-	       std::string _searchdn, std::string _searchfilter, std::string _dnattr)
+	       const std::string &_searchdn, const std::string &_searchfilter, const std::string &_dnattr)
       : uri(std::move(_uri)), binddn(std::move(_binddn)),
 	bindpw(std::move(_bindpw)), searchdn(_searchdn), searchfilter(_searchfilter), dnattr(_dnattr),
 	ldap(nullptr) {
@@ -83,15 +82,13 @@ namespace rgw {
 			      (void*) &ldap_ver);
 	if (ret == LDAP_SUCCESS) {
 	  ret = ldap_simple_bind_s(tldap, dn, pwd.c_str());
-	  if (ret == LDAP_SUCCESS) {
-	    (void) ldap_unbind(tldap);
-	  }
 	}
+	(void) ldap_unbind(tldap);
       }
       return ret; // OpenLDAP client error space
     }
 
-    int auth(const std::string uid, const std::string pwd);
+    int auth(const std::string &uid, const std::string &pwd);
 
     ~LDAPHelper() {
       if (ldap)
@@ -105,8 +102,8 @@ namespace rgw {
   class LDAPHelper
   {
   public:
-    LDAPHelper(std::string _uri, std::string _binddn, std::string _bindpw,
-	       std::string _searchdn, std::string _searchfilter, std::string _dnattr)
+    LDAPHelper(const std::string &_uri, const std::string &_binddn, const std::string &_bindpw,
+	       const std::string &_searchdn, const std::string &_searchfilter, const std::string &_dnattr)
       {}
 
     int init() {
@@ -117,7 +114,7 @@ namespace rgw {
       return -ENOTSUP;
     }
 
-    int auth(const std::string uid, const std::string pwd) {
+    int auth(const std::string &uid, const std::string &pwd) {
       return -EACCES;
     }
 
@@ -136,8 +133,6 @@ namespace rgw {
 #include "common/safe_io.h"
 #include <boost/algorithm/string.hpp>
 
-#include "include/assert.h"
+#include "include/ceph_assert.h"
 
 std::string parse_rgw_ldap_bindpw(CephContext* ctx);
-
-#endif /* RGW_LDAP_H */

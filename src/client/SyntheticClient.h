@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -94,10 +95,11 @@
 
 
 
-void parse_syn_options(vector<const char*>& args);
+void parse_syn_options(std::vector<const char*>& args);
+extern int num_client;
 
 class SyntheticClient {
-  Client *client;
+  StandaloneClient *client;
   int whoami;
 
   pthread_t thread_id;
@@ -108,11 +110,11 @@ class SyntheticClient {
   int get_op();
 
   
-  filepath             cwd;
-  map<string, struct stat*> contents;
-  set<string>          subdirs;
-  bool                 did_readdir;
-  set<int>             open_files;
+  filepath cwd;
+  std::map<std::string, struct stat*> contents;
+  std::set<std::string> subdirs;
+  bool did_readdir;
+  std::set<int> open_files;
 
   void up();
 
@@ -124,7 +126,7 @@ class SyntheticClient {
 
   int get_random_fh() {
     int r = rand() % open_files.size();
-    set<int>::iterator it = open_files.begin();
+    std::set<int>::iterator it = open_files.begin();
     while (r--) ++it;
     return *it;
   }
@@ -132,9 +134,9 @@ class SyntheticClient {
 
   filepath n1;
   const char *get_random_subdir() {
-    assert(!subdirs.empty());
+    ceph_assert(!subdirs.empty());
     int r = ((rand() % subdirs.size()) + (rand() % subdirs.size())) / 2;  // non-uniform distn
-    set<string>::iterator it = subdirs.begin();
+    std::set<std::string>::iterator it = subdirs.begin();
     while (r--) ++it;
 
     n1 = cwd;
@@ -143,13 +145,13 @@ class SyntheticClient {
   }
   filepath n2;
   const char *get_random_sub() {
-    assert(!contents.empty());
+    ceph_assert(!contents.empty());
     int r = ((rand() % contents.size()) + (rand() % contents.size())) / 2;  // non-uniform distn
     if (cwd.depth() && cwd.last_dentry().length()) 
       r += cwd.last_dentry().c_str()[0];                                         // slightly permuted
     r %= contents.size();
 
-    map<string,struct stat*>::iterator it = contents.begin();
+    std::map<std::string,struct stat*>::iterator it = contents.begin();
     while (r--) ++it;
 
     n2 = cwd;
@@ -161,14 +163,14 @@ class SyntheticClient {
   char sub_s[50];
   const char *make_sub(const char *base) {
     snprintf(sub_s, sizeof(sub_s), "%s.%d", base, rand() % 100);
-    string f = sub_s;
+    std::string f = sub_s;
     sub = cwd;
     sub.push_dentry(f);
     return sub.c_str();
   }
 
  public:
-  SyntheticClient(Client *client, int w = -1);
+  SyntheticClient(StandaloneClient *client, int w = -1);
 
   int start_thread();
   int join_thread();
@@ -190,16 +192,16 @@ class SyntheticClient {
   }
 
   // run() will do one of these things:
-  list<int> modes;
-  list<string> sargs;
-  list<int> iargs;
+  std::list<int> modes;
+  std::list<std::string> sargs;
+  std::list<int> iargs;
   utime_t run_start;
   utime_t run_until;
 
   client_t run_only;
   client_t exclude;
 
-  string get_sarg(int seq);
+  std::string get_sarg(int seq);
   int get_iarg() {
     int i = iargs.front();
     iargs.pop_front();
@@ -208,24 +210,24 @@ class SyntheticClient {
 
   bool time_to_stop() {
     utime_t now = ceph_clock_now();
-    if (0) cout << "time_to_stop .. now " << now
-		<< " until " << run_until
-		<< " start " << run_start
-		<< std::endl;
+    if (0) std::cout << "time_to_stop .. now " << now
+		     << " until " << run_until
+		     << " start " << run_start
+		     << std::endl;
     if (run_until.sec() && now > run_until)
       return true;
     else
       return false;
   }
 
-  string compose_path(string& prefix, char *rest) {
+  std::string compose_path(std::string& prefix, char *rest) {
     return prefix + rest;
   }
 
-  int full_walk(string& fromdir);
+  int full_walk(std::string& fromdir);
   int random_walk(int n);
 
-  int dump_placement(string& fn);
+  int dump_placement(std::string& fn);
 
 
   int make_dirs(const char *basedir, int dirs, int files, int depth);
@@ -237,8 +239,8 @@ class SyntheticClient {
   int create_shared(int num);
   int open_shared(int num, int count);
 
-  int rm_file(string& fn);
-  int write_file(string& fn, int mb, loff_t chunk);
+  int rm_file(std::string& fn);
+  int write_file(std::string& fn, int mb, loff_t chunk);
   int write_fd(int fd, int size, int wrsize);
 
   int write_batch(int nfile, int mb, int chunk);
@@ -248,15 +250,15 @@ class SyntheticClient {
   int object_rw(int nobj, int osize, int wrpc, int overlap, 
 		double rskew, double wskew);
 
-  int read_random(string& fn, int mb, int chunk);
-  int read_random_ex(string& fn, int mb, int chunk);
+  int read_random(std::string& fn, int mb, int chunk);
+  int read_random_ex(std::string& fn, int mb, int chunk);
   
   int overload_osd_0(int n, int sie, int wrsize);
   int check_first_primary(int fd);
 
-  int clean_dir(string& basedir);
+  int clean_dir(std::string& basedir);
 
-  int play_trace(Trace& t, string& prefix, bool metadata_only=false);
+  int play_trace(Trace& t, std::string& prefix, bool metadata_only=false);
 
   void make_dir_mess(const char *basedir, int n);
   void foo();
@@ -269,7 +271,7 @@ class SyntheticClient {
 		  const UserPerm& perms);
   int lookup_ino(inodeno_t ino, const UserPerm& perms);
 
-  int chunk_file(string &filename);
+  int chunk_file(std::string &filename);
 
   void mksnap(const char *base, const char *name, const UserPerm& perms);
   void rmsnap(const char *base, const char *name, const UserPerm& perms);

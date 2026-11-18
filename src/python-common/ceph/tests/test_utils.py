@@ -1,0 +1,166 @@
+import pytest
+
+from ceph.deployment.hostspec import SpecValidationError
+from ceph.deployment.utils import (
+    is_ipv6,
+    unwrap_ipv6,
+    wrap_ipv6,
+    valid_addr,
+    verify_dir_path,
+)
+from ceph.utils import with_units_to_int
+from typing import NamedTuple
+
+
+def test_is_ipv6():
+    for good in ("[::1]", "::1",
+                 "fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"):
+        assert is_ipv6(good)
+    for bad in ("127.0.0.1",
+                "ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffg",
+                "1:2:3:4:5:6:7:8:9", "fd00::1::1", "[fg::1]"):
+        assert not is_ipv6(bad)
+
+
+def test_unwrap_ipv6():
+    def unwrap_test(address, expected):
+        assert unwrap_ipv6(address) == expected
+
+    tests = [
+        ('::1', '::1'), ('[::1]', '::1'),
+        ('[fde4:8dba:82e1:0:5054:ff:fe6a:357]', 'fde4:8dba:82e1:0:5054:ff:fe6a:357'),
+        ('can actually be any string', 'can actually be any string'),
+        ('[but needs to be stripped] ', '[but needs to be stripped] ')]
+    for address, expected in tests:
+        unwrap_test(address, expected)
+
+
+def test_wrap_ipv6():
+    def wrap_test(address, expected):
+        assert wrap_ipv6(address) == expected
+
+    tests = [
+        ('::1', '[::1]'), ('[::1]', '[::1]'),
+        ('fde4:8dba:82e1:0:5054:ff:fe6a:357', '[fde4:8dba:82e1:0:5054:ff:fe6a:357]'),
+        ('myhost.example.com', 'myhost.example.com'), ('192.168.0.1', '192.168.0.1'),
+        ('', ''), ('fd00::1::1', 'fd00::1::1')]
+    for address, expected in tests:
+        wrap_test(address, expected)
+
+
+class Address(NamedTuple):
+    addr: str
+    status: bool
+    description: str
+
+
+@pytest.mark.parametrize('addr_object', [
+    Address('www.ibm.com', True, 'Name'),
+    Address('www.google.com:162', True, 'Name:Port'),
+    Address('my.big.domain.name.for.big.people', False, 'DNS lookup failed'),
+    Address('192.168.122.1', True, 'IPv4'),
+    Address('[192.168.122.1]', False, 'IPv4 address wrapped in brackets is invalid'),
+    Address('10.40003.200', False, 'Invalid partial IPv4 address'),
+    Address('10.7.5', False, 'Invalid partial IPv4 address'),
+    Address('10.7', False, 'Invalid partial IPv4 address'),
+    Address('192.168.122.5:7090', True, 'IPv4:Port'),
+    Address('fe80::7561:c8fb:d3d7:1fa4', True, 'IPv6'),
+    Address('[fe80::7561:c8fb:d3d7:1fa4]:9464', True, 'IPv6:Port'),
+    Address('[fe80::7561:c8fb:d3d7:1fa4]', True, 'IPv6'),
+    Address('[fe80::7561:c8fb:d3d7:1fa4', False,
+            'Address has incorrect/incomplete use of enclosing brackets'),
+    Address('fe80::7561:c8fb:d3d7:1fa4]', False,
+            'Address has incorrect/incomplete use of enclosing brackets'),
+    Address('fred.knockinson.org', False, 'DNS lookup failed'),
+    Address('tumbleweed.pickles.gov.au', False, 'DNS lookup failed'),
+    Address('192.168.122.5:00PS', False, 'Port must be numeric'),
+    Address('[fe80::7561:c8fb:d3d7:1fa4]:DOH', False, 'Port must be numeric')
+])
+def test_valid_addr(addr_object: Address):
+
+    valid, description = valid_addr(addr_object.addr)
+    assert valid == addr_object.status
+    assert description == addr_object.description
+
+
+@pytest.mark.parametrize('value,expected', [
+    # No unit suffix
+    ('', 0),
+    ('100', 100),
+    # Decimal (SI) suffixes
+    ('100B', 100),
+    ('100KB', 100 * 1000),
+    ('100MB', 100 * 1000 ** 2),
+    ('1GB', 1000 ** 3),
+    ('1TB', 1000 ** 4),
+    # Binary (IEC) suffixes
+    ('100KiB', 100 * 1024),
+    ('100MiB', 100 * 1024 ** 2),
+    ('1GiB', 1024 ** 3),
+    ('1TiB', 1024 ** 4),
+    # Bare unit letters, without a trailing B. These are binary, matching
+    # size_to_bytes() and the behaviour this helper had before the decimal
+    # suffixes were added.
+    ('128K', 128 * 1024),
+    ('500M', 500 * 1024 ** 2),
+    ('1G', 1024 ** 3),
+    ('2T', 2 * 1024 ** 4),
+    ('1g', 1024 ** 3),
+    ('1.5G', 1610612736),
+])
+def test_with_units_to_int(value, expected):
+    assert with_units_to_int(value) == expected
+
+
+@pytest.mark.parametrize('value', [
+    # A unit suffix with nothing in front of it
+    'B',
+    'iB',
+    'K',
+    'KB',
+    'GiB',
+    # The B and iB suffixes are matched case sensitively, the unit letter
+    # is not, so '1g' is valid but '1gb' is not
+    '1gb',
+    # Not a size at all
+    'abc',
+    '1X',
+    # float() accepts these, int() then overflows
+    'inf',
+    '1e400',
+])
+def test_with_units_to_int_invalid(value):
+    # Callers guard on ValueError only, so every bad value must be one.
+    with pytest.raises(ValueError, match='invalid size'):
+        with_units_to_int(value)
+
+
+def test_verify_dir_path():
+    verify_dir_path(None, 'path')
+    verify_dir_path('/var/log/ceph', 'path')
+    verify_dir_path('/var/log/ceph/custom', 'path')
+
+    with pytest.raises(SpecValidationError, match='non-empty string'):
+        verify_dir_path('', 'path')
+    with pytest.raises(SpecValidationError, match='non-empty string'):
+        verify_dir_path('   ', 'path')
+    with pytest.raises(SpecValidationError, match='absolute path'):
+        verify_dir_path('relative/path', 'path')
+    with pytest.raises(SpecValidationError, match='filesystem root'):
+        verify_dir_path('/', 'path')
+
+
+@pytest.mark.parametrize('path', ['/etc', '/var/', '//etc'])
+def test_verify_dir_path_rejects_protected_dirs(path):
+    with pytest.raises(SpecValidationError, match='path must not be a protected system'):
+        verify_dir_path(path, 'path')
+
+
+@pytest.mark.parametrize('path', [
+    '/var/log/ceph/',
+    '//var/log/ceph',
+    '/etc/ceph/logs',
+    '/vary',
+])
+def test_verify_dir_path_accepts_paths_below_protected_dirs(path):
+    verify_dir_path(path, 'path')

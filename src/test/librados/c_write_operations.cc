@@ -1,9 +1,10 @@
 // Tests for the C API coverage of atomic write operations
 
 #include <errno.h>
+#include "gtest/gtest.h"
+#include "include/err.h"
 #include "include/rados/librados.h"
 #include "test/librados/test.h"
-#include "gtest/gtest.h"
 
 TEST(LibradosCWriteOps, NewDelete) {
   rados_write_op_t op = rados_create_write_op();
@@ -222,6 +223,70 @@ TEST(LibRadosCWriteOps, WriteSame) {
   rados_write_op_remove(op);
   ASSERT_EQ(0, rados_write_op_operate(op, ioctx, "test", NULL, 0));
   rados_release_write_op(op);
+
+  rados_ioctx_destroy(ioctx);
+  ASSERT_EQ(0, destroy_one_pool(pool_name, &cluster));
+}
+
+TEST(LibRadosCWriteOps, CmpExt) {
+  rados_t cluster;
+  rados_ioctx_t ioctx;
+  std::string pool_name = get_temp_pool_name();
+  ASSERT_EQ("", create_one_pool(pool_name, &cluster));
+  rados_ioctx_create(cluster, pool_name.c_str(), &ioctx);
+
+  // create an object, write to it using writesame
+  rados_write_op_t op = rados_create_write_op();
+  ASSERT_TRUE(op);
+  rados_write_op_create(op, LIBRADOS_CREATE_EXCLUSIVE, NULL);
+  rados_write_op_write(op, "four", 4, 0);
+  ASSERT_EQ(0, rados_write_op_operate(op, ioctx, "test", NULL, 0));
+  rados_release_write_op(op);
+  char hi[4];
+  ASSERT_EQ(sizeof(hi), static_cast<std::size_t>(rados_read(ioctx, "test", hi, sizeof(hi), 0)));
+  ASSERT_EQ(0, memcmp("four", hi, sizeof(hi)));
+
+  // compare and overwrite on (expected) match
+  int val = 0;
+  op = rados_create_write_op();
+  ASSERT_TRUE(op);
+  rados_write_op_cmpext(op, "four", 4, 0, &val);
+  rados_write_op_write(op, "five", 4, 0);
+  ASSERT_EQ(0, rados_write_op_operate(op, ioctx, "test", NULL, 0));
+  ASSERT_EQ(0, val);
+  rados_release_write_op(op);
+  ASSERT_EQ(sizeof(hi), static_cast<std::size_t>(rados_read(ioctx, "test", hi, sizeof(hi), 0)));
+  ASSERT_EQ(0, memcmp("five", hi, sizeof(hi)));
+
+  // Check offset return error value
+  op = rados_create_write_op();
+  ASSERT_TRUE(op);
+  rados_write_op_cmpext(op, "four", 4, 0, &val);
+  rados_write_op_write(op, "six ", 4, 0);
+
+  ASSERT_EQ(-MAX_ERRNO - 1, rados_write_op_operate(op, ioctx, "test", NULL,
+                                                     LIBRADOS_OPERATION_RETURNVEC));
+  ASSERT_EQ(-MAX_ERRNO - 1, val);
+  
+  // compare and bail before write due to mismatch
+  // do it 1000 times to make sure we are hitting
+  // some socket injection
+  for (auto i = 0; i < 1000; ++i) {
+    val = 0;
+    op = rados_create_write_op();
+    ASSERT_TRUE(op);
+    rados_write_op_cmpext(op, "four", 4, 0, &val);
+    rados_write_op_write(op, "six ", 4, 0);
+    std::string const s = "test_" + std::to_string(i);
+    ASSERT_EQ(-MAX_ERRNO , rados_write_op_operate(op, ioctx, s.c_str(), NULL,
+                                                     LIBRADOS_OPERATION_RETURNVEC));
+    ASSERT_EQ(-MAX_ERRNO , val);
+  }
+  // cleanup
+  op = rados_create_write_op();
+  ASSERT_TRUE(op);
+  rados_write_op_remove(op);
+  ASSERT_EQ(0, rados_write_op_operate(op, ioctx, "test", NULL, 0));
 
   rados_ioctx_destroy(ioctx);
   ASSERT_EQ(0, destroy_one_pool(pool_name, &cluster));

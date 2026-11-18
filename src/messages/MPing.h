@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,18 +17,19 @@
 #ifndef CEPH_MPING_H
 #define CEPH_MPING_H
 
+#include "include/ceph_fs.h" // for CEPH_MSG_PING
 #include "msg/Message.h"
 
-class MPing : public Message {
- public:
-  MPing() : Message(CEPH_MSG_PING) {}
+class MPing final : public Message {
+public:
+  MPing() : Message{CEPH_MSG_PING} {}
 private:
-  ~MPing() {}
+  ~MPing() final {}
 
 public:
-  void decode_payload() { }
-  void encode_payload(uint64_t features) { }
-  const char *get_type_name() const { return "ping"; }
+  void decode_payload() override { }
+  void encode_payload(uint64_t features) override { }
+  std::string_view get_type_name() const override { return "ping"; }
 };
 
 #endif

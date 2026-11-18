@@ -1,14 +1,14 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/journal/OpenRequest.h"
 #include "common/dout.h"
 #include "common/errno.h"
-#include "common/WorkQueue.h"
 #include "journal/Journaler.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/Journal.h"
 #include "librbd/Utils.h"
+#include "librbd/asio/ContextWQ.h"
 #include "librbd/journal/Types.h"
 #include "librbd/journal/Utils.h"
 
@@ -25,7 +25,7 @@ using librbd::util::create_context_callback;
 using util::C_DecodeTags;
 
 template <typename I>
-OpenRequest<I>::OpenRequest(I *image_ctx, Journaler *journaler, Mutex *lock,
+OpenRequest<I>::OpenRequest(I *image_ctx, Journaler *journaler, ceph::mutex *lock,
                             journal::ImageClientMeta *client_meta,
                             uint64_t *tag_tid, journal::TagData *tag_data,
                             Context *on_finish)
@@ -72,9 +72,9 @@ void OpenRequest<I>::handle_init(int r) {
   }
 
   librbd::journal::ClientData client_data;
-  bufferlist::iterator bl = client.data.begin();
+  auto bl = client.data.cbegin();
   try {
-    ::decode(client_data, bl);
+    decode(client_data, bl);
   } catch (const buffer::error &err) {
     lderr(cct) << "failed to decode client meta data: " << err.what()
                << dendl;
@@ -83,7 +83,7 @@ void OpenRequest<I>::handle_init(int r) {
   }
 
   journal::ImageClientMeta *image_client_meta =
-    boost::get<journal::ImageClientMeta>(&client_data.client_meta);
+    std::get_if<journal::ImageClientMeta>(&client_data.client_meta);
   if (image_client_meta == nullptr) {
     lderr(cct) << this << " " << __func__ << ": "
                << "failed to extract client meta data" << dendl;
@@ -97,7 +97,7 @@ void OpenRequest<I>::handle_init(int r) {
 
   m_tag_class = image_client_meta->tag_class;
   {
-    Mutex::Locker locker(*m_lock);
+    std::lock_guard locker{*m_lock};
     *m_client_meta = *image_client_meta;
   }
 

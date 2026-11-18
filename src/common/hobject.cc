@@ -1,27 +1,40 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
-#include "include/types.h"
 #include "hobject.h"
 #include "common/Formatter.h"
 
-static void append_escaped(const string &in, string *out)
+#include <charconv>
+#include <fmt/compile.h>
+#include <fmt/core.h>
+
+using std::list;
+using std::ostream;
+using std::set;
+using std::string;
+
+using ceph::bufferlist;
+using ceph::Formatter;
+
+namespace {
+void escape_special_chars(const string& in, string* out)
 {
-  for (string::const_iterator i = in.begin(); i != in.end(); ++i) {
-    if (*i == '%') {
+  for (auto c : in) {
+    if (c == '%') {
       out->push_back('%');
       out->push_back('p');
-    } else if (*i == '.') {
+    } else if (c == '.') {
       out->push_back('%');
       out->push_back('e');
-    } else if (*i == '_') {
+    } else if (c == '_') {
       out->push_back('%');
       out->push_back('u');
     } else {
-      out->push_back(*i);
+      out->push_back(c);
     }
   }
 }
+}  // namespace
 
 set<string> hobject_t::get_prefixes(
   uint32_t bits,
@@ -71,33 +84,25 @@ set<string> hobject_t::get_prefixes(
 
 string hobject_t::to_str() const
 {
-  string out;
-
-  char snap_with_hash[1000];
-  char *t = snap_with_hash;
-  char *end = t + sizeof(snap_with_hash);
-
   uint64_t poolid(pool);
-  t += snprintf(t, end - t, "%.*llX", 16, (long long unsigned)poolid);
-
   uint32_t revhash(get_nibblewise_key_u32());
-  t += snprintf(t, end - t, ".%.*X", 8, revhash);
 
-  if (snap == CEPH_NOSNAP)
-    t += snprintf(t, end - t, ".head");
-  else if (snap == CEPH_SNAPDIR)
-    t += snprintf(t, end - t, ".snapdir");
-  else
-    t += snprintf(t, end - t, ".%llx", (long long unsigned)snap);
+  string out;
+  if (snap == CEPH_NOSNAP) {
+    out = fmt::format(FMT_COMPILE("{:016X}.{:08X}.head."), poolid, revhash);
+  } else if (snap == CEPH_SNAPDIR) {
+    out = fmt::format(FMT_COMPILE("{:016X}.{:08X}.snapdir."), poolid, revhash);
+  } else {
+    out = fmt::format(
+	FMT_COMPILE("{:016X}.{:08X}.{:x}."), poolid, revhash,
+	(unsigned long long)snap);
+  }
 
-  out += string(snap_with_hash);
-
+  escape_special_chars(oid.name, &out);
   out.push_back('.');
-  append_escaped(oid.name, &out);
+  escape_special_chars(get_key(), &out);
   out.push_back('.');
-  append_escaped(get_key(), &out);
-  out.push_back('.');
-  append_escaped(nspace, &out);
+  escape_special_chars(nspace, &out);
 
   return out;
 }
@@ -105,32 +110,32 @@ string hobject_t::to_str() const
 void hobject_t::encode(bufferlist& bl) const
 {
   ENCODE_START(4, 3, bl);
-  ::encode(key, bl);
-  ::encode(oid, bl);
-  ::encode(snap, bl);
-  ::encode(hash, bl);
-  ::encode(max, bl);
-  ::encode(nspace, bl);
-  ::encode(pool, bl);
-  assert(!max || (*this == hobject_t(hobject_t::get_max())));
+  encode(key, bl);
+  encode(oid, bl);
+  encode(snap, bl);
+  encode(hash, bl);
+  encode(max, bl);
+  encode(nspace, bl);
+  encode(pool, bl);
+  ceph_assert(!max || (*this == hobject_t(hobject_t::get_max())));
   ENCODE_FINISH(bl);
 }
 
-void hobject_t::decode(bufferlist::iterator& bl)
+void hobject_t::decode(bufferlist::const_iterator& bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(4, 3, 3, bl);
   if (struct_v >= 1)
-    ::decode(key, bl);
-  ::decode(oid, bl);
-  ::decode(snap, bl);
-  ::decode(hash, bl);
+    decode(key, bl);
+  decode(oid, bl);
+  decode(snap, bl);
+  decode(hash, bl);
   if (struct_v >= 2)
-    ::decode(max, bl);
+    decode(max, bl);
   else
     max = false;
   if (struct_v >= 4) {
-    ::decode(nspace, bl);
-    ::decode(pool, bl);
+    decode(nspace, bl);
+    decode(pool, bl);
     // for compat with hammer, which did not handle the transition
     // from pool -1 -> pool INT64_MIN for MIN properly.  this object
     // name looks a bit like a pgmeta object for the meta collection,
@@ -141,7 +146,7 @@ void hobject_t::decode(bufferlist::iterator& bl)
 	!max &&
 	oid.name.empty()) {
       pool = INT64_MIN;
-      assert(is_min());
+      ceph_assert(is_min());
     }
 
     // for compatibility with some earlier verisons which might encoded
@@ -189,28 +194,34 @@ void hobject_t::dump(Formatter *f) const
   f->dump_string("namespace", nspace);
 }
 
-void hobject_t::generate_test_instances(list<hobject_t*>& o)
+list<hobject_t> hobject_t::generate_test_instances()
 {
-  o.push_back(new hobject_t);
-  o.push_back(new hobject_t);
-  o.back()->max = true;
-  o.push_back(new hobject_t(object_t("oname"), string(), 1, 234, -1, ""));
-  o.push_back(new hobject_t(object_t("oname2"), string("okey"), CEPH_NOSNAP,
+  list<hobject_t> o;
+  o.emplace_back();
+  o.emplace_back();
+  o.back().max = true;
+  o.push_back(hobject_t(object_t("oname"), string(), 1, 234, -1, ""));
+  o.push_back(hobject_t(object_t("oname2"), string("okey"), CEPH_NOSNAP,
 	67, 0, "n1"));
-  o.push_back(new hobject_t(object_t("oname3"), string("oname3"),
+  o.push_back(hobject_t(object_t("oname3"), string("oname3"),
 	CEPH_SNAPDIR, 910, 1, "n2"));
+  return o;
 }
 
 static void append_out_escaped(const string &in, string *out)
 {
-  for (string::const_iterator i = in.begin(); i != in.end(); ++i) {
-    if (*i == '%' || *i == ':' || *i == '/' || *i < 32 || *i >= 127) {
-      out->push_back('%');
-      char buf[3];
-      snprintf(buf, sizeof(buf), "%02x", (int)(unsigned char)*i);
+  for (auto c : in) {
+    int i = (int)(unsigned char)(c);
+    if (i <= 0x0f) {
+      char buf[4] = {'%', '0'};
+      std::to_chars(buf + 2, buf + 3, i, 16);
+      out->append(buf);
+    } else if (i < 32 || i >= 127 || i == '%' || i == ':' || i == '/') {
+      char buf[4] = {'%'};
+      std::to_chars(buf + 1, buf + 3, i, 16);
       out->append(buf);
     } else {
-      out->push_back(*i);
+      out->push_back(c);
     }
   }
 }
@@ -337,10 +348,14 @@ int cmp(const hobject_t& l, const hobject_t& r)
     return -1;
   if (l.nspace > r.nspace)
     return 1;
-  if (l.get_effective_key() < r.get_effective_key())
-    return -1;
-  if (l.get_effective_key() > r.get_effective_key())
-    return 1;
+  if (!(l.get_key().empty() && r.get_key().empty())) {
+    if (l.get_effective_key() < r.get_effective_key()) {
+      return -1;
+    }
+    if (l.get_effective_key() > r.get_effective_key()) {
+      return 1;
+    }
+  }
   if (l.oid < r.oid)
     return -1;
   if (l.oid > r.oid)
@@ -360,16 +375,16 @@ void ghobject_t::encode(bufferlist& bl) const
 {
   // when changing this, remember to update encoded_size() too.
   ENCODE_START(6, 3, bl);
-  ::encode(hobj.key, bl);
-  ::encode(hobj.oid, bl);
-  ::encode(hobj.snap, bl);
-  ::encode(hobj.hash, bl);
-  ::encode(hobj.max, bl);
-  ::encode(hobj.nspace, bl);
-  ::encode(hobj.pool, bl);
-  ::encode(generation, bl);
-  ::encode(shard_id, bl);
-  ::encode(max, bl);
+  encode(hobj.key, bl);
+  encode(hobj.oid, bl);
+  encode(hobj.snap, bl);
+  encode(hobj.hash, bl);
+  encode(hobj.max, bl);
+  encode(hobj.nspace, bl);
+  encode(hobj.pool, bl);
+  encode(generation, bl);
+  encode(shard_id, bl);
+  encode(max, bl);
   ENCODE_FINISH(bl);
 }
 
@@ -414,21 +429,21 @@ size_t ghobject_t::encoded_size() const
   return r;
 }
 
-void ghobject_t::decode(bufferlist::iterator& bl)
+void ghobject_t::decode(bufferlist::const_iterator& bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(6, 3, 3, bl);
   if (struct_v >= 1)
-    ::decode(hobj.key, bl);
-  ::decode(hobj.oid, bl);
-  ::decode(hobj.snap, bl);
-  ::decode(hobj.hash, bl);
+    decode(hobj.key, bl);
+  decode(hobj.oid, bl);
+  decode(hobj.snap, bl);
+  decode(hobj.hash, bl);
   if (struct_v >= 2)
-    ::decode(hobj.max, bl);
+    decode(hobj.max, bl);
   else
     hobj.max = false;
   if (struct_v >= 4) {
-    ::decode(hobj.nspace, bl);
-    ::decode(hobj.pool, bl);
+    decode(hobj.nspace, bl);
+    decode(hobj.pool, bl);
     // for compat with hammer, which did not handle the transition from
     // pool -1 -> pool INT64_MIN for MIN properly (see hobject_t::decode()).
     if (hobj.pool == -1 &&
@@ -437,18 +452,18 @@ void ghobject_t::decode(bufferlist::iterator& bl)
 	!hobj.max &&
 	hobj.oid.name.empty()) {
       hobj.pool = INT64_MIN;
-      assert(hobj.is_min());
+      ceph_assert(hobj.is_min());
     }
   }
   if (struct_v >= 5) {
-    ::decode(generation, bl);
-    ::decode(shard_id, bl);
+    decode(generation, bl);
+    decode(shard_id, bl);
   } else {
     generation = ghobject_t::NO_GEN;
     shard_id = shard_id_t::NO_SHARD;
   }
   if (struct_v >= 6) {
-    ::decode(max, bl);
+    decode(max, bl);
   } else {
     max = false;
   }
@@ -478,33 +493,35 @@ void ghobject_t::dump(Formatter *f) const
   if (generation != NO_GEN)
     f->dump_int("generation", generation);
   if (shard_id != shard_id_t::NO_SHARD)
-    f->dump_int("shard_id", shard_id);
+    f->dump_int("shard_id", int(shard_id));
   f->dump_int("max", (int)max);
 }
 
-void ghobject_t::generate_test_instances(list<ghobject_t*>& o)
+list<ghobject_t> ghobject_t::generate_test_instances()
 {
-  o.push_back(new ghobject_t);
-  o.push_back(new ghobject_t);
-  o.back()->hobj.max = true;
-  o.push_back(new ghobject_t(hobject_t(object_t("oname"), string(), 1, 234, -1, "")));
+  list<ghobject_t> o;
+  o.emplace_back();
+  o.emplace_back();
+  o.back().hobj.max = true;
+  o.push_back(ghobject_t(hobject_t(object_t("oname"), string(), 1, 234, -1, "")));
 
-  o.push_back(new ghobject_t(hobject_t(object_t("oname2"), string("okey"), CEPH_NOSNAP,
+  o.push_back(ghobject_t(hobject_t(object_t("oname2"), string("okey"), CEPH_NOSNAP,
         67, 0, "n1"), 1, shard_id_t(0)));
-  o.push_back(new ghobject_t(hobject_t(object_t("oname2"), string("okey"), CEPH_NOSNAP,
+  o.push_back(ghobject_t(hobject_t(object_t("oname2"), string("okey"), CEPH_NOSNAP,
         67, 0, "n1"), 1, shard_id_t(1)));
-  o.push_back(new ghobject_t(hobject_t(object_t("oname2"), string("okey"), CEPH_NOSNAP,
+  o.push_back(ghobject_t(hobject_t(object_t("oname2"), string("okey"), CEPH_NOSNAP,
         67, 0, "n1"), 1, shard_id_t(2)));
-  o.push_back(new ghobject_t(hobject_t(object_t("oname3"), string("oname3"),
+  o.push_back(ghobject_t(hobject_t(object_t("oname3"), string("oname3"),
         CEPH_SNAPDIR, 910, 1, "n2"), 1, shard_id_t(0)));
-  o.push_back(new ghobject_t(hobject_t(object_t("oname3"), string("oname3"),
+  o.push_back(ghobject_t(hobject_t(object_t("oname3"), string("oname3"),
         CEPH_SNAPDIR, 910, 1, "n2"), 2, shard_id_t(0)));
-  o.push_back(new ghobject_t(hobject_t(object_t("oname3"), string("oname3"),
+  o.push_back(ghobject_t(hobject_t(object_t("oname3"), string("oname3"),
         CEPH_SNAPDIR, 910, 1, "n2"), 3, shard_id_t(0)));
-  o.push_back(new ghobject_t(hobject_t(object_t("oname3"), string("oname3"),
+  o.push_back(ghobject_t(hobject_t(object_t("oname3"), string("oname3"),
         CEPH_SNAPDIR, 910, 1, "n2"), 3, shard_id_t(1)));
-  o.push_back(new ghobject_t(hobject_t(object_t("oname3"), string("oname3"),
+  o.push_back(ghobject_t(hobject_t(object_t("oname3"), string("oname3"),
         CEPH_SNAPDIR, 910, 1, "n2"), 3, shard_id_t(2)));
+  return o;
 }
 
 ostream& operator<<(ostream& out, const ghobject_t& o)
@@ -535,14 +552,16 @@ bool ghobject_t::parse(const string& s)
   // look for shard# prefix
   const char *start = s.c_str();
   const char *p;
-  int sh = shard_id_t::NO_SHARD;
+  shard_id_t sh = shard_id_t::NO_SHARD;
   for (p = start; *p && isxdigit(*p); ++p) ;
   if (!*p && *p != '#')
     return false;
   if (p > start) {
-    int r = sscanf(s.c_str(), "%x", &sh);
+    unsigned int sh_i;
+    int r = sscanf(s.c_str(), "%x", &sh_i);
     if (r < 1)
       return false;
+    sh = shard_id_t(sh_i);
     start = p + 1;
   } else {
     ++start;

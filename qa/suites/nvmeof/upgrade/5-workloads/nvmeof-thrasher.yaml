@@ -1,0 +1,35 @@
+overrides:
+  ceph:
+    log-ignorelist:
+      # https://tracker.ceph.com/issues/76988
+      # ignore expected placement/apply failures when thrashing hosts/daemons
+      - CEPHADM_DAEMON_PLACE_FAIL
+      - CEPHADM_APPLY_SPEC_FAIL
+      # https://tracker.ceph.com/issues/75452
+      # ignore refresh warnings when thrashing hosts/daemons
+      - CEPHADM_REFRESH_FAILED
+
+tasks:
+- workunit:
+    no_coverage_and_limits: true
+    clients:
+      client.0:
+        - nvmeof/basic_tests.sh
+    env:
+      RBD_POOL: mypool
+      RBD_IMAGE_PREFIX: myimage
+
+- nvmeof.thrash:
+    checker_host: 'client.0'
+
+- workunit:
+    no_coverage_and_limits: true
+    timeout: 30m
+    clients:
+      client.0:
+        - nvmeof/fio_test.sh --rbd_iostat
+    env:
+      RBD_POOL: mypool
+      NVMEOF_POOL: mypool
+      IOSTAT_INTERVAL: '10'
+      RUNTIME: '600'

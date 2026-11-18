@@ -175,15 +175,21 @@ get_local_name_list() {
     get_local_daemon_list "mon"
     get_local_daemon_list "osd"
     get_local_daemon_list "mds"
+    get_local_daemon_list "mgr"
 }
 
 get_name_list() {
     orig="$*"
 
-    # extract list of monitors, mdss, osds defined in startup.conf
-    allconf="$local "`$CCONF -c $conf -l mon | egrep -v '^mon$' || true ; \
-	$CCONF -c $conf -l mds | egrep -v '^mds$' || true ; \
-	$CCONF -c $conf -l osd | egrep -v '^osd$' || true`
+    # extract list of monitors, mdss, osds, mgrs defined in startup.conf
+    allconf=$(for entity in \
+      $local \
+      `$CCONF -c $conf -l mon | grep -E -v '^mon$' || true` \
+      `$CCONF -c $conf -l mds | grep -E -v '^mds$' || true` \
+      `$CCONF -c $conf -l mgr | grep -E -v '^mgr$' || true` \
+      `$CCONF -c $conf -l osd | grep -E -v '^osd$' || true`; do
+      echo $entity
+    done | sort -u)
 
     if [ -z "$orig" ]; then
 	what="$allconf"
@@ -195,7 +201,7 @@ get_name_list() {
 	type=`echo $f | cut -c 1-3`   # e.g. 'mon', if $item is 'mon1'
 	id=`echo $f | cut -c 4- | sed 's/\\.//'`
 	case $f in
-	    mon | osd | mds)
+	    mon | osd | mds | mgr)
 		for d in $allconf; do
 		    if echo $d | grep -q ^$type; then
 			what="$what $d"
@@ -203,7 +209,7 @@ get_name_list() {
 		done
 		;;
 	    *)
-		if ! echo " " $allconf $local " " | egrep -q "( $type$id | $type.$id )"; then
+		if ! echo " " $allconf $local " " | grep -E -q "( $type$id | $type.$id )"; then
 		    echo "$0: $type.$id not found ($conf defines" $allconf", /var/lib/ceph defines" $local")"
 		    exit 1
 		fi

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "PG.h"
 #include "Session.h"
@@ -9,27 +9,41 @@
 #define dout_context cct
 #define dout_subsys ceph_subsys_osd
 
+using std::map;
+using std::set;
+
+Backoff::Backoff(spg_t pgid, PGRef pg, ceph::ref_t<Session> s,
+                 uint64_t i,
+                 const hobject_t& b, const hobject_t& e)
+: RefCountedObject(g_ceph_context),
+  pgid(pgid),
+  id(i),
+  pg(pg),
+  session(std::move(s)),
+  begin(b),
+  end(e) {}
+
 void Session::clear_backoffs()
 {
-  map<spg_t,map<hobject_t,set<BackoffRef>>> ls;
+  map<spg_t,map<hobject_t,set<ceph::ref_t<Backoff>>>> ls;
   {
-    Mutex::Locker l(backoff_lock);
+    std::lock_guard l(backoff_lock);
     ls.swap(backoffs);
     backoff_count = 0;
   }
   for (auto& i : ls) {
     for (auto& p : i.second) {
       for (auto& b : p.second) {
-	Mutex::Locker l(b->lock);
+	std::lock_guard l(b->lock);
 	if (b->pg) {
-	  assert(b->session == this);
-	  assert(b->is_new() || b->is_acked());
+	  ceph_assert(b->session == this);
+	  ceph_assert(b->is_new() || b->is_acked());
 	  b->pg->rm_backoff(b);
 	  b->pg.reset();
 	  b->session.reset();
 	} else if (b->session) {
-	  assert(b->session == this);
-	  assert(b->is_deleting());
+	  ceph_assert(b->session == this);
+	  ceph_assert(b->is_deleting());
 	  b->session.reset();
 	}
       }
@@ -44,7 +58,7 @@ void Session::ack_backoff(
   const hobject_t& begin,
   const hobject_t& end)
 {
-  Mutex::Locker l(backoff_lock);
+  std::lock_guard l(backoff_lock);
   auto p = backoffs.find(pgid);
   if (p == backoffs.end()) {
     dout(20) << __func__ << " " << pgid << " " << id << " [" << begin << ","
@@ -79,17 +93,17 @@ void Session::ack_backoff(
       backoffs.erase(p);
     }
   }
-  assert(!backoff_count == backoffs.empty());
+  ceph_assert(!backoff_count == backoffs.empty());
 }
 
 bool Session::check_backoff(
-  CephContext *cct, spg_t pgid, const hobject_t& oid, Message *m)
+  CephContext *cct, spg_t pgid, const hobject_t& oid, const Message *m)
 {
-  BackoffRef b(have_backoff(pgid, oid));
+  auto b = have_backoff(pgid, oid);
   if (b) {
     dout(10) << __func__ << " session " << this << " has backoff " << *b
 	     << " for " << *m << dendl;
-    assert(!b->is_acked() || !g_conf->osd_debug_crash_on_ignored_backoff);
+    ceph_assert(!b->is_acked() || !g_conf()->osd_debug_crash_on_ignored_backoff);
     return true;
   }
   // we may race with ms_handle_reset.  it clears session->con before removing

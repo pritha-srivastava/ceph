@@ -1,0 +1,31 @@
+<div class="key-value-table">
+  <cd-table
+    #table
+    [data]="tableData || []"
+    [columns]="columns"
+    columnMode="flex"
+    [toolHeader]="false"
+    [autoReload]="autoReload"
+    [customCss]="customCss"
+    [autoSave]="false"
+    [header]="false"
+    [footer]="false"
+    [limit]="0"
+  >
+  </cd-table>
+</div>
+
+<ng-template
+  #valueCellTpl
+  let-row="data.row"
+  let-value="data.value"
+>
+  @if (row.key in multilineTextKeys) {
+    <span class="pre-wrap">{{ value }}</span>
+  } @else {
+    <span>{{ value }}</span>
+  }
+  <ng-template #normalText>
+    <span>{{ value }}</span>
+  </ng-template>
+</ng-template>

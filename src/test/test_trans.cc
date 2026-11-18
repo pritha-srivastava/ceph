@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,14 +16,16 @@
 #include <iostream>
 #include "common/ceph_argparse.h"
 #include "common/debug.h"
-#include "os/filestore/FileStore.h"
+#include "os/bluestore/BlueStore.h"
 #include "global/global_init.h"
-#include "include/assert.h"
+#include "include/ceph_assert.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_filestore
 #undef dout_prefix
 #define dout_prefix *_dout
+
+using namespace std;
 
 struct Foo : public Thread {
   void *entry() override {
@@ -35,12 +38,11 @@ struct Foo : public Thread {
 
 int main(int argc, const char **argv)
 {
-  vector<const char*> args;
-  argv_to_vec(argc, argv, args);
-  env_to_vec(args);
+  auto args = argv_to_vec(argc, argv);
 
   auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
-			 CODE_ENVIRONMENT_UTILITY, 0);
+			 CODE_ENVIRONMENT_UTILITY,
+			 CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
   common_init_finish(g_ceph_context);
 
   // args
@@ -51,17 +53,17 @@ int main(int argc, const char **argv)
   cout << "#dev " << filename << std::endl;
   cout << "#mb " << mb << std::endl;
 
-  ObjectStore *fs = new FileStore(cct.get(), filename, NULL);
+  ObjectStore *fs = new BlueStore(cct.get(), filename);
   if (fs->mount() < 0) {
     cout << "mount failed" << std::endl;
     return -1;
   }
 
-  ObjectStore::Sequencer osr(__func__);
   ObjectStore::Transaction t;
   char buf[1 << 20];
   bufferlist bl;
   bl.append(buf, sizeof(buf));
+  auto ch = fs->create_new_collection(coll_t());
   t.create_collection(coll_t(), 0);
 
   for (int i=0; i<mb; i++) {
@@ -74,7 +76,6 @@ int main(int argc, const char **argv)
   dout(0) << "starting thread" << dendl;
   foo.create("foo");
   dout(0) << "starting op" << dendl;
-  fs->apply_transaction(&osr, std::move(t));
-
+  fs->queue_transaction(ch, std::move(t));
 }
 

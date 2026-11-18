@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/managed_lock/ReacquireRequest.h"
 #include "librbd/Watcher.h"
@@ -21,7 +21,7 @@ using std::string;
 namespace librbd {
 namespace managed_lock {
 
-using librbd::util::create_rados_safe_callback;
+using librbd::util::create_rados_callback;
 
 template <typename I>
 ReacquireRequest<I>::ReacquireRequest(librados::IoCtx& ioctx,
@@ -47,14 +47,14 @@ void ReacquireRequest<I>::set_cookie() {
 
   librados::ObjectWriteOperation op;
   rados::cls::lock::set_cookie(&op, RBD_LOCK_NAME,
-                               m_exclusive ? LOCK_EXCLUSIVE : LOCK_SHARED,
+                               m_exclusive ? ClsLockType::EXCLUSIVE : ClsLockType::SHARED,
                                m_old_cookie, util::get_watcher_lock_tag(),
                                m_new_cookie);
 
-  librados::AioCompletion *rados_completion = create_rados_safe_callback<
+  librados::AioCompletion *rados_completion = create_rados_callback<
     ReacquireRequest, &ReacquireRequest::handle_set_cookie>(this);
   int r = m_ioctx.aio_operate(m_oid, rados_completion, &op);
-  assert(r == 0);
+  ceph_assert(r == 0);
   rados_completion->release();
 }
 

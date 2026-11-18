@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -63,6 +64,18 @@ TEST(str_map, plaintext) {
     ASSERT_EQ("val1", str_map["key1"]);
     ASSERT_EQ("val2", str_map["key2"]);
     ASSERT_EQ("val3", str_map["key3"]);
+  }
+}
+
+TEST(str_map, empty_values) {
+  {
+    map<string,string> str_map;
+    ASSERT_EQ(0, get_str_map("M= P= L=",
+			     &str_map));
+    ASSERT_EQ(3u, str_map.size());
+    ASSERT_EQ("", str_map["M"]);
+    ASSERT_EQ("", str_map["P"]);
+    ASSERT_EQ("", str_map["L"]);
   }
 }
 

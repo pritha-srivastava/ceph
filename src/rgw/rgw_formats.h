@@ -1,8 +1,7 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
-#ifndef CEPH_RGW_FORMATS_H
-#define CEPH_RGW_FORMATS_H
+#pragma once
 
 #include "common/Formatter.h"
 
@@ -24,31 +23,33 @@ class RGWFormatter_Plain : public Formatter {
   void reset_buf();
 public:
   explicit RGWFormatter_Plain(bool use_kv = false);
-  virtual ~RGWFormatter_Plain();
+  ~RGWFormatter_Plain() override;
 
-  virtual void set_status(int status, const char* status_name) {};
-  virtual void output_header() {};
-  virtual void output_footer() {};
-  virtual void flush(ostream& os);
-  virtual void reset();
+  void set_status(int status, const char* status_name) override {};
+  void output_header() override {};
+  void output_footer() override {};
+  void enable_line_break() override {};
+  void flush(std::ostream& os) override;
+  void reset() override;
 
-  virtual void open_array_section(const char *name);
-  virtual void open_array_section_in_ns(const char *name, const char *ns);
-  virtual void open_object_section(const char *name);
-  virtual void open_object_section_in_ns(const char *name, const char *ns);
-  virtual void close_section();
-  virtual void dump_unsigned(const char *name, uint64_t u);
-  virtual void dump_int(const char *name, int64_t u);
-  virtual void dump_float(const char *name, double d);
-  virtual void dump_string(const char *name, const std::string& s);
-  virtual std::ostream& dump_stream(const char *name);
-  virtual void dump_format_va(const char *name, const char *ns, bool quoted, const char *fmt, va_list ap);
-  virtual int get_len() const;
-  virtual void write_raw_data(const char *data);
+  void open_array_section(std::string_view name) override;
+  void open_array_section_in_ns(std::string_view name, const char *ns) override;
+  void open_object_section(std::string_view name) override;
+  void open_object_section_in_ns(std::string_view name, const char *ns) override;
+  void close_section() override;
+  void dump_null(std::string_view name) override;
+  void dump_unsigned(std::string_view name, uint64_t u) override;
+  void dump_int(std::string_view name, int64_t u) override;
+  void dump_float(std::string_view name, double d) override;
+  void dump_string(std::string_view name, std::string_view s) override;
+  std::ostream& dump_stream(std::string_view name) override;
+  void dump_format_va(std::string_view name, const char *ns, bool quoted, const char *fmt, va_list ap) override;
+  int get_len() const override;
+  void write_raw_data(const char *data) override;
 
 private:
   void write_data(const char *fmt, ...);
-  void dump_value_int(const char *name, const char *fmt, ...);
+  void dump_value_int(std::string_view name, const char *fmt, ...);
 
   char *buf = nullptr;
   int len = 0;
@@ -79,7 +80,7 @@ public:
   void generate_header(const std::string& dir_path,
                        const std::string& css_path);
   void generate_footer();
-  void dump_object(const RGWObjEnt& objent);
+  void dump_object(const rgw_bucket_dir_entry& objent);
   void dump_subdir(const std::string& name);
 };
 
@@ -115,13 +116,19 @@ public:
 };
 
 class RGWStreamFlusher : public RGWFormatterFlusher {
-  ostream& os;
+  std::ostream& os;
 protected:
-  virtual void do_flush() {
+  void do_flush() override {
     formatter->flush(os);
   }
 public:
-  RGWStreamFlusher(Formatter *f, ostream& _os) : RGWFormatterFlusher(f), os(_os) {}
+  RGWStreamFlusher(Formatter *f, std::ostream& _os) : RGWFormatterFlusher(f), os(_os) {}
 };
 
-#endif
+class RGWNullFlusher : public RGWFormatterFlusher {
+protected:
+  void do_flush() override {
+  }
+public:
+  RGWNullFlusher() : RGWFormatterFlusher(nullptr) {}
+};

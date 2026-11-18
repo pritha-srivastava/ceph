@@ -7,7 +7,7 @@ import logging
 import random
 import time
 
-import ceph_manager
+from tasks import ceph_manager
 from teuthology import misc as teuthology
 
 log = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ def task(ctx, config):
     log.info('Beginning scrub...')
 
     first_mon = teuthology.get_first_mon(ctx, config)
-    (mon,) = ctx.cluster.only(first_mon).remotes.iterkeys()
+    (mon,) = ctx.cluster.only(first_mon).remotes.keys()
 
     manager = ceph_manager.CephManager(
         mon,
@@ -59,11 +59,11 @@ def task(ctx, config):
         yield
     finally:
         log.info('joining scrub')
-        scrub_proc.do_join()
+        scrub_proc.stop_and_join()
 
 class Scrubber:
     """
-    Scrubbing is actually performed during initialzation
+    Scrubbing is actually performed during initialization
     """
     def __init__(self, manager, config):
         """
@@ -82,7 +82,7 @@ class Scrubber:
         else:
             def tmp(x):
                 """Local display"""
-                print x
+                print(x)
             self.log = tmp
 
         self.stopping = False
@@ -91,10 +91,18 @@ class Scrubber:
 
         self.thread = gevent.spawn(self.do_scrub)
 
-    def do_join(self):
-        """Scrubbing thread finished"""
+    def stop(self):
+        """Stop scrubbing"""
         self.stopping = True
+
+    def join(self):
+        """Scrubbing thread finished"""
         self.thread.get()
+
+    def stop_and_join(self):
+        """Stop scrubbing thread"""
+        self.stop()
+        return self.join()
 
     def do_scrub(self):
         """Perform the scrub operation"""

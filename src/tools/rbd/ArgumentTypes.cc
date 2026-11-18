@@ -1,13 +1,14 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "tools/rbd/ArgumentTypes.h"
 #include "tools/rbd/Shell.h"
 #include "tools/rbd/Utils.h"
 #include "include/rbd/features.h"
-#include "common/config.h"
+#include "common/config_proxy.h"
 #include "common/strtol.h"
-#include "common/Formatter.h"
+#include "common/JSONFormatter.h"
+#include "common/XMLFormatter.h"
 #include "global/global_context.h"
 #include <iostream>
 #include <boost/tokenizer.hpp>
@@ -26,6 +27,10 @@ const std::map<uint64_t, std::string> ImageFeatures::FEATURE_MAPPING = {
   {RBD_FEATURE_DEEP_FLATTEN, RBD_FEATURE_NAME_DEEP_FLATTEN},
   {RBD_FEATURE_JOURNALING, RBD_FEATURE_NAME_JOURNALING},
   {RBD_FEATURE_DATA_POOL, RBD_FEATURE_NAME_DATA_POOL},
+  {RBD_FEATURE_OPERATIONS, RBD_FEATURE_NAME_OPERATIONS},
+  {RBD_FEATURE_MIGRATING, RBD_FEATURE_NAME_MIGRATING},
+  {RBD_FEATURE_NON_PRIMARY, RBD_FEATURE_NAME_NON_PRIMARY},
+  {RBD_FEATURE_DIRTY_CACHE, RBD_FEATURE_NAME_DIRTY_CACHE},
 };
 
 Format::Formatter Format::create_formatter(bool pretty) const {
@@ -59,15 +64,6 @@ std::string get_description_prefix(ArgumentModifier modifier) {
   }
 }
 
-void add_special_pool_option(po::options_description *opt,
-			     std::string prefix) {
-  std::string name = prefix + "-" + POOL_NAME;
-  std::string description = prefix + " pool name";
-
-  opt->add_options()
-    (name.c_str(), po::value<std::string>(), description.c_str());
-}
-
 void add_pool_option(po::options_description *opt,
                      ArgumentModifier modifier,
                      const std::string &desc_suffix) {
@@ -85,6 +81,27 @@ void add_pool_option(po::options_description *opt,
     break;
   }
   description += desc_suffix;
+
+  // TODO add validator
+  opt->add_options()
+    (name.c_str(), po::value<std::string>(), description.c_str());
+}
+
+void add_namespace_option(boost::program_options::options_description *opt,
+                          ArgumentModifier modifier) {
+  std::string name = NAMESPACE_NAME;
+  std::string description = "namespace name";
+  switch (modifier) {
+  case ARGUMENT_MODIFIER_NONE:
+    break;
+  case ARGUMENT_MODIFIER_SOURCE:
+    description = "source " + description;
+    break;
+  case ARGUMENT_MODIFIER_DEST:
+    name = DEST_NAMESPACE_NAME;
+    description = "destination " + description;
+    break;
+  }
 
   // TODO add validator
   opt->add_options()
@@ -114,22 +131,10 @@ void add_image_option(po::options_description *opt,
     (name.c_str(), po::value<std::string>(), description.c_str());
 }
 
-void add_group_option(po::options_description *opt,
-		      ArgumentModifier modifier,
-		      const std::string &desc_suffix) {
-  std::string name = GROUP_NAME;
-  std::string description = "group name";
-  switch (modifier) {
-  case ARGUMENT_MODIFIER_NONE:
-    break;
-  case ARGUMENT_MODIFIER_SOURCE:
-    description = "source " + description;
-    break;
-  case ARGUMENT_MODIFIER_DEST:
-    name = DEST_GROUP_NAME;
-    description = "destination " + description;
-    break;
-  }
+void add_image_id_option(po::options_description *opt,
+                         const std::string &desc_suffix) {
+  std::string name = IMAGE_ID;
+  std::string description = "image id";
   description += desc_suffix;
 
   // TODO add validator
@@ -159,35 +164,37 @@ void add_snap_option(po::options_description *opt,
     (name.c_str(), po::value<std::string>(), description.c_str());
 }
 
-void add_journal_option(po::options_description *opt,
-                      ArgumentModifier modifier,
-                      const std::string &desc_suffix) {
-  std::string name = JOURNAL_NAME;
-  std::string description = "journal name";
+void add_snap_id_option(po::options_description *opt,
+                        ArgumentModifier modifier) {
+  std::string name = SNAPSHOT_ID;
+  std::string description = "snapshot id";
   switch (modifier) {
   case ARGUMENT_MODIFIER_NONE:
+  case ARGUMENT_MODIFIER_DEST:
     break;
   case ARGUMENT_MODIFIER_SOURCE:
     description = "source " + description;
     break;
-  case ARGUMENT_MODIFIER_DEST:
-    name = DEST_JOURNAL_NAME;
-    description = "destination " + description;
-    break;
   }
-  description += desc_suffix;
 
-  // TODO add validator
   opt->add_options()
-    (name.c_str(), po::value<std::string>(), description.c_str());
+    (name.c_str(), po::value<uint64_t>(), description.c_str());
 }
 
 void add_pool_options(boost::program_options::options_description *pos,
-                      boost::program_options::options_description *opt) {
-  pos->add_options()
-    ("pool-name", "pool name");
+                      boost::program_options::options_description *opt,
+                      bool namespaces_supported) {
   opt->add_options()
     ((POOL_NAME + ",p").c_str(), po::value<std::string>(), "pool name");
+  if (namespaces_supported) {
+    add_namespace_option(opt, ARGUMENT_MODIFIER_NONE);
+    pos->add_options()
+      ("pool-spec", "pool specification\n"
+       "(example: <pool-name>[/<namespace>]");
+  } else {
+    pos->add_options()
+      ("pool-name", "pool name");
+  }
 }
 
 void add_image_spec_options(po::options_description *pos,
@@ -196,20 +203,10 @@ void add_image_spec_options(po::options_description *pos,
   pos->add_options()
     ((get_name_prefix(modifier) + IMAGE_SPEC).c_str(),
      (get_description_prefix(modifier) + "image specification\n" +
-      "(example: [<pool-name>/]<image-name>)").c_str());
+      "(example: [<pool-name>/[<namespace>/]]<image-name>)").c_str());
   add_pool_option(opt, modifier);
+  add_namespace_option(opt, modifier);
   add_image_option(opt, modifier);
-}
-
-void add_group_spec_options(po::options_description *pos,
-			    po::options_description *opt,
-			    ArgumentModifier modifier) {
-  pos->add_options()
-    ((get_name_prefix(modifier) + GROUP_SPEC).c_str(),
-     (get_description_prefix(modifier) + "group specification\n" +
-      "(example: [<pool-name>/]<group-name>)").c_str());
-  add_pool_option(opt, modifier);
-  add_group_option(opt, modifier);
 }
 
 void add_snap_spec_options(po::options_description *pos,
@@ -218,8 +215,9 @@ void add_snap_spec_options(po::options_description *pos,
   pos->add_options()
     ((get_name_prefix(modifier) + SNAPSHOT_SPEC).c_str(),
      (get_description_prefix(modifier) + "snapshot specification\n" +
-      "(example: [<pool-name>/]<image-name>@<snapshot-name>)").c_str());
+      "(example: [<pool-name>/[<namespace>/]]<image-name>@<snap-name>)").c_str());
   add_pool_option(opt, modifier);
+  add_namespace_option(opt, modifier);
   add_image_option(opt, modifier);
   add_snap_option(opt, modifier);
 }
@@ -230,25 +228,12 @@ void add_image_or_snap_spec_options(po::options_description *pos,
   pos->add_options()
     ((get_name_prefix(modifier) + IMAGE_OR_SNAPSHOT_SPEC).c_str(),
      (get_description_prefix(modifier) + "image or snapshot specification\n" +
-      "(example: [<pool-name>/]<image-name>[@<snap-name>])").c_str());
+      "(example: [<pool-name>/[<namespace>/]]<image-name>[@<snap-name>])").c_str());
   add_pool_option(opt, modifier);
+  add_namespace_option(opt, modifier);
   add_image_option(opt, modifier);
   add_snap_option(opt, modifier);
 }
-
-void add_journal_spec_options(po::options_description *pos,
-			      po::options_description *opt,
-			      ArgumentModifier modifier) {
-
-  pos->add_options()
-    ((get_name_prefix(modifier) + JOURNAL_SPEC).c_str(),
-     (get_description_prefix(modifier) + "journal specification\n" +
-      "(example: [<pool-name>/]<journal-name>)").c_str());
-  add_pool_option(opt, modifier);
-  add_image_option(opt, modifier);
-  add_journal_option(opt, modifier);
-}
-
 
 void add_create_image_options(po::options_description *opt,
                               bool include_format) {
@@ -256,15 +241,15 @@ void add_create_image_options(po::options_description *opt,
   if (include_format) {
     opt->add_options()
       (IMAGE_FORMAT.c_str(), po::value<ImageFormat>(),
-       "image format [1 (deprecated) or 2]")
+       "image format [default: 2]")
       (IMAGE_NEW_FORMAT.c_str(),
        po::value<ImageNewFormat>()->zero_tokens(),
-       "use image format 2\n(deprecated)");
+       "deprecated[:image-format 2]");
   }
 
   opt->add_options()
     (IMAGE_ORDER.c_str(), po::value<ImageOrder>(),
-     "object order [12 <= order <= 25]")
+     "deprecated[:object-size]")
     (IMAGE_OBJECT_SIZE.c_str(), po::value<ImageObjectSize>(),
      "object size in B/K/M [4K <= object size <= 32M]")
     (IMAGE_FEATURES.c_str(), po::value<ImageFeatures>()->composing(),
@@ -272,7 +257,9 @@ void add_create_image_options(po::options_description *opt,
     (IMAGE_SHARED.c_str(), po::bool_switch(), "shared image")
     (IMAGE_STRIPE_UNIT.c_str(), po::value<ImageObjectSize>(), "stripe unit in B/K/M")
     (IMAGE_STRIPE_COUNT.c_str(), po::value<uint64_t>(), "stripe count")
-    (IMAGE_DATA_POOL.c_str(), po::value<std::string>(), "data pool");
+    (IMAGE_DATA_POOL.c_str(), po::value<std::string>(), "data pool")
+    (IMAGE_MIRROR_IMAGE_MODE.c_str(), po::value<MirrorImageMode>(),
+     "mirror image mode [journal or snapshot]");
 
   add_create_journal_options(opt);
 }
@@ -282,7 +269,7 @@ void add_create_journal_options(po::options_description *opt) {
     (JOURNAL_SPLAY_WIDTH.c_str(), po::value<uint64_t>(),
      "number of active journal objects")
     (JOURNAL_OBJECT_SIZE.c_str(), po::value<JournalObjectSize>(),
-     "size of journal objects")
+     "size of journal objects [4K <= size <= 64M]")
     (JOURNAL_POOL.c_str(), po::value<std::string>(),
      "pool for journal objects");
 }
@@ -290,7 +277,19 @@ void add_create_journal_options(po::options_description *opt) {
 void add_size_option(boost::program_options::options_description *opt) {
   opt->add_options()
     ((IMAGE_SIZE + ",s").c_str(), po::value<ImageSize>()->required(),
-     "image size (in M/G/T)");
+     "image size (in M/G/T) [default: M]");
+}
+
+void add_estimated_size_option(boost::program_options::options_description *opt) {
+  opt->add_options()
+    (IMAGE_ESTIMATED_SIZE.c_str(), po::value<ImageSize>(),
+     "estimated image size (valid only for raw import from stdin, in M/G/T) [default: M]");
+}
+
+void add_sparse_size_option(boost::program_options::options_description *opt) {
+  opt->add_options()
+    (IMAGE_SPARSE_SIZE.c_str(), po::value<ImageObjectSize>(),
+    "sparse size in B/K/M [default: 4K]");
 }
 
 void add_path_options(boost::program_options::options_description *pos,
@@ -316,7 +315,7 @@ void add_no_progress_option(boost::program_options::options_description *opt) {
 
 void add_format_options(boost::program_options::options_description *opt) {
   opt->add_options()
-    (FORMAT.c_str(), po::value<Format>(), "output format [plain, json, or xml]")
+    (FORMAT.c_str(), po::value<Format>(), "output format (plain, json, or xml) [default: plain]")
     (PRETTY_FORMAT.c_str(), po::bool_switch(),
      "pretty formatting (json and xml)");
 }
@@ -328,7 +327,7 @@ void add_verbose_option(boost::program_options::options_description *opt) {
 
 void add_no_error_option(boost::program_options::options_description *opt) {
   opt->add_options()
-    (NO_ERROR.c_str(), po::bool_switch(), "continue after error");
+    (NO_ERR.c_str(), po::bool_switch(), "continue after error");
 }
 
 void add_export_format_option(boost::program_options::options_description *opt) {
@@ -336,11 +335,44 @@ void add_export_format_option(boost::program_options::options_description *opt) 
     ("export-format", po::value<ExportFormat>(), "format of image file");
 }
 
+void add_flatten_option(boost::program_options::options_description *opt) {
+  opt->add_options()
+    (IMAGE_FLATTEN.c_str(), po::bool_switch(),
+     "fill clone with parent data (make it independent)");
+}
+
+void add_snap_create_options(po::options_description *opt) {
+  opt->add_options()
+    (SKIP_QUIESCE.c_str(), po::bool_switch(), "do not run quiesce hooks")
+    (IGNORE_QUIESCE_ERROR.c_str(), po::bool_switch(),
+     "ignore quiesce hook error");
+}
+
+void add_encryption_options(boost::program_options::options_description *opt) {
+  opt->add_options()
+    (ENCRYPTION_FORMAT.c_str(),
+     po::value<std::vector<EncryptionFormat>>(),
+     "encryption format (luks, luks1, luks2) [default: luks]");
+
+  opt->add_options()
+    (ENCRYPTION_PASSPHRASE_FILE.c_str(),
+     po::value<std::vector<std::string>>(),
+     "path to file containing passphrase for unlocking the image");
+}
+
 std::string get_short_features_help(bool append_suffix) {
   std::ostringstream oss;
   bool first_feature = true;
   oss << "[";
   for (auto &pair : ImageFeatures::FEATURE_MAPPING) {
+    if ((pair.first & RBD_FEATURES_IMPLICIT_ENABLE) != 0ULL) {
+      // hide implicitly enabled features from list
+      continue;
+    } else if (!append_suffix && (pair.first & RBD_FEATURES_MUTABLE) == 0ULL) {
+      // hide non-mutable features for the 'rbd feature XYZ' command
+      continue;
+    }
+
     if (!first_feature) {
       oss << ", ";
     }
@@ -382,7 +414,7 @@ void validate(boost::any& v, const std::vector<std::string>& values,
   const std::string &s = po::validators::get_single_string(values);
 
   std::string parse_error;
-  uint64_t size = strict_sistrtoll(s.c_str(), &parse_error);
+  uint64_t size = strict_iecstrtoll(s, &parse_error);
   if (!parse_error.empty()) {
     throw po::validation_error(po::validation_error::invalid_option_value);
   }
@@ -414,9 +446,9 @@ void validate(boost::any& v, const std::vector<std::string>& values,
               ImageObjectSize *target_type, int dummy) {
   po::validators::check_first_occurrence(v);
   const std::string &s = po::validators::get_single_string(values);
-  
+
   std::string parse_error;
-  uint64_t objectsize = strict_sistrtoll(s.c_str(), &parse_error);
+  uint64_t objectsize = strict_iecstrtoll(s, &parse_error);
   if (!parse_error.empty()) {
     throw po::validation_error(po::validation_error::invalid_option_value);
   }
@@ -440,8 +472,6 @@ void validate(boost::any& v, const std::vector<std::string>& values,
 
 void validate(boost::any& v, const std::vector<std::string>& values,
               ImageNewFormat *target_type, int dummy) {
-  std::cout << "rbd: --new-format is deprecated, use --image-format"
-            << std::endl;
   v = boost::any(true);
 }
 
@@ -473,6 +503,19 @@ void validate(boost::any& v, const std::vector<std::string>& values,
 }
 
 void validate(boost::any& v, const std::vector<std::string>& values,
+              MirrorImageMode* mirror_image_mode, int) {
+  po::validators::check_first_occurrence(v);
+  const std::string &s = po::validators::get_single_string(values);
+  if (s == "journal") {
+    v = boost::any(RBD_MIRROR_IMAGE_MODE_JOURNAL);
+  } else if (s == "snapshot") {
+    v = boost::any(RBD_MIRROR_IMAGE_MODE_SNAPSHOT);
+  } else {
+    throw po::validation_error(po::validation_error::invalid_option_value);
+  }
+}
+
+void validate(boost::any& v, const std::vector<std::string>& values,
               Format *target_type, int) {
   po::validators::check_first_occurrence(v);
   const std::string &s = po::validators::get_single_string(values);
@@ -489,12 +532,40 @@ void validate(boost::any& v, const std::vector<std::string>& values,
   const std::string &s = po::validators::get_single_string(values);
 
   std::string parse_error;
-  uint64_t size = strict_sistrtoll(s.c_str(), &parse_error);
-  if (parse_error.empty() && (size >= (1 << 12))) {
+  uint64_t size = strict_iecstrtoll(s, &parse_error);
+  if (parse_error.empty() && (size >= (1 << 12)) && (size <= (1 << 26))) {
     v = boost::any(size);
     return;
   }
   throw po::validation_error(po::validation_error::invalid_option_value);
+}
+
+void validate(boost::any& v, const std::vector<std::string>& values,
+              EncryptionAlgorithm *target_type, int) {
+  po::validators::check_first_occurrence(v);
+  const std::string &s = po::validators::get_single_string(values);
+  if (s == "aes-128") {
+    v = boost::any(RBD_ENCRYPTION_ALGORITHM_AES128);
+  } else if (s == "aes-256") {
+    v = boost::any(RBD_ENCRYPTION_ALGORITHM_AES256);
+  } else {
+    throw po::validation_error(po::validation_error::invalid_option_value);
+  }
+}
+
+void validate(boost::any& v, const std::vector<std::string>& values,
+              EncryptionFormat *target_type, int) {
+  po::validators::check_first_occurrence(v);
+  const std::string &s = po::validators::get_single_string(values);
+  if (s == "luks") {
+    v = boost::any(EncryptionFormat{RBD_ENCRYPTION_FORMAT_LUKS});
+  } else if (s == "luks1") {
+    v = boost::any(EncryptionFormat{RBD_ENCRYPTION_FORMAT_LUKS1});
+  } else if (s == "luks2") {
+    v = boost::any(EncryptionFormat{RBD_ENCRYPTION_FORMAT_LUKS2});
+  } else {
+    throw po::validation_error(po::validation_error::invalid_option_value);
+  }
 }
 
 void validate(boost::any& v, const std::vector<std::string>& values,
@@ -503,12 +574,21 @@ void validate(boost::any& v, const std::vector<std::string>& values,
   const std::string &s = po::validators::get_single_string(values);
 
   std::string parse_error;
-  uint64_t format = strict_sistrtoll(s.c_str(), &parse_error);
+  uint64_t format = strict_iecstrtoll(s, &parse_error);
   if (!parse_error.empty() || (format != 1 && format != 2)) {
     throw po::validation_error(po::validation_error::invalid_option_value);
   }
 
   v = boost::any(format);
+}
+
+void validate(boost::any& v, const std::vector<std::string>& values,
+              Secret *target_type, int) {
+
+  po::validators::check_first_occurrence(v);
+  const std::string &s = po::validators::get_single_string(values);
+  g_conf().set_val_or_die("keyfile", s.c_str());
+  v = boost::any(s);
 }
 
 } // namespace argument_types

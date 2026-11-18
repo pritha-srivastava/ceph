@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 #
 # test_mon_config_key - Test 'ceph config-key' interface
 #
@@ -12,6 +12,7 @@
 import argparse
 import base64
 import errno
+import json
 import logging
 import os
 import random
@@ -19,6 +20,7 @@ import string
 import subprocess
 import sys
 import time
+from typing import List, Dict
 
 #
 # Accepted Environment variables:
@@ -42,21 +44,30 @@ SIZES = [
     (50, 0),
     (100, 0),
     (1000, 0),
-    (4096, 0),
-    (4097, -errno.EFBIG),
-    (8192, -errno.EFBIG)
+    (64 * 1024, 0),
+    (64 * 1024 + 1, -errno.EFBIG),
+    (128 * 1024, -errno.EFBIG)
 ]
+
+# tests will be randomly selected from the keys here, and the test
+# suboperation will be randomly selected from the list in the values
+# here.  i.e. 'exists/existing' would test that a key the test put into
+# the store earlier actually does still exist in the config store,
+# and that's a separate test case from 'exists/enoent', which tests
+# nonexistence of a key known to not be present.
 
 OPS = {
     'put': ['existing', 'new'],
     'del': ['existing', 'enoent'],
     'exists': ['existing', 'enoent'],
-    'get': ['existing', 'enoent']
+    'get': ['existing', 'enoent'],
+    'list': ['existing', 'enoent'],
+    'dump': ['existing', 'enoent'],
 }
 
-CONFIG_PUT = []  # list: keys
-CONFIG_DEL = []  # list: keys
-CONFIG_EXISTING = {}  # map: key -> size
+CONFIG_PUT: List[str] = []  # list: keys
+CONFIG_DEL: List[str] = []  # list: keys
+CONFIG_EXISTING: Dict[str, int] = {}  # map: key -> size
 
 
 def run_cmd(cmd, expects=0):
@@ -68,38 +79,18 @@ def run_cmd(cmd, expects=0):
     cmdlog = LOG.getChild('run_cmd')
     cmdlog.debug('{fc}'.format(fc=' '.join(full_cmd)))
 
-    proc = subprocess.Popen(full_cmd,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE)
-
-    stdout = []
-    stderr = []
-    while True:
-        try:
-            out, err = proc.communicate()
-            if out is not None:
-                stdout += out.decode().split('\n')
-                cmdlog.debug('stdout: {s}'.format(s=out))
-            if err is not None:
-                stdout += err.decode().split('\n')
-                cmdlog.debug('stderr: {s}'.format(s=err))
-        except ValueError:
-            ret = proc.wait()
-            break
-
-    if ret != expects:
-        cmdlog.error('cmd > {cmd}'.format(cmd=full_cmd))
-        cmdlog.error("expected return '{expected}' got '{got}'".format(
-            expected=expects, got=ret))
+    proc = subprocess.run(full_cmd,
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE,
+                          universal_newlines=True)
+    if proc.returncode != expects:
+        cmdlog.error(f'cmd > {proc.args}')
+        cmdlog.error(f'expected return "{expects}" got "{proc.returncode}"')
         cmdlog.error('stdout')
-        for i in stdout:
-            cmdlog.error('{x}'.format(x=i))
+        cmdlog.error(proc.stdout)
         cmdlog.error('stderr')
-        for i in stderr:
-            cmdlog.error('{x}'.format(x=i))
+        cmdlog.error(proc.stderr)
 
-
-# end run_cmd
 
 def gen_data(size, rnd):
     chars = string.ascii_letters + string.digits
@@ -385,6 +376,68 @@ def main():
                     "wrong size from store for key '{k}': {sz}, expected {es}".format(
                         k=key, sz=cnt, es=CONFIG_EXISTING[key])
                 destroy_tmp_file(file_path)
+            continue
+
+        elif op == 'list' or op == 'dump':
+            expected = 0
+            cmd = [op]
+            key = None
+
+            if sop == 'existing':
+                if len(CONFIG_EXISTING) == 0:
+                    op_log.debug('no existing keys; continue')
+                    continue
+                key = rnd.choice(CONFIG_PUT)
+                assert key in CONFIG_EXISTING, \
+                    "key '{k_}' not in CONFIG_EXISTING".format(k_=key)
+
+            if sop == 'enoent':
+                for x in range(0, 10):
+                    key = base64.b64encode(os.urandom(20)).decode()
+                    if key not in CONFIG_EXISTING:
+                        break
+                    key = None
+                if key is None:
+                    op_log.error('unable to generate an unique key -- try again later.')
+                    continue
+                assert key not in CONFIG_PUT and key not in CONFIG_EXISTING, \
+                    'key {k} was not supposed to exist!'.format(k=key)
+
+            assert key is not None, \
+                'key must be != None'
+
+            file_path = gen_tmp_file_path(rnd)
+            cmd += ['-o', file_path]
+            op_log.debug('key: {k}'.format(k=key))
+            run_cmd(cmd, expects=expected)
+            try:
+                temp_file = open(file_path, 'r+')
+            except IOError as err:
+                if err.errno == errno.ENOENT:
+                    assert CONFIG_EXISTING[key] == 0, \
+                        "error opening '{fp}': {e}".format(fp=file_path, e=err)
+                    continue
+                else:
+                    assert False, \
+                        'some error occurred: {e}'.format(e=err)
+            cnt = 0
+            try:
+                read_data = json.load(temp_file)
+            except ValueError:
+                temp_file.seek(0)
+                assert False, "{op} output was not valid JSON:\n{filedata}".format(
+                    op=op, filedata=temp_file.readlines())
+
+            if sop == 'existing':
+                assert key in read_data, "key '{k}' not found in list/dump output".format(k=key)
+                if op == 'dump':
+                    cnt = len(read_data[key])
+                    assert cnt == CONFIG_EXISTING[key], \
+                        "wrong size from list for key '{k}': {sz}, expected {es}".format(
+                        k=key, sz=cnt, es=CONFIG_EXISTING[key])
+            elif sop == 'enoent':
+                assert key not in read_data, "key '{k}' found in list/dump output".format(k=key)
+            destroy_tmp_file(file_path)
             continue
         else:
             assert False, 'unknown op {o}'.format(o=op)

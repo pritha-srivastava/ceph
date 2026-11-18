@@ -2,18 +2,78 @@
 Workunit task -- Run ceph on sets of specific clients
 """
 import logging
-import pipes
 import os
+import re
+import shlex
 
-from util import get_remote_for_role
+from tasks.util import get_remote_for_role
+from tasks.util.workunit import get_refspec_after_overrides
+from tasks.watched_process import WatchedProcess
 
 from teuthology import misc
 from teuthology.config import config as teuth_config
-from teuthology.orchestra.run import CommandFailedError
+from teuthology.exceptions import CommandFailedError
 from teuthology.parallel import parallel
 from teuthology.orchestra import run
 
 log = logging.getLogger(__name__)
+
+
+class WorkunitProcess(WatchedProcess):
+    """
+    Lets the DaemonWatchdog stop a workunit that is blocked on a cluster which
+    has already failed, instead of leaving it to run out its own timeout. By
+    default, watchdog is disabled.
+
+    To enable it do the following:
+
+        tasks:
+        - workunit:
+            watchdog: true
+            clients:
+            ...
+
+    If the workunit runs in cephadm, make sure to enable watchdog_setup too:
+
+        overrides:
+            cephadm:
+                watchdog_setup: true
+    """
+
+    def __init__(self, remote, role, workunit, pattern):
+        super(WorkunitProcess, self).__init__()
+
+        self._remote = remote
+        self._pattern = pattern
+        self._name = 'workunit.{role}.{workunit}'.format(role=role,
+                                                         workunit=workunit)
+
+    @property
+    def id(self):
+        return self._name
+
+    def _session(self):
+        """
+        The session the workunit's ssh command runs in, or None if it has
+        already gone. This is needed to terminate the process session if
+        the watchdog barks.
+        """
+        for line in self._remote.sh('ps -eo sess=,args=', quiet=True).splitlines():
+            sess, _, args = line.strip().partition(' ')
+            if self._pattern in args and sess.isdigit() and sess != '0':
+                return sess
+        return None
+
+    def stop(self):
+        log.debug('Stopping %s: %s', self._name, self._exception)
+        sess = self._session()
+        if sess is None:
+            log.debug('%s has already gone', self._name)
+            return
+        self._remote.run(
+            args=['sudo', 'pkill', '-KILL', '-s', sess],
+            check_status=False,
+        )
 
 
 def task(ctx, config):
@@ -59,6 +119,14 @@ def task(ctx, config):
               BAZ: quux
             timeout: 3h
 
+    You can also pass optional arguments to the found workunits:
+
+        tasks:
+        - workunit:
+            clients:
+              all:
+                - test-ceph-helpers.sh test_get_config
+
     This task supports roles that include a ceph cluster, e.g.::
 
         tasks:
@@ -68,6 +136,17 @@ def task(ctx, config):
               backup.client.0: [foo]
               client.1: [bar] # cluster is implicitly 'ceph'
 
+    You can also specify an alternative top-level dir to 'qa/workunits', like
+    'qa/standalone', with::
+
+        tasks:
+        - install:
+        - workunit:
+            basedir: qa/standalone
+            clients:
+              client.0:
+                - test-ceph-helpers.sh
+
     :param ctx: Context
     :param config: Configuration
     """
@@ -76,17 +155,10 @@ def task(ctx, config):
         'configuration must contain a dictionary of clients'
 
     overrides = ctx.config.get('overrides', {})
-    misc.deep_merge(config, overrides.get('workunit', {}))
-
-    refspec = config.get('branch')
-    if refspec is None:
-        refspec = config.get('tag')
-    if refspec is None:
-        refspec = config.get('sha1')
-    if refspec is None:
-        refspec = 'HEAD'
-
+    refspec = get_refspec_after_overrides(config, overrides)
     timeout = config.get('timeout', '3h')
+    cleanup = config.get('cleanup', True)
+    watchdog = config.get('watchdog', False)
 
     log.info('Pulling workunits from ref %s', refspec)
 
@@ -98,31 +170,42 @@ def task(ctx, config):
 
     # Create scratch dirs for any non-all workunits
     log.info('Making a separate scratch dir for every client...')
-    for role in clients.iterkeys():
-        assert isinstance(role, basestring)
+    for role in clients.keys():
+        assert isinstance(role, str)
         if role == "all":
             continue
 
-        assert 'client' in role
+        assert 'client' in role, f"unexpected client name: {role}"
         created_mnt_dir = _make_scratch_dir(ctx, role, config.get('subdir'))
         created_mountpoint[role] = created_mnt_dir
 
     # Execute any non-all workunits
+    log.info("timeout={}".format(timeout))
+    log.info("cleanup={}".format(cleanup))
     with parallel() as p:
-        for role, tests in clients.iteritems():
+        for role, tests in clients.items():
             if role != "all":
                 p.spawn(_run_tests, ctx, refspec, role, tests,
-                        config.get('env'), timeout=timeout)
+                        config.get('env'),
+                        basedir=config.get('basedir','qa/workunits'),
+                        subdir=config.get('subdir'),
+                        timeout=timeout,
+                        cleanup=cleanup,
+                        watchdog=watchdog,
+                        coverage_and_limits=not config.get('no_coverage_and_limits', None))
 
-    # Clean up dirs from any non-all workunits
-    for role, created in created_mountpoint.items():
-        _delete_dir(ctx, role, created)
+    if cleanup:
+        # Clean up dirs from any non-all workunits
+        for role, created in created_mountpoint.items():
+            _delete_dir(ctx, role, created)
 
     # Execute any 'all' workunits
     if 'all' in clients:
         all_tasks = clients["all"]
         _spawn_on_all_clients(ctx, refspec, all_tasks, config.get('env'),
-                              config.get('subdir'), timeout=timeout)
+                              config.get('basedir', 'qa/workunits'),
+                              config.get('subdir'), timeout=timeout,
+                              cleanup=cleanup, watchdog=watchdog)
 
 
 def _client_mountpoint(ctx, cluster, id_):
@@ -250,7 +333,8 @@ def _make_scratch_dir(ctx, role, subdir):
     return created_mountpoint
 
 
-def _spawn_on_all_clients(ctx, refspec, tests, env, subdir, timeout=None):
+def _spawn_on_all_clients(ctx, refspec, tests, env, basedir, subdir, timeout=None,
+                          cleanup=True, watchdog=False):
     """
     Make a scratch directory for each client in the cluster, and then for each
     test spawn _run_tests() for each role.
@@ -269,14 +353,21 @@ def _spawn_on_all_clients(ctx, refspec, tests, env, subdir, timeout=None):
     for unit in tests:
         with parallel() as p:
             for role, remote in client_remotes.items():
-                p.spawn(_run_tests, ctx, refspec, role, [unit], env, subdir,
-                        timeout=timeout)
+                p.spawn(_run_tests, ctx, refspec, role, [unit], env,
+                        basedir,
+                        subdir,
+                        timeout=timeout,
+                        watchdog=watchdog)
 
     # cleanup the generated client directories
-    for role, _ in client_remotes.items():
-        _delete_dir(ctx, role, created_mountpoint[role])
+    if cleanup:
+        for role, _ in client_remotes.items():
+            _delete_dir(ctx, role, created_mountpoint[role])
 
-def _run_tests(ctx, refspec, role, tests, env, subdir=None, timeout=None):
+
+def _run_tests(ctx, refspec, role, tests, env, basedir,
+               subdir=None, timeout=None, cleanup=True, watchdog=False,
+               coverage_and_limits=True):
     """
     Run the individual test. Create a scratch directory and then extract the
     workunits from git. Make the executables, and then run the tests.
@@ -295,7 +386,7 @@ def _run_tests(ctx, refspec, role, tests, env, subdir=None, timeout=None):
                     to False is passed, the 'timeout' command is not used.
     """
     testdir = misc.get_testdir(ctx)
-    assert isinstance(role, basestring)
+    assert isinstance(role, str)
     cluster, type_, id_ = misc.split_role(role)
     assert type_ == 'client'
     remote = get_remote_for_role(ctx, role)
@@ -306,53 +397,30 @@ def _run_tests(ctx, refspec, role, tests, env, subdir=None, timeout=None):
     else:
         scratch_tmp = os.path.join(mnt, subdir)
     clonedir = '{tdir}/clone.{role}'.format(tdir=testdir, role=role)
-    srcdir = '{cdir}/qa/workunits'.format(cdir=clonedir)
+    srcdir = '{cdir}/{basedir}'.format(cdir=clonedir,
+                                       basedir=basedir)
 
-    git_url = teuth_config.get_ceph_git_url()
+    git_url = teuth_config.get_ceph_qa_suite_git_url()
+    # if we are running an upgrade test, and ceph-ci does not have branches like
+    # `jewel`, so should use ceph.git as an alternative.
     try:
-        remote.run(
-            logger=log.getChild(role),
-            args=[
-                'rm',
-                '-rf',
-                clonedir,
-                run.Raw('&&'),
-                'git',
-                'clone',
-                git_url,
-                clonedir,
-                run.Raw('&&'),
-                'cd', '--', clonedir,
-                run.Raw('&&'),
-                'git', 'checkout', refspec,
-            ],
-        )
+        remote.run(logger=log.getChild(role),
+                   args=refspec.clone(git_url, clonedir))
     except CommandFailedError:
-        alt_git_url = git_url.replace('ceph-ci', 'ceph')
+        if git_url.endswith('/ceph-ci.git'):
+            alt_git_url = git_url.replace('/ceph-ci.git', '/ceph.git')
+        elif git_url.endswith('/ceph-ci'):
+            alt_git_url = re.sub(r'/ceph-ci$', '/ceph.git', git_url)
+        else:
+            raise
         log.info(
             "failed to check out '%s' from %s; will also try in %s",
             refspec,
             git_url,
             alt_git_url,
         )
-        remote.run(
-            logger=log.getChild(role),
-            args=[
-                'rm',
-                '-rf',
-                clonedir,
-                run.Raw('&&'),
-                'git',
-                'clone',
-                alt_git_url,
-                clonedir,
-                run.Raw('&&'),
-                'cd', '--', clonedir,
-                run.Raw('&&'),
-                'git', 'checkout', refspec,
-            ],
-        )
-
+        remote.run(logger=log.getChild(role),
+                   args=refspec.clone(alt_git_url, clonedir))
     remote.run(
         logger=log.getChild(role),
         args=[
@@ -360,69 +428,167 @@ def _run_tests(ctx, refspec, role, tests, env, subdir=None, timeout=None):
             run.Raw('&&'),
             'if', 'test', '-e', 'Makefile', run.Raw(';'), 'then', 'make', run.Raw(';'), 'fi',
             run.Raw('&&'),
-            'find', '-executable', '-type', 'f', '-printf', r'%P\0'.format(srcdir=srcdir),
+            'find', '-executable', '-type', 'f', '-printf', r'%P\0',
             run.Raw('>{tdir}/workunits.list.{role}'.format(tdir=testdir, role=role)),
         ],
     )
 
     workunits_file = '{tdir}/workunits.list.{role}'.format(tdir=testdir, role=role)
-    workunits = sorted(misc.get_file(remote, workunits_file).split('\0'))
+    workunits = sorted(remote.read_file(workunits_file).decode().split('\0'))
     assert workunits
 
     try:
         assert isinstance(tests, list)
         for spec in tests:
-            log.info('Running workunits matching %s on %s...', spec, role)
-            prefix = '{spec}/'.format(spec=spec)
-            to_run = [w for w in workunits if w == spec or w.startswith(prefix)]
+            dir_or_fname, *optional_args = shlex.split(spec)
+            log.info('Running workunits matching %s on %s...', dir_or_fname, role)
+            # match executables named "foo" or "foo/*" with workunit named
+            # "foo"
+            to_run = [w for w in workunits
+                      if os.path.commonpath([w, dir_or_fname]) == dir_or_fname]
             if not to_run:
                 raise RuntimeError('Spec did not match any workunits: {spec!r}'.format(spec=spec))
             for workunit in to_run:
                 log.info('Running workunit %s...', workunit)
+                remote.run(
+                    logger=log.getChild(role),
+                    args=['mkdir', '-p', '--', scratch_tmp],
+                    label=f"workunit sandbox creation test {workunit}",
+                )
+
+                try:
+                    cluster_keyring = ctx.ceph[cluster].keyring
+                except AttributeError:
+                    cluster_keyring = f"/etc/ceph/{cluster}.keyring"
+                    log.info("keyring not configured by cluster setup, using default: %s", cluster_keyring)
+
+                try:
+                    k = remote.read_file(cluster_keyring).decode()
+                    log.info("current keyring file:\n%s", k)
+                except FileNotFoundError:
+                    log.info("no cluster keyring found; skipping keyring imports")
+                else:
+                    have_authtool = remote.run(
+                        args=['sh', '-c', 'command -v ceph-authtool'],
+                        check_status=False,
+                    ).exitstatus == 0
+                    if not have_authtool:
+                        # workunits that only reach ceph via
+                        # `cephadm shell` (not CEPH_KEYRING/default identity
+                        # resolution on the host) don't need this merge
+                        log.info(
+                            "ceph-authtool not present on host; skipping"
+                            " keyring merge"
+                        )
+                    else:
+                        client_keyring = f'/etc/ceph/{cluster}.client.{id_}.keyring'
+                        admin_keyring = f'/etc/ceph/{cluster}.client.admin.keyring'
+                        #tmp_keyring = f'{scratch_tmp}/workunit.client.{id_}.keyring'
+                        tmp_keyring = cluster_keyring
+                        remote.run(
+                            args=[
+                                'sudo',
+                                'ceph-authtool',
+                                tmp_keyring,
+                                '--import-keyring',
+                                client_keyring,
+                            ],
+                        )
+                        # admin_keyring may be a key type not understood
+                        try:
+                            remote.run(
+                                args=[
+                                    'sudo',
+                                    'ceph-authtool',
+                                    tmp_keyring,
+                                    '--import-keyring',
+                                    admin_keyring,
+                                ],
+                            )
+                        except:
+                            log.info("admin key type not understood")
+
                 args = [
-                    'mkdir', '-p', '--', scratch_tmp,
-                    run.Raw('&&'),
                     'cd', '--', scratch_tmp,
                     run.Raw('&&'),
                     run.Raw('CEPH_CLI_TEST_DUP_COMMAND=1'),
                     run.Raw('CEPH_REF={ref}'.format(ref=refspec)),
                     run.Raw('TESTDIR="{tdir}"'.format(tdir=testdir)),
-                    run.Raw('CEPH_ARGS="--cluster {0}"'.format(cluster)),
-                    run.Raw('CEPH_ID="{id}"'.format(id=id_)),
+                    run.Raw(f'CEPH_CLIENT_ID={id_}'), # used by src/test/librados/test_cxx.cc
+                    run.Raw(f'CEPH_ARGS="--cluster={cluster}"'),
+                    #run.Raw(f'CEPH_KEYRING="{tmp_keyring}"'),
+                    run.Raw(f'CEPH_ID="{id_}"'), # used by rbd
                     run.Raw('PATH=$PATH:/usr/sbin'),
                     run.Raw('CEPH_BASE={dir}'.format(dir=clonedir)),
+                    run.Raw('CEPH_ROOT={dir}'.format(dir=clonedir)),
+                    run.Raw('CEPH_MNT={dir}'.format(dir=mnt)),
                 ]
                 if env is not None:
-                    for var, val in env.iteritems():
-                        quoted_val = pipes.quote(val)
+                    for var, val in env.items():
+                        quoted_val = shlex.quote(val)
                         env_arg = '{var}={val}'.format(var=var, val=quoted_val)
                         args.append(run.Raw(env_arg))
-                args.extend([
-                    'adjust-ulimits',
-                    'ceph-coverage',
-                    '{tdir}/archive/coverage'.format(tdir=testdir)])
+                if coverage_and_limits:
+                    args.extend([
+                        'adjust-ulimits',
+                        'ceph-coverage',
+                        '{tdir}/archive/coverage'.format(tdir=testdir)])
                 if timeout and timeout != '0':
                     args.extend(['timeout', timeout])
-                args.extend([
-                    '{srcdir}/{workunit}'.format(
-                        srcdir=srcdir,
-                        workunit=workunit,
-                    ),
-                ])
-                remote.run(
-                    logger=log.getChild(role),
-                    args=args,
-                    label="workunit test {workunit}".format(workunit=workunit)
+                workunit_path = '{srcdir}/{workunit}'.format(
+                    srcdir=srcdir,
+                    workunit=workunit,
                 )
-                remote.run(
-                    logger=log.getChild(role),
-                    args=['sudo', 'rm', '-rf', '--', scratch_tmp],
-                )
+                args.extend([workunit_path])
+                watched = None
+                if watchdog:
+                    # Only a cluster task sets up the watchdog. Workunits that
+                    # bring up their own cluster (qa/standalone) or run without
+                    # one at all have no ctx.ceph, and a suite-wide
+                    # 'overrides: workunit: watchdog: true' reaches them too.
+                    # Skip rather than fail the job.
+                    cluster_ctx = getattr(ctx, 'ceph', {}).get(cluster)
+                    if hasattr(cluster_ctx, 'watched_processes'):
+                        watched = WorkunitProcess(remote, role, workunit,
+                                                  workunit_path)
+                        cluster_ctx.watched_processes.append(watched)
+                    else:
+                        log.warning('no watchdog for cluster %s: '
+                                    'not watching workunit %s',
+                                    cluster, workunit)
+                try:
+                    if 'unit_test_scan' in optional_args:
+                        optional_args.remove('unit_test_scan')
+                        remote.run_unit_test(
+                            logger=log.getChild(role),
+                            args=args + optional_args,
+                            label="workunit test {workunit}".format(workunit=workunit),
+                            xml_path_regex=f'{testdir}/archive/unit_test_xml_report/*.xml',
+                            output_yaml=os.path.join(ctx.archive, 'unit_test_summary.yaml'),
+                        )
+                    else:
+                        remote.run(
+                            logger=log.getChild(role),
+                            args=args + optional_args,
+                            label="workunit test {workunit}".format(workunit=workunit)
+                        )
+                except Exception:
+                    if watched is not None and watched.exception:
+                        raise watched.exception
+                    raise
+                finally:
+                    if watched is not None:
+                        ctx.ceph[cluster].watched_processes.remove(watched)
+                if cleanup:
+                    args=['sudo', 'rm', '-rf', '--', scratch_tmp]
+                    remote.run(logger=log.getChild(role), args=args, timeout=(60*60))
     finally:
         log.info('Stopping %s on %s...', tests, role)
+        # N.B. unlike before, don't cleanup path under variable "scratch_tmp"
+        # here! If the mount is broken then rm will hang. For context, see
+        # commit d4b8f94cf8d95ebb277b550fc6ebc3468052a39c.
+        args=['sudo', 'rm', '-rf', '--', workunits_file, clonedir]
         remote.run(
             logger=log.getChild(role),
-            args=[
-                'rm', '-rf', '--', workunits_file, clonedir,
-            ],
+            args=args,
         )

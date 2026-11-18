@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -30,7 +31,7 @@ class PgFiles
 {
 private:
   Objecter *objecter;
-  struct ceph_mount_info *cmount;
+  struct ceph_mount_info *cmount = nullptr;
 
   std::set<pg_t> pgs;
   std::set<uint64_t> pools;
@@ -40,7 +41,7 @@ private:
 
 
 public:
-  PgFiles(Objecter *o, std::set<pg_t> pgs_);
+  PgFiles(Objecter *o, const std::set<pg_t> &pgs_);
   ~PgFiles();
 
   int init();

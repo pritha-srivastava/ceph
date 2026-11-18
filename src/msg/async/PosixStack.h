@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -25,34 +26,34 @@
 #include "Stack.h"
 
 class PosixWorker : public Worker {
-  NetHandler net;
-  virtual void initialize();
+  ceph::NetHandler net;
+  void initialize() override;
  public:
-  PosixWorker(CephContext *c, unsigned i)
-      : Worker(c, i), net(c) {}
-  virtual int listen(entity_addr_t &sa, const SocketOptions &opt,
-                     ServerSocket *socks) override;
-  virtual int connect(const entity_addr_t &addr, const SocketOptions &opts, ConnectedSocket *socket) override;
+  PosixWorker(CephContext *c, unsigned i, bool try_smc)
+      : Worker(c, i), net(c, try_smc) {}
+  int listen(entity_addr_t &sa,
+	     unsigned addr_slot,
+	     const SocketOptions &opt,
+	     ServerSocket *socks) override;
+  int connect(const entity_addr_t &addr, const SocketOptions &opts, ConnectedSocket *socket) override;
 };
 
 class PosixNetworkStack : public NetworkStack {
-  vector<int> coreids;
-  vector<std::thread> threads;
+  std::vector<std::thread> threads;
+  bool try_smc;
+
+  virtual Worker* create_worker(CephContext *c, unsigned worker_id) override {
+    return new PosixWorker(c, worker_id, try_smc);
+  }
 
  public:
-  explicit PosixNetworkStack(CephContext *c, const string &t);
+  explicit PosixNetworkStack(CephContext *c, bool try_smc);
 
-  int get_cpuid(int id) const {
-    if (coreids.empty())
-      return -1;
-    return coreids[id % coreids.size()];
+  void spawn_worker(std::function<void ()> &&func) override {
+    threads.emplace_back(std::move(func));
   }
-  virtual void spawn_worker(unsigned i, std::function<void ()> &&func) override {
-    threads.resize(i+1);
-    threads[i] = std::thread(func);
-  }
-  virtual void join_worker(unsigned i) override {
-    assert(threads.size() > i && threads[i].joinable());
+  void join_worker(unsigned i) override {
+    ceph_assert(threads.size() > i && threads[i].joinable());
     threads[i].join();
   }
 };

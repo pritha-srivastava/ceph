@@ -1,111 +1,208 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
-#ifndef CEPH_RGW_HTTP_CLIENT_H
-#define CEPH_RGW_HTTP_CLIENT_H
+#pragma once
 
-#include "common/RWLock.h"
+#include "common/async/yield_context.h"
 #include "common/Cond.h"
-#include "include/atomic.h"
 #include "rgw_common.h"
 #include "rgw_string.h"
+#include "rgw_http_client_types.h"
 
-using param_pair_t = pair<string, string>;
-using param_vec_t = vector<param_pair_t>;
+#include <atomic>
+#include <boost/url.hpp>
+
+using param_pair_t = std::pair<std::string, std::string>;
+using param_vec_t = std::vector<param_pair_t>;
+
+void rgw_http_client_init(CephContext *cct);
+void rgw_http_client_cleanup();
 
 struct rgw_http_req_data;
+class RGWHTTPManager;
 
-class RGWHTTPClient
+/**
+ * RGWEndpoint - Represents an HTTP endpoint with additional metdata such as connection routing.
+ *
+ * Wraps boost::urls::url for proper URL manipulation (set_path, set_query,
+ * set_host) instead of raw string concatenation.
+ *
+ * Carries a CURLOPT_CONNECT_TO override for IP-level routing.
+ *
+ * Fields:
+ *  - endpoint_url_lookup_id: The initially configured endpoint URL (immutable).
+ *                 Used as a lookup key in RGWRESTConn to find the ResolvedEndpoint
+ *                 for health tracking (marking IPs as up/down).
+ *  - url:         boost::urls::url for the request URL (mutable via set_path, etc.).
+ *  - connect_to:  libcurl CONNECT_TO string (format: "host:port:addr:port").
+ */
+struct RGWEndpoint {
+private:
+  std::string endpoint_url_lookup_id;
+  boost::urls::url url;
+  std::string connect_to;
+
+public:
+  RGWEndpoint() = default;
+
+  RGWEndpoint(const char* u) : RGWEndpoint(std::string(u)) {}
+
+  RGWEndpoint(const std::string& u) : endpoint_url_lookup_id(u) {
+    auto r = boost::urls::parse_uri(u);
+    if (r.has_value()) {
+      url = r.value();
+    }
+  }
+
+  RGWEndpoint(const std::string& u, const std::string& c)
+    : endpoint_url_lookup_id(u), connect_to(c) {
+    auto r = boost::urls::parse_uri(u);
+    if (r.has_value()) {
+      url = r.value();
+    }
+  }
+
+  void set_url(const std::string& u) {
+    auto r = boost::urls::parse_uri(u);
+    if (r.has_value()) {
+      url = r.value();
+    }
+    if (endpoint_url_lookup_id.empty()) {
+      endpoint_url_lookup_id = u;
+    }
+  }
+
+  std::string get_url() const { return std::string(url.buffer()); }
+  const std::string& get_endpoint_url_lookup_id() const { return endpoint_url_lookup_id; }
+
+  void set_path(const std::string& path) { url.set_encoded_path(path); }
+  void set_query(const std::string& q) {
+    if (q.empty()) return;
+    // strip leading '?' - if present, boost::urls adds it automatically
+    url.set_encoded_query(q[0] == '?' ? q.substr(1) : q);
+  }
+  void set_host(const std::string& h) { url.set_host(h); }
+
+  void add_trailing_slash() {
+    auto path = std::string(url.encoded_path());
+    if (path.empty() || path.back() != '/') {
+      path += '/';
+      url.set_encoded_path(path);
+    }
+  }
+
+  void set_connect_to(const std::string& c) { connect_to = c; }
+  const std::string& get_connect_to() const { return connect_to; }
+
+  friend std::ostream& operator<<(std::ostream& os, const RGWEndpoint& ep) {
+    os << "RGWEndpoint: url=" << ep.url.buffer()
+       << " endpoint_url_lookup_id=" << (ep.endpoint_url_lookup_id.empty() ? "<empty>" : ep.endpoint_url_lookup_id)
+       << " connect_to=" << (ep.connect_to.empty() ? "<empty>" : ep.connect_to);
+    return os;
+  }
+};
+
+class RGWHTTPClient : public RGWIOProvider,
+                      public NoDoutPrefix
 {
   friend class RGWHTTPManager;
 
   bufferlist send_bl;
   bufferlist::iterator send_iter;
-  size_t send_len;
   bool has_send_len;
   long http_status;
+  bool send_data_hint{false};
+  size_t receive_pause_skip{0}; /* how many bytes to skip next time receive_data is called
+                                   due to being paused */
+
+  void *user_info{nullptr};
 
   rgw_http_req_data *req_data;
 
-  void *user_info;
-
-  string last_method;
-  string last_url;
   bool verify_ssl; // Do not validate self signed certificates, default to false
 
-  atomic_t stopped;
+  std::string ca_path;
+
+  std::string client_cert;
+
+  std::string client_key;
+
+  std::atomic<unsigned> stopped { 0 };
 
 protected:
   CephContext *cct;
+
+  std::string method;
+  RGWEndpoint endpoint;
+
+  std::string protocol;
+  std::string host;
+  std::string resource_prefix;
+
+  size_t send_len{0};
+
   param_vec_t headers;
 
-  int init_request(const char *method,
-                   const char *url,
-                   rgw_http_req_data *req_data);
+  long  req_timeout{0L};
+  long  req_connect_timeout{0L};
+
+  void init();
+
+  RGWHTTPManager *get_manager();
+
+  int init_request(rgw_http_req_data *req_data);
 
   virtual int receive_header(void *ptr, size_t len) {
     return 0;
   }
-  virtual int receive_data(void *ptr, size_t len) {
+  virtual int receive_data(void *ptr, size_t len, bool *pause) {
     return 0;
   }
-  virtual int send_data(void *ptr, size_t len) {
+
+  virtual int send_data(void *ptr, size_t len, bool *pause=nullptr) {
     return 0;
   }
 
   /* Callbacks for libcurl. */
-  static size_t simple_receive_http_header(void *ptr,
-                                           size_t size,
-                                           size_t nmemb,
-                                           void *_info);
   static size_t receive_http_header(void *ptr,
                                     size_t size,
                                     size_t nmemb,
                                     void *_info);
 
-  static size_t simple_receive_http_data(void *ptr,
-                                         size_t size,
-                                         size_t nmemb,
-                                         void *_info);
   static size_t receive_http_data(void *ptr,
                                   size_t size,
                                   size_t nmemb,
                                   void *_info);
 
-  static size_t simple_send_http_data(void *ptr,
-                                      size_t size,
-                                      size_t nmemb,
-                                      void *_info);
   static size_t send_http_data(void *ptr,
                                size_t size,
                                size_t nmemb,
                                void *_info);
+
+  ceph::mutex& get_req_lock();
+
+  /* needs to be called under req_lock() */
+  void _set_write_paused(bool pause);
+  void _set_read_paused(bool pause);
 public:
   static const long HTTP_STATUS_NOSTATUS     = 0;
   static const long HTTP_STATUS_UNAUTHORIZED = 401;
   static const long HTTP_STATUS_NOTFOUND     = 404;
 
+  static constexpr int HTTPCLIENT_IO_READ    = 0x1;
+  static constexpr int HTTPCLIENT_IO_WRITE   = 0x2;
+  static constexpr int HTTPCLIENT_IO_CONTROL = 0x4;
+
   virtual ~RGWHTTPClient();
-  explicit RGWHTTPClient(CephContext *cct)
-    : send_len(0),
-      has_send_len(false),
-      http_status(HTTP_STATUS_NOSTATUS),
-      req_data(nullptr),
-      user_info(nullptr),
-      verify_ssl(true),
-      cct(cct) {
-  }
+  explicit RGWHTTPClient(CephContext *cct,
+                         const std::string& _method,
+                         const RGWEndpoint& _endpoint);
 
-  void set_user_info(void *info) {
-    user_info = info;
-  }
+  std::ostream& gen_prefix(std::ostream& out) const override;
 
-  void *get_user_info() {
-    return user_info;
-  }
 
-  void append_header(const string& name, const string& val) {
-    headers.push_back(pair<string, string>(name, val));
+  void append_header(const std::string& name, const std::string& val) {
+    headers.push_back(std::pair<std::string, std::string>(name, val));
   }
 
   void set_send_length(size_t len) {
@@ -113,24 +210,81 @@ public:
     has_send_len = true;
   }
 
+  void set_send_data_hint(bool hint) {
+    send_data_hint = hint;
+  }
 
   long get_http_status() const {
     return http_status;
+  }
+
+  void set_http_status(long _http_status) {
+    http_status = _http_status;
   }
 
   void set_verify_ssl(bool flag) {
     verify_ssl = flag;
   }
 
-  int process(const char *method, const char *url);
-  int process(const char *url) { return process("GET", url); }
+  // set request timeout in seconds
+  // zero (default) mean that request will never timeout
+  void set_req_timeout(long timeout) {
+    req_timeout = timeout;
+  }
 
-  int wait();
+  // set request for connect phase timeout in seconds. 
+  // ensures wrong url hits don't stay alive post this limit
+  void set_req_connect_timeout(long connect_timeout) {
+    req_connect_timeout = connect_timeout;
+  }
+
+  int process(const DoutPrefixProvider* dpp, optional_yield y);
+
+  int wait(const DoutPrefixProvider* dpp, optional_yield y);
+  void cancel();
+  bool is_done();
+
   rgw_http_req_data *get_req_data() { return req_data; }
 
-  string to_str();
+  std::string to_str();
 
   int get_req_retcode();
+
+  const RGWEndpoint& get_endpoint() const {
+    return endpoint;
+  }
+
+  void set_endpoint(const RGWEndpoint& _endpoint) {
+    endpoint = _endpoint;
+  }
+
+  void set_url(const std::string& _url) {
+    endpoint.set_url(_url);
+  }
+
+  void set_method(const std::string& _method) {
+    method = _method;
+  }
+
+  void set_io_user_info(void *_user_info) override {
+    user_info = _user_info;
+  }
+
+  void *get_io_user_info() override {
+    return user_info;
+  }
+
+  void set_ca_path(const std::string& _ca_path) {
+    ca_path = _ca_path;
+  }
+
+  void set_client_cert(const std::string& _client_cert) {
+    client_cert = _client_cert;
+  }
+
+  void set_client_key(const std::string& _client_key) {
+    client_key = _client_key;
+  }
 };
 
 
@@ -141,8 +295,10 @@ public:
   typedef std::set<header_name_t, ltstr_nocase> header_spec_t;
 
   RGWHTTPHeadersCollector(CephContext * const cct,
-                          const header_spec_t relevant_headers)
-    : RGWHTTPClient(cct),
+                          const std::string& method,
+                          const RGWEndpoint& endpoint,
+                          const header_spec_t &relevant_headers)
+    : RGWHTTPClient(cct, method, endpoint),
       relevant_headers(relevant_headers) {
   }
 
@@ -156,15 +312,7 @@ public:
   }
 
 protected:
-  virtual int receive_header(void *ptr, size_t len) override;
-
-  virtual int receive_data(void *ptr, size_t len) override {
-    return 0;
-  }
-
-  virtual int send_data(void *ptr, size_t len) override {
-    return 0;
-  }
+  int receive_header(void *ptr, size_t len) override;
 
 private:
   const std::set<header_name_t, ltstr_nocase> relevant_headers;
@@ -179,18 +327,22 @@ class RGWHTTPTransceiver : public RGWHTTPHeadersCollector {
 
 public:
   RGWHTTPTransceiver(CephContext * const cct,
+                     const std::string& method,
+                     const RGWEndpoint& endpoint,
                      bufferlist * const read_bl,
                      const header_spec_t intercept_headers = {})
-    : RGWHTTPHeadersCollector(cct, intercept_headers),
+    : RGWHTTPHeadersCollector(cct, method, endpoint, intercept_headers),
       read_bl(read_bl),
       post_data_index(0) {
   }
 
   RGWHTTPTransceiver(CephContext * const cct,
+                     const std::string& method,
+                     const RGWEndpoint& endpoint,
                      bufferlist * const read_bl,
                      const bool verify_ssl,
                      const header_spec_t intercept_headers = {})
-    : RGWHTTPHeadersCollector(cct, intercept_headers),
+    : RGWHTTPHeadersCollector(cct, method, endpoint, intercept_headers),
       read_bl(read_bl),
       post_data_index(0) {
     set_verify_ssl(verify_ssl);
@@ -201,9 +353,9 @@ public:
   }
 
 protected:
-  int send_data(void* ptr, size_t len) override;
+  int send_data(void* ptr, size_t len, bool *pause=nullptr) override;
 
-  int receive_data(void *ptr, size_t len) override {
+  int receive_data(void *ptr, size_t len, bool *pause) override {
     read_bl->append((char *)ptr, len);
     return 0;
   }
@@ -214,30 +366,48 @@ typedef RGWHTTPTransceiver RGWPostHTTPData;
 
 class RGWCompletionManager;
 
+enum RGWHTTPRequestSetState {
+  SET_NOP = 0,
+  SET_WRITE_PAUSED = 1,
+  SET_WRITE_RESUME = 2,
+  SET_READ_PAUSED  = 3,
+  SET_READ_RESUME  = 4,
+};
+
 class RGWHTTPManager {
+  struct set_state {
+    uint64_t id;
+    int bitmask;
+
+    set_state(uint64_t _id, int _bitmask) : id(_id), bitmask(_bitmask) {}
+  };
   CephContext *cct;
   RGWCompletionManager *completion_mgr;
   void *multi_handle;
-  bool is_threaded;
-  atomic_t going_down;
-  atomic_t is_stopped;
+  bool is_started = false;
+  std::atomic<unsigned> going_down { 0 };
+  std::atomic<unsigned> is_stopped { 0 };
 
-  RWLock reqs_lock;
-  map<uint64_t, rgw_http_req_data *> reqs;
-  list<rgw_http_req_data *> unregistered_reqs;
-  map<uint64_t, rgw_http_req_data *> complete_reqs;
-  int64_t num_reqs;
-  int64_t max_threaded_req;
+  ceph::shared_mutex reqs_lock = ceph::make_shared_mutex("RGWHTTPManager::reqs_lock");
+  std::map<uint64_t, rgw_http_req_data *> reqs;
+  std::list<rgw_http_req_data *> unregistered_reqs;
+  ceph::mutex reqs_change_state_lock =
+    ceph::make_mutex("RGWHTTPManager::reqs_change_state_lock");
+  std::list<set_state> reqs_change_state;
+  std::map<uint64_t, rgw_http_req_data *> complete_reqs;
+  int64_t num_reqs = 0;
+  int64_t max_threaded_req = 0;
   int thread_pipe[2];
 
   void register_request(rgw_http_req_data *req_data);
   void complete_request(rgw_http_req_data *req_data);
   void _complete_request(rgw_http_req_data *req_data);
-  void unregister_request(rgw_http_req_data *req_data);
+  bool unregister_request(rgw_http_req_data *req_data);
   void _unlink_request(rgw_http_req_data *req_data);
   void unlink_request(rgw_http_req_data *req_data);
-  void finish_request(rgw_http_req_data *req_data, int r);
+  void finish_request(rgw_http_req_data *req_data, int r, long http_status = -1);
   void _finish_request(rgw_http_req_data *req_data, int r);
+  void _set_req_state(set_state& ss);
   int link_request(rgw_http_req_data *req_data);
 
   void manage_pending_requests();
@@ -246,11 +416,11 @@ class RGWHTTPManager {
     RGWHTTPManager *manager;
 
   public:
-    ReqsThread(RGWHTTPManager *_m) : manager(_m) {}
-    void *entry();
+    explicit ReqsThread(RGWHTTPManager *_m) : manager(_m) {}
+    void *entry() override;
   };
 
-  ReqsThread *reqs_thread;
+  ReqsThread *reqs_thread = nullptr;
 
   void *reqs_thread_entry();
 
@@ -260,16 +430,18 @@ public:
   RGWHTTPManager(CephContext *_cct, RGWCompletionManager *completion_mgr = NULL);
   ~RGWHTTPManager();
 
-  int set_threaded();
+  int start();
   void stop();
 
-  int add_request(RGWHTTPClient *client, const char *method, const char *url);
+  int add_request(RGWHTTPClient *client);
   int remove_request(RGWHTTPClient *client);
-
-  /* only for non threaded case */
-  int process_requests(bool wait_for_data, bool *done);
-
-  int complete_requests();
+  int set_request_state(RGWHTTPClient *client, RGWHTTPRequestSetState state);
 };
 
-#endif
+class RGWHTTP
+{
+public:
+  static int send(RGWHTTPClient *req);
+  static int process(const DoutPrefixProvider* dpp, RGWHTTPClient *req,
+                     optional_yield y);
+};

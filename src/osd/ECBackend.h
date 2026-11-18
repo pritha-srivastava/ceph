@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,111 +13,146 @@
  *
  */
 
-#ifndef ECBACKEND_H
-#define ECBACKEND_H
+#pragma once
 
-#include <boost/intrusive/set.hpp>
 #include <boost/intrusive/list.hpp>
+#include <boost/intrusive/set.hpp>
 
+#include "ECCommon.h"
+#include "ECExtentCache.h"
+#include "ECListener.h"
+#include "ECTypes.h"
+#include "ECUtil.h"
 #include "OSD.h"
 #include "PGBackend.h"
 #include "erasure-code/ErasureCodeInterface.h"
-#include "ECUtil.h"
-#include "ECTransaction.h"
-#include "ExtentCache.h"
+#include "include/buffer.h"
+#include "osd/scrubber/scrub_backend.h"
+#include "Coroutines.h"
+
+/* This file is soon going to be replaced (before next release), so we are going
+ * to simply ignore all deprecated warnings.
+ * */
 
 //forward declaration
 struct ECSubWrite;
 struct ECSubWriteReply;
 struct ECSubRead;
 struct ECSubReadReply;
+class ECSwitch;
 
-struct RecoveryMessages;
-class ECBackend : public PGBackend {
-public:
-  RecoveryHandle *open_recovery_op();
+class ECSwitch;
+
+class ECBackend : public ECCommon {
+ public:
+  PGBackend::RecoveryHandle *open_recovery_op();
 
   void run_recovery_op(
-    RecoveryHandle *h,
-    int priority
+      PGBackend::RecoveryHandle *h,
+      int priority
     );
 
-  void recover_object(
-    const hobject_t &hoid,
-    eversion_t v,
-    ObjectContextRef head,
-    ObjectContextRef obc,
-    RecoveryHandle *h
+  int recover_object(
+      const hobject_t &hoid,
+      eversion_t v,
+      ObjectContextRef head,
+      ObjectContextRef obc,
+      PGBackend::RecoveryHandle *h
     );
 
-  bool handle_message(
-    OpRequestRef op
-    );
-  bool can_handle_while_inactive(
-    OpRequestRef op
-    );
+  bool _handle_message(OpRequestRef op);
+  bool can_handle_while_inactive(OpRequestRef op);
+
   friend struct SubWriteApplied;
   friend struct SubWriteCommitted;
-  void sub_write_applied(
-    ceph_tid_t tid, eversion_t version);
   void sub_write_committed(
-    ceph_tid_t tid, eversion_t version, eversion_t last_complete);
-  void handle_sub_write(
-    pg_shard_t from,
-    OpRequestRef msg,
-    ECSubWrite &op,
-    Context *on_local_applied_sync = 0
+      ceph_tid_t tid,
+      eversion_t version,
+      eversion_t last_complete,
+      const ZTracer::Trace &trace
     );
+  void handle_sub_write(
+      pg_shard_t from,
+      OpRequestRef msg,
+      ECSubWrite &op,
+      const ZTracer::Trace &trace,
+      ECListener &eclistener
+    ) override;
   void handle_sub_read(
+      pg_shard_t from,
+      const ECSubRead &op,
+      ECSubReadReply *reply,
+      const ZTracer::Trace &trace
+    );
+  void handle_sub_read_n_reply(
     pg_shard_t from,
     ECSubRead &op,
-    ECSubReadReply *reply
+    const ZTracer::Trace &trace
+#ifdef WITH_CRIMSON
+    ) override;
+#else
     );
+#endif
   void handle_sub_write_reply(
-    pg_shard_t from,
-    ECSubWriteReply &op
+      pg_shard_t from,
+      const ECSubWriteReply &op,
+      const ZTracer::Trace &trace
     );
   void handle_sub_read_reply(
-    pg_shard_t from,
-    ECSubReadReply &op,
-    RecoveryMessages *m
+      pg_shard_t from,
+      ECSubReadReply &op,
+      const ZTracer::Trace &trace
     );
 
   /// @see ReadOp below
-  void check_recovery_sources(const OSDMapRef& osdmap);
+  void check_recovery_sources(const OSDMapRef &osdmap);
 
   void on_change();
   void clear_recovery_state();
 
-  void on_flushed();
+  void dump_recovery_info(ceph::Formatter *f) const;
 
-  void dump_recovery_info(Formatter *f) const;
-
-  void call_write_ordered(std::function<void(void)> &&cb) override;
+  void call_write_ordered(std::function<void(void)> &&cb) {
+    rmw_pipeline.call_write_ordered(std::move(cb));
+  }
 
   void submit_transaction(
-    const hobject_t &hoid,
-    const object_stat_sum_t &delta_stats,
-    const eversion_t &at_version,
-    PGTransactionUPtr &&t,
-    const eversion_t &trim_to,
-    const eversion_t &roll_forward_to,
-    const vector<pg_log_entry_t> &log_entries,
-    boost::optional<pg_hit_set_history_t> &hset_history,
-    Context *on_local_applied_sync,
-    Context *on_all_applied,
-    Context *on_all_commit,
-    ceph_tid_t tid,
-    osd_reqid_t reqid,
-    OpRequestRef op
+      const hobject_t &hoid,
+      const object_stat_sum_t &delta_stats,
+      const eversion_t &at_version,
+      PGTransactionUPtr &&t,
+      const eversion_t &trim_to,
+      const eversion_t &pg_committed_to,
+      std::vector<pg_log_entry_t> &&log_entries,
+      std::optional<pg_hit_set_history_t> &hset_history,
+      Context *on_all_commit,
+      ceph_tid_t tid,
+      osd_reqid_t reqid,
+      OpRequestRef op
     );
 
   int objects_read_sync(
     const hobject_t &hoid,
+    uint64_t object_size,
+    const std::list<std::pair<ec_align_t,
+    std::pair<ceph::buffer::list*, Context*>>> &to_read,
+    CoroHandles coro
+  );
+
+  int objects_read_local(
+    const hobject_t &hoid,
     uint64_t off,
     uint64_t len,
     uint32_t op_flags,
-    bufferlist *bl);
+    ceph::buffer::list *bl
+  );
+
+  std::pair<uint64_t, uint64_t> extent_to_shard_extent(uint64_t off, uint64_t len);
+
+  int objects_readv_sync(const hobject_t &hoid,
+     std::map<uint64_t, uint64_t>& m,
+     uint32_t op_flags,
+     ceph::buffer::list *bl);
 
   /**
    * Async read mechanism
@@ -126,543 +162,296 @@ public:
    * buffer as well as for calling the callbacks.
    *
    * One tricky bit is that two reads may possibly not read from the same
-   * set of replicas.  This could result in two reads completing in the
+   * std::set of replicas.  This could result in two reads completing in the
    * wrong (from the interface user's point of view) order.  Thus, we
    * maintain a queue of in progress reads (@see in_progress_client_reads)
    * to ensure that we always call the completion callback in order.
    *
-   * Another subtely is that while we may read a degraded object, we will
-   * still only perform a client read from shards in the acting set.  This
+   * Another subtly is that while we may read a degraded object, we will
+   * still only perform a client read from shards in the acting std::set.  This
    * ensures that we won't ever have to restart a client initiated read in
    * check_recovery_sources.
    */
   void objects_read_and_reconstruct(
-    const map<hobject_t, std::list<boost::tuple<uint64_t, uint64_t, uint32_t> >
-    > &reads,
-    bool fast_read,
-    GenContextURef<map<hobject_t,pair<int, extent_map> > &&> &&func);
-
-  friend struct CallClientContexts;
-  struct ClientAsyncReadStatus {
-    unsigned objects_to_read;
-    GenContextURef<map<hobject_t,pair<int, extent_map> > &&> func;
-    map<hobject_t,pair<int, extent_map> > results;
-    explicit ClientAsyncReadStatus(
-      unsigned objects_to_read,
-      GenContextURef<map<hobject_t,pair<int, extent_map> > &&> &&func)
-      : objects_to_read(objects_to_read), func(std::move(func)) {}
-    void complete_object(
-      const hobject_t &hoid,
-      int err,
-      extent_map &&buffers) {
-      assert(objects_to_read);
-      --objects_to_read;
-      assert(!results.count(hoid));
-      results.emplace(hoid, make_pair(err, std::move(buffers)));
-    }
-    bool is_complete() const {
-      return objects_to_read == 0;
-    }
-    void run() {
-      func.release()->complete(std::move(results));
-    }
-  };
-  list<ClientAsyncReadStatus> in_progress_client_reads;
-  void objects_read_async(
-    const hobject_t &hoid,
-    const list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
-		    pair<bufferlist*, Context*> > > &to_read,
-    Context *on_complete,
-    bool fast_read = false);
-
-  template <typename Func>
-  void objects_read_async_no_cache(
-    const map<hobject_t,extent_set> &to_read,
-    Func &&on_complete) {
-    map<hobject_t,std::list<boost::tuple<uint64_t, uint64_t, uint32_t> > > _to_read;
-    for (auto &&hpair: to_read) {
-      auto &l = _to_read[hpair.first];
-      for (auto extent: hpair.second) {
-	l.emplace_back(extent.first, extent.second, 0);
-      }
-    }
-    objects_read_and_reconstruct(
-      _to_read,
-      false,
-      make_gen_lambda_context<
-      map<hobject_t,pair<int, extent_map> > &&, Func>(
-	  std::forward<Func>(on_complete)));
-  }
-  void kick_reads() {
-    while (in_progress_client_reads.size() &&
-	   in_progress_client_reads.front().is_complete()) {
-      in_progress_client_reads.front().run();
-      in_progress_client_reads.pop_front();
-    }
-  }
-
-private:
-  friend struct ECRecoveryHandle;
-  uint64_t get_recovery_chunk_size() const {
-    return ROUND_UP_TO(cct->_conf->osd_recovery_max_chunk,
-			sinfo.get_stripe_width());
-  }
-
-  void get_want_to_read_shards(set<int> *want_to_read) const {
-    const vector<int> &chunk_mapping = ec_impl->get_chunk_mapping();
-    for (int i = 0; i < (int)ec_impl->get_data_chunk_count(); ++i) {
-      int chunk = (int)chunk_mapping.size() > i ? chunk_mapping[i] : i;
-      want_to_read->insert(chunk);
-    }
-  }
+      const std::map<hobject_t, std::list<ec_align_t>> &reads,
+      bool fast_read,
+      uint64_t object_size,
+      GenContextURef<ECCommon::ec_extents_t&&> &&func
+    ) override;
 
   /**
-   * Recovery
+   * Async read mechanism for read-modify-write (RMW) code paths. Here wthe
+   * client already knows the set of shard reads that are required, so these
+   * can be passed in directly.  The "fast_read" mechanism is not needed.
    *
-   * Recovery uses the same underlying read mechanism as client reads
-   * with the slight difference that recovery reads may come from non
-   * acting shards.  Thus, check_recovery_sources may wind up calling
-   * cancel_pull for a read originating with RecoveryOp.
-   *
-   * The recovery process is expressed as a state machine:
-   * - IDLE: Nothing is currently in progress, reads will be started and
-   *         we will transition to READING
-   * - READING: We are awaiting a pending read op.  Once complete, we will
-   *            decode the buffers and proceed to WRITING
-   * - WRITING: We are awaiting a completed push.  Once complete, we will
-   *            either transition to COMPLETE or to IDLE to continue.
-   * - COMPLETE: complete
-   *
-   * We use the existing Push and PushReply messages and structures to
-   * handle actually shuffling the data over to the replicas.  recovery_info
-   * and recovery_progress are expressed in terms of the logical offset
-   * space except for data_included which is in terms of the chunked object
-   * space (to match the passed buffer).
-   *
-   * xattrs are requested on the first read and used to initialize the
-   * object_context if missing on completion of the first read.
-   *
-   * In order to batch up reads and writes, we batch Push, PushReply,
-   * Transaction, and reads in a RecoveryMessages object which is passed
-   * among the recovery methods.
+   * Otherwise this is the same as objects_read_and_reconstruct.
    */
-  struct RecoveryOp {
-    hobject_t hoid;
-    eversion_t v;
-    set<pg_shard_t> missing_on;
-    set<shard_id_t> missing_on_shards;
+  void objects_read_and_reconstruct_for_rmw(
+      std::map<hobject_t, read_request_t> &&reads,
+      GenContextURef<ECCommon::ec_extents_t&&> &&func
+    ) override;
 
-    ObjectRecoveryInfo recovery_info;
-    ObjectRecoveryProgress recovery_progress;
+  void objects_read_async(
+      const hobject_t &hoid,
+      uint64_t object_size,
+      const std::list<std::pair<ec_align_t,
+                                std::pair<ceph::buffer::list*, Context*>>> &
+      to_read,
+      Context *on_complete,
+      bool fast_read = false
+    );
 
-    enum state_t { IDLE, READING, WRITING, COMPLETE } state;
+  bool ec_can_decode(const shard_id_set &available_shards) const;
+  shard_id_map<bufferlist> ec_encode_acting_set(const bufferlist &in_bl) const;
+  shard_id_map<bufferlist> ec_decode_acting_set(
+      const shard_id_map<bufferlist> &shard_map, int chunk_size) const;
+  ECUtil::stripe_info_t ec_get_sinfo() const;
 
-    static const char* tostr(state_t state) {
-      switch (state) {
-      case ECBackend::RecoveryOp::IDLE:
-	return "IDLE";
-	break;
-      case ECBackend::RecoveryOp::READING:
-	return "READING";
-	break;
-      case ECBackend::RecoveryOp::WRITING:
-	return "WRITING";
-	break;
-      case ECBackend::RecoveryOp::COMPLETE:
-	return "COMPLETE";
-	break;
-      default:
-	ceph_abort();
-	return "";
-      }
-    }
+ private:
+  friend struct ECRecoveryHandle;
 
-    // must be filled if state == WRITING
-    map<int, bufferlist> returned_data;
-    map<string, bufferlist> xattrs;
-    ECUtil::HashInfoRef hinfo;
-    ObjectContextRef obc;
-    set<pg_shard_t> waiting_on_pushes;
+  void kick_reads();
 
-    // valid in state READING
-    pair<uint64_t, uint64_t> extent_requested;
-
-    void dump(Formatter *f) const;
-
-    RecoveryOp() : state(IDLE) {}
-  };
-  friend ostream &operator<<(ostream &lhs, const RecoveryOp &rhs);
-  map<hobject_t, RecoveryOp> recovery_ops;
-
-  void continue_recovery_op(
-    RecoveryOp &op,
-    RecoveryMessages *m);
-  void dispatch_recovery_messages(RecoveryMessages &m, int priority);
-  friend struct OnRecoveryReadComplete;
-  void handle_recovery_read_complete(
+  int _objects_read_sync(
     const hobject_t &hoid,
-    boost::tuple<uint64_t, uint64_t, map<pg_shard_t, bufferlist> > &to_read,
-    boost::optional<map<string, bufferlist> > attrs,
-    RecoveryMessages *m);
-  void handle_recovery_push(
-    PushOp &op,
-    RecoveryMessages *m);
-  void handle_recovery_push_reply(
-    PushReplyOp &op,
-    pg_shard_t from,
-    RecoveryMessages *m);
+    uint64_t off,
+    uint64_t len,
+    uint32_t op_flags,
+    ceph::buffer::list *bl
+  );
 
 public:
-  /**
-   * Low level async read mechanism
-   *
-   * To avoid duplicating the logic for requesting and waiting for
-   * multiple object shards, there is a common async read mechanism
-   * taking a map of hobject_t->read_request_t which defines callbacks
-   * taking read_result_ts as arguments.
-   *
-   * tid_to_read_map gives open read ops.  check_recovery_sources uses
-   * shard_to_read_map and ReadOp::source_to_obj to restart reads
-   * involving down osds.
-   *
-   * The user is responsible for specifying replicas on which to read
-   * and for reassembling the buffer on the other side since client
-   * reads require the original object buffer while recovery only needs
-   * the missing pieces.
-   *
-   * Rather than handling reads on the primary directly, we simply send
-   * ourselves a message.  This avoids a dedicated primary path for that
-   * part.
-   */
-  struct read_result_t {
-    int r;
-    map<pg_shard_t, int> errors;
-    boost::optional<map<string, bufferlist> > attrs;
-    list<
-      boost::tuple<
-	uint64_t, uint64_t, map<pg_shard_t, bufferlist> > > returned;
-    read_result_t() : r(0) {}
+  struct ECRecoveryBackend : RecoveryBackend {
+    ECRecoveryBackend(CephContext *cct,
+                      const coll_t &coll,
+                      ceph::ErasureCodeInterfaceRef ec_impl,
+                      const ECUtil::stripe_info_t &sinfo,
+                      ReadPipeline &read_pipeline,
+                      PGBackend::Listener *parent,
+                      ECBackend *)
+      : RecoveryBackend(cct, coll, std::move(ec_impl), sinfo, read_pipeline,
+                        parent->get_eclistener()),
+        parent(parent) {}
+
+    struct ECRecoveryHandle;
+
+    ECRecoveryHandle *open_recovery_op();
+
+    void run_recovery_op(
+      ECRecoveryHandle &h,
+      int priority);
+
+    void commit_txn_send_replies(
+        ceph::os::Transaction &&txn,
+        std::map<int, MOSDPGPushReply*> replies) override;
+
+    void maybe_load_obc(
+      const std::map<std::string, ceph::bufferlist, std::less<>>& raw_attrs,
+      RecoveryOp &op) final;
+
+    PGBackend::Listener *get_parent() const { return parent; }
+
+   private:
+    PGBackend::Listener *parent;
   };
-  struct read_request_t {
-    const list<boost::tuple<uint64_t, uint64_t, uint32_t> > to_read;
-    const set<pg_shard_t> need;
-    const bool want_attrs;
-    GenContext<pair<RecoveryMessages *, read_result_t& > &> *cb;
-    read_request_t(
-      const list<boost::tuple<uint64_t, uint64_t, uint32_t> > &to_read,
-      const set<pg_shard_t> &need,
-      bool want_attrs,
-      GenContext<pair<RecoveryMessages *, read_result_t& > &> *cb)
-      : to_read(to_read), need(need), want_attrs(want_attrs),
-	cb(cb) {}
-  };
-  friend ostream &operator<<(ostream &lhs, const read_request_t &rhs);
 
-  struct ReadOp {
-    int priority;
-    ceph_tid_t tid;
-    OpRequestRef op; // may be null if not on behalf of a client
-    // True if redundant reads are issued, false otherwise,
-    // this is useful to tradeoff some resources (redundant ops) for
-    // low latency read, especially on relatively idle cluster
-    bool do_redundant_reads;
-    // True if reading for recovery which could possibly reading only a subset
-    // of the available shards.
-    bool for_recovery;
+  friend std::ostream &operator<<(std::ostream &lhs,
+                                  const RecoveryBackend::RecoveryOp &rhs
+    );
+  friend struct RecoveryMessages;
+  friend struct OnRecoveryReadComplete;
+  friend struct RecoveryReadCompleter;
 
-    map<hobject_t, read_request_t> to_read;
-    map<hobject_t, read_result_t> complete;
+  void handle_recovery_push(
+      const PushOp &op,
+      RecoveryMessages *m,
+      bool is_repair
+    );
 
-    map<hobject_t, set<pg_shard_t>> obj_to_source;
-    map<pg_shard_t, set<hobject_t> > source_to_obj;
+  PGBackend::Listener *parent;
+  CephContext *cct;
+  ECSwitch *switcher;
+  ReadPipeline read_pipeline;
+  RMWPipeline rmw_pipeline;
+  ECRecoveryBackend recovery_backend;
 
-    void dump(Formatter *f) const;
+  ceph::ErasureCodeInterfaceRef ec_impl;
 
-    set<pg_shard_t> in_progress;
-
-    ReadOp(
-      int priority,
-      ceph_tid_t tid,
-      bool do_redundant_reads,
-      bool for_recovery,
-      OpRequestRef op,
-      map<hobject_t, read_request_t> &&_to_read)
-      : priority(priority), tid(tid), op(op), do_redundant_reads(do_redundant_reads),
-	for_recovery(for_recovery), to_read(std::move(_to_read)) {
-      for (auto &&hpair: to_read) {
-	auto &returned = complete[hpair.first].returned;
-	for (auto &&extent: hpair.second.to_read) {
-	  returned.push_back(
-	    boost::make_tuple(
-	      extent.get<0>(),
-	      extent.get<1>(),
-	      map<pg_shard_t, bufferlist>()));
-	}
-      }
-    }
-    ReadOp() = delete;
-    ReadOp(const ReadOp &) = default;
-    ReadOp(ReadOp &&) = default;
-  };
-  friend struct FinishReadOp;
-  void filter_read_op(
-    const OSDMapRef& osdmap,
-    ReadOp &op);
-  void complete_read_op(ReadOp &rop, RecoveryMessages *m);
-  friend ostream &operator<<(ostream &lhs, const ReadOp &rhs);
-  map<ceph_tid_t, ReadOp> tid_to_read_map;
-  map<pg_shard_t, set<ceph_tid_t> > shard_to_read_map;
-  void start_read_op(
-    int priority,
-    map<hobject_t, read_request_t> &to_read,
-    OpRequestRef op,
-    bool do_redundant_reads, bool for_recovery);
-
-  void do_read_op(ReadOp &rop);
-  int send_all_remaining_reads(
-    const hobject_t &hoid,
-    ReadOp &rop);
-
-
-  /**
-   * Client writes
-   *
-   * ECTransaction is responsible for generating a transaction for
-   * each shard to which we need to send the write.  As required
-   * by the PGBackend interface, the ECBackend write mechanism
-   * passes trim information with the write and last_complete back
-   * with the reply.
-   *
-   * As with client reads, there is a possibility of out-of-order
-   * completions. Thus, callbacks and completion are called in order
-   * on the writing list.
-   */
-  struct Op : boost::intrusive::list_base_hook<> {
-    /// From submit_transaction caller, decribes operation
-    hobject_t hoid;
-    object_stat_sum_t delta_stats;
-    eversion_t version;
-    eversion_t trim_to;
-    boost::optional<pg_hit_set_history_t> updated_hit_set_history;
-    vector<pg_log_entry_t> log_entries;
-    ceph_tid_t tid;
-    osd_reqid_t reqid;
-
-    eversion_t roll_forward_to; /// Soon to be generated internally
-
-    /// Ancillary also provided from submit_transaction caller
-    map<hobject_t, ObjectContextRef> obc_map;
-
-    /// see call_write_ordered
-    std::list<std::function<void(void)> > on_write;
-
-    /// Generated internally
-    set<hobject_t> temp_added;
-    set<hobject_t> temp_cleared;
-
-    ECTransaction::WritePlan plan;
-    bool requires_rmw() const { return !plan.to_read.empty(); }
-    bool invalidates_cache() const { return plan.invalidates_cache; }
-
-    // must be true if requires_rmw(), must be false if invalidates_cache()
-    bool using_cache = false;
-
-    /// In progress read state;
-    map<hobject_t,extent_set> pending_read; // subset already being read
-    map<hobject_t,extent_set> remote_read;  // subset we must read
-    map<hobject_t,extent_map> remote_read_result;
-    bool read_in_progress() const {
-      return !remote_read.empty() && remote_read_result.empty();
-    }
-
-    /// In progress write state
-    set<pg_shard_t> pending_commit;
-    set<pg_shard_t> pending_apply;
-    bool write_in_progress() const {
-      return !pending_commit.empty() || !pending_apply.empty();
-    }
-
-    /// optional, may be null, for tracking purposes
-    OpRequestRef client_op;
-
-    /// pin for cache
-    ExtentCache::write_pin pin;
-
-    /// Callbacks
-    Context *on_local_applied_sync = nullptr;
-    Context *on_all_applied = nullptr;
-    Context *on_all_commit = nullptr;
-    ~Op() {
-      delete on_local_applied_sync;
-      delete on_all_applied;
-      delete on_all_commit;
-    }
-  };
-  using op_list = boost::intrusive::list<Op>;
-  friend ostream &operator<<(ostream &lhs, const Op &rhs);
-
-  ExtentCache cache;
-  map<ceph_tid_t, Op> tid_to_op_map; /// Owns Op structure
-
-  /**
-   * We model the possible rmw states as a set of waitlists.
-   * All writes at this time complete in order, so a write blocked
-   * at waiting_state blocks all writes behind it as well (same for
-   * other states).
-   *
-   * Future work: We can break this up into a per-object pipeline
-   * (almost).  First, provide an ordering token to submit_transaction
-   * and require that all operations within a single transaction take
-   * place on a subset of hobject_t space partitioned by that token
-   * (the hashid seem about right to me -- even works for temp objects
-   * if you recall that a temp object created for object head foo will
-   * only ever be referenced by other transactions on foo and aren't
-   * reused).  Next, factor this part into a class and maintain one per
-   * ordering token.  Next, fixup PrimaryLogPG's repop queue to be
-   * partitioned by ordering token.  Finally, refactor the op pipeline
-   * so that the log entries passed into submit_tranaction aren't
-   * versioned.  We can't assign versions to them until we actually
-   * submit the operation.  That's probably going to be the hard part.
-   */
-  class pipeline_state_t {
-    enum {
-      CACHE_VALID = 0,
-      CACHE_INVALID = 1
-    } pipeline_state = CACHE_VALID;
-  public:
-    bool caching_enabled() const {
-      return pipeline_state == CACHE_VALID;
-    }
-    bool cache_invalid() const {
-      return !caching_enabled();
-    }
-    void invalidate() {
-      pipeline_state = CACHE_INVALID;
-    }
-    void clear() {
-      pipeline_state = CACHE_VALID;
-    }
-    friend ostream &operator<<(ostream &lhs, const pipeline_state_t &rhs);
-  } pipeline_state;
-
-
-  op_list waiting_state;        /// writes waiting on pipe_state
-  op_list waiting_reads;        /// writes waiting on partial stripe reads
-  op_list waiting_commit;       /// writes waiting on initial commit
-  eversion_t completed_to;
-  eversion_t committed_to;
-  void start_rmw(Op *op, PGTransactionUPtr &&t);
-  bool try_state_to_reads();
-  bool try_reads_to_commit();
-  bool try_finish_rmw();
-  void check_ops();
-
-  ErasureCodeInterfaceRef ec_impl;
-
+  PGBackend::Listener *get_parent() { return parent; }
 
   /**
    * ECRecPred
    *
-   * Determines the whether _have is suffient to recover an object
+   * Determines whether _have is sufficient to recover an object
    */
   class ECRecPred : public IsPGRecoverablePredicate {
-    set<int> want;
-    ErasureCodeInterfaceRef ec_impl;
-  public:
-    explicit ECRecPred(ErasureCodeInterfaceRef ec_impl) : ec_impl(ec_impl) {
-      for (unsigned i = 0; i < ec_impl->get_chunk_count(); ++i) {
-	want.insert(i);
-      }
+    shard_id_set want;
+    const ECUtil::stripe_info_t *sinfo;
+    ceph::ErasureCodeInterfaceRef ec_impl;
+
+   public:
+    explicit ECRecPred(const ECUtil::stripe_info_t *sinfo,
+                       ceph::ErasureCodeInterfaceRef ec_impl) :
+      sinfo(sinfo), ec_impl(ec_impl) {
+      want.insert_range(shard_id_t(0), sinfo->get_k_plus_m());
     }
-    bool operator()(const set<pg_shard_t> &_have) const {
-      set<int> have;
-      for (set<pg_shard_t>::const_iterator i = _have.begin();
-	   i != _have.end();
-	   ++i) {
-	have.insert(i->shard);
+
+    bool operator()(const std::set<pg_shard_t> &_have) const override {
+      shard_id_set have;
+      for (pg_shard_t p: _have) {
+        have.insert(p.shard);
       }
-      set<int> min;
-      return ec_impl->minimum_to_decode(want, have, &min) == 0;
+      shard_id_set min;
+
+      return ec_impl->minimum_to_decode(want, have, min) == 0;
     }
   };
-  IsPGRecoverablePredicate *get_is_recoverable_predicate() {
-    return new ECRecPred(ec_impl);
+
+  std::unique_ptr<ECRecPred> get_is_recoverable_predicate() const {
+    return std::make_unique<ECRecPred>(&sinfo, ec_impl);
+  }
+
+  unsigned get_ec_data_chunk_count() const {
+    return sinfo.get_k();
+  }
+
+  int get_ec_stripe_chunk_size() const {
+    return sinfo.get_chunk_size();
+  }
+
+  bool get_ec_supports_crc_encode_decode() const {
+    return sinfo.supports_encode_decode_crcs();
+  }
+
+  uint64_t object_size_to_shard_size(const uint64_t size, shard_id_t shard
+    ) const {
+    return sinfo.object_size_to_shard_size(size, shard);
+  }
+
+  uint64_t get_is_nonprimary_shard(shard_id_t shard) const {
+    return sinfo.is_nonprimary_shard(shard);
   }
 
   /**
    * ECReadPred
    *
-   * Determines the whether _have is suffient to read an object
+   * Determines the whether _have is sufficient to read an object
    */
   class ECReadPred : public IsPGReadablePredicate {
     pg_shard_t whoami;
     ECRecPred rec_pred;
-  public:
+
+   public:
     ECReadPred(
-      pg_shard_t whoami,
-      ErasureCodeInterfaceRef ec_impl) : whoami(whoami), rec_pred(ec_impl) {}
-    bool operator()(const set<pg_shard_t> &_have) const {
+        pg_shard_t whoami,
+        const ECUtil::stripe_info_t *sinfo,
+        ceph::ErasureCodeInterfaceRef ec_impl) : whoami(whoami), rec_pred(sinfo, ec_impl) {}
+
+    bool operator()(const std::set<pg_shard_t> &_have) const override {
       return _have.count(whoami) && rec_pred(_have);
     }
   };
-  IsPGReadablePredicate *get_is_readable_predicate() {
-    return new ECReadPred(get_parent()->whoami_shard(), ec_impl);
-  }
 
+  std::unique_ptr<ECReadPred>
+  get_is_readable_predicate(pg_shard_t whoami) const {
+    return std::make_unique<ECReadPred>(whoami, &sinfo, ec_impl);
+  }
 
   const ECUtil::stripe_info_t sinfo;
-  /// If modified, ensure that the ref is held until the update is applied
-  SharedPtrRegistry<hobject_t, ECUtil::HashInfo> unstable_hashinfo_registry;
-  ECUtil::HashInfoRef get_hash_info(const hobject_t &hoid, bool checks = true,
-				    const map<string,bufferptr> *attr = NULL);
 
-public:
+  std::tuple<
+    int,
+    std::map<std::string, ceph::bufferlist, std::less<>>,
+    size_t
+  > get_attrs_n_size_from_disk(const hobject_t &hoid);
+
+ public:
+  int object_stat(const hobject_t &hoid, struct stat *st);
   ECBackend(
-    PGBackend::Listener *pg,
-    coll_t coll,
-    ObjectStore::CollectionHandle &ch,
-    ObjectStore *store,
-    CephContext *cct,
-    ErasureCodeInterfaceRef ec_impl,
-    uint64_t stripe_width);
-
-  /// Returns to_read replicas sufficient to reconstruct want
-  int get_min_avail_to_read_shards(
-    const hobject_t &hoid,     ///< [in] object
-    const set<int> &want,      ///< [in] desired shards
-    bool for_recovery,         ///< [in] true if we may use non-acting replicas
-    bool do_redundant_reads,   ///< [in] true if we want to issue redundant reads to reduce latency
-    set<pg_shard_t> *to_read   ///< [out] shards to read
-    ); ///< @return error code, 0 on success
-
-  int get_remaining_shards(
-    const hobject_t &hoid,
-    const set<int> &avail,
-    set<pg_shard_t> *to_read);
+      PGBackend::Listener *pg,
+      CephContext *cct,
+      ceph::ErasureCodeInterfaceRef ec_impl,
+      uint64_t stripe_width,
+      ECSwitch *s,
+      ECExtentCache::LRU &ec_extent_cache_lru
+    );
 
   int objects_get_attrs(
-    const hobject_t &hoid,
-    map<string, bufferlist> *out);
+      const hobject_t &hoid,
+      std::map<std::string, ceph::buffer::list, std::less<>> *out
+    );
 
-  void rollback_append(
-    const hobject_t &hoid,
-    uint64_t old_size,
-    ObjectStore::Transaction *t);
-
-  bool scrub_supported() { return true; }
   bool auto_repair_supported() const { return true; }
 
-  void be_deep_scrub(
-    const hobject_t &obj,
-    uint32_t seed,
-    ScrubMap::object &o,
-    ThreadPool::TPHandle &handle);
-  uint64_t be_get_ondisk_size(uint64_t logical_size) {
-    return sinfo.logical_to_next_chunk_offset(logical_size);
-  }
-  void _failed_push(const hobject_t &hoid,
-    pair<RecoveryMessages *, ECBackend::read_result_t &> &in);
-};
-ostream &operator<<(ostream &lhs, const ECBackend::pipeline_state_t &rhs);
+  int be_deep_scrub(
+      const Scrub::ScrubCounterSet& io_counters,
+      const hobject_t &poid,
+      ScrubMap &map,
+      ScrubMapBuilder &pos,
+      ScrubMap::object &o
+    );
 
-#endif
+  uint64_t be_get_ondisk_size(uint64_t logical_size, shard_id_t shard_id,
+      bool object_is_legacy_ec) const {
+    if (object_is_legacy_ec) {
+      // In legacy EC, all shards were padded to the next chunk boundry.
+      return sinfo.ro_offset_to_next_chunk_offset(logical_size);
+    }
+    return object_size_to_shard_size(logical_size, shard_id);
+  }
+
+  bool remove_ec_omap_journal_entry(const hobject_t &hoid, const ECOmapJournalEntry &entry);
+  std::pair<gen_t, bool> omap_get_generation(const hobject_t &hoid);
+  void omap_trim_delete_from_journal(const hobject_t &hoid, const version_t version);
+
+  using OmapIterFunction = std::function<ObjectStore::omap_iter_ret_t(std::string_view, std::string_view)>;
+  int omap_iterate (
+    ObjectStore::CollectionHandle &c_, ///< [in] collection
+    const ghobject_t &oid, ///< [in] object
+    const ObjectStore::omap_iter_seek_t &start_from, ///< [in] where the iterator should point to at the beginning
+    const OmapIterFunction &f, ///< [in] function to call for each key/value pair
+    ObjectStore *store
+  );
+
+  int omap_get_values(
+    ObjectStore::CollectionHandle &c_, ///< [in] collection
+    const ghobject_t &oid,              ///< [in] object
+    const std::set<std::string> &keys,  ///< [in] keys to get
+    std::map<std::string, ceph::buffer::list> *out, ///< [out] returned key/values
+    ObjectStore *store
+  );
+
+  int omap_get_header(
+    ObjectStore::CollectionHandle &c_,    ///< [in] Collection containing oid
+    const ghobject_t &oid,   ///< [in] Object containing omap
+    ceph::buffer::list *header,      ///< [out] omap header
+    bool allow_eio, ///< [in] don't assert on eio
+    ObjectStore *store
+  );
+
+  int omap_get(
+    ObjectStore::CollectionHandle &c_,    ///< [in] Collection containing oid
+    const ghobject_t &oid,   ///< [in] Object containing omap
+    ceph::buffer::list *header,      ///< [out] omap header
+    std::map<std::string, ceph::buffer::list> *out, /// < [out] Key to value map
+    ObjectStore *store
+  );
+
+  int omap_check_keys(
+    ObjectStore::CollectionHandle &c_,    ///< [in] Collection containing oid
+    const ghobject_t &oid,   ///< [in] Object containing omap
+    const std::set<std::string> &keys, ///< [in] Keys to check
+    std::set<std::string> *out,         ///< [out] Subset of keys defined on oid
+    ObjectStore *store
+  );
+
+  static bool should_be_removed(
+    const std::map<std::string, std::optional<std::string>>& removed_ranges,
+    const std::string_view key
+  );
+
+  static void remove_keys_in_ranges(
+    const std::map<std::string, std::optional<std::string>>& removed_ranges,
+    std::map<std::string, ceph::buffer::list>* out
+  );
+};

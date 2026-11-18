@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <iostream>
 #include <string.h>
@@ -14,6 +14,8 @@
 #include "common/sctp_crc32.h"
 #include "common/crc32c_intel_baseline.h"
 #include "common/crc32c_aarch64.h"
+#include "common/crc32c_riscv.h"
+#include "common/crc32c_ppc.h"
 
 TEST(Crc32c, Small) {
   const char *a = "foo bar baz";
@@ -31,6 +33,8 @@ TEST(Crc32c, PartialWord) {
   memset((void *)b, 1, 35);
   ASSERT_EQ(2715569182u, ceph_crc32c(0, (unsigned char *)a, 5));
   ASSERT_EQ(440531800u, ceph_crc32c(0, (unsigned char *)b, 35));
+  free((void*)a);
+  free((void*)b);
 }
 
 TEST(Crc32c, Big) {
@@ -39,6 +43,7 @@ TEST(Crc32c, Big) {
   memset(a, 1, len);
   ASSERT_EQ(31583199u, ceph_crc32c(0, (unsigned char *)a, len));
   ASSERT_EQ(1400919119u, ceph_crc32c(1234, (unsigned char *)a, len));
+  free(a);
 }
 
 TEST(Crc32c, Performance) {
@@ -81,6 +86,7 @@ TEST(Crc32c, Performance) {
     std::cout << "intel baseline = " << rate << " MB/sec" << std::endl;
     ASSERT_EQ(261108528u, val);
   }
+#if defined(__arm__) || defined(__aarch64__)
   if (ceph_arch_aarch64_crc32) // Skip if CRC32C instructions are not defined.
   {
     utime_t start = ceph_clock_now();
@@ -90,7 +96,30 @@ TEST(Crc32c, Performance) {
     std::cout << "aarch64 = " << rate << " MB/sec" << std::endl;
     ASSERT_EQ(261108528u, val);
   }
-
+#endif
+#if defined(__riscv) && defined(HAVE_RISCV_ZVBC)
+  if (ceph_arch_riscv_zbc && ceph_arch_riscv_zvbc)
+  {
+    utime_t start = ceph_clock_now();
+    unsigned val = ceph_crc32c_riscv(0, (unsigned char *)a, len);
+    utime_t end = ceph_clock_now();
+    float rate = (float)len / (float)(1024*1024) / (float)(end - start);
+    std::cout << "riscv = " << rate << " MB/sec" << std::endl;
+    ASSERT_EQ(261108528u, val);
+  }
+#endif
+#if defined(__PPC64__) || defined(__powerpc64__)
+  if (ceph_arch_ppc_crc32) // Skip if CRC32C instructions are not defined.
+  {
+    utime_t start = ceph_clock_now();
+    unsigned val = ceph_crc32c_ppc(0, (unsigned char *)a, len);
+    utime_t end = ceph_clock_now();
+    float rate = (float)len / (float)(1024*1024) / (float)(end - start);
+    std::cout << "ppc64le = " << rate << " MB/sec" << std::endl;
+    ASSERT_EQ(261108528u, val);
+  }
+#endif
+  free(a);
 }
 
 
@@ -264,4 +293,116 @@ TEST(Crc32c, RangeNull) {
     crc = ceph_crc32c(crc, NULL, len-i);
     ASSERT_EQ(crc, *check);
   }
+}
+
+double estimate_clock_resolution()
+{
+  volatile char* p = (volatile char*)malloc(1024);
+  utime_t start;
+  utime_t end;
+  std::set<double> S;
+  for(int j=10; j<200; j+=1) {
+    start = ceph_clock_now();
+    for (int i=0; i<j; i++)
+      p[i]=1;
+    end = ceph_clock_now();
+    S.insert((double)(end - start));
+  }
+  auto head = S.begin();
+  auto tail = S.end();
+  for (size_t i=0; i<S.size()/4; i++) {
+    ++head;
+    --tail;
+  }
+  double v = *(head++);
+  double range=0;
+  while (head != tail) {
+    range = std::max(range, *head - v);
+    v = *head;
+    head++;
+  }
+  free((void*)p);
+  return range;
+}
+
+TEST(Crc32c, zeros_performance_compare) {
+  double resolution = estimate_clock_resolution();
+  utime_t start;
+  utime_t pre_start;
+  utime_t end;
+  double time_adjusted;
+  using namespace std::chrono;
+  high_resolution_clock::now();
+  for (size_t scale=1; scale < 31; scale++)
+  {
+    size_t size = (1<<scale) + rand()%(1<<scale);
+    pre_start = ceph_clock_now();
+    start = ceph_clock_now();
+    uint32_t crc_a = ceph_crc32c(111, nullptr, size);
+    end = ceph_clock_now();
+    time_adjusted = (end - start) - (start - pre_start);
+    std::cout << "regular  method. size=" << size << " time= " << (double)(end-start)
+        << " at " << (double)size/(1024*1024)/(time_adjusted) << " MB/sec"
+        << " error=" << resolution / time_adjusted * 100 << "%" << std::endl;
+
+    pre_start = ceph_clock_now();
+    start = ceph_clock_now();
+#ifdef HAVE_POWER8
+    uint32_t crc_b = ceph_crc32c_zeros(111, size);
+#else
+    uint32_t crc_b = ceph_crc32c_func(111, nullptr, size);
+#endif
+    end = ceph_clock_now();
+    time_adjusted = (end - start) - (start - pre_start);
+#ifdef HAVE_POWER8
+    std::cout << "ceph_crc32c_zeros method. size=" << size << " time=" 
+        << (double)(end-start) << " at " << (double)size/(1024*1024)/(time_adjusted) 
+        << " MB/sec" << " error=" << resolution / time_adjusted * 100 << "%" 
+        << std::endl;
+#else
+    std::cout << "fallback method. size=" << size << " time=" << (double)(end-start)
+        << " at " << (double)size/(1024*1024)/(time_adjusted) << " MB/sec"
+        << " error=" << resolution / time_adjusted * 100 << "%" << std::endl;
+#endif
+    EXPECT_EQ(crc_a, crc_b);
+  }
+}
+
+TEST(Crc32c, zeros_performance) {
+  constexpr size_t ITER=100000;
+  utime_t start;
+  utime_t end;
+
+  start = ceph_clock_now();
+  for (size_t i=0; i<ITER; i++)
+  {
+    for (size_t scale=1; scale < 31; scale++)
+    {
+      size_t size = (1<<scale) + rand() % (1<<scale);
+      ceph_crc32c(rand(), nullptr, size);
+    }
+  }
+  end = ceph_clock_now();
+  std::cout << "iterations="<< ITER*31 << " time=" << (double)(end-start) << std::endl;
+
+}
+
+TEST(Crc32c, OmapDigestLengthFieldIsLittleEndian) {
+  // Verify that ceph_crc32c fed a ceph_le32 length produces the same result
+  // as the encode() wire format. This is the invariant that crc32_netstring
+  // must satisfy to match the pre-20.x bufferhash/encode() omap digest path.
+  // Would have caught https://tracker.ceph.com/issues/79104
+  const std::string_view data = "csi.volume.95123f9a-968b-4383-8ddd-c8c6c95e2bac";
+
+  // Method 1: ceph_le32 length prefix (the fix)
+  ceph_le32 le_len{static_cast<uint32_t>(data.length())};
+  uint32_t crc_le = ceph_crc32c(0xFFFFFFFF, (unsigned char*)&le_len, sizeof(le_len));
+  crc_le = ceph_crc32c(crc_le, (unsigned char*)data.data(), data.length());
+
+  // Method 2: encode() into bufferlist (the pre-20.x reference path)
+  bufferlist bl;
+  encode(std::string(data), bl);
+  uint32_t crc_encode = bl.crc32c(0xFFFFFFFF);
+
+  EXPECT_EQ(crc_le, crc_encode);
 }

@@ -17,10 +17,11 @@ Synopsis
   [ --gen-print-key ]
   [ --import-keyring *otherkeyringfile* ]
   [ -n | --name *entityname* ]
-  [ -u | --set-uid *auid* ]
   [ -a | --add-key *base64_key* ]
+  [ -t | --key-type *KEY_TYPE* ]
   [ --cap *subsystem* *capability* ]
   [ --caps *capfile* ]
+  [ --mode *mode* ]
 
 
 Description
@@ -32,7 +33,7 @@ possibly an associated capability specification. Each key is
 associated with an entity name, of the form
 ``{client,mon,mds,osd}.name``.
 
-**WARNING** Ceph provides authentication and protection against
+**WARNING:** Ceph provides authentication and protection against
 man-in-the-middle attacks once secret keys are in place.  However,
 data over the wire is not encrypted, which may include the messages
 used to configure said keys. The system is primarily intended to be
@@ -71,10 +72,6 @@ Options
 
    specify entityname to operate on
 
-.. option:: -u, --set-uid *auid*
-
-   sets the auid (authenticated user id) for the specified entityname
-
 .. option:: -a, --add-key *base64_key*
 
    will add an encoded key to the keyring
@@ -87,6 +84,16 @@ Options
 
    will set all of capabilities associated with a given key, for all subsystems
 
+.. option:: --mode *mode*
+
+   will set the desired file mode to the keyring e.g.: 0644, defaults to 0600
+
+.. option:: -t, --key-type *KEY_TYPE*
+
+   Set the key-type for generated keys. Can be one of "aes", "aes256k", or
+   "preferred" (always "aes256k": ceph-authtool works offline and cannot
+   see the cluster's ``auth_preferred_cipher``).  Defaults to "preferred".
+
 
 Capabilities
 ============
@@ -95,7 +102,7 @@ The subsystem is the name of a Ceph subsystem: ``mon``, ``mds``, or
 ``osd``.
 
 The capability is a string describing what the given user is allowed
-to do. This takes the form of a comma separated list of allow
+to do. This takes the form of a comma-separated list of allow
 clauses with a permission specifier containing one or more of rwx for
 read, write, and execute permission. The ``allow *`` grants full
 superuser permissions for the given subsystem.
@@ -139,7 +146,9 @@ In general, an osd capability follows the grammar::
 
         osdcap  := grant[,grant...]
         grant   := allow (match capspec | capspec match)
-        match   := [pool[=]<poolname> | object_prefix <prefix>]
+        match   := [ pool[=]<poolname> | object_prefix <prefix>
+                    | namespace[=]<rados-namespace>
+                    | tag <application-name> <key>=<value> ]
         capspec := * | [r][w][x] [class-read] [class-write]
 
 The capspec determines what kind of operations the entity can perform::
@@ -149,7 +158,7 @@ The capspec determines what kind of operations the entity can perform::
     x           = can call any class method (same as class-read class-write)
     class-read  = can call class methods that are reads
     class-write = can call class methods that are writes
-    *           = equivalent to rwx, plus the ability to run osd admin commands,
+    * or "all"  = equivalent to rwx, plus the ability to run osd admin commands,
                   i.e. ceph osd tell ...
 
 The match criteria restrict a grant based on the pool being accessed.
@@ -172,12 +181,12 @@ value is the capability string (see above).
 Example
 =======
 
-To create a new keyring containing a key for client.foo::
+To create a new keyring containing a key for client.foo with a 0644 file mode::
 
-        ceph-authtool -C -n client.foo --gen-key keyring
+        ceph-authtool -C -n client.foo --gen-key keyring --mode 0644
 
 To associate some capabilities with the key (namely, the ability to
-mount a Ceph filesystem)::
+mount a Ceph file system)::
 
         ceph-authtool -n client.foo --cap mds 'allow' --cap osd 'allow rw pool=data' --cap mon 'allow r' keyring
 
@@ -194,7 +203,7 @@ Availability
 ============
 
 **ceph-authtool** is part of Ceph, a massively scalable, open-source, distributed storage system. Please
-refer to the Ceph documentation at http://ceph.com/docs for more
+refer to the Ceph documentation at https://docs.ceph.com for more
 information.
 
 

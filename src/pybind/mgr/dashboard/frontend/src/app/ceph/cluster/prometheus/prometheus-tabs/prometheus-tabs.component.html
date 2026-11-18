@@ -1,0 +1,47 @@
+<nav
+  class="nav nav-tabs"
+  ngbNav
+  #nav="ngbNav"
+>
+  <ng-container ngbNavItem>
+    <a
+      class="nav-link"
+      routerLink="/monitoring/active-alerts"
+      routerLinkActive="active"
+      ariaCurrentWhenActive="page"
+      [routerLinkActiveOptions]="{ exact: true }"
+      i18n
+      >Active Alerts
+      @if (prometheusAlertService.activeCriticalAlerts > 0) {
+        <cds-tag class="tag-danger ms-1">{{ prometheusAlertService.activeCriticalAlerts }}</cds-tag>
+      }
+      @if (prometheusAlertService.activeWarningAlerts > 0) {
+        <cds-tag class="tag-warning ms-1">{{ prometheusAlertService.activeWarningAlerts }}</cds-tag>
+      }
+    </a>
+  </ng-container>
+  @if (prometheusPermissions.read) {
+    <ng-container ngbNavItem>
+      <a
+        class="nav-link"
+        routerLink="/monitoring/silences"
+        routerLinkActive="active"
+        ariaCurrentWhenActive="page"
+        [routerLinkActiveOptions]="{ exact: true }"
+        i18n
+        >Silences</a
+      >
+    </ng-container>
+  }
+  <ng-container ngbNavItem>
+    <a
+      class="nav-link"
+      routerLink="/monitoring/alerts"
+      routerLinkActive="active"
+      ariaCurrentWhenActive="page"
+      [routerLinkActiveOptions]="{ exact: true }"
+      i18n
+      >Alert Rules</a
+    >
+  </ng-container>
+</nav>

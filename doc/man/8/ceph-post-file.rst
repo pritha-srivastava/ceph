@@ -9,7 +9,7 @@
 Synopsis
 ========
 
-| **ceph-post-file** [-d *description] [-u *user*] *file or dir* ...
+| **ceph-post-file** [-d *description*] [-u *user*] *file or dir* ...
 
 
 Description
@@ -20,9 +20,9 @@ later analysis by Ceph developers.
 
 Each invocation uploads files or directories to a separate directory
 with a unique tag.  That tag can be passed to a developer or
-referenced in a bug report (http://tracker.ceph.com/).  Once the
+referenced in a bug report (https://tracker.ceph.com/).  Once the
 upload completes, the directory is marked non-readable and
-non-writeable to prevent access or modification by other users.
+non-writable to prevent access or modification by other users.
 
 Warning
 =======
@@ -62,10 +62,10 @@ Availability
 ============
 
 **ceph-post-file** is part of Ceph, a massively scalable, open-source, distributed storage system. Please refer to
-the Ceph documentation at http://ceph.com/docs for more information.
+the Ceph documentation at https://docs.ceph.com for more information.
 
 See also
 ========
 
 :doc:`ceph <ceph>`\(8),
-:doc:`ceph-debugpack <ceph-debugpack>`\(8),
+:doc:`ceph-debugpack <ceph-debugpack>`\(8)

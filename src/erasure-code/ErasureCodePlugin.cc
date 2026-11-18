@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph distributed storage system
  *
@@ -15,55 +16,53 @@
  * 
  */
 
+#include <cassert>
 #include <errno.h>
-#include <dlfcn.h>
 
 #include "ceph_ver.h"
 #include "ErasureCodePlugin.h"
 #include "common/errno.h"
+#include "include/dlfcn_compat.h"
 #include "include/str_list.h"
+#include "include/ceph_assert.h"
+
+using namespace std;
 
 #define PLUGIN_PREFIX "libec_"
-#if defined(DARWIN)
-#define PLUGIN_SUFFIX ".dylib"
-#else
-#define PLUGIN_SUFFIX ".so"
-#endif
+#define PLUGIN_SUFFIX SHARED_LIB_SUFFIX
 #define PLUGIN_INIT_FUNCTION "__erasure_code_init"
 #define PLUGIN_VERSION_FUNCTION "__erasure_code_version"
 
+namespace ceph {
+
 ErasureCodePluginRegistry ErasureCodePluginRegistry::singleton;
 
-ErasureCodePluginRegistry::ErasureCodePluginRegistry() :
-  lock("ErasureCodePluginRegistry::lock"),
-  loading(false),
-  disable_dlclose(false)
-{
-}
+ErasureCodePluginRegistry::ErasureCodePluginRegistry() = default;
 
 ErasureCodePluginRegistry::~ErasureCodePluginRegistry()
 {
-  if (disable_dlclose)
-    return;
-
-  for (std::map<std::string,ErasureCodePlugin*>::iterator i = plugins.begin();
-       i != plugins.end();
-       ++i) {
-    void *library = i->second->library;
-    delete i->second;
-    dlclose(library);
+  for (auto& name_plugin : plugins) {
+    auto *plugin = name_plugin.second;
+    assert(plugin);
+    void *library = plugin->library;
+    delete plugin;
+    if (library && !disable_dlclose) {
+      dlclose(library);
+    }
   }
 }
 
 int ErasureCodePluginRegistry::remove(const std::string &name)
 {
-  assert(lock.is_locked());
+  ceph_assert(ceph_mutex_is_locked(lock));
   if (plugins.find(name) == plugins.end())
     return -ENOENT;
   std::map<std::string,ErasureCodePlugin*>::iterator plugin = plugins.find(name);
   void *library = plugin->second->library;
   delete plugin->second;
-  dlclose(library);
+  if (library) {
+    dlclose(library);
+  }
   plugins.erase(plugin);
   return 0;
 }
@@ -71,7 +70,7 @@ int ErasureCodePluginRegistry::remove(const std::string &name)
 int ErasureCodePluginRegistry::add(const std::string &name,
                                    ErasureCodePlugin* plugin)
 {
-  assert(lock.is_locked());
+  ceph_assert(ceph_mutex_is_locked(lock));
   if (plugins.find(name) != plugins.end())
     return -EEXIST;
   plugins[name] = plugin;
@@ -80,11 +79,26 @@ int ErasureCodePluginRegistry::add(const std::string &name,
 
 ErasureCodePlugin *ErasureCodePluginRegistry::get(const std::string &name)
 {
-  assert(lock.is_locked());
+  ceph_assert(ceph_mutex_is_locked(lock));
   if (plugins.find(name) != plugins.end())
     return plugins[name];
   else
     return 0;
+}
+
+static std::map<std::string, std::function<ErasureCodePlugin*()>>&
+builtin_plugins()
+{
+  static std::map<std::string, std::function<ErasureCodePlugin*()>> reg;
+  return reg;
+}
+
+int ErasureCodePluginRegistry::register_builtin(
+  const std::string &name,
+  std::function<ErasureCodePlugin*()> create)
+{
+  builtin_plugins()[name] = std::move(create);
+  return 0;
 }
 
 int ErasureCodePluginRegistry::factory(const std::string &plugin_name,
@@ -95,7 +109,7 @@ int ErasureCodePluginRegistry::factory(const std::string &plugin_name,
 {
   ErasureCodePlugin *plugin;
   {
-    Mutex::Locker l(lock);
+    std::lock_guard l{lock};
     plugin = get(plugin_name);
     if (plugin == 0) {
       loading = true;
@@ -126,7 +140,17 @@ int ErasureCodePluginRegistry::load(const std::string &plugin_name,
 				    ErasureCodePlugin **plugin,
 				    ostream *ss)
 {
-  assert(lock.is_locked());
+  ceph_assert(ceph_mutex_is_locked(lock));
+
+  if (auto it = builtin_plugins().find(plugin_name);
+      it != builtin_plugins().end()) {
+    int r = add(plugin_name, it->second());
+    if (r == 0) {
+      *plugin = get(plugin_name);
+    }
+    return r;
+  }
+
   std::string fname = directory + "/" PLUGIN_PREFIX
     + plugin_name + PLUGIN_SUFFIX;
   void *library = dlopen(fname.c_str(), RTLD_NOW);
@@ -185,7 +209,7 @@ int ErasureCodePluginRegistry::preload(const std::string &plugins,
 				       const std::string &directory,
 				       ostream *ss)
 {
-  Mutex::Locker l(lock);
+  std::lock_guard l{lock};
   list<string> plugins_list;
   get_str_list(plugins, plugins_list);
   for (list<string>::iterator i = plugins_list.begin();
@@ -197,4 +221,5 @@ int ErasureCodePluginRegistry::preload(const std::string &plugins,
       return r;
   }
   return 0;
+}
 }

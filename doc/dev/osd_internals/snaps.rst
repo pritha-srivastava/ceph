@@ -6,7 +6,7 @@ Overview
 --------
 Rados supports two related snapshotting mechanisms:
 
-  1. *pool snaps*: snapshots are implicitely applied to all objects
+  1. *pool snaps*: snapshots are implicitly applied to all objects
      in a pool
   2. *self managed snaps*: the user must provide the current *SnapContext*
      on each write.
@@ -23,12 +23,11 @@ The difference between *pool snaps* and *self managed snaps* from the
 OSD's point of view lies in whether the *SnapContext* comes to the OSD
 via the client's MOSDOp or via the most recent OSDMap.
 
-See OSD::make_writeable
+See :ref:`manifest.rst <osd-make-writeable>` for more information.
 
 Ondisk Structures
 -----------------
-Each object has in the pg collection a *head* object (or *snapdir*, which we
-will come to shortly) and possibly a set of *clone* objects.
+Each object has in the PG collection a *head* object and possibly a set of *clone* objects.
 Each hobject_t has a snap field.  For the *head* (the only writeable version
 of an object), the snap field is set to CEPH_NOSNAP.  For the *clones*, the
 snap field is set to the *seq* of the *SnapContext* at their creation.
@@ -47,8 +46,12 @@ The *head* object contains a *SnapSet* encoded in an attribute, which tracks
   3. Overlapping intervals between clones for tracking space usage
   4. Clone size
 
-If the *head* is deleted while there are still clones, a *snapdir* object
-is created instead to house the *SnapSet*.
+The *head* can't be deleted while there are still clones. Instead, it is
+marked as whiteout (``object_info_t::FLAG_WHITEOUT``) in order to house the
+*SnapSet* contained in it.
+In that case, the *head* object no longer logically exists.
+
+See: should_whiteout()
 
 Additionally, the *object_info_t* on each clone includes a vector of snaps
 for which clone is defined.
@@ -68,7 +71,7 @@ removal, we maintain a mapping from snap to *hobject_t* using the
 See PrimaryLogPG::SnapTrimmer, SnapMapper
 
 This trimming is performed asynchronously by the snap_trim_wq while the
-pg is clean and not scrubbing.
+PG is clean and not scrubbing.
 
   #. The next snap in PG::snap_trimq is selected for trimming
   #. We determine the next object for trimming out of PG::snap_mapper.
@@ -90,7 +93,7 @@ pg is clean and not scrubbing.
 Recovery
 --------
 Because the trim operations are implemented using repops and log entries,
-normal pg peering and recovery maintain the snap trimmer operations with
+normal PG peering and recovery maintain the snap trimmer operations with
 the caveat that push and removal operations need to update the local
 *SnapMapper* instance.  If the purged_snaps update is lost, we merely
 retrim a now empty snap.
@@ -98,7 +101,7 @@ retrim a now empty snap.
 SnapMapper
 ----------
 *SnapMapper* is implemented on top of map_cacher<string, bufferlist>,
-which provides an interface over a backing store such as the filesystem
+which provides an interface over a backing store such as the file system
 with async transactions.  While transactions are incomplete, the map_cacher
 instance buffers unstable keys allowing consistent access without having
 to flush the filestore.  *SnapMapper* provides two mappings:
@@ -117,12 +120,120 @@ is constant length.  These keys have a bufferlist encoding
 pair<snapid, hobject_t> as a value.  Thus, creating or trimming a single
 object does not involve reading all objects for any snap.  Additionally,
 upon construction, the *SnapMapper* is provided with a mask for filtering
-the objects in the single SnapMapper keyspace belonging to that pg.
+the objects in the single SnapMapper keyspace belonging to that PG.
 
 Split
 -----
-The snapid_t -> hobject_t key entries are arranged such that for any pg,
+The snapid_t -> hobject_t key entries are arranged such that for any PG,
 up to 8 prefixes need to be checked to determine all hobjects in a particular
-snap for a particular pg.  Upon split, the prefixes to check on the parent
-are adjusted such that only the objects remaining in the pg will be visible.
+snap for a particular PG.  Upon split, the prefixes to check on the parent
+are adjusted such that only the objects remaining in the PG will be visible.
 The children will immediately have the correct mapping.
+
+clone_overlap
+-------------
+Each SnapSet attached to the *head* object contains the overlapping intervals
+between clone objects for optimizing space.
+The overlapping intervals are stored within the ``clone_overlap`` map, each element in the
+map stores the snap ID and the corresponding overlap with the next newest clone.
+
+See the following example using a 4 byte object:
+
++--------+---------+
+| object | content |
++========+=========+
+| head   | [AAAA]  |
++--------+---------+
+
+listsnaps output is as follows:
+
++---------+-------+------+---------+
+| cloneid | snaps | size | overlap |
++=========+=======+======+=========+
+| head    | -     | 4    |         |
++---------+-------+------+---------+
+
+After taking a snapshot (ID 1) and re-writing the first 2 bytes of the object,
+the clone created will overlap with the new *head* object in its last 2 bytes.
+
++------------+---------+
+| object     | content |
++============+=========+
+| head       | [BBAA]  |
++------------+---------+
+| clone ID 1 | [AAAA]  |
++------------+---------+
+
++---------+-------+------+---------+
+| cloneid | snaps | size | overlap |
++=========+=======+======+=========+
+| 1       | 1     | 4    | [2~2]   |
++---------+-------+------+---------+
+| head    | -     | 4    |         |
++---------+-------+------+---------+
+
+By taking another snapshot (ID 2) and this time re-writing only the first 1 byte of the object,
+the clone created (ID 2) will overlap with the new *head* object in its last 3 bytes.
+While the oldest clone (ID 1) will overlap with the newest clone in its last 2 bytes.
+
++------------+---------+
+| object     | content |
++============+=========+
+| head       | [CBAA]  |
++------------+---------+
+| clone ID 2 | [BBAA]  |
++------------+---------+
+| clone ID 1 | [AAAA]  |
++------------+---------+
+
++---------+-------+------+---------+
+| cloneid | snaps | size | overlap |
++=========+=======+======+=========+
+| 1       | 1     | 4    | [2~2]   |
++---------+-------+------+---------+
+| 2       | 2     | 4    | [1~3]   |
++---------+-------+------+---------+
+| head    | -     | 4    |         |
++---------+-------+------+---------+
+
+If the *head* object will be completely re-written by re-writing 4 bytes,
+the only existing overlap that will remain will be between the two clones.
+
++------------+---------+
+| object     | content |
++============+=========+
+| head       | [DDDD]  |
++------------+---------+
+| clone ID 2 | [BBAA]  |
++------------+---------+
+| clone ID 1 | [AAAA]  |
++------------+---------+
+
++---------+-------+------+---------+
+| cloneid | snaps | size | overlap |
++=========+=======+======+=========+
+| 1       | 1     | 4    | [2~2]   |
++---------+-------+------+---------+
+| 2       | 2     | 4    |         |
++---------+-------+------+---------+
+| head    | -     | 4    |         |
++---------+-------+------+---------+
+
+Lastly, after the last snap (ID 2) is removed and snaptrim kicks in,
+no overlapping intervals will remain:
+
++------------+---------+
+| object     | content |
++============+=========+
+| head       | [DDDD]  |
++------------+---------+
+| clone ID 1 | [AAAA]  |
++------------+---------+
+
++---------+-------+------+---------+
+| cloneid | snaps | size | overlap |
++=========+=======+======+=========+
+| 1       | 1     | 4    |         |
++---------+-------+------+---------+
+| head    | -     | 4    |         |
++---------+-------+------+---------+

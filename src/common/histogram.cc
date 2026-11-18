@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,7 +17,7 @@
 #include "common/Formatter.h"
 
 // -- pow2_hist_t --
-void pow2_hist_t::dump(Formatter *f) const
+void pow2_hist_t::dump(ceph::Formatter *f) const
 {
   f->open_array_section("histogram");
   for (std::vector<int32_t>::const_iterator p = h.begin(); p != h.end(); ++p)
@@ -25,28 +26,30 @@ void pow2_hist_t::dump(Formatter *f) const
   f->dump_int("upper_bound", upper_bound());
 }
 
-void pow2_hist_t::encode(bufferlist& bl) const
+void pow2_hist_t::encode(ceph::buffer::list& bl) const
 {
   ENCODE_START(1, 1, bl);
-  ::encode(h, bl);
+  encode(h, bl);
   ENCODE_FINISH(bl);
 }
 
-void pow2_hist_t::decode(bufferlist::iterator& p)
+void pow2_hist_t::decode(ceph::buffer::list::const_iterator& p)
 {
   DECODE_START(1, p);
-  ::decode(h, p);
+  decode(h, p);
   DECODE_FINISH(p);
 }
 
-void pow2_hist_t::generate_test_instances(std::list<pow2_hist_t*>& ls)
+std::list<pow2_hist_t> pow2_hist_t::generate_test_instances()
 {
-  ls.push_back(new pow2_hist_t);
-  ls.push_back(new pow2_hist_t);
-  ls.back()->h.push_back(1);
-  ls.back()->h.push_back(3);
-  ls.back()->h.push_back(0);
-  ls.back()->h.push_back(2);
+  std::list<pow2_hist_t> ls;
+  ls.emplace_back();
+  ls.emplace_back();
+  ls.back().h.push_back(1);
+  ls.back().h.push_back(3);
+  ls.back().h.push_back(0);
+  ls.back().h.push_back(2);
+  return ls;
 }
 
 void pow2_hist_t::decay(int bits)

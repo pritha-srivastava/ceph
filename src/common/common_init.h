@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,21 +16,16 @@
 #ifndef CEPH_COMMON_INIT_H
 #define CEPH_COMMON_INIT_H
 
-#include <deque>
-#include <stdint.h>
-#include <string>
-#include <vector>
-
+#include "include/common_fwd.h"
 #include "common/code_environment.h"
 
-class CephContext;
-class CephInitParameters;
+#include <string>
 
 enum common_init_flags_t {
-  // Set up defaults that make sense for an unprivileged deamon
+  // Set up defaults that make sense for an unprivileged daemon
   CINIT_FLAG_UNPRIVILEGED_DAEMON_DEFAULTS = 0x1,
 
-  // By default, don't read a configuration file
+  // By default, don't read a configuration file OR contact mons
   CINIT_FLAG_NO_DEFAULT_CONFIG_FILE = 0x2,
 
   // Don't close stderr (in daemonize)
@@ -40,7 +36,16 @@ enum common_init_flags_t {
 
   // don't drop privileges
   CINIT_FLAG_DEFER_DROP_PRIVILEGES = 0x10,
+
+  // don't contact mons for config
+  CINIT_FLAG_NO_MON_CONFIG = 0x20,
+
+  // don't expose default cct perf counters
+  CINIT_FLAG_NO_CCT_PERF_COUNTERS = 0x40,
 };
+
+#ifndef WITH_CRIMSON
+class CephInitParameters;
 
 /*
  * NOTE: If you are writing a Ceph daemon, ignore this function and call
@@ -54,18 +59,18 @@ enum common_init_flags_t {
  * the user asked for.
  *
  * This is usually done by something like this:
- * cct->_conf->parse_env();
- * cct->_conf->apply_changes();
+ * cct->_conf.parse_env();
+ * cct->_conf.apply_changes();
  *
  * Your library may also supply functions to read a configuration file.
  */
 CephContext *common_preinit(const CephInitParameters &iparams,
-			    enum code_environment_t code_env, int flags,
-			    const char *data_dir_option = 0);
+			    enum code_environment_t code_env, int flags);
+#endif // #ifndef WITH_CRIMSON
 
-/* Print out some parse errors. */
-void complain_about_parse_errors(CephContext *cct,
-				 std::deque<std::string> *parse_errors);
+/* Print out some parse error. */
+void complain_about_parse_error(CephContext *cct,
+				const std::string& parse_error);
 
 /* This function is called after you have done your last
  * fork. When you make this call, the system will initialize everything that

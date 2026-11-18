@@ -16,32 +16,18 @@
 #include "arch/probe.h"
 
 /* flags we export */
+int ceph_arch_intel_avx512_vpclmul = 0;
 int ceph_arch_intel_pclmul = 0;
 int ceph_arch_intel_sse42 = 0;
 int ceph_arch_intel_sse41 = 0;
 int ceph_arch_intel_ssse3 = 0;
 int ceph_arch_intel_sse3 = 0;
 int ceph_arch_intel_sse2 = 0;
+int ceph_arch_intel_aesni = 0;
 
 #ifdef __x86_64__
-
-/* Note: valgrind redefines cpuid : it is different from the native processor. */
-/* intel cpu? */
-static void do_cpuid(unsigned int *eax, unsigned int *ebx, unsigned int *ecx,
-                     unsigned int *edx)
-{
-        int id = *eax;
-
-        asm("movl %4, %%eax;"
-            "cpuid;"
-            "movl %%eax, %0;"
-            "movl %%ebx, %1;"
-            "movl %%ecx, %2;"
-            "movl %%edx, %3;"
-                : "=r" (*eax), "=r" (*ebx), "=r" (*ecx), "=r" (*edx)
-                : "r" (id)
-                : "eax", "ebx", "ecx", "edx");
-}
+#include <cpuid.h>
+#include <x86intrin.h>
 
 /* http://en.wikipedia.org/wiki/CPUID#EAX.3D1:_Processor_Info_and_Feature_Bits */
 
@@ -51,12 +37,30 @@ static void do_cpuid(unsigned int *eax, unsigned int *ebx, unsigned int *ecx,
 #define CPUID_SSSE3	(1 << 9)
 #define CPUID_SSE3	(1)
 #define CPUID_SSE2	(1 << 26)
+#define CPUID_AESNI 	(1 << 25)
+#define CPUID_OSXSAVE	(1 << 27)
+
+/* SSE:[1] AVX:[2] Opmask:[5] ZMM_HI256:[6] ZMM16-31:[7]*/
+#define XCR0_AVX512		(0x000000E6ULL)
+
+/* Match ISA-L requirements since we call into it. May be stricter than necessary. */
+/* AVX512F:[16] DQ:[17] CD:[28] BW:[30] VL:[31] */
+#define CPUID7_0_AVX512_EBX	(0xD0030000UL)
+/* AVX512VBMI2:[6] GFNI:[8] VAES:[9] VPCLMULQDQ:[10] VNNI:[11] BITALG:[12] VPOPCNTDQ:[14] */
+#define CPUID7_0_AVX512_ECX	(0x00005F40UL)
+
+__attribute__((__target__("xsave")))
+unsigned long long ceph_xgetbv(unsigned int xcr_index) {
+	return _xgetbv(xcr_index);
+}
 
 int ceph_arch_intel_probe(void)
 {
 	/* i know how to check this on x86_64... */
-	unsigned int eax = 1, ebx, ecx, edx;
-	do_cpuid(&eax, &ebx, &ecx, &edx);
+	unsigned int eax, ebx, ecx = 0, edx = 0;
+	if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
+	  return 1;
+	}
 	if ((ecx & CPUID_PCLMUL) != 0) {
 		ceph_arch_intel_pclmul = 1;
 	}
@@ -75,7 +79,25 @@ int ceph_arch_intel_probe(void)
 	if ((edx & CPUID_SSE2) != 0) {
 	        ceph_arch_intel_sse2 = 1;
 	}
+	if ((ecx & CPUID_AESNI) != 0) {
+	        ceph_arch_intel_aesni = 1;
+	}
 
+	/*
+	 * AVX512 feature: check these conditions IN ORDER
+	 *     a. OSXSAVE/XGETBV is available
+	 *     b. AVX512 state is enabled in XCR0
+	 *     c. CPUID leaf 7 exists
+	 *     d. required AVX512 features present
+	 */
+	unsigned int eax_7_0 = 0, ebx_7_0 = 0, ecx_7_0 = 0, edx_7_0 = 0;
+	if ((ecx & CPUID_OSXSAVE) &&
+	    ((ceph_xgetbv(0) & XCR0_AVX512) == XCR0_AVX512) &&
+	    (__get_cpuid_count(7, 0, &eax_7_0, &ebx_7_0, &ecx_7_0, &edx_7_0)) &&
+	    ((ebx_7_0 & CPUID7_0_AVX512_EBX) == CPUID7_0_AVX512_EBX) &&
+	    ((ecx_7_0 & CPUID7_0_AVX512_ECX) == CPUID7_0_AVX512_ECX)) {
+		ceph_arch_intel_avx512_vpclmul = 1;
+	}
 	return 0;
 }
 

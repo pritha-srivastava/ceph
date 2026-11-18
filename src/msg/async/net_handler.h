@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -23,11 +24,12 @@ namespace ceph {
     int generic_connect(const entity_addr_t& addr, const entity_addr_t& bind_addr, bool nonblock);
 
     CephContext *cct;
+    bool try_smc;
    public:
     int create_socket(int domain, bool reuse_addr=false);
-    explicit NetHandler(CephContext *c): cct(c) {}
+    explicit NetHandler(CephContext *c, bool try_smc=false): cct(c), try_smc(try_smc) {
+    }
     int set_nonblock(int sd);
-    void set_close_on_exec(int sd);
     int set_socket_options(int sd, bool nodelay, int size);
     int connect(const entity_addr_t &addr, const entity_addr_t& bind_addr);
     
@@ -40,7 +42,7 @@ namespace ceph {
      */
     int reconnect(const entity_addr_t &addr, int sd);
     int nonblock_connect(const entity_addr_t &addr, const entity_addr_t& bind_addr);
-    void set_priority(int sd, int priority);
+    void set_priority(int sd, int priority, int domain);
   };
 }
 

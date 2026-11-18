@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #ifndef CEPH_LIBRBD_LIBRBDADMINSOCKETHOOK_H
 #define CEPH_LIBRBD_LIBRBDADMINSOCKETHOOK_H
 
@@ -15,13 +16,17 @@ namespace librbd {
   class LibrbdAdminSocketHook : public AdminSocketHook {
   public:
     LibrbdAdminSocketHook(ImageCtx *ictx);
-    ~LibrbdAdminSocketHook();
+    ~LibrbdAdminSocketHook() override;
 
-    bool call(std::string command, cmdmap_t& cmdmap, std::string format,
-	      bufferlist& out);
+    int call(std::string_view command, const cmdmap_t& cmdmap,
+	     const bufferlist&,
+	     Formatter *f,
+	     std::ostream& errss,
+	     bufferlist& out) override;
 
   private:
-    typedef std::map<std::string,LibrbdAdminSocketCommand*> Commands;
+    typedef std::map<std::string,LibrbdAdminSocketCommand*,
+		     std::less<>> Commands;
 
     AdminSocket *admin_socket;
     Commands commands;

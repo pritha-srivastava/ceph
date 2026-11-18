@@ -1,19 +1,423 @@
-import json
+import re
+import time
+import signal
 import logging
-from unittest import case, SkipTest
+import operator
+from random import randint, choice
+from json import loads as json_loads
 
-from cephfs_test_case import CephFSTestCase
+from tasks.cephfs.cephfs_test_case import CephFSTestCase
 from teuthology.exceptions import CommandFailedError
-from tasks.ceph_manager import CephManager
-from teuthology import misc as teuthology
+from teuthology.contextutil import safe_while
 from tasks.cephfs.fuse_mount import FuseMount
 
 log = logging.getLogger(__name__)
 
+class TestClusterAffinity(CephFSTestCase):
+    CLIENTS_REQUIRED = 0
+    MDSS_REQUIRED = 4
+
+    def _verify_join_fs(self, target, status=None, fs=None):
+        fs_select = fs
+        if fs_select is None:
+            fs_select = self.fs
+        if status is None:
+            status = fs_select.wait_for_daemons(timeout=30)
+            log.debug("%s", status)
+        target = sorted(target, key=operator.itemgetter('name'))
+        log.info("target = %s", target)
+        current = list(status.get_all())
+        current = sorted(current, key=operator.itemgetter('name'))
+        log.info("current = %s", current)
+        self.assertEqual(len(current), len(target))
+        for i in range(len(current)):
+            for attr in target[i]:
+                self.assertIn(attr, current[i])
+                self.assertEqual(target[i][attr], current[i][attr])
+
+    def _change_target_state(self, state, name, changes):
+        for entity in state:
+            if entity['name'] == name:
+                for k, v in changes.items():
+                    entity[k] = v
+                return
+        self.fail("no entity")
+
+    def _verify_init(self, fs=None):
+        fs_select = fs
+        if fs_select is None:
+            fs_select = self.fs
+        status = fs_select.status()
+        log.info("status = {0}".format(status))
+        target = [{'join_fscid': -1, 'name': info['name']} for info in status.get_all()]
+        self._verify_join_fs(target, status=status, fs=fs_select)
+        return (status, target)
+
+    def _reach_target(self, target):
+        def takeover():
+            try:
+                self._verify_join_fs(target)
+                return True
+            except AssertionError as e:
+                log.debug("%s", e)
+                return False
+        self.wait_until_true(takeover, 30)
+
+    def test_join_fs_runtime(self):
+        """
+        That setting mds_join_fs at runtime affects the cluster layout.
+        """
+        status, target = self._verify_init()
+        standbys = list(status.get_standbys())
+        self.config_set('mds.'+standbys[0]['name'], 'mds_join_fs', 'cephfs')
+        self._change_target_state(target, standbys[0]['name'], {'join_fscid': self.fs.id, 'state': 'up:active'})
+        self._reach_target(target)
+
+    def test_join_fs_unset(self):
+        """
+        That unsetting mds_join_fs will cause failover if another high-affinity standby exists.
+        """
+        status, target = self._verify_init()
+        standbys = list(status.get_standbys())
+        names = (standbys[0]['name'], standbys[1]['name'])
+        self.config_set('mds.'+names[0], 'mds_join_fs', 'cephfs')
+        self.config_set('mds.'+names[1], 'mds_join_fs', 'cephfs')
+        self._change_target_state(target, names[0], {'join_fscid': self.fs.id})
+        self._change_target_state(target, names[1], {'join_fscid': self.fs.id})
+        self._reach_target(target)
+        time.sleep(5) # MDSMonitor tick
+        status = self.fs.wait_for_daemons()
+        active = self.fs.get_active_names(status=status)[0]
+        self.assertIn(active, names)
+        self.config_rm('mds.'+active, 'mds_join_fs')
+        self._change_target_state(target, active, {'join_fscid': -1})
+        new_active = (set(names) - set((active,))).pop()
+        self._change_target_state(target, new_active, {'state': 'up:active'})
+        self._reach_target(target)
+
+    def test_join_fs_drop(self):
+        """
+        That unsetting mds_join_fs will not cause failover if no high-affinity standby exists.
+        """
+        status, target = self._verify_init()
+        standbys = list(status.get_standbys())
+        active = standbys[0]['name']
+        self.config_set('mds.'+active, 'mds_join_fs', 'cephfs')
+        self._change_target_state(target, active, {'join_fscid': self.fs.id, 'state': 'up:active'})
+        self._reach_target(target)
+        self.config_rm('mds.'+active, 'mds_join_fs')
+        self._change_target_state(target, active, {'join_fscid': -1})
+        self._reach_target(target)
+
+    def test_join_fs_vanilla(self):
+        """
+        That a vanilla standby is preferred over others with mds_join_fs set to another fs.
+        """
+        fs2 = self.mds_cluster.newfs(name="cephfs2")
+        status, target = self._verify_init()
+        active = self.fs.get_active_names(status=status)[0]
+        status2, _ = self._verify_init(fs=fs2)
+        active2 = fs2.get_active_names(status=status2)[0]
+        standbys = [info['name'] for info in status.get_standbys()]
+        victim = standbys.pop()
+        # Set a bogus fs on the others
+        for mds in standbys:
+            self.config_set('mds.'+mds, 'mds_join_fs', 'cephfs2')
+            self._change_target_state(target, mds, {'join_fscid': fs2.id})
+        # The active MDS for cephfs2 will be replaced by the MDS for which
+        # file system affinity has been set. Also, set the affinity for
+        # the earlier active MDS so that it is not chosen by the monitors
+        # as an active MDS for the existing file system.
+        log.info(f'assigning affinity to cephfs2 for active mds (mds.{active2})')
+        self.config_set(f'mds.{active2}', 'mds_join_fs', 'cephfs2')
+        self._change_target_state(target, active2, {'join_fscid': fs2.id})
+        self._reach_target(target)
+        self.fs.rank_fail()
+        self._change_target_state(target, victim, {'state': 'up:active'})
+        self._reach_target(target)
+        status = self.fs.status()
+        active = self.fs.get_active_names(status=status)[0]
+        self.assertEqual(active, victim)
+
+    def test_join_fs_last_resort(self):
+        """
+        That a standby with mds_join_fs set to another fs is still used if necessary.
+        """
+        status, target = self._verify_init()
+        standbys = [info['name'] for info in status.get_standbys()]
+        for mds in standbys:
+            self.config_set('mds.'+mds, 'mds_join_fs', 'cephfs2')
+        fs2 = self.mds_cluster.newfs(name="cephfs2")
+        for mds in standbys:
+            self._change_target_state(target, mds, {'join_fscid': fs2.id})
+        self.fs.rank_fail()
+        status = self.fs.status()
+        ranks = list(self.fs.get_ranks(status=status))
+        self.assertEqual(len(ranks), 1)
+        self.assertIn(ranks[0]['name'], standbys)
+
+        # Wait for the former active to reclaim its spot
+        def reclaimed():
+            ranks = list(self.fs.get_ranks())
+            return len(ranks) > 0 and ranks[0]['name'] not in standbys
+
+        log.info("Waiting for former active to reclaim its spot")
+        self.wait_until_true(reclaimed, timeout=self.fs.beacon_timeout)
+
+    def test_join_fs_last_resort_refused(self):
+        """
+        That a standby with mds_join_fs set to another fs is not used if refuse_standby_for_another_fs is set.
+        """
+        status, target = self._verify_init()
+        standbys = [info['name'] for info in status.get_standbys()]
+        for mds in standbys:
+            self.config_set('mds.'+mds, 'mds_join_fs', 'cephfs2')
+        fs2 = self.mds_cluster.newfs(name="cephfs2")
+        for mds in standbys:
+            self._change_target_state(target, mds, {'join_fscid': fs2.id})
+        self.fs.set_refuse_standby_for_another_fs(True)
+        self.fs.rank_fail()
+        status = self.fs.status()
+        ranks = list(self.fs.get_ranks(status=status))
+        self.assertTrue(len(ranks) == 0 or ranks[0]['name'] not in standbys)
+
+        # Wait for the former active to reclaim its spot
+        def reclaimed():
+            ranks = list(self.fs.get_ranks())
+            return len(ranks) > 0 and ranks[0]['name'] not in standbys
+
+        log.info("Waiting for former active to reclaim its spot")
+        self.wait_until_true(reclaimed, timeout=self.fs.beacon_timeout)
+
+    def test_join_fs_steady(self):
+        """
+        That a sole MDS with mds_join_fs set will come back as active eventually even after failover.
+        """
+        status, target = self._verify_init()
+        active = self.fs.get_active_names(status=status)[0]
+        self.config_set('mds.'+active, 'mds_join_fs', 'cephfs')
+        self._change_target_state(target, active, {'join_fscid': self.fs.id})
+        self._reach_target(target)
+        self.fs.rank_fail()
+        self._reach_target(target)
+
+    def test_join_fs_standby_replay(self):
+        """
+        That a standby-replay daemon with weak affinity is replaced by a stronger one.
+        """
+        status, target = self._verify_init()
+        standbys = [info['name'] for info in status.get_standbys()]
+        self.config_set('mds.'+standbys[0], 'mds_join_fs', 'cephfs')
+        self._change_target_state(target, standbys[0], {'join_fscid': self.fs.id, 'state': 'up:active'})
+        self._reach_target(target)
+        self.fs.set_allow_standby_replay(True)
+        status = self.fs.status()
+        standbys = [info['name'] for info in status.get_standbys()]
+        self.config_set('mds.'+standbys[0], 'mds_join_fs', 'cephfs')
+        self._change_target_state(target, standbys[0], {'join_fscid': self.fs.id, 'state': 'up:standby-replay'})
+        self._reach_target(target)
+
+class TestClusterResize(CephFSTestCase):
+    CLIENTS_REQUIRED = 0
+    MDSS_REQUIRED = 3
+
+    def test_grow(self):
+        """
+        That the MDS cluster grows after increasing max_mds.
+        """
+
+        # Need all my standbys up as well as the active daemons
+        # self.wait_for_daemon_start() necessary?
+
+        self.fs.grow(2)
+        self.fs.grow(3)
+
+
+    def test_shrink(self):
+        """
+        That the MDS cluster shrinks automatically after decreasing max_mds.
+        """
+
+        self.fs.grow(3)
+        self.fs.shrink(1)
+
+    def test_up_less_than_max(self):
+        """
+        That a health warning is generated when max_mds is greater than active count.
+        """
+
+        status = self.fs.status()
+        mdss = [info['gid'] for info in status.get_all()]
+        self.fs.set_max_mds(len(mdss)+1)
+        self.wait_for_health("MDS_UP_LESS_THAN_MAX", 30)
+        self.fs.shrink(2)
+        self.wait_for_health_clear(30)
+
+    def test_down_health(self):
+        """
+        That marking a FS down does not generate a health warning
+        """
+
+        self.fs.set_down()
+
+        # Transient warnings (FS_DEGRADED, MDS_ALL_DOWN) can briefly appear
+        # while monitors process the down state. We wait for them to clear.
+        self.wait_for_health_clear(timeout=30)
+
+    def test_down_twice(self):
+        """
+        That marking a FS down twice does not wipe old_max_mds.
+        """
+
+        self.fs.grow(2)
+        self.fs.set_down()
+        self.fs.wait_for_daemons()
+        self.fs.set_down(False)
+        self.assertEqual(self.fs.get_var("max_mds"), 2)
+        self.fs.wait_for_daemons(timeout=60)
+
+    def test_down_grow(self):
+        """
+        That setting max_mds undoes down.
+        """
+
+        self.fs.set_down()
+        self.fs.wait_for_daemons()
+        self.fs.grow(2)
+        self.fs.wait_for_daemons()
+
+    def test_down(self):
+        """
+        That down setting toggles and sets max_mds appropriately.
+        """
+
+        self.fs.set_down()
+        self.fs.wait_for_daemons()
+        self.assertEqual(self.fs.get_var("max_mds"), 0)
+        self.fs.set_down(False)
+        self.assertEqual(self.fs.get_var("max_mds"), 1)
+        self.fs.wait_for_daemons()
+        self.assertEqual(self.fs.get_var("max_mds"), 1)
+
+    def test_hole(self):
+        """
+        Test that a hole cannot be created in the FS ranks.
+        """
+
+        fscid = self.fs.id
+
+        self.fs.grow(2)
+
+        # Now add a delay which should slow down how quickly rank 1 stops
+        self.config_set('mds', 'ms_inject_delay_max', '5.0')
+        self.config_set('mds', 'ms_inject_delay_probability', '1.0')
+        self.fs.set_max_mds(1)
+        log.info("status = {0}".format(self.fs.status()))
+
+        # Don't wait for rank 1 to stop
+        self.fs.set_max_mds(3)
+        log.info("status = {0}".format(self.fs.status()))
+
+        # Now check that the mons didn't try to promote a standby to rank 2
+        self.fs.set_max_mds(2)
+        status = self.fs.status()
+        try:
+            status = self.fs.wait_for_daemons(timeout=90)
+            ranks = set([info['rank'] for info in status.get_ranks(fscid)])
+            self.assertEqual(ranks, set([0, 1]))
+        finally:
+            log.info("status = {0}".format(status))
+
+    def test_thrash(self):
+        """
+        Test that thrashing max_mds does not fail.
+        """
+
+        max_mds = 2
+        for i in range(0, 100):
+            self.fs.set_max_mds(max_mds)
+            max_mds = (max_mds+1)%3+1
+
+        self.fs.wait_for_daemons(timeout=90)
+
+class TestFailoverBeaconHealth(CephFSTestCase):
+    CLIENTS_REQUIRED = 1
+    MDSS_REQUIRED = 1
+
+    def initiate_journal_replay(self, num_files=100):
+        """ Initiate journal replay by creating files and restarting mds server."""
+
+        self.config_set("mds", "mds_delay_journal_replay_for_testing", "5000")
+        self.mounts[0].test_files = [str(x) for x in range(num_files)]
+        self.mounts[0].create_files()
+        self.fs.fail()
+        self.fs.set_joinable()
+
+    def test_replay_beacon_estimated_time(self):
+        """
+        That beacon emits warning message with estimated time to complete replay
+        """
+        self.initiate_journal_replay()
+        self.wait_for_health("MDS_ESTIMATED_REPLAY_TIME", 60)
+        # remove the config so that replay finishes and the cluster
+        # is HEALTH_OK
+        self.config_rm("mds", "mds_delay_journal_replay_for_testing")
+        self.wait_for_health_clear(timeout=60)
+
+    def test_replay_estimated_time_accuracy(self):
+        self.initiate_journal_replay(250)
+        def replay_complete():
+            health = self.ceph_cluster.mon_manager.get_mon_health(debug=False, detail=True)
+            codes = [s for s in health['checks']]
+            return 'MDS_ESTIMATED_REPLAY_TIME' not in codes
+
+        def get_estimated_time():
+            completion_percentage = 0.0
+            time_duration = pending_duration = 0
+            with safe_while(sleep=5, tries=360) as proceed:
+                while proceed():
+                    health = self.ceph_cluster.mon_manager.get_mon_health(debug=False, detail=True)
+                    codes = [s for s in health['checks']]
+                    if 'MDS_ESTIMATED_REPLAY_TIME' in codes:
+                        message = health['checks']['MDS_ESTIMATED_REPLAY_TIME']['detail'][0]['message']
+                        ### sample warning string: "mds.a(mds.0): replay: 50.0446% complete - elapsed time: 582s, estimated time remaining: 581s"
+                        m = re.match(".* replay: (\d+(\.\d+)?)% complete - elapsed time: (\d+)s, estimated time remaining: (\d+)s", message)
+                        if not m:
+                            continue
+                        completion_percentage = float(m.group(1))
+                        time_duration = int(m.group(3))
+                        pending_duration = int(m.group(4))
+                        log.debug(f"MDS_ESTIMATED_REPLAY_TIME is present in health: {message}, duration: {time_duration}, completion_percentage: {completion_percentage}")
+                        if completion_percentage >= 50:
+                            return (completion_percentage, time_duration, pending_duration)
+        _, _, pending_duration = get_estimated_time()
+        # wait for 25% more time to avoid false negative failures
+        self.wait_until_true(replay_complete, timeout=pending_duration * 1.25)
 
 class TestFailover(CephFSTestCase):
     CLIENTS_REQUIRED = 1
     MDSS_REQUIRED = 2
+
+    def test_repeated_boot(self):
+        """
+        That multiple boot messages do not result in the MDS getting evicted.
+        """
+
+        interval = 10
+        self.config_set("mon", "paxos_propose_interval", interval)
+
+        mds = choice(list(self.fs.status().get_all()))
+
+        with self.assert_cluster_log(f"daemon mds.{mds['name']} restarted", present=False):
+            # Avoid a beacon to the monitors with down:dne by restarting:
+            self.fs.mds_fail(mds_id=mds['name'])
+            # `ceph mds fail` won't return until the FSMap is committed, double-check:
+            self.assertIsNone(self.fs.status().get_mds_gid(mds['gid']))
+            time.sleep(2) # for mds to restart and accept asok commands
+            status1 = self.fs.mds_asok(['status'], mds_id=mds['name'])
+            time.sleep(interval*1.5)
+            status2 = self.fs.mds_asok(['status'], mds_id=mds['name'])
+            self.assertEqual(status1['id'], status2['id'])
 
     def test_simple(self):
         """
@@ -24,27 +428,20 @@ class TestFailover(CephFSTestCase):
         in thrashing tests.
         """
 
-        # Need all my standbys up as well as the active daemons
-        self.wait_for_daemon_start()
-
         (original_active, ) = self.fs.get_active_names()
         original_standbys = self.mds_cluster.get_standby_daemons()
 
         # Kill the rank 0 daemon's physical process
         self.fs.mds_stop(original_active)
 
-        grace = int(self.fs.get_config("mds_beacon_grace", service_type="mon"))
-
         # Wait until the monitor promotes his replacement
         def promoted():
-            active = self.fs.get_active_names()
-            return active and active[0] in original_standbys
+            ranks = list(self.fs.get_ranks())
+            return len(ranks) > 0 and ranks[0]['name'] in original_standbys
 
         log.info("Waiting for promotion of one of the original standbys {0}".format(
             original_standbys))
-        self.wait_until_true(
-            promoted,
-            timeout=grace*2)
+        self.wait_until_true(promoted, timeout=self.fs.beacon_timeout)
 
         # Start the original rank 0 daemon up again, see that he becomes a standby
         self.fs.mds_restart(original_active)
@@ -60,23 +457,20 @@ class TestFailover(CephFSTestCase):
         """
 
         if not isinstance(self.mount_a, FuseMount):
-            raise SkipTest("Requires FUSE client to inject client metadata")
+            self.skipTest("Requires FUSE client to inject client metadata")
 
         require_active = self.fs.get_config("fuse_require_active_mds", service_type="mon").lower() == "true"
         if not require_active:
-            raise case.SkipTest("fuse_require_active_mds is not set")
-
-        grace = int(self.fs.get_config("mds_beacon_grace", service_type="mon"))
+            self.skipTest("fuse_require_active_mds is not set")
 
         # Check it's not laggy to begin with
         (original_active, ) = self.fs.get_active_names()
-        self.assertNotIn("laggy_since", self.fs.mon_manager.get_mds_status(original_active))
+        self.assertNotIn("laggy_since", self.fs.status().get_mds(original_active))
 
         self.mounts[0].umount_wait()
 
         # Control: that we can mount and unmount usually, while the cluster is healthy
-        self.mounts[0].mount()
-        self.mounts[0].wait_until_mounted()
+        self.mounts[0].mount_wait()
         self.mounts[0].umount_wait()
 
         # Stop the daemon processes
@@ -91,166 +485,350 @@ class TestFailover(CephFSTestCase):
 
             return True
 
-        self.wait_until_true(laggy, grace * 2)
+        self.wait_until_true(laggy, self.fs.beacon_timeout)
         with self.assertRaises(CommandFailedError):
-            self.mounts[0].mount()
+            self.mounts[0].mount_wait()
+
+    def test_standby_count_wanted(self):
+        """
+        That cluster health warnings are generated by insufficient standbys available.
+        """
+
+        # Need all my standbys up as well as the active daemons
+        self.wait_for_daemon_start()
+
+        standbys = self.mds_cluster.get_standby_daemons()
+        self.assertGreaterEqual(len(standbys), 1)
+        self.run_ceph_cmd('fs', 'set', self.fs.name, 'standby_count_wanted', str(len(standbys)))
+
+        # Kill a standby and check for warning
+        victim = standbys.pop()
+        self.fs.mds_stop(victim)
+        self.wait_for_health("MDS_INSUFFICIENT_STANDBY", self.fs.beacon_timeout)
+
+        # restart the standby, see that he becomes a standby, check health clears
+        self.fs.mds_restart(victim)
+        self.wait_until_true(
+            lambda: victim in self.mds_cluster.get_standby_daemons(),
+            timeout=60  # Approximately long enough for MDS to start and mon to notice
+        )
+        self.wait_for_health_clear(timeout=30)
+
+        # Set it one greater than standbys ever seen
+        standbys = self.mds_cluster.get_standby_daemons()
+        self.assertGreaterEqual(len(standbys), 1)
+        self.run_ceph_cmd('fs', 'set', self.fs.name, 'standby_count_wanted', str(len(standbys)+1))
+        self.wait_for_health("MDS_INSUFFICIENT_STANDBY", self.fs.beacon_timeout)
+
+        # Set it to 0
+        self.run_ceph_cmd('fs', 'set', self.fs.name, 'standby_count_wanted', '0')
+        self.wait_for_health_clear(timeout=30)
+
+    def test_discontinuous_mdsmap(self):
+        """
+        That discontinuous mdsmap does not affect failover.
+        See http://tracker.ceph.com/issues/24856.
+        """
+        self.fs.set_max_mds(2)
+        status = self.fs.wait_for_daemons()
+
+        self.mount_a.umount_wait()
+
+        monc_timeout = float(self.fs.get_config("mon_client_ping_timeout", service_type="mds"))
+
+        mds_0 = self.fs.get_rank(rank=0, status=status)
+        self.fs.rank_freeze(True, rank=0) # prevent failover
+        self.fs.rank_signal(signal.SIGSTOP, rank=0, status=status)
+        self.wait_until_true(
+            lambda: "laggy_since" in self.fs.get_rank(),
+            timeout=self.fs.beacon_timeout
+        )
+
+        self.fs.rank_fail(rank=1)
+        self.fs.wait_for_state('up:resolve', rank=1, timeout=30)
+
+        # Make sure of mds_0's monitor connection gets reset
+        time.sleep(monc_timeout * 2)
+
+        # Continue rank 0, it will get discontinuous mdsmap
+        self.fs.rank_signal(signal.SIGCONT, rank=0)
+        self.wait_until_true(
+            lambda: "laggy_since" not in self.fs.get_rank(rank=0),
+            timeout=self.fs.beacon_timeout
+        )
+
+        # mds.b will be stuck at 'reconnect' state if snapserver gets confused
+        # by discontinuous mdsmap
+        self.fs.wait_for_state('up:active', rank=1, timeout=30)
+        self.assertEqual(mds_0['gid'], self.fs.get_rank(rank=0)['gid'])
+        self.fs.rank_freeze(False, rank=0)
+
+    def test_connect_bootstrapping(self):
+        self.config_set("mds", "mds_sleep_rank_change", 10000000.0)
+        self.config_set("mds", "mds_connect_bootstrapping", True)
+        self.fs.set_max_mds(2)
+        self.fs.wait_for_daemons()
+        self.fs.rank_fail(rank=0)
+        # rank 0 will get stuck in up:resolve, see https://tracker.ceph.com/issues/53194
+        self.fs.wait_for_daemons()
 
 
 class TestStandbyReplay(CephFSTestCase):
+
+    CLIENTS_REQUIRED = 1
     MDSS_REQUIRED = 4
-    REQUIRE_FILESYSTEM = False
 
-    def set_standby_for(self, leader, follower, replay):
-        self.set_conf("mds.{0}".format(follower), "mds_standby_for_name", leader)
+    def _confirm_no_replay(self):
+        status = self.fs.status()
+        _ = len(list(status.get_standbys()))
+        self.assertEqual(0, len(list(self.fs.get_replays(status=status))))
+        return status
+
+    def _confirm_single_replay(self, full=True, status=None, retries=3):
+        status = self.fs.wait_for_daemons(status=status)
+        ranks = sorted(self.fs.get_mds_map(status=status)['in'])
+        replays = list(self.fs.get_replays(status=status))
+        checked_replays = set()
+        for rank in ranks:
+            has_replay = False
+            for replay in replays:
+                if replay['rank'] == rank:
+                    self.assertFalse(has_replay)
+                    has_replay = True
+                    checked_replays.add(replay['gid'])
+            if full and not has_replay:
+                if retries <= 0:
+                    raise RuntimeError("rank "+str(rank)+" has no standby-replay follower")
+                else:
+                    retries = retries-1
+                    time.sleep(2)
+        self.assertEqual(checked_replays, set(info['gid'] for info in replays))
+        return status
+
+    def _check_replay_takeover(self, status, rank=0):
+        replay = self.fs.get_replay(rank=rank, status=status)
+        new_status = self.fs.wait_for_daemons()
+        new_active = self.fs.get_rank(rank=rank, status=new_status)
         if replay:
-            self.set_conf("mds.{0}".format(follower), "mds_standby_replay", "true")
-
-    def get_info_by_name(self, mds_name):
-        status = self.mds_cluster.status()
-        info = status.get_mds(mds_name)
-        if info is None:
-            log.warn(str(status))
-            raise RuntimeError("MDS '{0}' not found".format(mds_name))
+            self.assertEqual(replay['gid'], new_active['gid'])
         else:
-            return info
+            # double check takeover came from a standby (or some new daemon via restart)
+            found = False
+            for info in status.get_standbys():
+                if info['gid'] == new_active['gid']:
+                    found = True
+                    break
+            if not found:
+                for info in status.get_all():
+                    self.assertNotEqual(info['gid'], new_active['gid'])
+        return new_status
 
-    def test_standby_replay_unused(self):
-        # Pick out exactly 3 daemons to be run during test
-        use_daemons = sorted(self.mds_cluster.mds_ids[0:3])
-        mds_a, mds_b, mds_c = use_daemons
-        log.info("Using MDS daemons: {0}".format(use_daemons))
+    def test_standby_replay_singleton(self):
+        """
+        That only one MDS becomes standby-replay.
+        """
 
-        # B and C should both follow A, but only one will
-        # really get into standby replay state.
-        self.set_standby_for(mds_a, mds_b, True)
-        self.set_standby_for(mds_a, mds_c, True)
+        self._confirm_no_replay()
+        self.fs.set_allow_standby_replay(True)
+        time.sleep(30)
+        self._confirm_single_replay()
 
-        # Create FS and start A
-        fs_a = self.mds_cluster.newfs("alpha")
-        self.mds_cluster.mds_restart(mds_a)
-        fs_a.wait_for_daemons()
-        self.assertEqual(fs_a.get_active_names(), [mds_a])
+    def test_standby_replay_damaged(self):
+        """
+        That a standby-replay daemon can cause the rank to go damaged correctly.
+        """
 
-        # Start B, he should go into standby replay
-        self.mds_cluster.mds_restart(mds_b)
-        self.wait_for_daemon_start([mds_b])
-        info_b = self.get_info_by_name(mds_b)
-        self.assertEqual(info_b['state'], "up:standby-replay")
-        self.assertEqual(info_b['standby_for_name'], mds_a)
-        self.assertEqual(info_b['rank'], 0)
+        for mount in self.mounts:
+            mount.umount_wait()
 
-        # Start C, he should go into standby (*not* replay)
-        self.mds_cluster.mds_restart(mds_c)
-        self.wait_for_daemon_start([mds_c])
-        info_c = self.get_info_by_name(mds_c)
-        self.assertEqual(info_c['state'], "up:standby")
-        self.assertEqual(info_c['standby_for_name'], mds_a)
-        self.assertEqual(info_c['rank'], -1)
+        self._confirm_no_replay()
+        self.config_set("mds", "mds_standby_replay_damaged", True)
+        self.fs.set_allow_standby_replay(True)
+        self.wait_until_true(
+            lambda: len(self.fs.get_damaged()) > 0,
+            timeout=30
+        )
+        status = self.fs.status()
+        self.assertListEqual([], list(self.fs.get_ranks(status=status)))
+        self.assertListEqual([0], self.fs.get_damaged(status=status))
 
-        # Kill B, C should go into standby replay
-        self.mds_cluster.mds_stop(mds_b)
-        self.mds_cluster.mds_fail(mds_b)
-        self.wait_until_equal(
-                lambda: self.get_info_by_name(mds_c)['state'],
-                "up:standby-replay",
-                60)
-        info_c = self.get_info_by_name(mds_c)
-        self.assertEqual(info_c['state'], "up:standby-replay")
-        self.assertEqual(info_c['standby_for_name'], mds_a)
-        self.assertEqual(info_c['rank'], 0)
+    def test_standby_replay_disable(self):
+        """
+        That turning off allow_standby_replay fails all standby-replay daemons.
+        """
 
-    def test_standby_failure(self):
+        self._confirm_no_replay()
+        self.fs.set_allow_standby_replay(True)
+        time.sleep(30)
+        self._confirm_single_replay()
+        self.fs.set_allow_standby_replay(False)
+        self._confirm_no_replay()
+
+    def test_standby_replay_singleton_fail(self):
+        """
+        That failures don't violate singleton constraint.
+        """
+
+        self._confirm_no_replay()
+        self.fs.set_allow_standby_replay(True)
+        status = self._confirm_single_replay()
+
+        for i in range(10):
+            time.sleep(randint(1, 5))
+            self.fs.rank_restart(status=status)
+            status = self._check_replay_takeover(status)
+            status = self._confirm_single_replay(status=status)
+
+        for i in range(10):
+            time.sleep(randint(1, 5))
+            self.fs.rank_fail()
+            status = self._check_replay_takeover(status)
+            status = self._confirm_single_replay(status=status)
+
+    def test_standby_replay_singleton_fail_multimds(self):
+        """
+        That failures don't violate singleton constraint with multiple actives.
+        """
+
+        status = self._confirm_no_replay()
+        new_max_mds = randint(2, len(list(status.get_standbys())))
+        self.fs.set_max_mds(new_max_mds)
+        self.fs.wait_for_daemons() # wait for actives to come online!
+        self.fs.set_allow_standby_replay(True)
+        status = self._confirm_single_replay(full=False)
+
+        for i in range(10):
+            time.sleep(randint(1, 5))
+            victim = randint(0, new_max_mds-1)
+            self.fs.rank_restart(rank=victim, status=status)
+            status = self._check_replay_takeover(status, rank=victim)
+            status = self._confirm_single_replay(status=status, full=False)
+
+        for i in range(10):
+            time.sleep(randint(1, 5))
+            victim = randint(0, new_max_mds-1)
+            self.fs.rank_fail(rank=victim)
+            status = self._check_replay_takeover(status, rank=victim)
+            status = self._confirm_single_replay(status=status, full=False)
+
+    def test_standby_replay_failure(self):
         """
         That the failure of a standby-replay daemon happens cleanly
         and doesn't interrupt anything else.
         """
-        # Pick out exactly 2 daemons to be run during test
-        use_daemons = sorted(self.mds_cluster.mds_ids[0:2])
-        mds_a, mds_b = use_daemons
-        log.info("Using MDS daemons: {0}".format(use_daemons))
 
-        # Configure two pairs of MDSs that are standby for each other
-        self.set_standby_for(mds_a, mds_b, True)
-        self.set_standby_for(mds_b, mds_a, False)
+        status = self._confirm_no_replay()
+        self.fs.set_max_mds(1)
+        self.fs.set_allow_standby_replay(True)
+        status = self._confirm_single_replay()
 
-        # Create FS alpha and get mds_a to come up as active
-        fs_a = self.mds_cluster.newfs("alpha")
-        self.mds_cluster.mds_restart(mds_a)
-        fs_a.wait_for_daemons()
-        self.assertEqual(fs_a.get_active_names(), [mds_a])
+        for i in range(10):
+            time.sleep(randint(1, 5))
+            victim = self.fs.get_replay(status=status)
+            self.fs.mds_restart(mds_id=victim['name'])
+            status = self._confirm_single_replay(status=status)
 
-        # Start the standbys
-        self.mds_cluster.mds_restart(mds_b)
-        self.wait_for_daemon_start([mds_b])
+    def test_standby_replay_prepare_beacon(self):
+        """
+        That a MDSMonitor::prepare_beacon handles standby-replay daemons
+        correctly without removing the standby. (Note, usually a standby-replay
+        beacon will just be replied to by MDSMonitor::preprocess_beacon.)
+        """
 
-        # See the standby come up as the correct rank
-        info_b = self.get_info_by_name(mds_b)
-        self.assertEqual(info_b['state'], "up:standby-replay")
-        self.assertEqual(info_b['standby_for_name'], mds_a)
-        self.assertEqual(info_b['rank'], 0)
-
-        # Kill the standby
-        self.mds_cluster.mds_stop(mds_b)
-        self.mds_cluster.mds_fail(mds_b)
-
-        # See that the standby is gone and the active remains
-        self.assertEqual(fs_a.get_active_names(), [mds_a])
-        mds_map = fs_a.get_mds_map()
-        self.assertEqual(len(mds_map['info']), 1)
-        self.assertEqual(mds_map['failed'], [])
-        self.assertEqual(mds_map['damaged'], [])
-        self.assertEqual(mds_map['stopped'], [])
+        status = self._confirm_no_replay()
+        self.fs.set_max_mds(1)
+        self.fs.set_allow_standby_replay(True)
+        status = self._confirm_single_replay()
+        replays = list(status.get_replays(self.fs.id))
+        self.assertEqual(len(replays), 1)
+        self.config_set('mds.'+replays[0]['name'], 'mds_inject_health_dummy', True)
+        time.sleep(10) # for something not to happen...
+        status = self._confirm_single_replay()
+        replays2 = list(status.get_replays(self.fs.id))
+        self.assertEqual(replays[0]['gid'], replays2[0]['gid'])
 
     def test_rank_stopped(self):
         """
         That when a rank is STOPPED, standby replays for
         that rank get torn down
         """
-        # Pick out exactly 2 daemons to be run during test
-        use_daemons = sorted(self.mds_cluster.mds_ids[0:4])
-        mds_a, mds_b, mds_a_s, mds_b_s = use_daemons
-        log.info("Using MDS daemons: {0}".format(use_daemons))
 
-        # a and b both get a standby
-        self.set_standby_for(mds_a, mds_a_s, True)
-        self.set_standby_for(mds_b, mds_b_s, True)
+        status = self._confirm_no_replay()
+        standby_count = len(list(status.get_standbys()))
+        self.fs.set_max_mds(2)
+        self.fs.set_allow_standby_replay(True)
+        status = self._confirm_single_replay()
 
-        # Create FS alpha and get mds_a to come up as active
-        fs_a = self.mds_cluster.newfs("alpha")
-        fs_a.mon_manager.raw_cluster_cmd('fs', 'set', fs_a.name,
-                                         'allow_multimds', "true",
-                                         "--yes-i-really-mean-it")
-        fs_a.mon_manager.raw_cluster_cmd('fs', 'set', fs_a.name, 'max_mds', "2")
+        self.fs.set_max_mds(1) # stop rank 1
 
-        self.mds_cluster.mds_restart(mds_a)
-        self.wait_until_equal(lambda: fs_a.get_active_names(), [mds_a], 30)
-        self.mds_cluster.mds_restart(mds_b)
-        fs_a.wait_for_daemons()
-        self.assertEqual(sorted(fs_a.get_active_names()), [mds_a, mds_b])
+        status = self._confirm_single_replay()
+        self.assertTrue(standby_count, len(list(status.get_standbys())))
 
-        # Start the standbys
-        self.mds_cluster.mds_restart(mds_b_s)
-        self.wait_for_daemon_start([mds_b_s])
-        self.mds_cluster.mds_restart(mds_a_s)
-        self.wait_for_daemon_start([mds_a_s])
-        info_b_s = self.get_info_by_name(mds_b_s)
-        self.assertEqual(info_b_s['state'], "up:standby-replay")
-        info_a_s = self.get_info_by_name(mds_a_s)
-        self.assertEqual(info_a_s['state'], "up:standby-replay")
+    def test_health_warn_oversize_cache_has_no_counters(self):
+        '''
+        Test that when MDS cache size crosses the limit, health warning
+        printed for standy-replay MDS doesn't include inode and stray
+        counters.
 
-        # Shrink the cluster
-        fs_a.mon_manager.raw_cluster_cmd('fs', 'set', fs_a.name, 'max_mds', "1")
-        fs_a.mon_manager.raw_cluster_cmd("mds", "stop", "{0}:1".format(fs_a.name))
-        self.wait_until_equal(
-            lambda: fs_a.get_active_names(), [mds_a],
-            60
-        )
+        Tests: https://tracker.ceph.com/issues/63514
+        '''
+        # reduce MDS cache limit, default MDS cache limit is too high which
+        # will unnecessarily consume too many resources and too much time.
+        self.config_set('mds', 'mds_cache_memory_limit', '1K')
+        # health warning for crossing MDS cache size limit won't be raised
+        # until a threshold. default threshold is too high. it will
+        # unnecessarily consume so much time and resources.
+        self.config_set('mds', 'mds_health_cache_threshold', '1.000001')
+        # so that there is only active MDS and only 1 health warning is
+        # produced. presence of 2 warning should cause this test to fail
+        self.fs.set_max_mds(1)
+        self.fs.set_allow_standby_replay(True)
+        self._confirm_single_replay()
+        self.fs.wait_for_daemons()
+        # The call above (to self.fs.wait_for_daemons()) should ensure we have
+        # only 1 active MDS on cluster
+        active_mds_id = self.fs.get_active_names()[0]
+        sr_mds_id = self.fs.get_standby_replay_names()[0]
 
-        # Both 'b' and 'b_s' should go back to being standbys
-        self.wait_until_equal(
-            lambda: self.mds_cluster.get_standby_daemons(), {mds_b, mds_b_s},
-            60
-        )
+        # this should generate more than enough MDS cache to trigger health
+        # warning MDS_CACHE_OVERSIZED.
+        self.mount_a.open_n_background(".", 400)
+
+        # actual test begins now...
+        with safe_while(sleep=3, tries=10) as proceed:
+            while proceed():
+                # logging cache generated so far for th sake of easy
+                # debugging in future.
+                self.get_ceph_cmd_stdout(f'tell mds.{active_mds_id} cache '
+                                          'status')
+
+                health_report = self.get_ceph_cmd_stdout('health detail '
+                                                         '--format json')
+                health_report = json_loads(health_report)
+                if 'MDS_CACHE_OVERSIZED' not in health_report['checks']:
+                    log.debug('warning hasn\'t appeared in health report yet.'
+                             'trying again after some sleep...')
+                    continue
+
+                cache_warn = health_report['checks']['MDS_CACHE_OVERSIZED']\
+                        ['detail']
+                log.debug(f'cache_warn - {cache_warn}')
+                # sanity check: "ceph health detail" output should've 2
+                # warnings -- one for active MDS and other for standby-replay
+                # MDS.
+                if len(cache_warn) != 2:
+                    log.debug('expected 2 warnings but instead found '
+                              f'{len(cache_warn)} warnings; trying again '
+                               'after some sleep...')
+                    continue
+
+                for cw in cache_warn:
+                    msg = cw['message']
+                    if f'mds.{sr_mds_id}' not in cw['message']:
+                        continue
+                    self.assertNotIn('inodes in use by clients', msg)
+                    self.assertNotIn('stray files', msg)
+                    return
 
 
 class TestMultiFilesystems(CephFSTestCase):
@@ -262,13 +840,12 @@ class TestMultiFilesystems(CephFSTestCase):
 
     def setUp(self):
         super(TestMultiFilesystems, self).setUp()
-        self.mds_cluster.mon_manager.raw_cluster_cmd("fs", "flag", "set",
-            "enable_multiple", "true",
-            "--yes-i-really-mean-it")
+        self.run_ceph_cmd("fs", "flag", "set", "enable_multiple",
+                          "true", "--yes-i-really-mean-it")
 
     def _setup_two(self):
-        fs_a = self.mds_cluster.newfs("alpha")
-        fs_b = self.mds_cluster.newfs("bravo")
+        fs_a = self.mds_cluster.newfs(name="alpha")
+        fs_b = self.mds_cluster.newfs(name="bravo")
 
         self.mds_cluster.mds_restart()
 
@@ -278,7 +855,7 @@ class TestMultiFilesystems(CephFSTestCase):
 
         # Reconfigure client auth caps
         for mount in self.mounts:
-            self.mds_cluster.mon_manager.raw_cluster_cmd_result(
+            self.get_ceph_cmd_result(
                 'auth', 'caps', "client.{0}".format(mount.client_id),
                 'mds', 'allow',
                 'mon', 'allow r',
@@ -291,14 +868,14 @@ class TestMultiFilesystems(CephFSTestCase):
         fs_a, fs_b = self._setup_two()
 
         # Mount a client on fs_a
-        self.mount_a.mount(mount_fs_name=fs_a.name)
+        self.mount_a.mount_wait(cephfs_name=fs_a.name)
         self.mount_a.write_n_mb("pad.bin", 1)
         self.mount_a.write_n_mb("test.bin", 2)
         a_created_ino = self.mount_a.path_to_ino("test.bin")
         self.mount_a.create_files()
 
         # Mount a client on fs_b
-        self.mount_b.mount(mount_fs_name=fs_b.name)
+        self.mount_b.mount_wait(cephfs_name=fs_b.name)
         self.mount_b.write_n_mb("test.bin", 1)
         b_created_ino = self.mount_b.path_to_ino("test.bin")
         self.mount_b.create_files()
@@ -346,7 +923,7 @@ class TestMultiFilesystems(CephFSTestCase):
 
         # Kill fs_a's active MDS, see a standby take over
         self.mds_cluster.mds_stop(original_a)
-        self.mds_cluster.mon_manager.raw_cluster_cmd("mds", "fail", original_a)
+        self.run_ceph_cmd("mds", "fail", original_a)
         self.wait_until_equal(lambda: len(fs_a.get_active_names()), 1, 30,
                               reject_fn=lambda v: v > 1)
         # Assert that it's a *different* daemon that has now appeared in the map for fs_a
@@ -354,7 +931,7 @@ class TestMultiFilesystems(CephFSTestCase):
 
         # Kill fs_b's active MDS, see a standby take over
         self.mds_cluster.mds_stop(original_b)
-        self.mds_cluster.mon_manager.raw_cluster_cmd("mds", "fail", original_b)
+        self.run_ceph_cmd("mds", "fail", original_b)
         self.wait_until_equal(lambda: len(fs_b.get_active_names()), 1, 30,
                               reject_fn=lambda v: v > 1)
         # Assert that it's a *different* daemon that has now appeared in the map for fs_a
@@ -374,255 +951,77 @@ class TestMultiFilesystems(CephFSTestCase):
     def test_grow_shrink(self):
         # Usual setup...
         fs_a, fs_b = self._setup_two()
-        fs_a.mon_manager.raw_cluster_cmd("fs", "set", fs_a.name,
-                                         "allow_multimds", "true",
-                                         "--yes-i-really-mean-it")
-
-        fs_b.mon_manager.raw_cluster_cmd("fs", "set", fs_b.name,
-                                         "allow_multimds", "true",
-                                         "--yes-i-really-mean-it")
 
         # Increase max_mds on fs_b, see a standby take up the role
-        fs_b.mon_manager.raw_cluster_cmd('fs', 'set', fs_b.name, 'max_mds', "2")
+        fs_b.set_max_mds(2)
         self.wait_until_equal(lambda: len(fs_b.get_active_names()), 2, 30,
                               reject_fn=lambda v: v > 2 or v < 1)
 
         # Increase max_mds on fs_a, see a standby take up the role
-        fs_a.mon_manager.raw_cluster_cmd('fs', 'set', fs_a.name, 'max_mds', "2")
+        fs_a.set_max_mds(2)
         self.wait_until_equal(lambda: len(fs_a.get_active_names()), 2, 30,
                               reject_fn=lambda v: v > 2 or v < 1)
 
         # Shrink fs_b back to 1, see a daemon go back to standby
-        fs_b.mon_manager.raw_cluster_cmd('fs', 'set', fs_b.name, 'max_mds', "1")
-        fs_b.mon_manager.raw_cluster_cmd('mds', 'deactivate', "{0}:1".format(fs_b.name))
+        fs_b.set_max_mds(1)
         self.wait_until_equal(lambda: len(fs_b.get_active_names()), 1, 30,
                               reject_fn=lambda v: v > 2 or v < 1)
 
         # Grow fs_a up to 3, see the former fs_b daemon join it.
-        fs_a.mon_manager.raw_cluster_cmd('fs', 'set', fs_a.name, 'max_mds', "3")
+        fs_a.set_max_mds(3)
         self.wait_until_equal(lambda: len(fs_a.get_active_names()), 3, 60,
                               reject_fn=lambda v: v > 3 or v < 2)
 
-    def test_standby_for_name(self):
-        # Pick out exactly 4 daemons to be run during test
-        use_daemons = sorted(self.mds_cluster.mds_ids[0:4])
-        mds_a, mds_b, mds_c, mds_d = use_daemons
-        log.info("Using MDS daemons: {0}".format(use_daemons))
+SHUTDOWN_KILLPOINTS = [
+    "SHUTDOWN_NULL",
+    "SHUTDOWN_START",
+    "SHUTDOWN_POSTTRIM",
+    "SHUTDOWN_POSTONEEXPORT",
+    "SHUTDOWN_POSTALLEXPORTS",
+    "SHUTDOWN_SESSIONTERMINATE",
+    "SHUTDOWN_SUBTREEMAP",
+    "SHUTDOWN_TRIMALL",
+    "SHUTDOWN_STRAYPUT",
+    "SHUTDOWN_LOGCAP",
+    "SHUTDOWN_EMPTYSUBTREES",
+    "SHUTDOWN_MYINREMOVAL",
+    "SHUTDOWN_GLOBALSNAPREALMREMOVAL",
+]
 
-        def set_standby_for(leader, follower, replay):
-            self.set_conf("mds.{0}".format(follower), "mds_standby_for_name", leader)
-            if replay:
-                self.set_conf("mds.{0}".format(follower), "mds_standby_replay", "true")
+class TestShutdownKillpoints(CephFSTestCase):
+    CLIENTS_REQUIRED = 1
+    MDSS_REQUIRED = 3
 
-        # Configure two pairs of MDSs that are standby for each other
-        set_standby_for(mds_a, mds_b, True)
-        set_standby_for(mds_b, mds_a, False)
-        set_standby_for(mds_c, mds_d, True)
-        set_standby_for(mds_d, mds_c, False)
+    def _run_workload(self, killpoint):
+        self.fs.set_max_mds(2)
+        status = self.fs.wait_for_daemons()
+        rinfo = self.fs.get_rank(rank=1, status=status)
 
-        # Create FS alpha and get mds_a to come up as active
-        fs_a = self.mds_cluster.newfs("alpha")
-        self.mds_cluster.mds_restart(mds_a)
-        fs_a.wait_for_daemons()
-        self.assertEqual(fs_a.get_active_names(), [mds_a])
+        self.fs.set_config("mds_kill_shutdown_at", str(killpoint), rank=1, status=status)
 
-        # Create FS bravo and get mds_c to come up as active
-        fs_b = self.mds_cluster.newfs("bravo")
-        self.mds_cluster.mds_restart(mds_c)
-        fs_b.wait_for_daemons()
-        self.assertEqual(fs_b.get_active_names(), [mds_c])
+        self.mount_a.run_shell_payload("mkdir top && touch top/file")
+        self.mount_a.setfattr("top", "ceph.dir.pin", "1")
+        self._wait_subtrees([('/top', 1)], status=status, rank=0)
 
-        # Start the standbys
-        self.mds_cluster.mds_restart(mds_b)
-        self.mds_cluster.mds_restart(mds_d)
-        self.wait_for_daemon_start([mds_b, mds_d])
+        p = self.mount_a.open_n_background("top", 1000)
+        self.fs.set_max_mds(1)
+        self.fs.wait_for_death(timeout=120, status=status, rank=1)
+        self.delete_mds_coredump(rinfo['name'])
+        self.fs.mds_restart(rinfo['name'])
+        status = self.fs.wait_for_daemons()
+        p.stdin.close()
+        p.wait()
 
-        def get_info_by_name(fs, mds_name):
-            mds_map = fs.get_mds_map()
-            for gid_str, info in mds_map['info'].items():
-                if info['name'] == mds_name:
-                    return info
+    @staticmethod
+    def make_test_killpoint(killpoint, name):
+        def test(self):
+            log.info(f"Starting workload with killpoint {name}={killpoint}")
+            self._run_workload(killpoint)
+            log.info(f"Test passed for killpoint {name}={killpoint}")
+        return test
 
-            log.warn(json.dumps(mds_map, indent=2))
-            raise RuntimeError("MDS '{0}' not found in filesystem MDSMap".format(mds_name))
-
-        # See both standbys come up as standby replay for the correct ranks
-        # mds_b should be in filesystem alpha following mds_a
-        info_b = get_info_by_name(fs_a, mds_b)
-        self.assertEqual(info_b['state'], "up:standby-replay")
-        self.assertEqual(info_b['standby_for_name'], mds_a)
-        self.assertEqual(info_b['rank'], 0)
-        # mds_d should be in filesystem alpha following mds_c
-        info_d = get_info_by_name(fs_b, mds_d)
-        self.assertEqual(info_d['state'], "up:standby-replay")
-        self.assertEqual(info_d['standby_for_name'], mds_c)
-        self.assertEqual(info_d['rank'], 0)
-
-        # Kill both active daemons
-        self.mds_cluster.mds_stop(mds_a)
-        self.mds_cluster.mds_fail(mds_a)
-        self.mds_cluster.mds_stop(mds_c)
-        self.mds_cluster.mds_fail(mds_c)
-
-        # Wait for standbys to take over
-        fs_a.wait_for_daemons()
-        self.assertEqual(fs_a.get_active_names(), [mds_b])
-        fs_b.wait_for_daemons()
-        self.assertEqual(fs_b.get_active_names(), [mds_d])
-
-        # Start the original active daemons up again
-        self.mds_cluster.mds_restart(mds_a)
-        self.mds_cluster.mds_restart(mds_c)
-        self.wait_for_daemon_start([mds_a, mds_c])
-
-        self.assertEqual(set(self.mds_cluster.get_standby_daemons()),
-                         {mds_a, mds_c})
-
-    def test_standby_for_rank(self):
-        use_daemons = sorted(self.mds_cluster.mds_ids[0:4])
-        mds_a, mds_b, mds_c, mds_d = use_daemons
-        log.info("Using MDS daemons: {0}".format(use_daemons))
-
-        def set_standby_for(leader_rank, leader_fs, follower_id):
-            self.set_conf("mds.{0}".format(follower_id),
-                          "mds_standby_for_rank", leader_rank)
-
-            fscid = leader_fs.get_namespace_id()
-            self.set_conf("mds.{0}".format(follower_id),
-                          "mds_standby_for_fscid", fscid)
-
-        fs_a = self.mds_cluster.newfs("alpha")
-        fs_b = self.mds_cluster.newfs("bravo")
-        set_standby_for(0, fs_a, mds_a)
-        set_standby_for(0, fs_a, mds_b)
-        set_standby_for(0, fs_b, mds_c)
-        set_standby_for(0, fs_b, mds_d)
-
-        self.mds_cluster.mds_restart(mds_a)
-        fs_a.wait_for_daemons()
-        self.assertEqual(fs_a.get_active_names(), [mds_a])
-
-        self.mds_cluster.mds_restart(mds_c)
-        fs_b.wait_for_daemons()
-        self.assertEqual(fs_b.get_active_names(), [mds_c])
-
-        self.mds_cluster.mds_restart(mds_b)
-        self.mds_cluster.mds_restart(mds_d)
-        self.wait_for_daemon_start([mds_b, mds_d])
-
-        self.mds_cluster.mds_stop(mds_a)
-        self.mds_cluster.mds_fail(mds_a)
-        self.mds_cluster.mds_stop(mds_c)
-        self.mds_cluster.mds_fail(mds_c)
-
-        fs_a.wait_for_daemons()
-        self.assertEqual(fs_a.get_active_names(), [mds_b])
-        fs_b.wait_for_daemons()
-        self.assertEqual(fs_b.get_active_names(), [mds_d])
-
-    def test_standby_for_fscid(self):
-        """
-        That I can set a standby FSCID with no rank, and the result is
-        that daemons join any rank for that filesystem.
-        """
-        use_daemons = sorted(self.mds_cluster.mds_ids[0:4])
-        mds_a, mds_b, mds_c, mds_d = use_daemons
-
-        log.info("Using MDS daemons: {0}".format(use_daemons))
-
-        def set_standby_for(leader_fs, follower_id):
-            fscid = leader_fs.get_namespace_id()
-            self.set_conf("mds.{0}".format(follower_id),
-                          "mds_standby_for_fscid", fscid)
-
-        # Create two filesystems which should have two ranks each
-        fs_a = self.mds_cluster.newfs("alpha")
-        fs_a.mon_manager.raw_cluster_cmd("fs", "set", fs_a.name,
-                                         "allow_multimds", "true",
-                                         "--yes-i-really-mean-it")
-
-        fs_b = self.mds_cluster.newfs("bravo")
-        fs_b.mon_manager.raw_cluster_cmd("fs", "set", fs_b.name,
-                                         "allow_multimds", "true",
-                                         "--yes-i-really-mean-it")
-
-        fs_a.mon_manager.raw_cluster_cmd('fs', 'set', fs_a.name,
-                                         'max_mds', "2")
-        fs_b.mon_manager.raw_cluster_cmd('fs', 'set', fs_b.name,
-                                         'max_mds', "2")
-
-        # Set all the daemons to have a FSCID assignment but no other
-        # standby preferences.
-        set_standby_for(fs_a, mds_a)
-        set_standby_for(fs_a, mds_b)
-        set_standby_for(fs_b, mds_c)
-        set_standby_for(fs_b, mds_d)
-
-        # Now when we start all daemons at once, they should fall into
-        # ranks in the right filesystem
-        self.mds_cluster.mds_restart(mds_a)
-        self.mds_cluster.mds_restart(mds_b)
-        self.mds_cluster.mds_restart(mds_c)
-        self.mds_cluster.mds_restart(mds_d)
-        self.wait_for_daemon_start([mds_a, mds_b, mds_c, mds_d])
-        fs_a.wait_for_daemons()
-        fs_b.wait_for_daemons()
-        self.assertEqual(set(fs_a.get_active_names()), {mds_a, mds_b})
-        self.assertEqual(set(fs_b.get_active_names()), {mds_c, mds_d})
-
-    def test_standby_for_invalid_fscid(self):
-        # Set invalid standby_fscid with other mds standby_rank
-        # stopping active mds service should not end up in mon crash
-
-        # Get configured mons in the cluster
-        first_mon = teuthology.get_first_mon(self.ctx, self.configs_set)
-        (mon,) = self.ctx.cluster.only(first_mon).remotes.iterkeys()
-        manager = CephManager(
-            mon,
-            ctx=self.ctx,
-            logger=log.getChild('ceph_manager'),
-        )
-        configured_mons = manager.get_mon_quorum()
-
-        use_daemons = sorted(self.mds_cluster.mds_ids[0:3])
-        mds_a, mds_b, mds_c = use_daemons
-        log.info("Using MDS daemons: {0}".format(use_daemons))
-
-        def set_standby_for_rank(leader_rank, follower_id):
-            self.set_conf("mds.{0}".format(follower_id),
-                          "mds_standby_for_rank", leader_rank)
-
-        # Create one fs
-        fs_a = self.mds_cluster.newfs("cephfs")
-
-        # Set all the daemons to have a rank assignment but no other
-        # standby preferences.
-        set_standby_for_rank(0, mds_a)
-        set_standby_for_rank(0, mds_b)
-
-        # Set third daemon to have invalid fscid assignment and no other
-        # standby preferences
-        invalid_fscid = 123
-        self.set_conf("mds.{0}".format(mds_c), "mds_standby_for_fscid", invalid_fscid)
-
-        #Restart all the daemons to make the standby preference applied
-        self.mds_cluster.mds_restart(mds_a)
-        self.mds_cluster.mds_restart(mds_b)
-        self.mds_cluster.mds_restart(mds_c)
-        self.wait_for_daemon_start([mds_a, mds_b, mds_c])
-
-        #Stop active mds daemon service of fs
-        if (fs_a.get_active_names(), [mds_a]):
-            self.mds_cluster.mds_stop(mds_a)
-            self.mds_cluster.mds_fail(mds_a)
-            fs_a.wait_for_daemons()
-        else:
-            self.mds_cluster.mds_stop(mds_b)
-            self.mds_cluster.mds_fail(mds_b)
-            fs_a.wait_for_daemons()
-
-        #Get active mons from cluster
-        active_mons = manager.get_mon_quorum()
-
-        #Check for active quorum mon status and configured mon status
-        self.assertEqual(active_mons, configured_mons, "Not all mons are in quorum Invalid standby invalid fscid test failed!")
+for killpoint, name in enumerate(SHUTDOWN_KILLPOINTS):
+    if killpoint == 0:
+        continue
+    test_export_killpoints = TestShutdownKillpoints.make_test_killpoint(killpoint, name)
+    setattr(TestShutdownKillpoints, f"test_shutdown_killpoint_{name}", test_export_killpoints)

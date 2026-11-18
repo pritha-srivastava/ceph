@@ -1,10 +1,58 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
 
-#include "ObjectStore.h"
+#include "os/Transaction.h"
 #include "common/Formatter.h"
 
-void ObjectStore::Transaction::dump(ceph::Formatter *f)
+using std::less;
+using std::list;
+using std::map;
+using std::ostream;
+using std::set;
+using std::string;
+
+using ceph::bufferlist;
+using ceph::decode;
+using ceph::encode;
+
+void decode_str_str_map_to_bl(bufferlist::const_iterator& p,
+			      bufferlist *out)
+{
+  auto start = p;
+  __u32 n;
+  decode(n, p);
+  unsigned len = 4;
+  while (n--) {
+    __u32 l;
+    decode(l, p);
+    p += l;
+    len += 4 + l;
+    decode(l, p);
+    p += l;
+    len += 4 + l;
+  }
+  start.copy(len, *out);
+}
+
+void decode_str_set_to_bl(bufferlist::const_iterator& p,
+			  bufferlist *out)
+{
+  auto start = p;
+  __u32 n;
+  decode(n, p);
+  unsigned len = 4;
+  while (n--) {
+    __u32 l;
+    decode(l, p);
+    p += l;
+    len += 4 + l;
+  }
+  start.copy(len, *out);
+}
+
+namespace ceph::os {
+
+void Transaction::dump(ceph::Formatter *f)
 {
   f->open_array_section("ops");
   iterator i = begin();
@@ -19,6 +67,16 @@ void ObjectStore::Transaction::dump(ceph::Formatter *f)
     case Transaction::OP_NOP:
       f->dump_string("op_name", "nop");
       break;
+    case Transaction::OP_CREATE:
+      {
+	coll_t cid = i.get_cid(op->cid);
+	ghobject_t oid = i.get_oid(op->oid);
+	f->dump_string("op_name", "create");
+	f->dump_stream("collection") << cid;
+	f->dump_stream("oid") << oid;
+      }
+      break;
+
     case Transaction::OP_TOUCH:
       {
         coll_t cid = i.get_cid(op->cid);
@@ -28,7 +86,19 @@ void ObjectStore::Transaction::dump(ceph::Formatter *f)
 	f->dump_stream("oid") << oid;
       }
       break;
-      
+
+    case Transaction::OP_TOUCH_TEMP:
+      {
+        coll_t cid = i.get_cid(op->cid);
+        const ghobject_t &oid = i.get_oid(op->oid);
+        const ghobject_t &dest_oid = i.get_oid(op->dest_oid);
+	f->dump_string("op_name", "touch_temp");
+	f->dump_stream("collection") << cid;
+	f->dump_stream("temp oid") << oid;
+        f->dump_stream("oid") << dest_oid;
+      }
+      break;
+
     case Transaction::OP_WRITE:
       {
         coll_t cid = i.get_cid(op->cid);
@@ -200,22 +270,32 @@ void ObjectStore::Transaction::dump(ceph::Formatter *f)
 
     case Transaction::OP_COLL_HINT:
       {
+	using ceph::decode;
         coll_t cid = i.get_cid(op->cid);
-        uint32_t type = op->hint_type;
+        uint32_t type = op->hint;
         f->dump_string("op_name", "coll_hint");
         f->dump_stream("collection") << cid;
         f->dump_unsigned("type", type);
         bufferlist hint;
         i.decode_bl(hint);
-        bufferlist::iterator hiter = hint.begin();
+        auto hiter = hint.cbegin();
         if (type == Transaction::COLL_HINT_EXPECTED_NUM_OBJECTS) {
           uint32_t pg_num;
           uint64_t num_objs;
-          ::decode(pg_num, hiter);
-          ::decode(num_objs, hiter);
+          decode(pg_num, hiter);
+          decode(num_objs, hiter);
           f->dump_unsigned("pg_num", pg_num);
           f->dump_unsigned("expected_num_objects", num_objs);
         }
+      }
+      break;
+
+    case Transaction::OP_COLL_SET_BITS:
+      {
+	coll_t cid = i.get_cid(op->cid);
+	f->dump_string("op_name", "coll_set_bits");
+	f->dump_stream("collection") << cid;
+	f->dump_unsigned("bits", op->split_bits);
       }
       break;
 
@@ -285,10 +365,6 @@ void ObjectStore::Transaction::dump(ceph::Formatter *f)
       }
       break;
 
-    case Transaction::OP_STARTSYNC:
-      f->dump_string("op_name", "startsync");
-      break;
-
     case Transaction::OP_COLL_RENAME:
       {
 	f->dump_string("op_name", "collection_rename");
@@ -332,6 +408,11 @@ void ObjectStore::Transaction::dump(ceph::Formatter *f)
 	f->dump_string("op_name", "omap_rmkeys");
 	f->dump_stream("collection") << cid;
 	f->dump_stream("oid") << oid;
+	f->open_array_section("attrs");
+	for (auto& k : keys) {
+	  f->dump_string("", k.c_str());
+	}
+	f->close_section();
       }
       break;
 
@@ -373,6 +454,18 @@ void ObjectStore::Transaction::dump(ceph::Formatter *f)
 	f->dump_stream("bits") << bits;
 	f->dump_stream("rem") << rem;
 	f->dump_stream("dest") << dest;
+      }
+      break;
+
+    case Transaction::OP_MERGE_COLLECTION:
+      {
+        coll_t cid = i.get_cid(op->cid);
+        uint32_t bits = op->split_bits;
+        coll_t dest = i.get_cid(op->dest_cid);
+	f->dump_string("op_name", "op_merge_collection");
+	f->dump_stream("collection") << cid;
+	f->dump_stream("dest") << dest;
+	f->dump_stream("bits") << bits;
       }
       break;
 
@@ -423,11 +516,13 @@ void ObjectStore::Transaction::dump(ceph::Formatter *f)
         ghobject_t oid = i.get_oid(op->oid);
         uint64_t expected_object_size = op->expected_object_size;
         uint64_t expected_write_size = op->expected_write_size;
+        uint32_t alloc_hint_flags = op->hint;
         f->dump_string("op_name", "op_setallochint");
         f->dump_stream("collection") << cid;
         f->dump_stream("oid") << oid;
         f->dump_stream("expected_object_size") << expected_object_size;
         f->dump_stream("expected_write_size") << expected_write_size;
+        f->dump_string("alloc_hint_flags", ceph_osd_alloc_hint_flag_string(alloc_hint_flags));
       }
       break;
 
@@ -447,47 +542,58 @@ void ObjectStore::Transaction::dump(ceph::Formatter *f)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
-void ObjectStore::Transaction::generate_test_instances(list<ObjectStore::Transaction*>& o)
+list<Transaction> Transaction::generate_test_instances()
 {
-  o.push_back(new Transaction);
+  list<Transaction> o;
 
-  Transaction *t = new Transaction;
-  t->nop();
-  o.push_back(t);
+  o.emplace_back();
+
+  Transaction t;
+  t.nop();
+  o.push_back(std::move(t));
   
-  t = new Transaction;
+  t = Transaction{};
   coll_t c(spg_t(pg_t(1,2), shard_id_t::NO_SHARD));
   coll_t c2(spg_t(pg_t(4,5), shard_id_t::NO_SHARD));
   ghobject_t o1(hobject_t("obj", "", 123, 456, -1, ""));
   ghobject_t o2(hobject_t("obj2", "", 123, 456, -1, ""));
   ghobject_t o3(hobject_t("obj3", "", 123, 456, -1, ""));
-  t->touch(c, o1);
+  t.touch(c, o1);
   bufferlist bl;
   bl.append("some data");
-  t->write(c, o1, 1, bl.length(), bl);
-  t->zero(c, o1, 22, 33);
-  t->truncate(c, o1, 99);
-  t->remove(c, o1);
-  o.push_back(t);
+  t.write(c, o1, 1, bl.length(), bl);
+  t.zero(c, o1, 22, 33);
+  t.truncate(c, o1, 99);
+  t.remove(c, o1);
+  o.push_back(std::move(t));
 
-  t = new Transaction;
-  t->setattr(c, o1, "key", bl);
-  map<string,bufferptr> m;
+  t = Transaction{};
+  t.setattr(c, o1, "key", bl);
+  map<string,bufferptr,less<>> m;
   m["a"] = buffer::copy("this", 4);
   m["b"] = buffer::copy("that", 4);
-  t->setattrs(c, o1, m);
-  t->rmattr(c, o1, "b");
-  t->rmattrs(c, o1);
+  t.setattrs(c, o1, m);
+  t.rmattr(c, o1, "b");
+  t.rmattrs(c, o1);
 
-  t->clone(c, o1, o2);
-  t->clone(c, o1, o3);
-  t->clone_range(c, o1, o2, 1, 12, 99);
+  t.clone(c, o1, o2);
+  t.clone(c, o1, o3);
+  t.clone_range(c, o1, o2, 1, 12, 99);
 
-  t->create_collection(c, 12);
-  t->collection_move_rename(c, o2, c2, o3);
-  t->remove_collection(c);
-  o.push_back(t);  
+  t.create_collection(c, 12);
+  t.collection_move_rename(c, o2, c2, o3);
+  t.remove_collection(c);
+  o.push_back(std::move(t));
+
+  return o;
+}
+
+ostream& operator<<(ostream& out, const Transaction& tx) {
+
+  return out << "Transaction(" << &tx << ")";
 }
 
 #pragma GCC diagnostic pop
 #pragma GCC diagnostic warning "-Wpragmas"
+
+}

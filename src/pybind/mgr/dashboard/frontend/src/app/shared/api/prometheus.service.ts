@@ -1,0 +1,381 @@
+import { HttpClient } from '@angular/common/http';
+import { Injectable } from '@angular/core';
+
+import { Observable, Subject, Subscription, forkJoin, of, timer } from 'rxjs';
+import { catchError, map, switchMap } from 'rxjs/operators';
+
+import { AlertmanagerSilence } from '../models/alertmanager-silence';
+import {
+  AlertmanagerAlert,
+  AlertmanagerNotification,
+  GroupAlertmanagerAlert,
+  PrometheusRuleGroup
+} from '../models/prometheus-alerts';
+import moment from 'moment';
+
+export type PromethuesGaugeMetricResult = {
+  metric: Record<string, string>; // metric metadata
+  value: [number, string]; // timestamp, value
+};
+
+export type PromqlGuageMetric = {
+  resultType: 'vector';
+  result: PromethuesGaugeMetricResult[];
+};
+
+@Injectable({
+  providedIn: 'root'
+})
+export class PrometheusService {
+  timerGetPrometheusDataSub: Subscription;
+  timerTime = 30000;
+  readonly lastHourDateObject = {
+    start: moment().unix() - 3600,
+    end: moment().unix(),
+    step: 14
+  };
+  private baseURL = 'api/prometheus';
+  private settingsKey = {
+    alertmanager: 'ui-api/prometheus/alertmanager-api-host',
+    prometheus: 'ui-api/prometheus/prometheus-api-host'
+  };
+  private settings: Record<string, string | undefined> = {};
+  updatedChrtData = new Subject<any>();
+
+  constructor(private http: HttpClient) {}
+
+  unsubscribe() {
+    if (this.timerGetPrometheusDataSub) {
+      this.timerGetPrometheusDataSub.unsubscribe();
+    }
+  }
+
+  // Range Queries
+  getPrometheusData(params: any): any {
+    return this.http.get<any>(`${this.baseURL}/data`, { params });
+  }
+
+  // Guage Queries
+  getPrometheusQueryData(params: { params: string }): Observable<PromqlGuageMetric> {
+    return this.http.get<any>(`${this.baseURL}/prometheus_query_data`, { params });
+  }
+
+  disableAlertmanagerConfig(): void {
+    this.disableSetting(this.settingsKey.alertmanager);
+  }
+
+  disablePrometheusConfig(): void {
+    this.disableSetting(this.settingsKey.prometheus);
+  }
+
+  isPrometheusUsable(): Observable<boolean> {
+    return this.isSettingConfigured(this.settingsKey.prometheus).pipe(
+      map((isConfigured) => isConfigured),
+      catchError(() => of(false))
+    );
+  }
+
+  refreshPrometheusUsable(): Observable<boolean> {
+    delete this.settings[this.settingsKey.prometheus];
+    return this.isPrometheusUsable();
+  }
+
+  isAlertmanagerUsable(): Observable<boolean> {
+    return this.isSettingConfigured(this.settingsKey.alertmanager).pipe(
+      map((isConfigured) => isConfigured),
+      catchError(() => of(false))
+    );
+  }
+
+  ifSettingConfigured(url: string, fn: (value?: string) => void, elseFn?: () => void): void {
+    const setting = this.settings[url];
+
+    if (setting === undefined) {
+      this.http.get(url).subscribe(
+        (data: any) => {
+          this.settings[url] = this.getSettingsValue(data);
+          this.ifSettingConfigured(url, fn, elseFn);
+        },
+        (resp) => {
+          if (resp.status !== 401) {
+            this.settings[url] = '';
+          }
+        }
+      );
+    } else if (setting !== '') {
+      fn(setting);
+    } else {
+      if (elseFn) {
+        elseFn();
+      }
+    }
+  }
+
+  ifAlertmanagerConfigured(fn: (value?: string) => void, elseFn?: () => void): void {
+    this.ifSettingConfigured(this.settingsKey.alertmanager, fn, elseFn);
+  }
+
+  ifPrometheusConfigured(fn: (value?: string) => void, elseFn?: () => void): void {
+    this.ifSettingConfigured(this.settingsKey.prometheus, fn, elseFn);
+  }
+
+  getAlerts(clusterFilteredAlerts = false, params = {}): Observable<AlertmanagerAlert[]> {
+    params['cluster_filter'] = clusterFilteredAlerts;
+    return this.http.get<AlertmanagerAlert[]>(this.baseURL, { params });
+  }
+
+  getGroupedAlerts(clusterFilteredAlerts = false, params: Record<string, any> = {}) {
+    params['cluster_filter'] = clusterFilteredAlerts;
+    return this.http.get<GroupAlertmanagerAlert[]>(`${this.baseURL}/alertgroup`, { params });
+  }
+
+  getSilences(params = {}): Observable<AlertmanagerSilence[]> {
+    return this.http.get<AlertmanagerSilence[]>(`${this.baseURL}/silences`, { params });
+  }
+
+  getRules(
+    type: 'all' | 'alerting' | 'rewrites' = 'all'
+  ): Observable<{ groups: PrometheusRuleGroup[] }> {
+    return this.http.get<{ groups: PrometheusRuleGroup[] }>(`${this.baseURL}/rules`).pipe(
+      map((rules) => {
+        if (['alerting', 'rewrites'].includes(type)) {
+          rules.groups.map((group) => {
+            group.rules = group.rules.filter((rule) => rule.type === type);
+          });
+        }
+        return rules;
+      })
+    );
+  }
+
+  setSilence(silence: AlertmanagerSilence) {
+    return this.http.post<object>(`${this.baseURL}/silence`, silence, { observe: 'response' });
+  }
+
+  expireSilence(silenceId: string) {
+    return this.http.delete(`${this.baseURL}/silence/${silenceId}`, { observe: 'response' });
+  }
+
+  getNotifications(
+    notification?: AlertmanagerNotification
+  ): Observable<AlertmanagerNotification[]> {
+    const url = `${this.baseURL}/notifications?from=${
+      notification && notification.id ? notification.id : 'last'
+    }`;
+    return this.http.get<AlertmanagerNotification[]>(url);
+  }
+
+  getConfiguredSetting(url: string): Observable<string | null> {
+    const cached = this.settings[url];
+
+    if (cached !== undefined) {
+      return of(cached || null);
+    }
+
+    return this.http.get(url).pipe(
+      map((data: any) => {
+        const value = this.getSettingsValue(data);
+        this.settings[url] = value;
+        return value || null;
+      }),
+      catchError((resp) => {
+        if (resp.status !== 401) {
+          this.settings[url] = '';
+        }
+        return of(null);
+      })
+    );
+  }
+
+  isSettingConfigured(url: string): Observable<boolean> {
+    return this.getConfiguredSetting(url).pipe(map((value) => !!value));
+  }
+
+  // Easiest way to stop reloading external content that can't be reached
+  disableSetting(url: string) {
+    this.settings[url] = '';
+  }
+
+  private getSettingsValue(data: any): string {
+    return data.value || data.instance || '';
+  }
+
+  getGaugeQueryData(query: string): Observable<PromqlGuageMetric> {
+    return this.isPrometheusUsable().pipe(
+      switchMap((usable) => {
+        if (!usable) {
+          return of({ result: [] } as PromqlGuageMetric);
+        }
+
+        return this.getPrometheusQueryData({ params: query }).pipe(
+          catchError(() => of({ result: [] } as PromqlGuageMetric))
+        );
+      })
+    );
+  }
+
+  formatGuageMetric(data: string): number {
+    const value: number = parseFloat(data ?? '');
+    // Guage value can be "Nan", "+inf", "-inf" in case of errors
+    return isFinite(value) ? value : null;
+  }
+
+  private updateTimeStamp(selectedTime: any): any {
+    let secondsAgo = selectedTime['end'] - selectedTime['start'];
+    const date: number = moment().unix() - secondsAgo;
+    const dateNow: number = moment().unix();
+    return {
+      start: date,
+      end: dateNow,
+      step: selectedTime['step']
+    };
+  }
+
+  getMultiClusterData(params: any): any {
+    return this.http.get<any>(`${this.baseURL}/prometheus_query_data`, { params });
+  }
+
+  getMultiClusterQueryRangeData(params: any): any {
+    return this.http.get<any>(`${this.baseURL}/data`, { params });
+  }
+
+  getMultiClusterQueriesData(
+    queriesResults: any,
+    validQueries: string[],
+    validRangeQueries: string[],
+    multiClusterQueries: any,
+    validSelectedQueries: string[],
+    allMultiClusterQueries: string[]
+  ) {
+    return new Observable((observer) => {
+      this.isPrometheusUsable().subscribe((usable) => {
+        if (!usable) {
+          observer.complete();
+          return;
+        }
+
+        if (this.timerGetPrometheusDataSub) {
+          this.timerGetPrometheusDataSub.unsubscribe();
+        }
+
+        this.timerGetPrometheusDataSub = timer(0, this.timerTime).subscribe(() => {
+          const requests: any[] = [];
+          const queryNames: string[] = [];
+
+          Object.entries(multiClusterQueries).forEach(([key, _value]) => {
+            for (const queryName in multiClusterQueries[key].queries) {
+              if (
+                multiClusterQueries[key].queries.hasOwnProperty(queryName) &&
+                validSelectedQueries.includes(queryName)
+              ) {
+                const query = multiClusterQueries[key].queries[queryName];
+                const start = this.updateTimeStamp(multiClusterQueries[key].selectedTime)['start'];
+                const end = this.updateTimeStamp(multiClusterQueries[key].selectedTime)['end'];
+                const step = this.updateTimeStamp(multiClusterQueries[key].selectedTime)['step'];
+
+                if (validRangeQueries.includes(queryName)) {
+                  const request = this.getMultiClusterQueryRangeData({
+                    params: encodeURIComponent(query),
+                    start,
+                    end,
+                    step
+                  });
+                  requests.push(request);
+                  queryNames.push(queryName);
+                } else {
+                  const request = this.getMultiClusterData({
+                    params: encodeURIComponent(query),
+                    start,
+                    end,
+                    step
+                  });
+                  requests.push(request);
+                  queryNames.push(queryName);
+                }
+              }
+            }
+          });
+
+          validSelectedQueries = allMultiClusterQueries;
+
+          forkJoin(requests).subscribe(
+            (responses: any[]) => {
+              for (let i = 0; i < responses.length; i++) {
+                const data = responses[i];
+                const queryName = queryNames[i];
+                if (data.result.length) {
+                  if (validQueries.includes(queryName)) {
+                    queriesResults[queryName] = data.result;
+                  } else {
+                    queriesResults[queryName] = data.result.map(
+                      (result: { value: any }) => result.value
+                    );
+                  }
+                }
+              }
+              observer.next(queriesResults);
+              observer.complete();
+            },
+            (error: Error) => {
+              observer.error(error);
+            }
+          );
+        });
+      });
+    });
+  }
+
+  getRangeQueriesData(
+    selectedTime: any,
+    queries: Record<string, string>,
+    checkNan?: boolean
+  ): Observable<Record<string, [number, string][]>> {
+    return timer(0, this.timerTime).pipe(
+      switchMap(() =>
+        this.isPrometheusUsable().pipe(
+          switchMap((usable) => {
+            if (!usable) {
+              return of([] as Array<{ queryName: string; values: any[] }>);
+            }
+
+            const updatedTime = this.updateTimeStamp(selectedTime);
+
+            const observables = Object.entries(queries).map(([queryName, query]) =>
+              this.getPrometheusData({
+                params: encodeURIComponent(query),
+                start: updatedTime.start,
+                end: updatedTime.end,
+                step: updatedTime.step
+              }).pipe(
+                map((data: any) => ({
+                  queryName,
+                  values: data.result?.length ? data.result[0].values : []
+                }))
+              )
+            );
+
+            return forkJoin(observables) as Observable<Array<{ queryName: string; values: any[] }>>;
+          })
+        )
+      ),
+      map((results) => {
+        const formattedResults: Record<string, [number, string][]> = {};
+
+        results.forEach(({ queryName, values }) => {
+          if (checkNan) {
+            values = values.map((v) => {
+              if (isNaN(parseFloat(v[1]))) {
+                v[1] = '0';
+              }
+              return v;
+            });
+          }
+
+          formattedResults[queryName] = values;
+        });
+
+        return formattedResults;
+      })
+    );
+  }
+}

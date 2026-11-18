@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,7 +13,8 @@
  * 
  */
 
-#include "include/types.h"
+#include "cls/rbd/cls_rbd_ops.h"
+#include "include/rados.h" // for CEPH_OSD_CMPXATTR_OP_EQ
 #include "include/rados/librados.hpp"
 
 using namespace librados;
@@ -26,6 +28,8 @@ using namespace librados;
 #pragma GCC diagnostic ignored "-Wpragmas"
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
+using namespace std;
 
 void buf_to_hex(const unsigned char *buf, int len, char *str)
 {
@@ -114,7 +118,7 @@ int main(int argc, const char **argv)
 
   r = io_ctx.write(oid, bl, bl.length(), 0);
   uint64_t objver = io_ctx.get_last_version();
-  assert(objver > 0);
+  ceph_assert(objver > 0);
   cout << "io_ctx.write returned " << r << " last_ver=" << objver << std::endl;
 
   uint64_t stat_size;
@@ -167,43 +171,22 @@ int main(int argc, const char **argv)
   cout << "rados.trunc returned " << r << std::endl;
   r = io_ctx.read(oid, bl, bl.length(), 0);
   cout << "rados.read returned " << r << std::endl;
-  r = io_ctx.exec(oid, "crypto", "md5", bl, bl2);
-  cout << "exec returned " << r <<  " buf size=" << bl2.length() << std::endl;
-  const unsigned char *md5 = (const unsigned char *)bl2.c_str();
-  char md5_str[bl2.length()*2 + 1];
-  buf_to_hex(md5, bl2.length(), md5_str);
-  cout << "md5 result=" << md5_str << std::endl;
 
   // test assert_version
   r = io_ctx.read(oid, bl, 0, 1);
-  assert(r >= 0);
+  ceph_assert(r >= 0);
   uint64_t v = io_ctx.get_last_version();
   cout << oid << " version is " << v << std::endl;
-  assert(v > 0);
+  ceph_assert(v > 0);
   io_ctx.set_assert_version(v);
   r = io_ctx.read(oid, bl, 0, 1);
-  assert(r >= 0);
+  ceph_assert(r >= 0);
   io_ctx.set_assert_version(v - 1);
   r = io_ctx.read(oid, bl, 0, 1);
-  assert(r == -ERANGE);
+  ceph_assert(r == -ERANGE);
   io_ctx.set_assert_version(v + 1);
   r = io_ctx.read(oid, bl, 0, 1);
-  assert(r == -EOVERFLOW);
-
-  r = io_ctx.exec(oid, "crypto", "sha1", bl, bl2);
-  cout << "exec returned " << r << std::endl;
-  const unsigned char *sha1 = (const unsigned char *)bl2.c_str();
-  char sha1_str[bl2.length()*2 + 1];
-  buf_to_hex(sha1, bl2.length(), sha1_str);
-  cout << "sha1 result=" << sha1_str << std::endl;
-
-  r = io_ctx.exec(oid, "acl", "set", bl, bl2);
-  cout << "exec (set) returned " << r << std::endl;
-  r = io_ctx.exec(oid, "acl", "get", bl, bl2);
-  cout << "exec (get) returned " << r << std::endl;
-  if (bl2.length() > 0) {
-    cout << "attr=" << bl2.c_str() << std::endl;
-  }
+  ceph_assert(r == -EOVERFLOW);
 
   int size = io_ctx.read(oid, bl2, 128, 0);
   if (size <= 0) {
@@ -221,10 +204,8 @@ int main(int argc, const char **argv)
   cout << "size=" << size << std::endl;
 
   const char *oid2 = "jjj10.rbd";
-  r = io_ctx.exec(oid2, "rbd", "snap_list", bl, bl2);
+  r = io_ctx.exec(oid2, cls::rbd::method::snap_list, bl, bl2);
   cout << "snap_list result=" << r << std::endl;
-  r = io_ctx.exec(oid2, "rbd", "snap_add", bl, bl2);
-  cout << "snap_add result=" << r << std::endl;
 
   if (r > 0) {
     char *s = bl2.c_str();
@@ -243,13 +224,13 @@ int main(int argc, const char **argv)
   bufferlist val;
   val.append("foo");
   r = io_ctx.setxattr(oid, "foo", val);
-  assert(r >= 0);
+  ceph_assert(r >= 0);
   {
     ObjectReadOperation o;
     o.cmpxattr("foo", CEPH_OSD_CMPXATTR_OP_EQ, val);
     r = io_ctx.operate(oid, &o, &bl2);
     cout << " got " << r << " wanted >= 0" << std::endl;
-    assert(r >= 0);
+    ceph_assert(r >= 0);
   }
   val.append("...");
   {
@@ -257,7 +238,7 @@ int main(int argc, const char **argv)
     o.cmpxattr("foo", CEPH_OSD_CMPXATTR_OP_EQ, val);
     r = io_ctx.operate(oid, &o, &bl2);
     cout << " got " << r << " wanted " << -ECANCELED << " (-ECANCELED)" << std::endl;
-    assert(r == -ECANCELED);
+    ceph_assert(r == -ECANCELED);
   }
 
   io_ctx.locator_set_key(string());

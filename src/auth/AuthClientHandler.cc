@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,18 +18,26 @@
 
 #include "AuthClientHandler.h"
 #include "cephx/CephxClientHandler.h"
+#ifdef HAVE_GSSAPI
+#include "krb/KrbClientHandler.hpp"
+#endif
 #include "none/AuthNoneClientHandler.h"
 
-AuthClientHandler *get_auth_client_handler(CephContext *cct, int proto,
-					   RotatingKeyRing *rkeys)
+
+AuthClientHandler*
+AuthClientHandler::create(CephContext* cct, int proto,
+			  RotatingKeyRing* rkeys)
 {
   switch (proto) {
   case CEPH_AUTH_CEPHX:
     return new CephxClientHandler(cct, rkeys);
   case CEPH_AUTH_NONE:
-    return new AuthNoneClientHandler(cct, rkeys);
+    return new AuthNoneClientHandler{cct};
+#ifdef HAVE_GSSAPI
+  case CEPH_AUTH_GSS: 
+    return new KrbClientHandler(cct);
+#endif
   default:
     return NULL;
   }
 }
-

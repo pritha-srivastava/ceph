@@ -20,10 +20,23 @@ Synopsis
 Description
 ===========
 
-**ceph-conf** is a utility for getting information about a ceph
+**ceph-conf** is a utility for getting information from a Ceph
 configuration file. As with most Ceph programs, you can specify which
 Ceph configuration file to use with the ``-c`` flag.
 
+Note that unlike other Ceph tools, **ceph-conf** will *only* read from
+config files (or return compiled-in default values)--it will *not*
+fetch config values from the Monitor cluster.  For this reason it is
+recommended that **ceph-conf** only be used in legacy environments
+that are strictly config-file based.  New deployments and tools should
+instead rely on either querying the Monitors' central config store explicitly for
+configuration (e.g., ``ceph config get <daemon> <option>``) or use
+daemons themselves to fetch effective config options (e.g.,
+``ceph-osd -i 123 --show-config-value osd_data``).  The latter option
+has the advantages of drawing from compiled-in defaults (which
+occasionally vary between daemons), config files, and the Monitors'
+config database, providing the exact value that a daemon would be
+using if it were started.
 
 Actions
 =======
@@ -71,10 +84,17 @@ Options
    For example, if we specify ``--name osd.0``, the following sections will be
    searched: [osd.0], [osd], [global]
 
+.. option:: --pid *pid*
+
+   override the ``$pid`` when expanding options. For example, if an option is
+   configured like ``/var/log/$name.$pid.log``, the ``$pid`` portion in its
+   value will be substituted using the PID of **ceph-conf** instead of the
+   PID of the process specified using the ``--name`` option.
+
 .. option:: -r, --resolve-search
 
    search for the first file that exists and can be opened in the resulted
-   comma delimited search list.
+   comma-delimited search list.
 
 .. option:: -s, --section
 
@@ -104,7 +124,7 @@ To list all sections::
 
 To print the path of the "keyring" used by "client.0"::
 
-       ceph-conf --name client.0 -r -l keyring
+        ceph-conf --name client.0 -r -l keyring
 
 
 Files
@@ -119,11 +139,11 @@ Availability
 ============
 
 **ceph-conf** is part of Ceph, a massively scalable, open-source, distributed storage system.  Please refer
-to the Ceph documentation at http://ceph.com/docs for more
+to the Ceph documentation at https://docs.ceph.com for more
 information.
 
 
 See also
 ========
 
-:doc:`ceph <ceph>`\(8),
+:doc:`ceph <ceph>`\(8)

@@ -1,0 +1,1286 @@
+.. _mgr-nfs:
+
+=============================
+CephFS & RGW Exports over NFS
+=============================
+
+CephFS namespaces and RGW buckets can be exported over NFS protocol
+using the `NFS-Ganesha NFS server`_.
+
+The ``nfs`` manager module provides a general interface for managing
+NFS exports of either CephFS directories or RGW buckets.  Exports can
+be managed either via the CLI ``ceph nfs export ...`` commands
+or via the dashboard.
+
+The deployment of the NFS-Ganesha daemons can also be managed
+automatically if either the :ref:`cephadm` or :ref:`mgr-rook`
+orchestrators are enabled.  If neither are in use (e.g., Ceph is
+deployed via an external orchestrator like Ansible or Puppet), the
+NFS-Ganesha daemons must be manually deployed; for more information,
+see :ref:`nfs-ganesha-config`.
+
+.. note:: Starting with Ceph Pacific, the ``nfs`` Manager module must be enabled.
+
+NFS Cluster Management
+======================
+
+.. _nfs-module-cluster-create:
+
+Create NFS-Ganesha Cluster
+--------------------------
+
+.. prompt:: bash #
+
+   ceph nfs cluster create <cluster_id> [<placement>] [--ingress] [--virtual_ip <value>] \
+          [--ingress-mode {default|keepalive-only|haproxy-standard|haproxy-protocol}] \
+          [--ingress-placement <placement>] [--port <int>] \
+          [--enable-rdma] [--rdma_port <int>] [--enable-nfsv3] [-i <spec_file>]
+
+This creates a common recovery pool for all NFS-Ganesha daemons, a new user based on
+``cluster_id``, and a common NFS-Ganesha config RADOS object.
+
+.. note:: Since this command also brings up NFS-Ganesha daemons using a Manager
+   orchestrator module (see :doc:`/mgr/orchestrator`) such as ``cephadm`` or ``rook``, at
+   least one such module must be enabled for it to work.
+
+   Beginning with the Umbrella release, NFS-Ganesha daemons deployed by cephadm
+   can be colocated and more than one daemon can be deployed on a host.
+   See :ref:`cephadm-nfs-colocation` for more details.
+
+``<cluster_id>`` is an arbitrary string by which this NFS-Ganesha cluster will be
+known (e.g., ``mynfs``).
+
+``<placement>`` is an optional string signifying which hosts should have NFS-Ganesha
+daemon containers running on them and, optionally, the total number of NFS-Ganesha
+daemons on the cluster (should you want to have more than one NFS-Ganesha
+daemon running per node). For example, the following placement string means
+"deploy NFS-Ganesha daemons on nodes ``host1`` and ``host2``" (one daemon per host)::
+
+    "host1,host2"
+
+and this placement specification says to deploy single NFS-Ganesha daemon each
+on nodes ``host1`` and ``host2`` (for a total of two NFS-Ganesha daemons in the
+cluster)::
+
+    "2 host1,host2"
+
+NFS can be deployed on a port other than 2049 (the default) with ``--port <port>``.
+
+By default, only NFSv4 protocol is enabled. To enable both NFSv3 and NFSv4 protocols,
+add the ``--enable-nfsv3`` flag.
+
+To deploy NFS with a high-availability front-end (virtual IP and load balancer), add the
+``--ingress`` flag and specify a virtual IP address. This will deploy a combination
+of Keepalived and HAProxy to provide an high-availability NFS frontend for the NFS
+service.
+
+.. note:: Enabling ingress provides a stable virtual IP address for the NFS
+	  service, failover between hosts if a host fails, and load
+	  distribution across the NFS gateways. Client recovery after a
+	  failover is still subject to the NFS grace period. See
+	  :ref:`cephadm-ha-nfs` for details and additional deployment
+	  options.
+
+For more details, refer :ref:`orchestrator-cli-placement-spec` but keep
+in mind that specifying the placement via a YAML file is not supported.
+
+Deployment of NFS daemons and the ingress service is asynchronous: the
+command may return before the services have completely started. You may
+wish to check that these services do successfully start and stay running.
+When using cephadm orchestration, these commands check service status:
+
+
+.. prompt:: bash #
+
+   ceph orch ls --service_name=nfs.<cluster_id>
+   ceph orch ls --service_name=ingress.nfs.<cluster_id>
+
+
+Ingress
+-------
+
+The core *nfs* service will deploy one or more NFS-Ganesha daemons,
+each of which will provide a working NFS endpoint.  The IP address for each
+NFS endpoint will depend on which host the NFS-Ganesha daemons are
+deployed.  By default, daemons are placed semi-randomly, but users can
+also explicitly control where daemons are placed; see
+:ref:`orchestrator-cli-placement-spec`.
+
+When a cluster is created with ``--ingress``, an *ingress* service is
+additionally deployed to provide load balancing and high-availability
+for the NFS servers.  A virtual IP address is used to provide a known, stable
+NFS endpoint that all clients can use to mount.  Ceph will take care
+of the details of NFS redirecting traffic on the virtual IP address to the
+appropriate backend NFS servers, and redeploying NFS servers when they
+fail.
+
+By default, the *ingress* service follows the same placement as the
+NFS-Ganesha daemons (the optional ``<placement>`` argument).  To schedule
+Keepalived and HAProxy on a different set of hosts, pass
+``--ingress-placement`` with a separate placement string.  For example,
+to run three NFS daemons on ``host1`` and ``host2`` while colocating
+ingress on three dedicated nodes:
+
+.. prompt:: bash #
+
+   ceph nfs cluster create mynfs "2 host1 host2" --ingress --virtual_ip 192.168.1.100/24 --ingress-placement "3 host3 host4 host5"
+
+If ``--ingress-placement`` is omitted, both services share the NFS
+placement.
+
+An optional ``--ingress-mode`` parameter can be provided to choose
+how the *ingress* service is configured:
+
+- Setting ``--ingress-mode keepalive-only`` deploys a simplified *ingress*
+  service that provides a virtual IP address with the NFS server directly binding to
+  that virtual IP address and leaves out any sort of load balancing or traffic
+  redirection. This setup will restrict users to deploying only 1 NFS daemon
+  as multiple cannot bind to the same port on the virtual IP address.
+- Setting ``--ingress-mode haproxy-standard`` deploys a full *ingress* service
+  to provide load balancing and high-availability using HAProxy and Keepalived.
+  Client IP addresses are not visible to the back-end NFS server and IP-level
+  restrictions on NFS exports will not function.
+- Setting ``--ingress-mode haproxy-protocol`` deploys a full *ingress* service
+  to provide load balancing and high-availability using HAProxy and Keepalived.
+  Client IP addresses are visible to the back-end NFS server and IP-level
+  restrictions on NFS exports are usable. This mode requires NFS-Ganesha version
+  5.0 or later.
+- Setting ``--ingress-mode default`` is equivalent to not providing any other
+  ingress mode by name. When no other ingress mode is specified by name
+  the default ingress mode used is ``haproxy-standard``.
+
+Ingress can be added to an existing NFS service (e.g., one initially created
+without the ``--ingress`` flag), and the basic NFS service can
+also be modified after the fact to include non-default options, by modifying
+the services directly.  For more information, see :ref:`cephadm-ha-nfs`.
+
+
+Show NFS Cluster IP(s)
+----------------------
+
+To examine an NFS cluster's IP endpoints, including the IP addresses for the
+individual NFS daemons, and the virtual IP (if any) for the ingress service,
+run a command of the following form:
+
+.. prompt:: bash #
+
+   ceph nfs cluster info [<cluster_id>]
+
+.. note:: This will not work with the ``rook`` backend. Instead, expose the port
+   with the ``kubectl patch`` command and fetch the port details with ``kubectl get
+   services`` command:
+
+   .. prompt:: bash #
+
+      kubectl patch service -n rook-ceph -p '{"spec":{"type": "NodePort"}}' rook-ceph-nfs-<cluster-name>-<node-id>
+      kubectl get services -n rook-ceph rook-ceph-nfs-<cluster-name>-<node-id>
+
+
+Delete NFS-Ganesha Cluster
+--------------------------
+
+.. prompt:: bash #
+
+   ceph nfs cluster rm <cluster_id>
+
+This deletes the deployed cluster.
+
+Removal of NFS daemons and the ingress service is asynchronous: the
+command may return before the services have been completely deleted. You may
+wish to check that these services are no longer reported. When using cephadm
+orchestration, these commands check service status:
+
+.. prompt:: bash #
+
+   ceph orch ls --service_name=nfs.<cluster_id>
+   ceph orch ls --service_name=ingress.nfs.<cluster_id>
+
+
+Rotate NFS Cluster Keys
+-----------------------
+
+.. prompt:: bash #
+
+   ceph nfs cluster rotate-key <cluster_id> [--all-daemon-and-export-keys] [--auth-entities <entity>...] [--key-type <type>]
+
+Rotate auth keys belonging to an NFS cluster. ``<cluster_id>`` is required.
+
+Which keys get rotated must be requested explicitly: exactly one of
+``--all-daemon-and-export-keys`` or ``--auth-entities`` has to be given. If
+neither (or both) is given, the command fails without rotating anything.
+
+``--all-daemon-and-export-keys`` rotates every auth entity of the cluster,
+including daemon keyrings (for example ``client.nfs.<cluster_id>`` and
+``client.nfs.<daemon_id>-rgw``) and CephFS export keyrings
+(``client.nfs.<cluster_id>.<fs_name>.<hash>``).
+
+``--auth-entities <entity> [<entity>...]`` rotates only the listed entities.
+The names must match the entity names reported by ``ceph auth ls`` (the
+``client.`` prefix may be omitted) and each entity must belong to the cluster.
+Rotating a subset leaves the cluster with a mix of old and new keys: entities
+that are not listed keep their current key until they are rotated separately.
+
+``--key-type <type>`` is optional and is passed through to ``ceph auth rotate``
+(for example ``aes256k``).
+
+After export keys are rotated, matching CephFS exports are updated with the new
+keyrings. After any daemon keys are rotated, the NFS service is redeployed
+(``ceph orch redeploy nfs.<cluster_id>``).
+
+For example::
+
+   ceph nfs cluster rotate-key cephfs-nfs1 --all-daemon-and-export-keys --key-type aes256k
+   ceph nfs cluster rotate-key cephfs-nfs1 --auth-entities client.nfs.cephfs-nfs1.cephfs.c44692f7 --key-type aes256k
+
+
+Updating an NFS Cluster
+-----------------------
+
+In order to modify cluster parameters (for example, the port or the placement),
+use the orchestrator interface to update the NFS service spec. The safest way
+to do that is to export the current spec, modify it, and then re-apply it. For
+example, to modify the ``nfs.foo`` service, run commands of the following
+forms:
+
+.. prompt:: bash #
+
+   ceph orch ls --service-name nfs.foo --export > nfs.foo.yaml
+   emacs nfs.foo.yaml
+   ceph orch apply -i nfs.foo.yaml
+
+For more information about the NFS service spec, see
+:ref:`deploy-cephadm-nfs-ganesha`.
+
+
+List NFS-Ganesha Clusters
+-------------------------
+
+.. prompt:: bash #
+
+   ceph nfs cluster ls
+
+This lists deployed clusters.
+
+.. _nfs-cluster-set:
+
+Set Customized NFS-Ganesha Configuration
+----------------------------------------
+
+.. prompt:: bash #
+
+   ceph nfs cluster config set <cluster_id> -i <config_file>
+
+With this command the NFS cluster will use the specified configuration and it will have
+precedence over default configuration blocks.
+
+Example use cases include:
+
+#. Changing log level.  The logging level can be adjusted with the following
+   config fragment::
+
+     LOG {
+         COMPONENTS {
+             ALL = FULL_DEBUG;
+         }
+     }
+
+#. Adding custom export block.
+
+   The following sample block creates a single export. This export will not be
+   managed by the ``ceph nfs export`` interface::
+
+    EXPORT {
+      Export_Id = 100;
+      Transports = TCP;
+      Path = /;
+      Pseudo = /ceph/;
+      Protocols = 4;
+      Access_Type = RW;
+      Attr_Expiration_Time = 0;
+      Squash = None;
+      FSAL {
+        Name = CEPH;
+        Filesystem = "filesystem name";
+        User_Id = "user id";
+        Secret_Access_Key = "secret key";
+      }
+    }
+
+.. note:: User specified in FSAL block should have proper caps for NFS-Ganesha
+   daemons to access Ceph cluster. User can be created in following way using
+   ``auth get-or-create``:
+
+   .. prompt:: bash #
+
+      ceph auth get-or-create client.<user_id> mon 'allow r' osd 'allow rw pool=.nfs namespace=<nfs_cluster_name>, allow rw tag cephfs data=<fs_name>' mds 'allow rw path=<export_path>'
+
+
+View Customized NFS-Ganesha Configuration
+-----------------------------------------
+
+.. prompt:: bash #
+
+   ceph nfs cluster config get <cluster_id>
+
+This will output the user-defined configuration (if any).
+
+
+Reset NFS-Ganesha Configuration
+-------------------------------
+
+.. prompt:: bash #
+
+   ceph nfs cluster config reset <cluster_id>
+
+This removes the user-defined configuration.
+
+.. note:: With a Rook deployment, NFS-Ganesha pods must be explicitly restarted
+   for the new configuration blocks to be effective.
+
+
+Cluster QoS Management
+======================
+
+NFS-Ganesha supports cluster-wide and per-export Quality of Service (QoS) for
+bandwidth and IOPS (operations per second).
+
+.. note:: Cluster-level QoS changes take effect after the NFS service is
+   restarted. The ``ceph nfs cluster qos enable`` and ``ceph nfs cluster qos
+   disable`` commands (for both bandwidth control and IOPS control), as well as
+   ``ceph nfs cluster qos set``, restart all NFS-Ganesha daemons in the
+   cluster automatically via ``ceph orch restart nfs.<cluster_id>``. Plan for
+   a brief service interruption when running these commands on a live cluster.
+
+
+``qos_type`` Values
+-------------------
+
+All ``qos enable`` commands require a ``qos_type`` argument. Valid values are:
+
+* ``PerShare`` — limits apply per NFS export (share).
+* ``PerClient`` — limits apply per NFS client.
+* ``PerShare_PerClient`` — limits apply per export and per client.
+
+
+Parameter Constraints
+---------------------
+
+Bandwidth parameters (``max_*_bw``) accept human-readable values with the
+following units: ``KiB``, ``MiB``, ``GiB``, ``KB``, ``MB`` and ``GB``
+(for example, ``100MB`` or ``128KiB``). The valid range is
+128 KiB/s to 100 GiB/s.
+
+IOPS parameters (``max_*_iops``) must be integers in the range 10 to 1638400.
+
+The cluster QoS message interval (``cqos_msg_interval``) can be set with
+``ceph nfs cluster qos set``. The valid range is 100 to 300 milliseconds.
+
+
+Deploy-Time QoS via Service Spec
+--------------------------------
+
+When deploying an NFS cluster with cephadm, cluster-level QoS can be configured
+at creation time using the ``cluster_qos_config`` field in the NFS service
+spec, or via a command of the form ``ceph nfs cluster create -i foo.yml`` with a YAML input file.
+
+``cluster_qos_config`` is a dictionary. At least one of
+``enable_bw_control`` or ``enable_iops_control`` must be ``true``. Supported
+keys:
+
+* ``enable_qos`` (bool, default ``true``)
+* ``qos_type`` (required when QoS is enabled): ``PerShare``, ``PerClient``, or
+  ``PerShare_PerClient``
+* ``enable_bw_control`` (bool)
+* ``combined_rw_bw_control`` (bool)
+* ``enable_iops_control`` (bool)
+* ``max_export_write_bw``, ``max_export_read_bw``, ``max_client_write_bw``,
+  ``max_client_read_bw`` (string bandwidth values)
+* ``max_export_combined_bw``, ``max_client_combined_bw`` (string bandwidth
+  values)
+* ``max_export_iops``, ``max_client_iops`` (integer)
+* ``cqos_msg_interval`` (integer, 100–300 milliseconds)
+
+The NFS service spec also accepts ``cluster_qos_port`` (default ``31311``) to specify
+the cluster QoS messaging port used by NFS-Ganesha daemons.
+
+Example service spec with cluster QoS:
+
+.. code-block:: yaml
+
+    service_type: nfs
+    service_id: mynfs
+    placement:
+      hosts:
+        - host1
+    spec:
+      port: 2049
+      cluster_qos_port: 31311
+      cluster_qos_config:
+        qos_type: PerShare
+        enable_bw_control: true
+        combined_rw_bw_control: false
+        max_export_write_bw: 100MB
+        max_export_read_bw: 100MB
+
+Example ``ceph nfs cluster create`` input file:
+
+.. code-block:: yaml
+
+    cluster_qos_config:
+      qos_type: PerShare
+      enable_bw_control: true
+      max_export_write_bw: 100MB
+      max_export_read_bw: 100MB
+
+.. prompt:: bash #
+
+   ceph nfs cluster create mynfs "host1" -i cluster_qos.yaml
+
+
+Enable QoS Bandwidth Control for NFS-Ganesha Cluster
+----------------------------------------------------
+
+.. prompt:: bash #
+
+   ceph nfs cluster qos enable bandwidth_control <cluster_id> \
+          <qos_type:PerShare|PerClient|PerShare_PerClient> [--combined-rw-bw-ctrl] \
+          [--max_export_write_bw <value>] [--max_export_read_bw <value>] \
+          [--max_client_write_bw <value>] [--max_client_read_bw <value>] \
+          [--max_export_combined_bw <value>] [--max_client_combined_bw <value>]
+
+This command enables or updates Quality of Service (QoS) bandwidth control for
+an NFS-Ganesha cluster, where
+
+``<cluster_id>`` is the NFS-Ganesha cluster ID.
+
+``<qos_type>`` is the type of bandwidth control: ``PerShare``, ``PerClient``, or
+``PerShare_PerClient``.
+
+If ``PerShare`` ``qos_type`` is selected, then the cluster-level QoS config is
+applicable to all exports on that NFS-Ganesha cluster. It requires
+``max_export_write_bw`` and ``max_export_read_bw`` parameters if
+``--combined-rw-bw-ctrl`` is not set, otherwise ``max_export_combined_bw`` is
+required.
+
+If ``PerClient`` ``qos_type`` is selected, then the cluster-level QoS config is
+applicable to all clients accessing exports on that cluster. It requires
+``max_client_write_bw`` and ``max_client_read_bw`` parameters if
+``--combined-rw-bw-ctrl`` is not set, otherwise ``max_client_combined_bw`` is
+required.
+
+If ``PerShare_PerClient`` ``qos_type`` is selected, then the cluster-level
+config applies to all exports and all clients on that NFS-Ganesha cluster.
+It requires ``max_export_write_bw``, ``max_export_read_bw``,
+``max_client_write_bw``, and ``max_client_read_bw`` parameters if
+``--combined-rw-bw-ctrl`` is not set, otherwise ``max_export_combined_bw`` and
+``max_client_combined_bw`` are required.
+
+``--combined-rw-bw-ctrl`` enables combined read and write bandwidth. When set,
+only the combined bandwidth parameters allowed for the selected ``qos_type``
+may be specified.
+
+``--max_export_write_bw`` is the maximum write bandwidth for each export.
+
+``--max_export_read_bw`` is the maximum read bandwidth for each export.
+
+``--max_client_write_bw`` is the maximum write bandwidth for each client.
+
+``--max_client_read_bw`` is the maximum read bandwidth for each client.
+
+``--max_export_combined_bw`` is the maximum combined read/write bandwidth for each export.
+
+``--max_client_combined_bw`` is the maximum combined read/write bandwidth for each client.
+
+The bandwidth value can be specified using any supported bandwidth unit: bytes/s,
+KB/s, KiB/s, MB/s, MiB/s, GB/s, or GiB/s.
+
+For example:
+
+.. prompt:: bash #
+
+   ceph nfs cluster qos enable bandwidth_control nfs_clust PerShare --max_export_write_bw 100MB --max_export_read_bw 100MB
+
+.. note:: If this command is used to update ``qos_type``, update all exports
+   with the required parameters as well.
+
+By default, exports inherit the cluster-level QoS setting when no
+``QOS_BLOCK`` is present in the export block.
+
+
+Disable QoS Bandwidth Control for NFS-Ganesha Cluster
+-----------------------------------------------------
+
+.. prompt:: bash #
+
+   ceph nfs cluster qos disable bandwidth_control <cluster_id>
+
+This command disables bandwidth control QoS at the cluster level. If
+cluster-level bandwidth control is disabled, export-level bandwidth control
+has no effect even when enabled on an export.
+
+For example:
+
+.. prompt:: bash #
+
+   ceph nfs cluster qos disable bandwidth_control nfs_clust
+
+
+Enable QoS IOPS Control for NFS-Ganesha Cluster
+-----------------------------------------------
+
+.. prompt:: bash #
+
+   ceph nfs cluster qos enable ops_control <cluster_id> \
+          <qos_type:PerShare|PerClient|PerShare_PerClient> \
+          [--max_export_iops <int>] [--max_client_iops <int>]
+
+This command enables or updates IOPS control for an NFS cluster.
+
+``<cluster_id>`` is the NFS-Ganesha cluster ID.
+
+``<qos_type>`` is the type of ops control: ``PerShare``, ``PerClient``, or
+``PerShare_PerClient``.
+
+If ``PerShare`` ``qos_type`` is selected, the cluster-level QoS config applies
+to all exports on that NFS-Ganesha cluster and requires ``--max_export_iops``.
+
+If ``PerClient`` ``qos_type`` is selected, the cluster-level QoS config
+applies to all clients accessing exports on that cluster and requires
+``--max_client_iops``.
+
+If ``PerShare_PerClient`` ``qos_type`` is selected, the cluster-level config
+applies to all exports and all clients on that NFS-Ganesha cluster and
+requires both ``--max_export_iops`` and ``--max_client_iops``.
+
+``--max_export_iops`` is the IOPS limit per export.
+
+``--max_client_iops`` is the IOPS limit per client.
+
+For example:
+
+.. prompt:: bash #
+
+   ceph nfs cluster qos enable ops_control nfs_clust PerShare --max_export_iops 1000
+
+.. note:: If this command is used to update ``qos_type``, update all exports
+   with the required parameters as well.
+
+
+Disable QoS IOPS Control for NFS-Ganesha Cluster
+------------------------------------------------
+
+.. prompt:: bash #
+
+   ceph nfs cluster qos disable ops_control <cluster_id>
+
+This command disables IOPS control for an NFS-Ganesha cluster. After disabling
+IOPS control at the cluster level, export-level IOPS control has no effect even
+when enabled on an export.
+
+For example:
+
+.. prompt:: bash #
+
+   ceph nfs cluster qos disable ops_control nfs_clust
+
+
+Set Cluster QoS Message Interval
+--------------------------------
+
+.. prompt:: bash #
+
+   ceph nfs cluster qos set <cluster_id> <msg_interval>
+
+This command sets ``cqos_msg_interval``, the message interval (in
+milliseconds) used for cluster QoS synchronization among NFS-Ganesha hosts.
+The valid range is 100 to 300. Cluster-level QoS must already be configured
+(using ``enable bandwidth_control`` or ``enable ops_control``) before this
+command can be used.
+
+For example:
+
+.. prompt:: bash #
+
+   ceph nfs cluster qos set nfs_clust 200
+
+
+Get QoS Configuration for NFS-Ganesha Cluster
+---------------------------------------------
+
+.. prompt:: bash #
+
+   ceph nfs cluster qos get <cluster_id>
+
+This command displays the cluster-level QoS configuration. Use ``ceph -f
+json`` (or ``json-pretty``, ``yaml``, etc.) to control output formatting.
+
+For example:
+
+.. prompt:: bash #
+
+   ceph nfs cluster qos get nfs_clust
+
+::
+
+     {
+       "combined_rw_bw_control": false,
+       "enable_bw_control": true,
+       "enable_iops_control": true,
+       "enable_qos": true,
+       "max_export_iops": 1000,
+       "max_export_read_bw": "100.0MB",
+       "max_export_write_bw": "100.0MB",
+       "qos_type": "PerShare"
+     }
+
+When ``cqos_msg_interval`` has been set, it also appears in the output.
+
+
+Export Management
+=================
+
+.. warning:: Currently, the ``ceph nfs`` interface is not integrated with dashboard. Both
+   dashboard and the ``ceph nfs`` interface have different export requirements and
+   create exports differently. Management of dashboard-created exports is not
+   supported.
+
+
+Create CephFS Export
+--------------------
+
+.. prompt:: bash #
+
+   ceph nfs export create cephfs --cluster-id <cluster_id> \
+          --pseudo-path <pseudo_path> --fsname <fsname> [--readonly] \
+          [--path=/path/in/cephfs] [--client_addr <value>...] [--squash <value>] \
+          [--sectype <value>...] [--cmount_path <value>] [--xprtsec <value>] [--transports <value>...]
+
+This creates export RADOS objects containing the export block, where
+
+``<cluster_id>`` is the NFS-Ganesha cluster ID.
+
+``<pseudo_path>`` is the export position within the NFSv4 Pseudo Filesystem
+where the export will be available on the server. It must be an absolute path
+and unique.
+
+``<fsname>`` is the name of the FS volume used by the NFS-Ganesha cluster
+that will serve this export.
+
+``<path>`` is the path within CephFS. Valid path should be given and default
+path is ``/``. It need not be unique. Subvolume path can be fetched using:
+
+.. prompt:: bash #
+
+   ceph fs subvolume getpath <vol_name> <subvol_name> [--group_name <subvol_group_name>]
+
+``<client_addr>`` is the list of client address for which these export
+permissions will be applicable. By default all clients can access the export
+according to specified export permissions. See the `NFS-Ganesha Export Sample`_
+for permissible values.
+
+``<squash>`` defines the kind of user ID squashing to be performed. The default
+value is ``no_root_squash``. See the `NFS-Ganesha Export Sample`_ for
+permissible values.
+
+``<sectype>`` specifies which authentication methods will be used when
+connecting to the export. Valid values include ``krb5p``, ``krb5i``, ``krb5``, ``sys``
+and ``none``. More than one value can be supplied. The flag may be specified
+multiple times (example: ``--sectype=krb5p --sectype=krb5i``) or multiple
+values may be separated by a comma (example: ``--sectype krb5p,krb5i``). The
+server will negotatiate a supported security type with the client preferring
+the supplied methods left-to-right.
+
+.. note:: Specifying values for ``sectype`` that require Kerberos will only
+          function on servers that are configured to support Kerberos. Setting
+          up NFS-Ganesha to support Kerberos can be found
+          here: `Kerberos setup for NFS-Ganesha in Ceph <https://github.com/nfs-ganesha/nfs-ganesha/wiki/Kerberos-setup-for-NFS-Ganesha-in-Ceph>`_.
+
+``<xprtsec>`` defines how traffic is secured at the transport layer.
+Valid values are ``tls``, ``mtls`` and ``none``.
+
+``<cmount_path>`` specifies the path within the CephFS to mount this export on.
+It is allowed to be any complete path hierarchy between ``/`` and the
+``EXPORT {path}``. (i.e. if ``EXPORT { Path }`` parameter is ``/foo/bar``
+then ``cmount_path`` could be ``/``, ``/foo`` or ``/foo/bar``).
+
+.. note:: If this and the other ``EXPORT { FSAL {} }`` options are the same
+          between multiple exports, those exports will share a single
+          CephFS client. If not specified, the default is ``/``.
+
+``<transports>`` is optional. List of NFS transport protocols. Valid values are
+``TCP``, ``UDP``, and ``RDMA``. Multiple values may be passed (e.g.
+``--transports TCP --transports RDMA`` or ``--transports TCP,RDMA``). If omitted,
+the export uses the default (e.g. TCP only, or TCP and RDMA when the cluster
+has RDMA enabled).
+
+.. note:: Export creation is supported only for NFS-Ganesha clusters deployed
+          using the ``ceph nfs`` interface.
+
+Create RGW Export
+-----------------
+
+There are two kinds of RGW exports:
+
+- a *user* export will export all buckets owned by an
+  RGW user, where the top-level directory of the export is a list of buckets.
+- a *bucket* export will export a single bucket, where the top-level directory contains
+  the objects in the bucket.
+
+
+RGW Bucket Export
+^^^^^^^^^^^^^^^^^
+
+To export a *bucket*:
+
+.. prompt:: bash #
+
+   ceph nfs export create rgw --cluster-id <cluster_id> \
+          --pseudo-path <pseudo_path> --bucket <bucket_name> \
+          [--user-id <user-id>] [--readonly] [--client_addr <value>...] [--squash <value>] \
+          [--sectype <value>...] [--xprtsec <value>] [--transports <value>...]
+
+For example, to export ``mybucket`` via NFS cluster ``mynfs`` at the
+pseudo-path ``/bucketdata`` to any host in the ``192.168.10.0/24`` network
+
+.. prompt:: bash #
+
+   ceph nfs export create rgw --cluster-id mynfs --pseudo-path /bucketdata --bucket mybucket --client_addr 192.168.10.0/24
+
+.. note:: Export creation is supported only for NFS-Ganesha clusters deployed
+   using the ``ceph nfs`` interface.
+
+``<cluster_id>`` is the NFS-Ganesha cluster ID.
+
+``<pseudo_path>`` is the export position within the NFSv4 Pseudo Filesystem
+where the export will be available on the server. It must be an absolute path
+and unique.
+
+``<bucket_name>`` is the name of the bucket that will be exported.
+
+``<user_id>`` is optional, and specifies which RGW user will be used for read
+and write operations to the bucket.  If it is not specified, the user who owns
+the bucket will be used.
+
+.. note:: Currently, if multi-site RGW is enabled, Ceph can only export RGW
+   buckets in the default realm.
+
+``<client_addr>`` is the list of client address for which these export
+permissions will be applicable. By default all clients can access the export
+according to specified export permissions. See the `NFS-Ganesha Export
+Sample`_ for permissible values.
+
+``<squash>`` defines the kind of user ID squashing to be performed. The
+default value is ``no_root_squash``. See the `NFS-Ganesha Export Sample`_ for
+permissible values.
+
+``<sectype>`` specifies which authentication methods will be used when
+connecting to the export. Valid values include ``krb5p``, ``krb5i``, ``krb5``,
+``sys`` and ``none``. More than one value can be supplied. The flag may be
+specified multiple times (example: ``--sectype=krb5p --sectype=krb5i``) or
+multiple values may be separated by a comma (example: ``--sectype
+krb5p,krb5i``). The server will negotatiate a supported security type with the
+client preferring the supplied methods left-to-right.
+
+.. note:: Specifying values for ``sectype`` that require Kerberos will only
+   function on servers that are configured to support Kerberos. Setting up
+   NFS-Ganesha to support Kerberos is outside the scope of this document.
+
+``<transports>`` is optional. Valid values are ``TCP``, ``UDP``, and ``RDMA``.
+Multiple values may be passed. If omitted, defaults apply (e.g. TCP and RDMA
+when the cluster has RDMA enabled).
+
+``<xprtsec>`` defines how traffic is secured at the transport layer.
+Valid values are ``tls``, ``mtls`` and ``none``.
+
+
+RGW User Export
+^^^^^^^^^^^^^^^
+
+To export an RGW *user*:
+
+.. prompt:: bash #
+
+   ceph nfs export create rgw --cluster-id <cluster_id> \
+          --pseudo-path <pseudo_path> --user-id <user-id> \
+          [--readonly] [--client_addr <value>...] [--squash <value>] [--transports <value>...]
+
+For example, to export ``myuser`` via NFS cluster ``mynfs`` at the
+pseudo-path ``/myuser`` to any host in the ``192.168.10.0/24`` network
+
+.. prompt:: bash #
+
+   ceph nfs export create rgw --cluster-id mynfs --pseudo-path /bucketdata --user-id myuser --client_addr 192.168.10.0/24
+
+
+Delete Export
+-------------
+
+.. prompt:: bash #
+
+   ceph nfs export rm <cluster_id> <pseudo_path>
+
+This deletes an export in an NFS-Ganesha cluster, where:
+
+``<cluster_id>`` is the NFS-Ganesha cluster ID.
+
+``<pseudo_path>`` is the pseudo-root path (must be an absolute path).
+
+
+List Exports
+------------
+
+.. prompt:: bash #
+
+   ceph nfs export ls <cluster_id> [--detailed]
+
+It lists exports for a cluster, where:
+
+``<cluster_id>`` is the NFS-Ganesha cluster ID.
+
+With the ``--detailed`` option enabled it shows entire export block.
+
+
+Get Export
+----------
+
+.. prompt:: bash #
+
+   ceph nfs export info <cluster_id> <pseudo_path>
+
+This displays export block for a cluster based on pseudo-root name, where:
+
+``<cluster_id>`` is the NFS-Ganesha cluster ID.
+
+``<pseudo_path>`` is the pseudo-root path (must be an absolute path).
+
+
+Enable QoS Bandwidth Control for a Specific Export
+--------------------------------------------------
+
+.. prompt:: bash #
+
+   ceph nfs export qos enable bandwidth_control <cluster_id> <pseudo_path> \
+          [--combined-rw-bw-ctrl] [--max_export_write_bw <value>] [--max_export_read_bw <value>] \
+          [--max_client_write_bw <value>] [--max_client_read_bw <value>] \
+          [--max_export_combined_bw <value>] [--max_client_combined_bw <value>] [--skip-notify-nfs-server]
+
+This command enables or updates QoS bandwidth control for an export. Enable
+cluster-level bandwidth control with ``qos_type`` ``PerShare`` or
+``PerShare_PerClient`` before enabling export-level bandwidth control. This
+creates a ``QOS_BLOCK`` in the export block, where
+
+``<cluster_id>`` is the NFS-Ganesha cluster ID.
+
+``<pseudo_path>`` is the pseudo-root path (must be an absolute path).
+
+``--combined-rw-bw-ctrl`` enables combined read and write bandwidth. When set,
+only the combined bandwidth parameters allowed for the cluster ``qos_type`` may
+be specified.
+
+``--max_export_write_bw`` is the maximum write bandwidth for each export.
+
+``--max_export_read_bw`` is the maximum read bandwidth for each export.
+
+``--max_client_write_bw`` is the maximum write bandwidth for each client.
+
+``--max_client_read_bw`` is the maximum read bandwidth for each client.
+
+``--max_export_combined_bw`` is the maximum combined read/write bandwidth for each export.
+
+``--max_client_combined_bw`` is the maximum combined read/write bandwidth for each client.
+
+``--skip-notify-nfs-server`` skips notifying running NFS-Ganesha daemons after
+the change (useful for batch updates).
+
+The bandwidth value can be specified using any supported bandwidth unit: bytes/s,
+KB/s, KiB/s, MB/s, MiB/s, GB/s, or GiB/s.
+
+For example:
+
+.. prompt:: bash #
+
+   ceph nfs export qos enable bandwidth_control nfs_clust /export1 --combined-rw-bw-ctrl --max_export_combined_bw 200MB
+
+.. note:: Export-level bandwidth control cannot be enabled if the cluster-level
+   ``qos_type`` is ``PerClient``.
+
+
+Disable QoS Bandwidth Control for a Specific Export
+---------------------------------------------------
+
+.. prompt:: bash #
+
+   ceph nfs export qos disable bandwidth_control <cluster_id> <pseudo_path> [--skip-notify-nfs-server]
+
+This disables export-level bandwidth control. After disabling, the export no
+longer has export-specific bandwidth limits. If the export has no
+``QOS_BLOCK``, it inherits cluster-level bandwidth control again.
+
+For example:
+
+.. prompt:: bash #
+
+   ceph nfs export qos disable bandwidth_control nfs_clust /export1
+
+.. note:: To restore cluster-level QoS defaults for an export, use
+   ``ceph nfs export apply <cluster_id>`` with an export definition that does
+   not include a ``QOS_BLOCK``.
+
+
+Enable QoS IOPS Control for a Specific Export
+---------------------------------------------
+
+.. prompt:: bash #
+
+   ceph nfs export qos enable ops_control <cluster_id> <pseudo_path> \
+          [--max_export_iops <int>] [--max_client_iops <int>] [--skip-notify-nfs-server]
+
+This enables IOPS control for a specified export. The same command can be used
+to update an existing IOPS limit. Enable cluster-level IOPS control with ``qos_type``
+``PerShare`` or ``PerShare_PerClient`` before enabling export-level IOPS control.
+
+``<cluster_id>`` is the NFS-Ganesha cluster ID.
+
+``<pseudo_path>`` is the pseudo-root path (must be an absolute path).
+
+``--max_export_iops`` is the IOPS limit for the export.
+
+``--max_client_iops`` is the IOPS limit per client of the export.
+
+``--skip-notify-nfs-server`` skips notifying running NFS-Ganesha daemons after
+the change.
+
+For example:
+
+.. prompt:: bash #
+
+   ceph nfs export qos enable ops_control nfs_clust /export1 --max_export_iops 2000
+
+.. note:: Export-level IOPS control cannot be enabled if the cluster-level
+   ``qos_type`` is ``PerClient``.
+
+
+Disable QoS IOPS Control for a Specific Export
+----------------------------------------------
+
+.. prompt:: bash #
+
+   ceph nfs export qos disable ops_control <cluster_id> <pseudo_path> [--skip-notify-nfs-server]
+
+This command disables export-level IOPS control. After disabling, the export no
+longer has export-specific IOPS limits.
+
+For example:
+
+.. prompt:: bash #
+
+   ceph nfs export qos disable ops_control nfs_clust /export1
+
+
+Get QoS Configuration for Export
+--------------------------------
+
+.. prompt:: bash #
+
+   ceph nfs export qos get <cluster_id> <pseudo_path>
+
+This command displays the export-level QoS configuration. Use ``ceph -f
+json`` (or ``json-pretty``, ``yaml``, ``xml``, ``xml-pretty``) to control output formatting.
+When cluster-level QoS is configured, fields prefixed with ``global_`` show
+the cluster defaults (``global_enable_qos``, ``global_enable_bw_control``,
+``global_enable_iops_control``). Export-specific fields (without the
+``global_`` prefix) are present only when a ``QOS_BLOCK`` exists on the
+export. If the export has no ``QOS_BLOCK``, an empty object ``{}`` is
+returned.
+
+For example:
+
+.. prompt:: bash #
+
+   ceph nfs export qos get nfs_clust /export1
+
+::
+
+     {
+       "global_enable_bw_control": true,
+       "global_enable_iops_control": true,
+       "global_enable_qos": true,
+       "combined_rw_bw_control": true,
+       "enable_bw_control": true,
+       "enable_iops_control": true,
+       "enable_qos": true,
+       "max_export_combined_bw": "200.0MB",
+       "max_export_iops": 2000
+     }
+
+Export QoS can also be set via ``ceph nfs export apply`` by including a
+``qos_block`` key in the export JSON, or a ``QOS_BLOCK`` section in a NFS-Ganesha
+EXPORT config fragment.
+
+Create or Update Export via JSON Specification
+----------------------------------------------
+
+An existing export can be dumped in JSON format with:
+
+.. prompt:: bash #
+
+   ceph nfs export info <cluster_id> <pseudo_path>
+
+An export can be created or modified by importing a JSON description in the
+same format:
+
+.. prompt:: bash #
+
+   ceph nfs export apply <cluster_id> -i <json_file>
+
+For example:
+
+.. prompt:: bash #
+
+   ceph nfs export info mynfs /cephfs > update_cephfs_export.json
+   cat update_cephfs_export.json
+
+::
+
+   {
+     "export_id": 1,
+     "path": "/",
+     "cluster_id": "mynfs",
+     "pseudo": "/cephfs",
+     "access_type": "RW",
+     "squash": "no_root_squash",
+     "security_label": true,
+     "protocols": [
+       4
+     ],
+     "transports": [
+       "TCP"
+     ],
+     "fsal": {
+       "name": "CEPH",
+       "fs_name": "a",
+       "sec_label_xattr": "",
+       "cmount_path": "/"
+     },
+     "clients": []
+   }
+
+The imported JSON can be a single dict describing a single export, or a JSON
+list containing multiple export dicts.
+
+The exported JSON can be modified and then reapplied.  Below, ``pseudo``
+and ``access_type`` are modified.  When modifying an export, the
+provided JSON should fully describe the new state of the export (just
+as when creating a new export), with the exception of the
+authentication credentials, which will be carried over from the
+previous state of the export where possible.
+
+.. note:: The ``user_id`` in the ``fsal`` block should not be modified or
+   mentioned in the JSON file as it is auto-generated for CephFS exports.  It
+   is auto-generated in the format ``nfs.<cluster_id>.<fs_name>.<hash_id>``.
+
+.. prompt:: bash #
+
+   ceph nfs export apply mynfs -i update_cephfs_export.json
+   cat update_cephfs_export.json
+
+::
+
+   {
+     "export_id": 1,
+     "path": "/",
+     "cluster_id": "mynfs",
+     "pseudo": "/cephfs_testing",
+     "access_type": "RO",
+     "squash": "no_root_squash",
+     "security_label": true,
+     "protocols": [
+       4
+     ],
+     "transports": [
+       "TCP"
+     ],
+     "fsal": {
+       "name": "CEPH",
+       "fs_name": "a",
+       "sec_label_xattr": "",
+       "cmount_path": "/"
+     },
+     "clients": []
+   }
+
+An export can also be created or updated by injecting a Ganesha NFS EXPORT
+config fragment. For example:
+
+.. prompt:: bash #
+
+   ceph nfs export apply mynfs -i update_cephfs_export.conf
+   cat update_cephfs_export.conf
+
+::
+
+   EXPORT {
+       FSAL {
+           name = "CEPH";
+           filesystem = "a";
+       }
+       export_id = 1;
+       path = "/";
+       pseudo = "/a";
+       access_type = "RW";
+       squash = "none";
+       attr_expiration_time = 0;
+       security_label = true;
+       protocols = 4;
+       transports = "TCP";
+   }
+
+
+Mounting
+========
+
+After the exports are successfully created and NFS-Ganesha daemons are
+deployed, exports can be mounted with:
+
+.. prompt:: bash #
+
+   mount -t nfs <ganesha-host-name>:<pseudo_path> <mount-point>
+
+For example, if the NFS cluster was created with ``--ingress --virtual-ip
+192.168.10.10`` and the export's pseudo-path was ``/foo``, the export can be
+mounted at ``/mnt`` by running the following command:
+
+.. prompt:: bash #
+
+   mount -t nfs 192.168.10.10:/foo /mnt
+
+If the NFS service is running on a non-standard port number:
+
+.. prompt:: bash #
+
+   mount -t nfs -o port=<ganesha-port> <ganesha-host-name>:<ganesha-pseudo_path> <mount-point>
+
+.. note:: Only NFSv4.0+ is supported.
+
+.. note:: As of this writing (01 Jan 2024), no version of Microsoft Windows
+   supports mouting an NFSv4.x export natively.
+
+
+Troubleshooting
+===============
+
+There are two methods for examining NFS-Ganesha logs:
+
+#. ``cephadm``: List the NFS daemons by running the following command:
+
+   .. prompt:: bash #
+
+      ceph orch ps --daemon-type nfs
+
+   You can search via the logs for a specific daemon (e.g.,
+   ``nfs.mynfs.0.0.myhost.xkfzal``) on the relevant host with:
+
+   .. prompt:: bash #
+
+      cephadm logs --fsid <fsid> --name nfs.mynfs.0.0.myhost.xkfzal
+
+#. ``rook``:
+
+   .. prompt:: bash #
+
+      kubectl logs -n rook-ceph rook-ceph-nfs-<cluster_id>-<node_id> nfs-ganesha
+
+The NFS log level can be adjusted using the ``nfs cluster config set`` command
+(see :ref:`nfs-cluster-set`).
+
+To enable libcephfs client debug logging for CephFS-backed exports, set
+``enable_cephfs_client_log: true`` in the NFS service spec. See
+:ref:`deploy-cephadm-nfs-ganesha` for details. Client logs are written to the
+host directory ``/var/log/ceph/<cluster-fsid>`` (or a custom path set via
+``cephfs_client_log_dir``).
+
+
+.. _nfs-ganesha-config:
+
+Manual NFS-Ganesha Deployment
+=============================
+
+It may be possible to deploy and manage the NFS-Ganesha daemons without
+orchestration frameworks such as cephadm or Rook.
+
+.. note:: Manual configuration is not tested or fully documented; your
+          mileage may vary. If you make this work, please help us by
+          updating this documentation.
+
+
+Limitations
+------------
+
+If no orchestrator module is enabled for the Manager, the NFS cluster
+management commands, such as those starting with ``ceph nfs cluster``, will not
+function. However, commands that manage NFS exports, like those prefixed with
+``ceph nfs export`` are expected to work as long as the necessary RADOS objects
+have already been created. The exact RADOS objects required are not documented
+at this time as support for this feature is incomplete. A curious reader can
+find some details about the object by reading the source code for the
+``mgr/nfs`` module (found in the Ceph source tree under
+``src/pybind/mgr/nfs``).
+
+
+Requirements
+------------
+
+The following packages are required to enable CephFS and RGW exports with NFS-Ganesha:
+
+-  ``nfs-ganesha``, ``nfs-ganesha-ceph``, ``nfs-ganesha-rados-grace`` and
+   ``nfs-ganesha-rados-urls`` packages (version 3.3 and above)
+
+
+Ganesha Configuration Hierarchy
+-------------------------------
+
+Cephadm and Rook start each NFS-Ganesha daemon with a minimal
+*bootstrap* configuration file that pulls from a shared *common*
+configuration stored in the ``.nfs`` RADOS pool and watches the common
+config for changes.  Each export is written to a separate RADOS object
+that is referenced by URL from the common config.
+
+.. ditaa::
+
+                             rados://$pool/$namespace/export-$i        rados://$pool/$namespace/userconf-nfs.$cluster_id
+                                      (export config)                          (user config)
+
+                        +----------+    +----------+    +----------+      +---------------------------+
+                        |          |    |          |    |          |      |                           |
+                        | export-1 |    | export-2 |    | export-3 |      | userconf-nfs.$cluster_id  |
+                        |          |    |          |    |          |      |                           |
+                        +----+-----+    +----+-----+    +-----+----+      +-------------+-------------+
+                             ^               ^                ^                         ^
+                             |               |                |                         |
+                             +--------------------------------+-------------------------+
+                                        %url |
+                                             |
+                                    +--------+--------+
+                                    |                 |  rados://$pool/$namespace/conf-nfs.$svc
+                                    |  conf+nfs.$svc  |  (common config)
+                                    |                 |
+                                    +--------+--------+
+                                             ^
+                                             |
+                                   watch_url |
+                     +----------------------------------------------+
+                     |                       |                      |
+                     |                       |                      |            RADOS
+             +----------------------------------------------------------------------------------+
+                     |                       |                      |            CONTAINER
+           watch_url |             watch_url |            watch_url |
+                     |                       |                      |
+            +--------+-------+      +--------+-------+      +-------+--------+
+            |                |      |                |      |                |  /etc/ganesha/ganesha.conf
+            |   nfs.$svc.a   |      |   nfs.$svc.b   |      |   nfs.$svc.c   |  (bootstrap config)
+            |                |      |                |      |                |
+            +----------------+      +----------------+      +----------------+
+
+
+.. _NFS-Ganesha NFS Server: https://github.com/nfs-ganesha/nfs-ganesha/wiki
+.. _NFS-Ganesha Export Sample: https://github.com/nfs-ganesha/nfs-ganesha/blob/next/src/config_samples/export.txt

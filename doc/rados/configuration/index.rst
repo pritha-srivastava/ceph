@@ -2,26 +2,13 @@
  Configuration
 ===============
 
-Ceph can run with a cluster containing thousands of Object Storage Devices
-(OSDs). A minimal system will have at least two OSDs for data replication. To
-configure OSD clusters, you must provide settings in the configuration file.
-Ceph provides default values for many settings, which you can override in the
-configuration file. Additionally, you can make runtime modification to the
-configuration using command-line utilities.
+Each Ceph process, daemon, or utility draws its configuration from several
+sources on startup. Such sources can include (1) a local configuration, (2) the
+monitors, (3) the command line, and (4) environment variables.
 
-When Ceph starts, it activates three daemons:
-
-- ``ceph-mon`` (mandatory)
-- ``ceph-osd`` (mandatory)
-- ``ceph-mds`` (mandatory for cephfs only)
-
-Each process, daemon or utility loads the host's configuration file. A process
-may have information about more than one daemon instance (*i.e.,* multiple
-contexts). A daemon or utility only has information about a single daemon
-instance (a single context).
-
-.. note:: Ceph can run on a single host for evaluation purposes.
-
+Configuration options can be set globally so that they apply (1) to all
+daemons, (2) to all daemons or services of a particular type, or (3) to only a
+specific daemon, process, or client.
 
 .. raw:: html
 
@@ -32,7 +19,11 @@ For general object store configuration, refer to the following:
 .. toctree::
    :maxdepth: 1
 
-   Disks and Filesystems <filesystem-recommendations>
+   Storage devices <storage-devices>
+   BlueStore RocksDB cache <../bluestore/rocksdb-config>
+   BlueFS Spillover Cleaner <../bluestore/bluefs-spillover-cleaner>
+   Fast Crash Recovery for file-stored allocations <../bluestore/fast-onode-scan>
+   ExtBlkDev, FCM plugin <../bluestore/fcm-plugin>
    ceph-conf
 
 
@@ -43,19 +34,21 @@ For general object store configuration, refer to the following:
 To optimize the performance of your cluster, refer to the following:
 
 .. toctree::
-	:maxdepth: 1
+   :maxdepth: 1
 
-	Network Settings <network-config-ref>
-	Auth Settings <auth-config-ref>
-	Monitor Settings <mon-config-ref>
-	Heartbeat Settings <mon-osd-interaction>
-	OSD Settings <osd-config-ref>
-	Filestore Settings <filestore-config-ref>
-	Key/Value Store Settings <keyvaluestore-config-ref>
-	Journal Settings <journal-ref>
-	Pool, PG & CRUSH Settings <pool-pg-config-ref.rst>
-	Messaging Settings <ms-ref>	
-	General Settings <general-config-ref>
+   Common Settings <common>
+   Network Settings <network-config-ref>
+   Messenger v2 protocol <msgr2>
+   Auth Settings <auth-config-ref>
+   Monitor Settings <mon-config-ref>
+   mon-lookup-dns
+   Heartbeat Settings <mon-osd-interaction>
+   OSD Settings <osd-config-ref>
+   DmClock Settings <mclock-config-ref>
+   BlueStore Settings <bluestore-config-ref>
+   Journal Settings <journal-ref>
+   Pool, PG & CRUSH Settings <pool-pg-config-ref.rst>
+   General Settings <general-config-ref>
 
    
 .. raw:: html

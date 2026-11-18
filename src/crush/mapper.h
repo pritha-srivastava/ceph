@@ -5,12 +5,11 @@
  * CRUSH functions for find rules and then mapping an input to an
  * output set.
  *
- * LGPL2
+ * LGPL-2.1 or LGPL-3.0
  */
 
 #include "crush.h"
 
-extern int crush_find_rule(const struct crush_map *map, int ruleset, int type, int size);
 /** @ingroup API
  *
  * Map __x__ to __result_max__ items and store them in the __result__
@@ -60,6 +59,23 @@ extern int crush_find_rule(const struct crush_map *map, int ruleset, int type, i
  *         char __cwin__[crush_work_size(__map__, __result_max__)];
  *         crush_init_workspace(__map__, __cwin__);
  *
+ * There are two CRUSH variants implemented.  Rules of type
+ * - CRUSH_RULE_TYPE_REPLICATED
+ * - CRUSH_RULE_TYPE_ERASURE
+ * use crush_do_rule_no_retry.  The crush descent algorithm implemented
+ * there cannot retry prior steps upon hitting an out osd, so such rules
+ * rely on the chooseleaf variant to implement failure domains and have
+ * important limitations when mapping multiple OSDs per failure domain.
+ * See crush_msr_do_rule in mapper.c for a more detailed explanation.
+ *
+ * Rules of type
+ * - CRUSH_RULE_TYPE_MSR_FIRSTN
+ * - CRUSH_RULE_TYPE_MSR_INDEP
+ * use crush_msr_do_rule, which retries the full descent when it hits an
+ * out OSD.  This extra flexibility allows it to more effectively map multiple
+ * OSDs per failure domain.  See the comment on crush_msr_do_rule in mapper.c
+ * for more details.
+ *
  * @param map the crush_map
  * @param ruleno a positive integer < __CRUSH_MAX_RULES__
  * @param x the value to map to __result_max__ items
@@ -67,7 +83,8 @@ extern int crush_find_rule(const struct crush_map *map, int ruleset, int type, i
  * @param result_max the size of the __result__ array
  * @param weights an array of weights of size __weight_max__
  * @param weight_max the size of the __weights__ array
- * @param cwin must be the value of crush_work_size(__map__, __result_max__)
+ * @param cwin must be an char array initialized by crush_init_workspace
+ * @param choose_args weights and ids for each known bucket
  *
  * @return 0 on error or the size of __result__ on success
  */
@@ -75,17 +92,13 @@ extern int crush_do_rule(const struct crush_map *map,
 			 int ruleno,
 			 int x, int *result, int result_max,
 			 const __u32 *weights, int weight_max,
-			 void *cwin);
+			 void *cwin, const struct crush_choose_arg *choose_args);
 
-/* Returns the exact amount of workspace that will need to be used
-   for a given combination of crush_map and result_max. The caller can
-   then allocate this much on its own, either on the stack, in a
-   per-thread long-lived buffer, or however it likes. */
-
-static inline size_t crush_work_size(const struct crush_map *map,
-				     int result_max) {
-	return map->working_size + result_max * 3 * sizeof(__u32);
-}
+/* Returns enough workspace for any crush rule within map to generate
+   result_max outputs. The caller can then allocate this much on its own,
+   either on the stack, in a per-thread long-lived buffer, or however it likes.*/
+extern size_t crush_work_size(const struct crush_map *map,
+			      int result_max);
 
 extern void crush_init_workspace(const struct crush_map *m, void *v);
 

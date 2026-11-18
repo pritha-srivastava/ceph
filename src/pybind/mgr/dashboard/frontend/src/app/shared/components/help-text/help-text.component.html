@@ -1,0 +1,7 @@
+<div class="form-text text-muted">
+  @if (formAllFieldsRequired) {
+    <ng-container i18n> All fields are required, except where marked optional. </ng-container>
+  } @else {
+    <ng-content></ng-content>
+  }
+</div>

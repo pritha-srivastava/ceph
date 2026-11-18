@@ -10,19 +10,17 @@ If you cannot start the gateway (i.e., there is no existing ``pid``),
 check to see if there is an existing ``.asok`` file from another 
 user. If an ``.asok`` file from another user exists and there is no
 running ``pid``, remove the ``.asok`` file and try to start the
-process again.
-
-This may occur when you start the process as a ``root`` user and 
+process again. This may occur when you start the process as a ``root`` user and 
 the startup script is trying to start the process as a 
 ``www-data`` or ``apache`` user and an existing ``.asok`` is 
 preventing the script from starting the daemon.
 
 The radosgw init script (/etc/init.d/radosgw) also has a verbose argument that
-can provide some insight as to what could be the issue:
+can provide some insight as to what could be the issue::
 
   /etc/init.d/radosgw start -v
 
-or
+or ::
 
   /etc/init.d radosgw start --verbose
 
@@ -41,7 +39,7 @@ Crashed ``radosgw`` process
 ===========================
 
 If the ``radosgw`` process dies, you will normally see a 500 error
-from the web server (apache, nginx, etc.).  In that situation, simply
+from the web server (Apache, NGINX, etc.).  In that situation, simply
 restarting radosgw will restore service.
 
 To diagnose the cause of the crash, check the log in ``/var/log/ceph``
@@ -167,8 +165,8 @@ Object Storage services, you can resolve this problem in a few ways:
 405 MethodNotAllowed
 --------------------
 
-If you receive an 405 error, check to see if you have the S3 subdomain set up correctly. 
-You will need to have a wild card setting in your DNS record for subdomain functionality
+If you receive a 405 error, check to see if you have the S3 subdomain set up correctly.
+You must have a wildcard in your DNS record for subdomain functionality
 to work properly.
 
 Also, check to ensure that the default site is disabled. ::
@@ -177,3 +175,34 @@ Also, check to ensure that the default site is disabled. ::
   
   
   
+Numerous objects in default.rgw.meta pool
+=========================================
+
+Clusters created prior to *jewel* have a metadata archival feature enabled by default, using the ``default.rgw.meta`` pool.
+This archive keeps all old versions of user and bucket metadata, resulting in large numbers of objects in the ``default.rgw.meta`` pool.
+
+Disabling the Metadata Heap
+---------------------------
+
+Users who want to disable this feature going forward should set the ``metadata_heap`` field to an empty string ``""``::
+
+  $ radosgw-admin zone get --rgw-zone=default > zone.json
+  [edit zone.json, setting "metadata_heap": ""]
+  $ radosgw-admin zone set --rgw-zone=default --infile=zone.json
+  $ radosgw-admin period update --commit
+
+This will stop new metadata from being written to the ``default.rgw.meta`` pool, but does not remove any existing objects or pool.
+
+Cleaning the Metadata Heap Pool
+-------------------------------
+
+Clusters created prior to *jewel* normally use ``default.rgw.meta`` only for the metadata archival feature.
+
+However, from *luminous* onwards, radosgw uses :ref:`Pool Namespaces <radosgw-pool-namespaces>` within ``default.rgw.meta`` for an entirely different purpose, that is, to store ``user_keys`` and other critical metadata.
+
+Users should check zone configuration before proceeding any cleanup procedures::
+
+  $ radosgw-admin zone get --rgw-zone=default | grep default.rgw.meta
+  [should not match any strings]
+
+Having confirmed that the pool is not used for any purpose, users may safely delete all objects in the ``default.rgw.meta`` pool, or optionally, delete the entire pool itself.

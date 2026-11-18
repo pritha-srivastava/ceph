@@ -1,5 +1,6 @@
-// -*- mode:C; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,31 +16,154 @@
 #ifndef CEPH_AUTH_CRYPTO_H
 #define CEPH_AUTH_CRYPTO_H
 
+#include "include/common_fwd.h"
+#include "include/sha_digest.h"
 #include "include/types.h"
 #include "include/utime.h"
-#include "include/memory.h"
 #include "include/buffer.h"
 
 #include <string>
 
-class CephContext;
 class CryptoKeyContext;
 namespace ceph { class Formatter; }
 
+namespace TOPNSPC::auth {
+
+/*
+ * Random byte stream generator suitable for cryptographic use
+ */
+class CryptoRandom {
+public:
+  CryptoRandom(); // throws on failure
+  ~CryptoRandom();
+  /// copy up to 256 random bytes into the given buffer. throws on failure
+  void get_bytes(char *buf, int len);
+private:
+  static int open_urandom();
+  const int fd;
+};
 
 /*
  * some per-key context that is specific to a particular crypto backend
  */
 class CryptoKeyHandler {
 public:
-  bufferptr secret;
+  // The maximum size of a single block for all descendants of the class.
+  static constexpr std::size_t MAX_BLOCK_SIZE {16};
+
+  // A descendant pick-ups one from these and passes it to the ctor template.
+  typedef std::integral_constant<std::size_t,  0> BLOCK_SIZE_0B;
+  typedef std::integral_constant<std::size_t, 16> BLOCK_SIZE_16B;
+
+  struct in_slice_t {
+    const std::size_t length;
+    const unsigned char* const buf;
+  };
+
+  struct out_slice_t {
+    const std::size_t max_length;
+    unsigned char* const buf;
+  };
+
+  ceph::bufferptr secret;
+
+  template <class BlockSizeT>
+  CryptoKeyHandler(BlockSizeT) {
+    static_assert(BlockSizeT::value <= MAX_BLOCK_SIZE);
+  }
+
+  uint32_t default_usage{0};
 
   virtual ~CryptoKeyHandler() {}
 
-  virtual int encrypt(const bufferlist& in,
-		       bufferlist& out, std::string *error) const = 0;
-  virtual int decrypt(const bufferlist& in,
-		       bufferlist& out, std::string *error) const = 0;
+  operator bool()const {
+    return secret.length() > 0;
+  }
+
+  bool operator==(const CryptoKeyHandler &rhs) const {
+    return 0 == secret.cmp(rhs.secret);
+  }
+
+  virtual int encrypt(CephContext *cct,
+                      const ceph::buffer::list& in,
+		      ceph::buffer::list& out, std::string *error) const {
+    return encrypt_ext(cct, default_usage, in, nullptr, out, error);
+  }
+
+  virtual int encrypt_ext(CephContext *cct,
+                          uint32_t usage,
+                          const ceph::buffer::list& in,
+                          ceph::buffer::list& out, std::string *error) const {
+    return encrypt_ext(cct, usage, in, nullptr, out, error);
+  }
+
+  /* should either used internally, or for unitests. Confounder should be nullptr otherwise */
+  virtual int encrypt_ext(CephContext *cct,
+                          const ceph::buffer::list& in,
+                          const ceph::buffer::list *confounder,
+                          ceph::buffer::list& out, std::string *error) const {
+    return encrypt_ext(cct, default_usage, in, confounder, out, error);
+  }
+
+  virtual int encrypt_ext(CephContext *cct,
+                          uint32_t usage,
+                          const ceph::buffer::list& in,
+                          const ceph::buffer::list *confounder,
+                          ceph::buffer::list& out, std::string *error) const = 0;
+
+  virtual int decrypt(CephContext *cct,
+                      const ceph::buffer::list& in,
+		      ceph::buffer::list& out, std::string *error) const {
+    return decrypt_ext(cct, default_usage, in, out, error);
+  }
+
+  virtual int decrypt_ext(CephContext *cct,
+                          uint32_t usage,
+                          const ceph::buffer::list& in,
+                          ceph::buffer::list& out, std::string *error) const = 0;
+
+  virtual std::size_t enc_size(const in_slice_t& in,
+                       const in_slice_t *confounder) const {
+    return 0;
+  }
+
+  std::size_t encrypt(CephContext *cct,
+                              const in_slice_t& in,
+			      const out_slice_t& out) const {
+    return encrypt_ext(cct, default_usage, in, nullptr, out);
+  }
+  std::size_t encrypt_ext(CephContext *cct,
+                              uint32_t usage,
+                              const in_slice_t& in,
+			      const out_slice_t& out) const {
+    return encrypt_ext(cct, usage,
+                       in, nullptr, out);
+  }
+  std::size_t encrypt_ext(CephContext *cct,
+                              const in_slice_t& in,
+                              const in_slice_t *confounder,
+			      const out_slice_t& out) const {
+    return encrypt_ext(cct, default_usage,
+                       in, confounder, out);
+  }
+  virtual std::size_t encrypt_ext(CephContext *cct,
+                              uint32_t usage,
+                              const in_slice_t& in,
+                              const in_slice_t *confounder,
+			      const out_slice_t& out) const;
+
+  std::size_t decrypt(CephContext *cct,
+                              const in_slice_t& in,
+			      const out_slice_t& out) const {
+    return decrypt_ext(cct, default_usage, in, out);
+  }
+  virtual std::size_t decrypt_ext(CephContext *cct,
+                              uint32_t usage,
+                              const in_slice_t& in,
+			      const out_slice_t& out) const;
+
+  sha256_digest_t hmac_sha256(const in_slice_t& in) const;
+  sha256_digest_t hmac_sha256(const ceph::bufferlist& in) const;
 };
 
 /*
@@ -47,83 +171,135 @@ public:
  */
 class CryptoKey {
 protected:
-  __u16 type;
+  __u16 type = 0;
   utime_t created;
-  bufferptr secret;   // must set this via set_secret()!
 
   // cache a pointer to the implementation-specific key handler, so we
   // don't have to create it for every crypto operation.
-  mutable ceph::shared_ptr<CryptoKeyHandler> ckh;
+  mutable std::shared_ptr<CryptoKeyHandler> ckh;
 
-  int _set_secret(int type, const bufferptr& s);
+  int _set_secret(int type, const ceph::buffer::ptr& s);
 
 public:
-  CryptoKey() : type(0) { }
-  CryptoKey(int t, utime_t c, bufferptr& s)
+  CryptoKey() = default;
+  CryptoKey(int t, utime_t c, ceph::buffer::ptr const& s)
     : created(c) {
     _set_secret(t, s);
   }
-  ~CryptoKey() {
+  ~CryptoKey() = default;
+
+  operator bool()const {
+    return ckh && *ckh;
+  }
+  bool operator==(const CryptoKey &rhs) const {
+    return !ckh ? !rhs.ckh
+                : rhs.ckh && *ckh == *rhs.ckh;
+  }
+  void encode(ceph::buffer::list& bl) const;
+  void decode(ceph::buffer::list::const_iterator& bl);
+  void dump(ceph::Formatter *f) const;
+  static std::list<CryptoKey> generate_test_instances();
+
+  void clear() {
+    *this = CryptoKey();
   }
 
-  void encode(bufferlist& bl) const;
-  void decode(bufferlist::iterator& bl);
-
-  int get_type() const { return type; }
+  unsigned get_type() const { return type; }
   utime_t get_created() const { return created; }
   void print(std::ostream& out) const;
 
-  int set_secret(int type, const bufferptr& s, utime_t created);
-  const bufferptr& get_secret() { return secret; }
-  const bufferptr& get_secret() const { return secret; }
+  int set_secret(int type, const ceph::buffer::ptr& s, utime_t created);
 
-  void encode_base64(string& s) const {
-    bufferlist bl;
+  bool empty() const { return ckh.get() == nullptr; }
+
+  void encode_base64(std::string& s) const {
+    ceph::buffer::list bl;
     encode(bl);
-    bufferlist e;
+    ceph::bufferlist e;
     bl.encode_base64(e);
     e.append('\0');
     s = e.c_str();
   }
-  string encode_base64() const {
-    string s;
+  std::string encode_base64() const {
+    std::string s;
     encode_base64(s);
     return s;
   }
-  void decode_base64(const string& s) {
-    bufferlist e;
+  void decode_base64(const std::string& s) {
+    ceph::buffer::list e;
     e.append(s);
-    bufferlist bl;
+    ceph::buffer::list bl;
     bl.decode_base64(e);
-    bufferlist::iterator p = bl.begin();
+    auto p = std::cbegin(bl);
     decode(p);
   }
 
-  void encode_formatted(string label, Formatter *f, bufferlist &bl);
-  void encode_plaintext(bufferlist &bl);
+  void encode_formatted(std::string label, ceph::Formatter *f,
+			ceph::buffer::list &bl);
+  void encode_plaintext(ceph::buffer::list &bl);
 
   // --
   int create(CephContext *cct, int type);
-  int encrypt(CephContext *cct, const bufferlist& in, bufferlist& out,
-	       std::string *error) const {
-    assert(ckh); // Bad key?
-    return ckh->encrypt(in, out, error);
+  int encrypt(CephContext *cct, const ceph::buffer::list& in,
+	      ceph::buffer::list& out,
+	      std::string *error) const {
+    ceph_assert(!empty()); // Bad key?
+    return ckh->encrypt(cct, in, out, error);
   }
-  int decrypt(CephContext *cct, const bufferlist& in, bufferlist& out,
-	       std::string *error) const {
-    assert(ckh); // Bad key?
-    return ckh->decrypt(in, out, error);
+  int decrypt(CephContext *cct, const ceph::buffer::list& in,
+	      ceph::buffer::list& out,
+	      std::string *error) const {
+    ceph_assert(!empty()); // Bad key?
+    return ckh->decrypt(cct, in, out, error);
+  }
+  int encrypt_ext(CephContext *cct, uint32_t usage,
+              const ceph::buffer::list& in,
+	      ceph::buffer::list& out,
+	      std::string *error) const {
+    ceph_assert(!empty()); // Bad key?
+    return ckh->encrypt_ext(cct, usage, in, out, error);
+  }
+  int decrypt_ext(CephContext *cct, uint32_t usage,
+              const ceph::buffer::list& in,
+	      ceph::buffer::list& out,
+	      std::string *error) const {
+    ceph_assert(!empty()); // Bad key?
+    return ckh->decrypt_ext(cct, usage, in, out, error);
+  }
+
+  using in_slice_t = CryptoKeyHandler::in_slice_t;
+  using out_slice_t = CryptoKeyHandler::out_slice_t;
+
+  std::size_t encrypt(CephContext *cct, const in_slice_t& in,
+		      const out_slice_t& out) {
+    ceph_assert(!empty()); // Bad key?
+    return ckh->encrypt(cct, in, out);
+  }
+  std::size_t decrypt(CephContext *cct, const in_slice_t& in,
+		      const out_slice_t& out) {
+    ceph_assert(!empty()); // Bad key?
+    return ckh->encrypt(cct, in, out);
+  }
+
+  sha256_digest_t hmac_sha256(CephContext*, const ceph::buffer::list& in) const {
+    ceph_assert(!empty()); // Bad key?
+    return ckh->hmac_sha256(in);
+  }
+
+  sha256_digest_t hmac_sha256(CephContext *cct, const in_slice_t& in) const {
+    ceph_assert(ckh);
+    return ckh->hmac_sha256(in);
+  }
+
+  static constexpr std::size_t get_max_outbuf_size(std::size_t want_size) {
+    return want_size + CryptoKeyHandler::MAX_BLOCK_SIZE;
   }
 
   void to_str(std::string& s) const;
+private:
+  const ceph::bufferptr& get_secret() const;
 };
 WRITE_CLASS_ENCODER(CryptoKey)
-
-static inline ostream& operator<<(ostream& out, const CryptoKey& k)
-{
-  k.print(out);
-  return out;
-}
 
 
 /*
@@ -132,19 +308,48 @@ static inline ostream& operator<<(ostream& out, const CryptoKey& k)
  * To use these functions, you need to call ceph::crypto::init(), see
  * common/ceph_crypto.h. common_init_finish does this for you.
  */
+
 class CryptoHandler {
 public:
   virtual ~CryptoHandler() {}
   virtual int get_type() const = 0;
-  virtual int create(bufferptr& secret) = 0;
-  virtual int validate_secret(const bufferptr& secret) = 0;
-  virtual CryptoKeyHandler *get_key_handler(const bufferptr& secret,
-					    string& error) = 0;
+  virtual int create(CryptoRandom *random, ceph::buffer::ptr& secret) = 0;
+  virtual int validate_secret(const ceph::buffer::ptr& secret) = 0;
+  virtual CryptoKeyHandler *get_key_handler_ext(const ceph::buffer::ptr& secret,
+                                                const std::vector<uint32_t>& usages,
+                                                std::string& error) = 0;
+
+  virtual CryptoKeyHandler *get_key_handler(const ceph::buffer::ptr& secret,
+                                            std::string& error) {
+    return get_key_handler_ext(secret, {0}, error);
+  }
 
   static CryptoHandler *create(int type);
 };
 
-extern int get_random_bytes(char *buf, int len);
-extern uint64_t get_random(uint64_t min_val, uint64_t max_val);
+
+
+class CryptoManager {
+  CephContext *cct;
+  std::shared_ptr<CryptoHandler> crypto_none;
+  std::shared_ptr<CryptoHandler> crypto_aes;
+  std::shared_ptr<CryptoHandler> crypto_aes256krb5;
+
+  std::set<int> supported_crypto_types;
+public:
+  CryptoManager(CephContext *_cct);
+
+  const std::set<int>& get_supported_crypto_types() const {
+    return supported_crypto_types;
+  }
+
+  static int get_key_type(const std::string& s);
+  static std::string_view get_key_type_name(int type);
+  static const std::set<int>& get_secure_key_types();
+  bool crypto_type_supported(int type) const;
+
+  std::shared_ptr<CryptoHandler> get_handler(int type);
+};
+} // namespace TOPNSPC::auth
 
 #endif

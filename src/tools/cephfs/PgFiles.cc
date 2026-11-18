@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,6 +13,7 @@
  *
  */
 
+#include "common/debug.h"
 #include "common/errno.h"
 #include "osdc/Striper.h"
 
@@ -33,7 +35,7 @@ int PgFiles::init()
   return ceph_init(cmount);
 }
 
-PgFiles::PgFiles(Objecter *o, std::set<pg_t> pgs_)
+PgFiles::PgFiles(Objecter *o, const std::set<pg_t> &pgs_)
   : objecter(o), pgs(pgs_)
 {
   for (const auto &i : pgs) {
@@ -99,7 +101,7 @@ void PgFiles::hit_dir(std::string const &path)
 
 void PgFiles::hit_file(std::string const &path, const struct ceph_statx &stx)
 {
-  assert(S_ISREG(stx.stx_mode));
+  ceph_assert(S_ISREG(stx.stx_mode));
 
   dout(20) << "Hitting file '" << path << "'" << dendl;
 

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,32 +17,35 @@
 #define CEPH_MDS_ESUBTREEMAP_H
 
 #include "../LogEvent.h"
+#include "../SegmentBoundary.h"
 #include "EMetaBlob.h"
 
-class ESubtreeMap : public LogEvent {
+class ESubtreeMap : public LogEvent, public SegmentBoundary {
 public:
   EMetaBlob metablob;
-  map<dirfrag_t, vector<dirfrag_t> > subtrees;
-  set<dirfrag_t> ambiguous_subtrees;
-  uint64_t expire_pos;
-  uint64_t event_seq;
+  std::map<dirfrag_t, std::vector<dirfrag_t> > subtrees;
+  std::set<dirfrag_t> ambiguous_subtrees;
+  uint64_t expire_pos = 0;
 
-  ESubtreeMap() : LogEvent(EVENT_SUBTREEMAP), expire_pos(0), event_seq(0) { }
+  ESubtreeMap() : LogEvent(EVENT_SUBTREEMAP) {}
   
-  void print(ostream& out) const {
+  void print(std::ostream& out) const override {
     out << "ESubtreeMap " << subtrees.size() << " subtrees " 
 	<< ", " << ambiguous_subtrees.size() << " ambiguous "
 	<< metablob;
   }
 
-  EMetaBlob *get_metablob() { return &metablob; }
+  EMetaBlob *get_metablob() override { return &metablob; }
 
-  void encode(bufferlist& bl, uint64_t features) const;
-  void decode(bufferlist::iterator& bl);
-  void dump(Formatter *f) const;
-  static void generate_test_instances(list<ESubtreeMap*>& ls);
+  void encode(bufferlist& bl, uint64_t features) const override;
+  void decode(bufferlist::const_iterator& bl) override;
+  void dump(Formatter *f) const override;
+  static std::list<ESubtreeMap> generate_test_instances();
 
-  void replay(MDSRank *mds);
+  void replay(MDSRank *mds) override;
+  bool is_major_segment_boundary() const override {
+    return true;
+  }
 };
 WRITE_CLASS_ENCODER_FEATURES(ESubtreeMap)
 

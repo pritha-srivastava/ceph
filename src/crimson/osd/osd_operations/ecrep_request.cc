@@ -1,0 +1,143 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
+
+#include "ecrep_request.h"
+
+#include "common/Formatter.h"
+
+#include "crimson/osd/osd.h"
+#include "crimson/osd/osd_connection_priv.h"
+#include "crimson/osd/osd_operation_external_tracking.h"
+#include "crimson/osd/pg.h"
+#include "osd/PeeringState.h"
+
+namespace {
+  seastar::logger& logger() {
+    return crimson::get_logger(ceph_subsys_osd);
+  }
+}
+
+namespace crimson::osd {
+
+void ECRepRequest::print(std::ostream& os) const
+{
+  os << "ECRepRequest("
+     << ")";
+}
+
+void ECRepRequest::dump_detail(Formatter *f) const
+{
+#if 0
+  f->open_object_section("ECRepRequest");
+  f->dump_stream("req_tid") << req->get_tid();
+  f->dump_stream("pgid") << get_pgid();
+  f->dump_unsigned("map_epoch", req->get_map_epoch());
+  f->dump_unsigned("min_epoch", req->get_min_epoch());
+  f->close_section();
+#endif
+}
+
+ConnectionPipeline &ECRepRequest::get_connection_pipeline()
+{
+  return get_osd_priv(&get_local_connection()
+         ).replicated_request_conn_pipeline;
+}
+
+PerShardPipeline &ECRepRequest::get_pershard_pipeline(
+  ShardServices &shard_services)
+{
+  return shard_services.get_replicated_request_pipeline();
+}
+
+// from https://en.cppreference.com/w/cpp/utility/variant/visit
+// helper type for the visitor #4
+template<class... Ts>
+struct overloaded : Ts... { using Ts::operator()...; };
+// explicit deduction guide (not needed as of C++20)
+template<class... Ts>
+overloaded(Ts...) -> overloaded<Ts...>;
+
+ECRepRequest::interruptible_future<>
+ECRepRequest::with_pg_interruptible(
+  ShardServices &shard_services, Ref<PG> pg,
+  ECBackend *ec_backend)
+{
+  // only throttle write/read ops -- replies must never be throttled
+  // to avoid deadlock with the ops waiting for those replies
+  int cost = 1; // irrelevant for immediate class
+  unsigned prio = 0;
+  bool needs_throttle = false;
+  SchedulerClass klass = SchedulerClass::immediate;
+
+  if (auto* write = std::get_if<Ref<MOSDECSubOpWrite>>(&req)) {
+    // classic OSD uses SchedulerClass::immediate for EC write sub-ops
+    // immediate bypasses mClock and goes directly to high_priority queue
+    prio = static_cast<unsigned>((*write)->get_priority());
+    needs_throttle = true;
+  } else if (auto* read = std::get_if<Ref<MOSDECSubOpRead>>(&req)) {
+    // EC reads: distinguish client vs recovery generated via priority
+    // matching classic: priority_to_scheduler_class for recovery EC reads
+    cost = std::max<int>((*read)->get_cost(), 1);
+    prio = static_cast<unsigned>((*read)->get_priority());
+    if (static_cast<int>(prio) <=
+         PeeringState::recovery_msg_priority_t::FORCED) {
+      // recovery-generated EC read
+      klass = (static_cast<int>(prio) >=
+	        PeeringState::recovery_msg_priority_t::DEGRADED)
+	      ? SchedulerClass::background_recovery
+	      : SchedulerClass::background_best_effort;
+    } else {
+      // client-generated EC read → immediate
+      klass = SchedulerClass::immediate;
+    }
+    needs_throttle = true;
+  }
+
+  std::optional<OperationThrottler::ThrottleReleaser> throttle;
+  if (needs_throttle) {
+    auto releaser = co_await interruptor::make_interruptible(
+      shard_services.get_throttle(
+        scheduler::params_t{
+          cost,
+          prio,
+          0,
+          klass}));
+    throttle.emplace(std::move(releaser));
+  }
+  co_await std::visit(overloaded{
+    [pg] (Ref<MOSDECSubOpWrite> concrete_req) {
+      return pg->handle_rep_write_op(std::move(concrete_req));
+    },
+    [pg] (Ref<MOSDECSubOpWriteReply> concrete_req) {
+      return pg->handle_rep_write_reply(std::move(concrete_req));
+    },
+    [pg] (Ref<MOSDECSubOpRead> concrete_req) {
+      return pg->handle_rep_read_op(std::move(concrete_req));
+    },
+    [ec_backend] (Ref<MOSDECSubOpReadReply> concrete_req) {
+      return ec_backend->handle_rep_read_reply(
+        std::move(concrete_req)
+      ).handle_error_interruptible(
+        crimson::ct_error::assert_all("unexpected error"));
+    }}, req);
+  // throttle destructs here if set
+}
+
+seastar::future<> ECRepRequest::with_pg(
+  ShardServices &shard_services, Ref<PG> pg)
+{
+  logger().debug("{}: ECRepRequest::with_pg", *this);
+
+  IRef ref = this;
+  return interruptor::with_interruption(
+    [this, pg, ec_backend=dynamic_cast<ECBackend*>(&pg->get_backend()), &shard_services] {
+    assert(ec_backend);
+    return  with_pg_interruptible(shard_services, pg, ec_backend);
+  }, [ref, this](std::exception_ptr) {
+    logger().debug("{}: ECRepRequest::exception handling", *this);
+    return seastar::now();
+  }, pg, pg->get_osdmap_epoch());
+}
+
+}
+

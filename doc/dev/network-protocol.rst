@@ -127,7 +127,7 @@ CEPH_MSGR_TAG_MSG (0x07)
 		u32le front_len;  // The size of the front section.
 		u32le middle_len; // The size of the middle section.
 		u32le data_len;   // The size of the data section.
-		u16le data_off;   // The way data should be aligned by the reciever.
+		u16le data_off;   // The way data should be aligned by the receiver.
 		
 		ceph_entity_name src; // Information about the sender.
 		
@@ -141,7 +141,7 @@ CEPH_MSGR_TAG_MSG (0x07)
 		u32le front_crc;  // Checksums of the various sections.
 		u32le middle_crc; //
 		u32le data_crc;   //
-		u64le sig; // Crypographic signature.
+		u64le sig; // Cryptographic signature.
 		u8    flags;
 	}
 

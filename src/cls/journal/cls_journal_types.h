@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_CLS_JOURNAL_TYPES_H
 #define CEPH_CLS_JOURNAL_TYPES_H
@@ -9,7 +9,6 @@
 #include "include/encoding.h"
 #include <iosfwd>
 #include <list>
-#include <set>
 #include <string>
 
 namespace ceph {
@@ -36,10 +35,13 @@ struct ObjectPosition {
             tag_tid == rhs.tag_tid &&
             entry_tid == rhs.entry_tid);
   }
+  inline bool operator!=(const ObjectPosition& rhs) const {
+    return !(*this == rhs);
+  }
 
-  void encode(bufferlist& bl) const;
-  void decode(bufferlist::iterator& iter);
-  void dump(Formatter *f) const;
+  void encode(ceph::buffer::list& bl) const;
+  void decode(ceph::buffer::list::const_iterator& iter);
+  void dump(ceph::Formatter *f) const;
 
   inline bool operator<(const ObjectPosition &rhs) const {
     if (object_number != rhs.object_number) {
@@ -50,7 +52,7 @@ struct ObjectPosition {
     return entry_tid < rhs.entry_tid;
   }
 
-  static void generate_test_instances(std::list<ObjectPosition *> &o);
+  static std::list<ObjectPosition> generate_test_instances();
 };
 
 typedef std::list<ObjectPosition> ObjectPositions;
@@ -63,15 +65,15 @@ struct ObjectSetPosition {
   ObjectSetPosition(const ObjectPositions &_object_positions)
     : object_positions(_object_positions) {}
 
-  void encode(bufferlist& bl) const;
-  void decode(bufferlist::iterator& iter);
-  void dump(Formatter *f) const;
+  void encode(ceph::buffer::list& bl) const;
+  void decode(ceph::buffer::list::const_iterator& iter);
+  void dump(ceph::Formatter *f) const;
 
   inline bool operator==(const ObjectSetPosition &rhs) const {
     return (object_positions == rhs.object_positions);
   }
 
-  static void generate_test_instances(std::list<ObjectSetPosition *> &o);
+  static std::list<ObjectSetPosition> generate_test_instances();
 };
 
 enum ClientState {
@@ -81,12 +83,12 @@ enum ClientState {
 
 struct Client {
   std::string id;
-  bufferlist data;
+  ceph::buffer::list data;
   ObjectSetPosition commit_position;
   ClientState state;
 
   Client() : state(CLIENT_STATE_CONNECTED) {}
-  Client(const std::string& _id, const bufferlist &_data,
+  Client(const std::string& _id, const ceph::buffer::list &_data,
          const ObjectSetPosition &_commit_position = ObjectSetPosition(),
          ClientState _state = CLIENT_STATE_CONNECTED)
     : id(_id), data(_data), commit_position(_commit_position), state(_state) {}
@@ -101,11 +103,11 @@ struct Client {
     return (id < rhs.id);
   }
 
-  void encode(bufferlist& bl) const;
-  void decode(bufferlist::iterator& iter);
-  void dump(Formatter *f) const;
+  void encode(ceph::buffer::list& bl) const;
+  void decode(ceph::buffer::list::const_iterator& iter);
+  void dump(ceph::Formatter *f) const;
 
-  static void generate_test_instances(std::list<Client *> &o);
+  static std::list<Client> generate_test_instances();
 };
 
 struct Tag {
@@ -113,10 +115,10 @@ struct Tag {
 
   uint64_t tid;
   uint64_t tag_class;
-  bufferlist data;
+  ceph::buffer::list data;
 
   Tag() : tid(0), tag_class(0) {}
-  Tag(uint64_t tid, uint64_t tag_class, const bufferlist &data)
+  Tag(uint64_t tid, uint64_t tag_class, const ceph::buffer::list &data)
     : tid(tid), tag_class(tag_class), data(data) {}
 
   inline bool operator==(const Tag &rhs) const {
@@ -128,11 +130,11 @@ struct Tag {
     return (tid < rhs.tid);
   }
 
-  void encode(bufferlist& bl) const;
-  void decode(bufferlist::iterator& iter);
-  void dump(Formatter *f) const;
+  void encode(ceph::buffer::list& bl) const;
+  void decode(ceph::buffer::list::const_iterator& iter);
+  void dump(ceph::Formatter *f) const;
 
-  static void generate_test_instances(std::list<Tag *> &o);
+  static std::list<Tag> generate_test_instances();
 };
 
 WRITE_CLASS_ENCODER(ObjectPosition);
@@ -151,8 +153,5 @@ std::ostream &operator<<(std::ostream &os, const Tag &tag);
 
 } // namespace journal
 } // namespace cls
-
-using cls::journal::encode;
-using cls::journal::decode;
 
 #endif // CEPH_CLS_JOURNAL_TYPES_H

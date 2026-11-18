@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_RBD_INDENT_STREAM_H
 #define CEPH_RBD_INDENT_STREAM_H
@@ -25,7 +25,7 @@ public:
   }
 
 protected:
-  virtual int overflow (int c);
+  int overflow (int c) override;
 
 private:
   size_t m_indent;

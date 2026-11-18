@@ -1,0 +1,11 @@
+@if (motd) {
+  <cd-alert-panel
+    size="slim"
+    [showTitle]="false"
+    [type]="motd.severity"
+    [dismissible]="motd.severity !== 'danger'"
+    (dismissed)="onDismissed()"
+  >
+    <span [innerHTML]="motd.message | sanitizeHtml"></span>
+  </cd-alert-panel>
+}

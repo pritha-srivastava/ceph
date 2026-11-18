@@ -16,7 +16,7 @@ Examples:
 
 =head1 DESCRIPTION
 
-This script intends to test the rgw user quota funcionality using s3 interface
+This script intends to test the rgw user quota functionality using s3 interface
 and reports the test results
 
 =head1 ARGUMENTS
@@ -52,7 +52,7 @@ my $logmsg;
 my $kruft;
 my $s3;
 my $hostdom  = $ENV{RGW_FQDN}||hostfqdn();
-my $port     = $ENV{RGW_PORT}||7280;
+my $port     = $ENV{RGW_PORT}||80;
 our $hostname = "$hostdom:$port";
 our $testfileloc;
 our $cnt;

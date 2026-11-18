@@ -1,135 +1,177 @@
+.. _os-recommendations:
+
 ====================
  OS Recommendations
 ====================
 
-Ceph Dependencies
-=================
+.. meta::
+   :description: The operating systems, kernels, and container hosts on which each Ceph release is built and tested.
+   :ceph-page-type: reference
 
-As a general rule, we recommend deploying Ceph on newer releases of Linux. 
-We also recommend deploying on releases with long-term support.
+The Linux distributions, kernels, and container hosts on which each Ceph
+release is built and tested.
 
-Linux Kernel
-------------
-
-- **Ceph Kernel Client**
-
-  If you are using the kernel client, the general advice is to *track* "stable"
-  or "longterm maintenance" kernel series provided by either http://kernel.org
-  or your distribution on the kernel client machines.
-
-  For RBD, if you choose to *track* long-term kernels, we currently recommend
-  4.x-based "longterm maintenance" kernel series:
-
-  - 4.9.z
-  - 4.4.z
-
-  These are considered pretty old, but if you must:
-
-  - 3.16.z
-  - 3.10.z
-
-  For CephFS, see `CephFS best practices`_ for kernel version guidance.
-
-  Older kernel client versions may not support your `CRUSH tunables`_ profile.
-
-- **B-tree File System (Btrfs)**
-
-  If you use the ``btrfs`` file system with Ceph, we recommend using a
-  recent Linux kernel (3.14 or later).
+.. _start-platforms:
 
 Platforms
 =========
 
-The charts below show how Ceph's requirements map onto various Linux
-platforms.  Generally speaking, there is very little dependence on
-specific distributions aside from the kernel and system initialization
-package (i.e., sysvinit, upstart, systemd).
+Ceph runs on any Linux distribution with a supported kernel and
+``systemd``; only the distributions below get packages and testing.
 
-Infernalis (9.2.z) and Jewel (10.2.z)
--------------------------------------
++----------------+-------------------------+----------------+-------------------+-----------------+----------------+----------------+----------------+
+| Distribution   | Distribution EOL        | Squid (19.2.z) | Tentacle (20.2.z) | Umbrella (21.x) | Vampire (22.x) | W (23.x)       | X (24.x)       |
+|                |                         | EOL: Sept 2026 | EOL: May 2027     | EOL: May 2028   | EOL: May 2029  | EOL: May 2030  | EOL: May 2031  |
++================+=========================+================+===================+=================+================+================+================+
+| CentOS 9       | `May 2027 <CentOS_>`_   | A              | A                 | Ae              |                |                |                |
++----------------+-------------------------+----------------+-------------------+-----------------+----------------+----------------+----------------+
+| Rocky 10       | `May 2035 <Rocky_>`_    |                | A in v20.2.2      | A               | A              | A              | A              |
++----------------+-------------------------+----------------+-------------------+-----------------+----------------+----------------+----------------+
+| Rocky 11       |  May 2038*              |                |                   |                 |                |                | A              |
++----------------+-------------------------+----------------+-------------------+-----------------+----------------+----------------+----------------+
+| Debian 12      | `Jun 2028 <Debian_b_>`_ | C              | C                 | C               |                |                |                |
++----------------+-------------------------+----------------+-------------------+-----------------+----------------+----------------+----------------+
+| Debian 13      | `Jun 2030 <Debian_t_>`_ |                |                   | C               | C              | C              | C              |
++----------------+-------------------------+----------------+-------------------+-----------------+----------------+----------------+----------------+
+| Ubuntu 22.04   | `Jun 2027 <Ubuntu_>`_   | A              | A                 | A               |                |                |                |
++----------------+-------------------------+----------------+-------------------+-----------------+----------------+----------------+----------------+
+| Ubuntu 24.04   | `Jun 2029 <Ubuntu_>`_   |                | A in v20.2.5      | A               | A              | A              |                |
++----------------+-------------------------+----------------+-------------------+-----------------+----------------+----------------+----------------+
+| Ubuntu 26.04   | `May 2031 <Ubuntu_>`_   |                |                   |                 | A              | A              | A              |
++----------------+-------------------------+----------------+-------------------+-----------------+----------------+----------------+----------------+
+| Ubuntu 28.04   |  Jun 2033*              |                |                   |                 |                |                | A              |
++----------------+-------------------------+----------------+-------------------+-----------------+----------------+----------------+----------------+
+| MS Windows     |  Varies                 | D              | D                 | D               | D              | D              | D              |
++----------------+-------------------------+----------------+-------------------+-----------------+----------------+----------------+----------------+
 
-+----------+----------+--------------------+--------------+---------+------------+
-| Distro   | Release  | Code Name          | Kernel       | Notes   | Testing    | 
-+==========+==========+====================+==============+=========+============+
-| CentOS   | 7        | N/A                | linux-3.10.0 |         | B, I, C    |
-+----------+----------+--------------------+--------------+---------+------------+
-| Debian   | 8.0      | Jessie             | linux-3.16.0 | 1, 2    | B, I       |
-+----------+----------+--------------------+--------------+---------+------------+
-| Fedora   | 22       | N/A                | linux-3.14.0 |         | B, I       |
-+----------+----------+--------------------+--------------+---------+------------+
-| RHEL     | 7        | Maipo              | linux-3.10.0 |         | B, I       |
-+----------+----------+--------------------+--------------+---------+------------+
-| Ubuntu   | 14.04    | Trusty Tahr        | linux-3.13.0 |         | B, I, C    |
-+----------+----------+--------------------+--------------+---------+------------+
+**Table legend:**
 
-Hammer (0.94)
+- **A**: Ceph provides packages and has done comprehensive tests on the software in them.
+- **C**: Ceph provides packages only. No tests have been done on these releases.
+- **D**: Client packages are available from an external site but are not maintained or tested by the core Ceph team.
+- **Ae**: CentOS 9 Stream is expected to reach EOL before Umbrella does; after that no new Umbrella RPMs are built for it. Move to Rocky 10 or another supported distribution first.
+
+.. note:: Dates marked with * and columns for future releases are anticipated, not final.
+
+.. warning:: Starting with CentOS 10 Stream and onwards, CentOS will no longer be built for or tested on by the upstream Ceph project.
+
+Container Hosts
+---------------
+
++----------------+-------------------------+----------------+-------------------+-----------------+----------------+----------------+----------------+
+| Distribution   | Distribution EOL        | Squid (19.2.z) | Tentacle (20.2.z) | Umbrella (21.x) | Vampire (22.x) | W (23.x)       | X (24.x)       |
+|                |                         | EOL: Sept 2026 | EOL: May 2027     | EOL: May 2028   | EOL: May 2029  | EOL: May 2030  | EOL: May 2031  |
++================+=========================+================+===================+=================+================+================+================+
+| CentOS 9       | `May 2027 <CentOS_>`_   | H              | H                 | H               |                |                |                |
++----------------+-------------------------+----------------+-------------------+-----------------+----------------+----------------+----------------+
+| Rocky 10       | `May 2035 <Rocky_>`_    |                | H in v20.2.2      | H               | H              | H              | H              |
++----------------+-------------------------+----------------+-------------------+-----------------+----------------+----------------+----------------+
+| Rocky 11       |  May 2038*              |                |                   |                 |                |                | H              |
++----------------+-------------------------+----------------+-------------------+-----------------+----------------+----------------+----------------+
+| Ubuntu 22.04   | `Jun 2027 <Ubuntu_>`_   | H              | H                 | H               |                |                |                |
++----------------+-------------------------+----------------+-------------------+-----------------+----------------+----------------+----------------+
+| Ubuntu 24.04   | `Jun 2029 <Ubuntu_>`_   |                | H in v20.2.5      | H               | H              | H              |                |
++----------------+-------------------------+----------------+-------------------+-----------------+----------------+----------------+----------------+
+| Ubuntu 26.04   | `May 2031 <Ubuntu_>`_   |                |                   |                 | H              | H              | H              |
++----------------+-------------------------+----------------+-------------------+-----------------+----------------+----------------+----------------+
+| Ubuntu 28.04   |  Jun 2033*              |                |                   |                 |                |                | H              |
++----------------+-------------------------+----------------+-------------------+-----------------+----------------+----------------+----------------+
+
+**Table legend:**
+
+- **H**: Ceph tests its container image with this distribution as the host. The image is built on Rocky 10 from Umbrella onwards, and on CentOS 9 Stream before that; see Container Base Image.
+
+.. _umbrella-container-base-image:
+
+Container Base Image
+====================
+
+Since Umbrella the container image is built on Rocky Linux 10 (CentOS 9
+Stream before that). The host does not need to run Rocky 10; any
+distribution marked H above works.
+
+Rocky Linux 10 requires the x86-64-v3 microarchitecture level, so on the x86
+architecture the container image runs only on CPUs that support x86-64-v3,
+whatever distribution the host runs. For the first CPU generations that
+support it, see :ref:`CPU and Memory Sizing <hardware-cpu>`.
+
+.. note:: ARM architecture containers provide a limited set of daemons.
+   Check that the daemons you need are available before you plan an ARM
+   deployment.
+
+.. _linux-kernel:
+.. _ceph-dependencies:
+
+Kernel Version for Clients
+==========================
+
+.. list-table::
+   :header-rows: 1
+   :widths: 12 38 50
+
+   * - Client
+     - Minimum kernel
+     - Note
+   * - RBD
+     - 5.3, or Enterprise Linux 8.2 (4.19 long-term at the very least)
+     - Older kernels need :ref:`CRUSH tunables <crush-map-tunables>` and
+       image features disabled on the cluster.
+   * - CephFS
+     - See :ref:`kernel versions for CephFS <cephfs_which_kernel_version>`
+     -
+   * - Both
+     - Use a "stable" or "long-term maintenance" series from kernel.org or
+       your distribution.
+     -
+
+The Windows client is best effort, with no full-time maintainer.
+
+For the I/O scheduler setting per drive type, see
+:ref:`Storage Devices <hardware-storage-devices>`.
+
+Deployment Method
+=================
+
+Deploy Ceph as containers with :ref:`cephadm <cephadm>`. Package installs
+(``.deb``, ``.rpm``) are still supported, but containers let you upgrade
+Ceph independently of the host's packages.
+
+Upgrading the Host OS
+=====================
+
+Upgrade the host OS one node at a time, on a Ceph release that supports both
+the old and the new OS. Do not upgrade the OS and Ceph at the same time.
+
+Upgrade Paths
 -------------
 
-+----------+----------+--------------------+--------------+---------+------------+
-| Distro   | Release  | Code Name          | Kernel       | Notes   | Testing    | 
-+==========+==========+====================+==============+=========+============+
-| CentOS   | 6        | N/A                | linux-2.6.32 | 1, 2    |            |
-+----------+----------+--------------------+--------------+---------+------------+
-| CentOS   | 7        | N/A                | linux-3.10.0 |         | B, I, C    |
-+----------+----------+--------------------+--------------+---------+------------+
-| Debian   | 7.0      | Wheezy             | linux-3.2.0  | 1, 2    |            |
-+----------+----------+--------------------+--------------+---------+------------+
-| Ubuntu   | 12.04    | Precise Pangolin   | linux-3.2.0  | 1, 2    |            |
-+----------+----------+--------------------+--------------+---------+------------+
-| Ubuntu   | 14.04    | Trusty Tahr        | linux-3.13.0 |         | B, I, C    |
-+----------+----------+--------------------+--------------+---------+------------+
++--------------------------------------+--------------------------------------+---------------------------+
+| Current OS (EOL)                     | Target OS (EOL)                      | Do it on                  |
++======================================+======================================+===========================+
+| CentOS 9 (`May 2027 <CentOS_>`_)     | Rocky 10 (`May 2035 <Rocky_>`_)      | Tentacle, Umbrella        |
++--------------------------------------+--------------------------------------+---------------------------+
+| Ubuntu 22.04 (`Jun 2027 <Ubuntu_>`_) | Ubuntu 24.04 (`Jun 2029 <Ubuntu_>`_) | Tentacle, Umbrella        |
++--------------------------------------+--------------------------------------+---------------------------+
+| Ubuntu 24.04 (`Jun 2029 <Ubuntu_>`_) | Ubuntu 26.04 (`May 2031 <Ubuntu_>`_) | Vampire, W                |
++--------------------------------------+--------------------------------------+---------------------------+
+| Ubuntu 26.04 (`May 2031 <Ubuntu_>`_) | Ubuntu 28.04 (Jun 2033*)             | X, Y                      |
++--------------------------------------+--------------------------------------+---------------------------+
+| Rocky 10 (`May 2035 <Rocky_>`_)      | Rocky 11 (May 2038*)                 | X, Y                      |
++--------------------------------------+--------------------------------------+---------------------------+
 
-Firefly (0.80)
---------------
+Additional Resources
+====================
 
-+----------+----------+--------------------+--------------+---------+------------+
-| Distro   | Release  | Code Name          | Kernel       | Notes   | Testing    | 
-+==========+==========+====================+==============+=========+============+
-| CentOS   | 6        | N/A                | linux-2.6.32 | 1, 2    | B, I       |
-+----------+----------+--------------------+--------------+---------+------------+
-| CentOS   | 7        | N/A                | linux-3.10.0 |         | B          |
-+----------+----------+--------------------+--------------+---------+------------+
-| Debian   | 7.0      | Wheezy             | linux-3.2.0  | 1, 2    | B          |
-+----------+----------+--------------------+--------------+---------+------------+
-| Fedora   | 19       | Schrödinger's Cat  | linux-3.10.0 |         | B          |
-+----------+----------+--------------------+--------------+---------+------------+
-| Fedora   | 20       | Heisenbug          | linux-3.14.0 |         | B          |
-+----------+----------+--------------------+--------------+---------+------------+
-| RHEL     | 6        | Santiago           | linux-2.6.32 | 1, 2    | B, I, C    |
-+----------+----------+--------------------+--------------+---------+------------+
-| RHEL     | 7        | Maipo              | linux-3.10.0 |         | B, I, C    |
-+----------+----------+--------------------+--------------+---------+------------+
-| Ubuntu   | 12.04    | Precise Pangolin   | linux-3.2.0  | 1, 2    | B, I, C    |
-+----------+----------+--------------------+--------------+---------+------------+
-| Ubuntu   | 14.04    | Trusty Tahr        | linux-3.13.0 |         | B, I, C    |
-+----------+----------+--------------------+--------------+---------+------------+
+- :ref:`hardware-recommendations`
+- `Ceph Releases (general)`_
+- :ref:`cephadm_deploying_new_cluster`
 
-Notes
------
+.. _CentOS: https://www.centos.org/cl-vs-cs/
+.. _Debian_b: https://www.debian.org/releases/bookworm/
+.. _Debian_t: https://www.debian.org/releases/trixie/
+.. _Rocky: https://github.com/rocky-linux/wiki.rockylinux.org/blob/main/docs/rocky/version.md
+.. _Ubuntu: https://wiki.ubuntu.com/Releases
 
-- **1**: The default kernel has an older version of ``btrfs`` that we do not
-  recommend for ``ceph-osd`` storage nodes.  Upgrade to a recommended
-  kernel or use ``XFS``.
-
-- **2**: The default kernel has an old Ceph client that we do not recommend
-  for kernel client (kernel RBD or the Ceph file system).  Upgrade to a
-  recommended kernel.
-
-
-Testing
--------
-
-- **B**: We build release packages for this platform. For some of these
-  platforms, we may also continuously build all ceph branches and exercise
-  basic unit tests.
-
-- **I**: We do basic installation and functionality tests of releases on this
-  platform.
-
-- **C**: We run a comprehensive functional, regression, and stress test suite
-  on this platform on a continuous basis. This includes development branches,
-  pre-release, and released code.
-
-.. _CRUSH Tunables: ../../rados/operations/crush-map#tunables
-
-.. _CephFS best practices: ../../cephfs/best-practices
+.. Needs to be an external link because doc/releases/general.rst is not in
+   stable branches and we want to always use the main branch version
+.. _Ceph Releases (general): https://docs.ceph.com/en/latest/releases/general/

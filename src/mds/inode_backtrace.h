@@ -1,9 +1,18 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #ifndef CEPH_INODE_BACKTRACE_H
 #define CEPH_INODE_BACKTRACE_H
 
-#include "mdstypes.h"
+#include <list>
+#include <iosfwd>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "include/buffer.h" // for ceph::buffer::list
+#include "include/fs_types.h" // for inodeno_t
+#include "include/types.h" // for version_t
 
 namespace ceph {
   class Formatter;
@@ -20,18 +29,18 @@ namespace ceph {
  *   newer.
  */
 struct inode_backpointer_t {
+  inode_backpointer_t() {}
+  inode_backpointer_t(inodeno_t i, std::string_view d, version_t v) : dirino(i), dname(d), version(v) {}
+
+  void encode(ceph::buffer::list& bl) const;
+  void decode(ceph::buffer::list::const_iterator &bl);
+  void decode_old(ceph::buffer::list::const_iterator &bl);
+  void dump(ceph::Formatter *f) const;
+  static std::list<inode_backpointer_t> generate_test_instances();
+
   inodeno_t dirino;    // containing directory ino
-  string dname;        // linking dentry name
-  version_t version;   // child's version at time of backpointer creation
-
-  inode_backpointer_t() : version(0) {}
-  inode_backpointer_t(inodeno_t i, const string &d, version_t v) : dirino(i), dname(d), version(v) {}
-
-  void encode(bufferlist& bl) const;
-  void decode(bufferlist::iterator &bl);
-  void decode_old(bufferlist::iterator &bl);
-  void dump(Formatter *f) const;
-  static void generate_test_instances(list<inode_backpointer_t*>& ls);
+  std::string dname;        // linking dentry name
+  version_t version = 0;   // child's version at time of backpointer creation
 };
 WRITE_CLASS_ENCODER(inode_backpointer_t)
 
@@ -39,9 +48,7 @@ inline bool operator==(const inode_backpointer_t& l, const inode_backpointer_t& 
 	return l.dirino == r.dirino && l.version == r.version && l.dname == r.dname;
 }
 
-inline ostream& operator<<(ostream& out, const inode_backpointer_t& ib) {
-  return out << "<" << ib.dirino << "/" << ib.dname << " v" << ib.version << ">";
-}
+std::ostream& operator<<(std::ostream& out, const inode_backpointer_t& ib);
 
 /*
  * inode_backtrace_t is a complete ancestor backtraces for a given inode.
@@ -49,18 +56,12 @@ inline ostream& operator<<(ostream& out, const inode_backpointer_t& ib) {
  * an xattr on an object).
  */
 struct inode_backtrace_t {
-  inodeno_t ino;       // my ino
-  vector<inode_backpointer_t> ancestors;
-  int64_t pool;
-  // we use a set for old_pools to avoid duplicate entries, e.g. setlayout 0, 1, 0
-  set<int64_t> old_pools;
+  inode_backtrace_t() {}
 
-  inode_backtrace_t() : pool(-1) {}
-
-  void encode(bufferlist& bl) const;
-  void decode(bufferlist::iterator &bl);
-  void dump(Formatter *f) const;
-  static void generate_test_instances(list<inode_backtrace_t*>& ls);
+  void encode(ceph::buffer::list& bl) const;
+  void decode(ceph::buffer::list::const_iterator &bl);
+  void dump(ceph::Formatter *f) const;
+  static std::list<inode_backtrace_t> generate_test_instances();
 
   /**
    * Compare two backtraces *for the same inode*.
@@ -76,12 +77,20 @@ struct inode_backtrace_t {
    */
   int compare(const inode_backtrace_t& other,
                bool *equivalent, bool *divergent) const;
+
+  void clear() {
+    ancestors.clear();
+    old_pools.clear();
+  }
+
+  inodeno_t ino;       // my ino
+  std::vector<inode_backpointer_t> ancestors;
+  int64_t pool = -1;
+  std::vector<int64_t> old_pools;
 };
 WRITE_CLASS_ENCODER(inode_backtrace_t)
 
-inline ostream& operator<<(ostream& out, const inode_backtrace_t& it) {
-  return out << "(" << it.pool << ")" << it.ino << ":" << it.ancestors << "//" << it.old_pools;
-}
+std::ostream& operator<<(std::ostream& out, const inode_backtrace_t& it);
 
 inline bool operator==(const inode_backtrace_t& l,
                        const inode_backtrace_t& r) {
@@ -92,4 +101,3 @@ inline bool operator==(const inode_backtrace_t& l,
 }
 
 #endif
-

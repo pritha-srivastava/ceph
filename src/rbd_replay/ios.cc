@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -47,7 +48,7 @@ action::Dependencies convert_dependencies(uint64_t start_time,
 
 } // anonymous namespace
 
-void IO::write_debug_base(ostream& out, string type) const {
+void IO::write_debug_base(ostream& out, const string &type) const {
   out << m_ionum << ": " << m_start_time / 1000000.0 << ": " << type << ", thread = " << m_thread_id << ", deps = {";
   bool first = true;
   for (io_set_t::iterator itr = m_dependencies.begin(), end = m_dependencies.end(); itr != end; ++itr) {
@@ -68,9 +69,10 @@ ostream& operator<<(ostream &out, const IO::ptr &io) {
 }
 
 void StartThreadIO::encode(bufferlist &bl) const {
+  using ceph::encode;
   action::Action action((action::StartThreadAction(
     ionum(), thread_id(), convert_dependencies(start_time(), dependencies()))));
-  ::encode(action, bl);
+  encode(action, bl);
 }
 
 void StartThreadIO::write_debug(std::ostream& out) const {
@@ -78,9 +80,10 @@ void StartThreadIO::write_debug(std::ostream& out) const {
 }
 
 void StopThreadIO::encode(bufferlist &bl) const {
+  using ceph::encode;
   action::Action action((action::StopThreadAction(
     ionum(), thread_id(), convert_dependencies(start_time(), dependencies()))));
-  ::encode(action, bl);
+  encode(action, bl);
 }
 
 void StopThreadIO::write_debug(std::ostream& out) const {
@@ -88,10 +91,11 @@ void StopThreadIO::write_debug(std::ostream& out) const {
 }
 
 void ReadIO::encode(bufferlist &bl) const {
+  using ceph::encode;
   action::Action action((action::ReadAction(
     ionum(), thread_id(), convert_dependencies(start_time(), dependencies()),
     m_imagectx, m_offset, m_length)));
-  ::encode(action, bl);
+  encode(action, bl);
 }
 
 void ReadIO::write_debug(std::ostream& out) const {
@@ -100,10 +104,11 @@ void ReadIO::write_debug(std::ostream& out) const {
 }
 
 void WriteIO::encode(bufferlist &bl) const {
+  using ceph::encode;
   action::Action action((action::WriteAction(
     ionum(), thread_id(), convert_dependencies(start_time(), dependencies()),
     m_imagectx, m_offset, m_length)));
-  ::encode(action, bl);
+  encode(action, bl);
 }
 
 void WriteIO::write_debug(std::ostream& out) const {
@@ -112,10 +117,11 @@ void WriteIO::write_debug(std::ostream& out) const {
 }
 
 void DiscardIO::encode(bufferlist &bl) const {
+  using ceph::encode;
   action::Action action((action::DiscardAction(
     ionum(), thread_id(), convert_dependencies(start_time(), dependencies()),
     m_imagectx, m_offset, m_length)));
-  ::encode(action, bl);
+  encode(action, bl);
 }
 
 void DiscardIO::write_debug(std::ostream& out) const {
@@ -124,10 +130,11 @@ void DiscardIO::write_debug(std::ostream& out) const {
 }
 
 void AioReadIO::encode(bufferlist &bl) const {
+  using ceph::encode;
   action::Action action((action::AioReadAction(
     ionum(), thread_id(), convert_dependencies(start_time(), dependencies()),
     m_imagectx, m_offset, m_length)));
-  ::encode(action, bl);
+  encode(action, bl);
 }
 
 void AioReadIO::write_debug(std::ostream& out) const {
@@ -136,10 +143,11 @@ void AioReadIO::write_debug(std::ostream& out) const {
 }
 
 void AioWriteIO::encode(bufferlist &bl) const {
+  using ceph::encode;
   action::Action action((action::AioWriteAction(
     ionum(), thread_id(), convert_dependencies(start_time(), dependencies()),
     m_imagectx, m_offset, m_length)));
-  ::encode(action, bl);
+  encode(action, bl);
 }
 
 void AioWriteIO::write_debug(std::ostream& out) const {
@@ -148,10 +156,11 @@ void AioWriteIO::write_debug(std::ostream& out) const {
 }
 
 void AioDiscardIO::encode(bufferlist &bl) const {
+  using ceph::encode;
   action::Action action((action::AioDiscardAction(
     ionum(), thread_id(), convert_dependencies(start_time(), dependencies()),
     m_imagectx, m_offset, m_length)));
-  ::encode(action, bl);
+  encode(action, bl);
 }
 
 void AioDiscardIO::write_debug(std::ostream& out) const {
@@ -160,10 +169,11 @@ void AioDiscardIO::write_debug(std::ostream& out) const {
 }
 
 void OpenImageIO::encode(bufferlist &bl) const {
+  using ceph::encode;
   action::Action action((action::OpenImageAction(
     ionum(), thread_id(), convert_dependencies(start_time(), dependencies()),
     m_imagectx, m_name, m_snap_name, m_readonly)));
-  ::encode(action, bl);
+  encode(action, bl);
 }
 
 void OpenImageIO::write_debug(std::ostream& out) const {
@@ -172,10 +182,11 @@ void OpenImageIO::write_debug(std::ostream& out) const {
 }
 
 void CloseImageIO::encode(bufferlist &bl) const {
+  using ceph::encode;
   action::Action action((action::CloseImageAction(
     ionum(), thread_id(), convert_dependencies(start_time(), dependencies()),
     m_imagectx)));
-  ::encode(action, bl);
+  encode(action, bl);
 }
 
 void CloseImageIO::write_debug(std::ostream& out) const {
@@ -184,10 +195,11 @@ void CloseImageIO::write_debug(std::ostream& out) const {
 }
 
 void AioOpenImageIO::encode(bufferlist &bl) const {
+  using ceph::encode;
   action::Action action((action::AioOpenImageAction(
     ionum(), thread_id(), convert_dependencies(start_time(), dependencies()),
     m_imagectx, m_name, m_snap_name, m_readonly)));
-  ::encode(action, bl);
+  encode(action, bl);
 }
 
 void AioOpenImageIO::write_debug(std::ostream& out) const {
@@ -196,10 +208,11 @@ void AioOpenImageIO::write_debug(std::ostream& out) const {
 }
 
 void AioCloseImageIO::encode(bufferlist &bl) const {
+  using ceph::encode;
   action::Action action((action::AioCloseImageAction(
     ionum(), thread_id(), convert_dependencies(start_time(), dependencies()),
     m_imagectx)));
-  ::encode(action, bl);
+  encode(action, bl);
 }
 
 void AioCloseImageIO::write_debug(std::ostream& out) const {

@@ -1,16 +1,17 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
-#ifndef RGW_PERIOD_PUSHER_H
-#define RGW_PERIOD_PUSHER_H
+#pragma once
 
 #include <memory>
 #include <mutex>
 #include <vector>
 
+#include "common/async/yield_context.h"
+#include "include/types.h" // for epoch_t
 #include "rgw_realm_reloader.h"
+#include "rgw_sal_fwd.h"
 
-class RGWRados;
 class RGWPeriod;
 
 // RGWRealmNotify payload for push coordination
@@ -23,24 +24,25 @@ using RGWZonesNeedPeriod = RGWPeriod;
 class RGWPeriodPusher final : public RGWRealmWatcher::Watcher,
                               public RGWRealmReloader::Pauser {
  public:
-  RGWPeriodPusher(RGWRados* store);
-  ~RGWPeriodPusher();
+  explicit RGWPeriodPusher(const DoutPrefixProvider *dpp, rgw::sal::Driver* driver, rgw::sal::ConfigStore* cfgsore,
+                           optional_yield y);
+  ~RGWPeriodPusher() override;
 
   /// respond to realm notifications by pushing new periods to other zones
-  void handle_notify(RGWRealmNotify type, bufferlist::iterator& p) override;
+  void handle_notify(RGWRealmNotify type, bufferlist::const_iterator& p) override;
 
   /// avoid accessing RGWRados while dynamic reconfiguration is in progress.
   /// notifications will be enqueued until resume()
   void pause() override;
 
   /// continue processing notifications with a new RGWRados instance
-  void resume(RGWRados* store) override;
+  void resume(rgw::sal::Driver* driver) override;
 
  private:
   void handle_notify(RGWZonesNeedPeriod&& period);
 
   CephContext *const cct;
-  RGWRados* store;
+  rgw::sal::Driver* driver;
 
   std::mutex mutex;
   epoch_t realm_epoch{0}; //< the current realm epoch being sent
@@ -52,5 +54,3 @@ class RGWPeriodPusher final : public RGWRealmWatcher::Watcher,
   class CRThread; //< contains thread, coroutine manager, http manager
   std::unique_ptr<CRThread> cr_thread; //< thread to run the push coroutines
 };
-
-#endif // RGW_PERIOD_PUSHER_H

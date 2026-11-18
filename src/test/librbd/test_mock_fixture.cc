@@ -1,10 +1,10 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/librbd/test_mock_fixture.h"
 #include "test/librbd/mock/MockImageCtx.h"
 #include "test/librados_test_stub/LibradosTestStub.h"
-#include "test/librados_test_stub/MockTestMemRadosClient.h"
+#include "test/librados_test_stub/MockTestMemCluster.h"
 
 // template definitions
 #include "librbd/AsyncRequest.cc"
@@ -21,43 +21,51 @@ using ::testing::Return;
 using ::testing::StrEq;
 using ::testing::WithArg;
 
-TestMockFixture::TestRadosClientPtr TestMockFixture::s_test_rados_client;
-::testing::NiceMock<librados::MockTestMemRadosClient> *
-  TestMockFixture::s_mock_rados_client = NULL;
+TestMockFixture::TestClusterRef TestMockFixture::s_test_cluster;
 
 void TestMockFixture::SetUpTestCase() {
-  s_test_rados_client = librados_test_stub::get_rados_client();
+  s_test_cluster = librados_test_stub::get_cluster();
 
-  // use a mock version of the in-memory rados client
-  s_mock_rados_client = new ::testing::NiceMock<librados::MockTestMemRadosClient>(
-      s_test_rados_client->cct());
-  librados_test_stub::set_rados_client(TestRadosClientPtr(s_mock_rados_client));
+  // use a mock version of the in-memory cluster
+  librados_test_stub::set_cluster(boost::shared_ptr<librados::TestCluster>(
+    new ::testing::NiceMock<librados::MockTestMemCluster>()));
   TestFixture::SetUpTestCase();
 }
 
 void TestMockFixture::TearDownTestCase() {
   TestFixture::TearDownTestCase();
-  librados_test_stub::set_rados_client(s_test_rados_client);
-  s_test_rados_client->put();
-  s_test_rados_client.reset();
-}
-
-void TestMockFixture::SetUp() {
-  TestFixture::SetUp();
+  librados_test_stub::set_cluster(s_test_cluster);
 }
 
 void TestMockFixture::TearDown() {
-  TestFixture::TearDown();
-
   // Mock rados client lives across tests -- reset it to initial state
-  ::testing::Mock::VerifyAndClear(s_mock_rados_client);
-  s_mock_rados_client->default_to_dispatch();
+  librados::MockTestMemRadosClient *mock_rados_client =
+    get_mock_io_ctx(m_ioctx).get_mock_rados_client();
+  ASSERT_TRUE(mock_rados_client != nullptr);
+
+  ::testing::Mock::VerifyAndClear(mock_rados_client);
+  mock_rados_client->default_to_dispatch();
+  dynamic_cast<librados::MockTestMemCluster*>(
+    librados_test_stub::get_cluster().get())->default_to_dispatch();
+
+  TestFixture::TearDown();
 }
 
 void TestMockFixture::expect_unlock_exclusive_lock(librbd::ImageCtx &ictx) {
   EXPECT_CALL(get_mock_io_ctx(ictx.md_ctx),
-              exec(_, _, StrEq("lock"), StrEq("unlock"), _, _, _))
+              exec_internal(_, _, StrEq("lock"), StrEq("unlock"), _, _, _, _))
                 .WillRepeatedly(DoDefault());
+  if (ictx.test_features(RBD_FEATURE_DIRTY_CACHE)) {
+    EXPECT_CALL(get_mock_io_ctx(ictx.md_ctx),
+                exec_internal(ictx.header_oid, _, StrEq("rbd"), StrEq("set_features"), _, _, _, _))
+                  .WillOnce(DoDefault());
+    EXPECT_CALL(get_mock_io_ctx(ictx.md_ctx),
+                exec_internal(ictx.header_oid, _, StrEq("rbd"), StrEq("metadata_set"), _, _, _, _))
+                  .WillOnce(DoDefault());
+    EXPECT_CALL(get_mock_io_ctx(ictx.md_ctx),
+                exec_internal(ictx.header_oid, _, StrEq("rbd"), StrEq("metadata_remove"), _, _, _, _))
+                  .WillOnce(DoDefault());
+  }
 }
 
 void TestMockFixture::expect_op_work_queue(librbd::MockImageCtx &mock_image_ctx) {

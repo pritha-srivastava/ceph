@@ -2,66 +2,63 @@
  CPU Profiling
 ===============
 
-If you built Ceph from source and compiled Ceph for use with `oprofile`_
-you can profile Ceph's CPU usage. See `Installing Oprofile`_ for details.
+Use ``perf``, the Linux profiler, to see where a Ceph daemon spends its CPU
+time. ``perf`` works with the release packages: no special build of Ceph is
+needed. Install the debug symbols for the daemon that you want to profile so
+that ``perf`` can resolve function names. The symbols are in the ``-dbg``
+packages on Debian-based distributions (for example ``ceph-osd-dbg``) and in
+the ``-debuginfo`` packages on RPM-based distributions.
+
+Run ``perf`` on the host that runs the daemon. All of the commands below
+require root privileges.
 
 
-Initializing oprofile
-=====================
+Finding the process
+===================
 
-The first time you use ``oprofile`` you need to initialize it. Locate the
-``vmlinux`` image corresponding to the kernel you are now running. :: 
+Find the process ID (PID) of the daemon. The following command lists every
+OSD process on the host together with its command line, which includes the
+OSD ID:
 
-	ls /boot
-	sudo opcontrol --init
-	sudo opcontrol --setup --vmlinux={path-to-image} --separate=library --callgraph=6
+.. prompt:: bash #
 
-
-Starting oprofile
-=================
-
-To start ``oprofile`` execute the following command:: 
-
-	opcontrol --start
-
-Once you start ``oprofile``, you may run some tests with Ceph. 
+   pgrep -a ceph-osd
 
 
-Stopping oprofile
-=================
+Watching a daemon live
+======================
 
-To stop ``oprofile`` execute the following command:: 
+Run the following command to see a continuously updated list of the functions
+in which the daemon spends the most time:
 
-	opcontrol --stop
-	
-	
-Retrieving oprofile Results
-===========================
+.. prompt:: bash #
 
-To retrieve the top ``cmon`` results, execute the following command:: 
-
-	opreport -gal ./cmon | less	
-	
-
-To retrieve the top ``cmon`` results with call graphs attached, execute the
-following command:: 
-
-	opreport -cal ./cmon | less	
-	
-.. important:: After reviewing results, you should reset ``oprofile`` before
-   running it again. Resetting ``oprofile`` removes data from the session 
-   directory.
+   perf top -p {pid}
 
 
-Resetting oprofile
-==================
+Recording a profile
+===================
 
-To reset ``oprofile``, execute the following command:: 
+Run the following command to record 60 seconds of samples, including call
+graphs:
 
-	sudo opcontrol --reset   
-   
-.. important:: You should reset ``oprofile`` after analyzing data so that 
-   you do not commingle results from different tests.
+.. prompt:: bash #
 
-.. _oprofile: http://oprofile.sourceforge.net/about/
-.. _Installing Oprofile: ../../../dev/cpu-profiler
+   perf record -p {pid} -F 99 --call-graph dwarf -- sleep 60
+
+Run the following command to view the recording. The ``caller`` view shows
+what each top function calls; use ``--call-graph callee`` to see instead who
+calls each top function:
+
+.. prompt:: bash #
+
+   perf report --call-graph caller
+
+.. note:: A ``perf record`` with ``--call-graph dwarf`` copies part of the
+   stack on every sample and can produce large files. Keep the sampling
+   frequency low (``-F 99`` in the example above) and the duration short on a
+   busy daemon.
+
+See :doc:`/dev/perf` for building flame graphs from a recording and for
+compiling Ceph with frame pointers, which allows the cheaper ``--call-graph
+fp`` mode.

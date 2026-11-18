@@ -1,17 +1,21 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
-#ifndef RGW_REALM_RELOADER_H
-#define RGW_REALM_RELOADER_H
+#pragma once
+
+#include <boost/asio/io_context.hpp>
 
 #include "rgw_realm_watcher.h"
 #include "common/Cond.h"
+#include "common/Timer.h"
+#include "rgw_sal_fwd.h"
 
-class RGWRados;
+struct RGWProcessEnv;
+namespace rgw::auth { class ImplicitTenants; }
 
 /**
- * RGWRealmReloader responds to notifications by recreating RGWRados with the
- * updated realm configuration.
+ * RGWRealmReloader responds to new period notifications by recreating RGWRados
+ * with the updated realm configuration.
  */
 class RGWRealmReloader : public RGWRealmWatcher::Watcher {
  public:
@@ -20,8 +24,7 @@ class RGWRealmReloader : public RGWRealmWatcher::Watcher {
    * is required to ensure that they stop issuing requests on the old
    * RGWRados instance, and restart with the updated configuration.
    *
-   * This abstraction avoids a depency on class RGWFrontend, which is only
-   * defined in rgw_main.cc
+   * This abstraction avoids a dependency on class RGWFrontend.
    */
   class Pauser {
    public:
@@ -30,14 +33,17 @@ class RGWRealmReloader : public RGWRealmWatcher::Watcher {
     /// pause all frontends while realm reconfiguration is in progress
     virtual void pause() = 0;
     /// resume all frontends with the given RGWRados instance
-    virtual void resume(RGWRados* store) = 0;
+    virtual void resume(rgw::sal::Driver* driver) = 0;
   };
 
-  RGWRealmReloader(RGWRados*& store, Pauser* frontends);
-  ~RGWRealmReloader();
+  RGWRealmReloader(RGWProcessEnv& env,
+                   const rgw::auth::ImplicitTenants& implicit_tenants,
+                   std::map<std::string, std::string>& service_map_meta,
+                   Pauser* frontends, boost::asio::io_context& io_context);
+  ~RGWRealmReloader() override;
 
   /// respond to realm notifications by scheduling a reload()
-  void handle_notify(RGWRealmNotify type, bufferlist::iterator& p) override;
+  void handle_notify(RGWRealmNotify type, bufferlist::const_iterator& p) override;
 
  private:
   /// pause frontends and replace the RGWRados instance
@@ -45,18 +51,18 @@ class RGWRealmReloader : public RGWRealmWatcher::Watcher {
 
   class C_Reload; //< Context that calls reload()
 
-  /// main()'s RGWRados pointer as a reference, modified by reload()
-  RGWRados*& store;
+  RGWProcessEnv& env;
+  const rgw::auth::ImplicitTenants& implicit_tenants;
+  std::map<std::string, std::string>& service_map_meta;
   Pauser *const frontends;
+  boost::asio::io_context& io_context;
 
   /// reload() takes a significant amount of time, so we don't want to run
-  /// it in the handle_notify() thread. we choose a timer thread because we
-  /// also want to add a delay (see rgw_realm_reconfigure_delay) so that we
-  /// can batch up notifications within that window
+  /// it in the handle_notify() thread. we choose a timer thread instead of a
+  /// Finisher because it allows us to cancel events that were scheduled while
+  /// reload() is still running
   SafeTimer timer;
-  Mutex mutex; //< protects access to timer and reload_scheduled
-  Cond cond; //< to signal reload() after an invalid realm config
+  ceph::mutex mutex; //< protects access to timer and reload_scheduled
+  ceph::condition_variable cond; //< to signal reload() after an invalid realm config
   C_Reload* reload_scheduled; //< reload() context if scheduled
 };
-
-#endif // RGW_REALM_RELOADER_H

@@ -3,20 +3,20 @@ Thrash mds by simulating failures
 """
 import logging
 import contextlib
-import ceph_manager
+import itertools
 import random
 import time
 
-from gevent.greenlet import Greenlet
-from gevent.event import Event
+from gevent import sleep
 from teuthology import misc as teuthology
 
-from tasks.cephfs.filesystem import MDSCluster, Filesystem
+from tasks import ceph_manager
+from tasks.cephfs.filesystem import MDSCluster, Filesystem, FSMissing
+from tasks.thrasher import ThrasherGreenlet
 
 log = logging.getLogger(__name__)
 
-
-class MDSThrasher(Greenlet):
+class MDSThrasher(ThrasherGreenlet):
     """
     MDSThrasher::
 
@@ -45,10 +45,13 @@ class MDSThrasher(Greenlet):
     thrash_in_replay: [default: 0.0] likelihood that the MDS will be thrashed
       during replay.  Value should be between 0.0 and 1.0.
 
-    thrash_max_mds: [default: 0.25] likelihood that the max_mds of the mds
+    thrash_max_mds: [default: 0.05] likelihood that the max_mds of the mds
       cluster will be modified to a value [1, current) or (current, starting
-      max_mds]. When reduced, randomly selected MDSs other than rank 0 will be
-      deactivated to reach the new max_mds.  Value should be between 0.0 and 1.0.
+      max_mds]. Value should be between 0.0 and 1.0.
+
+    thrash_while_stopping: [default: false] thrash an MDS while there
+      are MDS in up:stopping (because max_mds was changed and some
+      MDS were deactivated).
 
     thrash_weights: allows specific MDSs to be thrashed more/less frequently.
       This option overrides anything specified by max_thrash.  This option is a
@@ -92,21 +95,19 @@ class MDSThrasher(Greenlet):
 
     """
 
-    def __init__(self, ctx, manager, config, logger, fs, max_mds):
+    def __init__(self, ctx, manager, config, fs, max_mds):
         super(MDSThrasher, self).__init__()
 
-        self.ctx = ctx
-        self.manager = manager
-        assert self.manager.is_clean()
         self.config = config
-        self.logger = logger
+        self.ctx = ctx
+        self.logger = log.getChild('fs.[{f}]'.format(f = fs.name))
         self.fs = fs
+        self.manager = manager
         self.max_mds = max_mds
-
-        self.stopping = Event()
+        self.name = 'thrasher.fs.[{f}]'.format(f = fs.name)
 
         self.randomize = bool(self.config.get('randomize', True))
-        self.thrash_max_mds = float(self.config.get('thrash_max_mds', 0.25))
+        self.thrash_max_mds = float(self.config.get('thrash_max_mds', 0.05))
         self.max_thrash = int(self.config.get('max_thrash', 1))
         self.max_thrash_delay = float(self.config.get('thrash_delay', 120.0))
         self.thrash_in_replay = float(self.config.get('thrash_in_replay', False))
@@ -118,23 +119,34 @@ class MDSThrasher(Greenlet):
     def _run(self):
         try:
             self.do_thrash()
-        except:
-            # Log exceptions here so we get the full backtrace (it's lost
-            # by the time someone does a .get() on this greenlet)
-            self.logger.exception("Exception in do_thrash:")
-            raise
+        except FSMissing:
+            pass
+        except Exception as e:
+            # Log exceptions here so we get the full backtrace (gevent loses them).
+            # Also allow successful completion as gevent exception handling is a broken mess:
+            #
+            # 2017-02-03T14:34:01.259 CRITICAL:root:  File "gevent.libev.corecext.pyx", line 367, in gevent.libev.corecext.loop.handle_error (src/gevent/libev/gevent.corecext.c:5051)
+            #   File "/home/teuthworker/src/git.ceph.com_git_teuthology_master/virtualenv/local/lib/python2.7/site-packages/gevent/hub.py", line 558, in handle_error
+            #     self.print_exception(context, type, value, tb)
+            #   File "/home/teuthworker/src/git.ceph.com_git_teuthology_master/virtualenv/local/lib/python2.7/site-packages/gevent/hub.py", line 605, in print_exception
+            #     traceback.print_exception(type, value, tb, file=errstream)
+            #   File "/usr/lib/python2.7/traceback.py", line 124, in print_exception
+            #     _print(file, 'Traceback (most recent call last):')
+            #   File "/usr/lib/python2.7/traceback.py", line 13, in _print
+            #     file.write(str+terminator)
+            # 2017-02-03T14:34:01.261 CRITICAL:root:IOError
+            self.set_thrasher_exception(e)
+            self.logger.exception("exception:")
+            # allow successful completion so gevent doesn't see an exception...
 
     def log(self, x):
-        """Write data to logger assigned to this MDThrasher"""
+        """Write data to the logger assigned to MDSThrasher"""
         self.logger.info(x)
-
-    def stop(self):
-        self.stopping.set()
 
     def kill_mds(self, mds):
         if self.config.get('powercycle'):
             (remote,) = (self.ctx.cluster.only('mds.{m}'.format(m=mds)).
-                         remotes.iterkeys())
+                         remotes.keys())
             self.log('kill_mds on mds.{m} doing powercycle of {s}'.
                      format(m=mds, s=remote.name))
             self._assert_ipmi(remote)
@@ -148,49 +160,60 @@ class MDSThrasher(Greenlet):
             "powercycling requested but RemoteConsole is not "
             "initialized.  Check ipmi config.")
 
-    def revive_mds(self, mds, standby_for_rank=None):
+    def revive_mds(self, mds):
         """
         Revive mds -- do an ipmpi powercycle (if indicated by the config)
-        and then restart (using --hot-standby if specified.
+        and then restart.
         """
         if self.config.get('powercycle'):
             (remote,) = (self.ctx.cluster.only('mds.{m}'.format(m=mds)).
-                         remotes.iterkeys())
+                         remotes.keys())
             self.log('revive_mds on mds.{m} doing powercycle of {s}'.
                      format(m=mds, s=remote.name))
             self._assert_ipmi(remote)
             remote.console.power_on()
             self.manager.make_admin_daemon_dir(self.ctx, remote)
         args = []
-        if standby_for_rank:
-            args.extend(['--hot-standby', standby_for_rank])
         self.ctx.daemons.get_daemon('mds', mds).restart(*args)
 
     def wait_for_stable(self, rank = None, gid = None):
         self.log('waiting for mds cluster to stabilize...')
-        status = self.fs.status()
-        itercount = 0
-        while True:
-            max_mds = status.get_fsmap(self.fs.id)['mdsmap']['max_mds']
-            if rank is not None:
-                try:
-                    info = status.get_rank(self.fs.id, rank)
-                    if info['gid'] != gid:
-                        self.log('mds.{name} has gained rank={rank}, replacing gid={gid}'.format(name = info['name'], rank = rank, gid = gid))
-                        return status, info['name']
-                except:
-                    pass # no rank present
-            else:
-                ranks = filter(lambda info: "up:active" == info['state'] and "laggy_since" not in info, list(status.get_ranks(self.fs.id)))
-                count = len(ranks)
-                if count >= max_mds:
-                    self.log('mds cluster has {count} alive and active, now stable!'.format(count = count))
-                    return status, None
-            itercount = itercount + 1
-            if itercount > 10:
-                self.log('mds map: {status}'.format(status=self.fs.status()))
-            time.sleep(2)
+        for itercount in itertools.count():
             status = self.fs.status()
+            max_mds = status.get_fsmap(self.fs.id)['mdsmap']['max_mds']
+            ranks = list(status.get_ranks(self.fs.id))
+            stopping = sum(1 for _ in ranks if "up:stopping" == _['state'])
+            actives = sum(1 for _ in ranks
+                          if "up:active" == _['state'] and "laggy_since" not in _)
+
+            if not bool(self.config.get('thrash_while_stopping', False)) and stopping > 0:
+                if itercount % 5 == 0:
+                    self.log('cluster is considered unstable while MDS are in up:stopping (!thrash_while_stopping)')
+            else:
+                if rank is not None:
+                    try:
+                        info = status.get_rank(self.fs.id, rank)
+                        if info['gid'] != gid and "up:active" == info['state']:
+                            self.log('mds.{name} has gained rank={rank}, replacing gid={gid}'.format(name = info['name'], rank = rank, gid = gid))
+                            return status
+                    except:
+                        pass # no rank present
+                    if actives >= max_mds:
+                        # no replacement can occur!
+                        self.log("cluster has {actives} actives (max_mds is {max_mds}), no MDS can replace rank {rank}".format(
+                            actives=actives, max_mds=max_mds, rank=rank))
+                        return status
+                else:
+                    if actives == max_mds:
+                        self.log('mds cluster has {count} alive and active, now stable!'.format(count = actives))
+                        return status, None
+            if itercount > 300/2: # 5 minutes
+                 raise RuntimeError('timeout waiting for cluster to stabilize')
+            elif itercount % 5 == 0:
+                self.log('mds map: {status}'.format(status=status))
+            else:
+                self.log('no change')
+            sleep(2)
 
     def do_thrash(self):
         """
@@ -204,35 +227,26 @@ class MDSThrasher(Greenlet):
             "kill": 0,
         }
 
-        while not self.stopping.is_set():
+        while not self.is_stopped:
             delay = self.max_thrash_delay
             if self.randomize:
-                delay = random.randrange(0.0, self.max_thrash_delay)
+                delay = random.uniform(0.0, self.max_thrash_delay)
 
             if delay > 0.0:
                 self.log('waiting for {delay} secs before thrashing'.format(delay=delay))
-                self.stopping.wait(delay)
-                if self.stopping.is_set():
-                    continue
+                self.sleep_unless_stopped(delay)
 
             status = self.fs.status()
 
-            if random.randrange(0.0, 1.0) <= self.thrash_max_mds:
+            if random.random() <= self.thrash_max_mds:
                 max_mds = status.get_fsmap(self.fs.id)['mdsmap']['max_mds']
-                options = range(1, max_mds)+range(max_mds+1, self.max_mds+1)
+                options = [i for i in range(1, self.max_mds + 1) if i != max_mds]
                 if len(options) > 0:
-                    sample = random.sample(options, 1)
-                    new_max_mds = sample[0]
+                    new_max_mds = random.choice(options)
                     self.log('thrashing max_mds: %d -> %d' % (max_mds, new_max_mds))
                     self.fs.set_max_mds(new_max_mds)
                     stats['max_mds'] += 1
-
-                    # Now randomly deactivate mds if we shrank
-                    for rank in random.sample(range(1, max_mds), max(0, max_mds-new_max_mds)):
-                        self.fs.deactivate(rank)
-                        stats['deactivate'] += 1
-
-                    status = self.wait_for_stable()[0]
+                    self.wait_for_stable()
 
             count = 0
             for info in status.get_ranks(self.fs.id):
@@ -250,7 +264,7 @@ class MDSThrasher(Greenlet):
                 weight = 1.0
                 if 'thrash_weights' in self.config:
                     weight = self.config['thrash_weights'].get(label, '0.0')
-                skip = random.randrange(0.0, 1.0)
+                skip = random.random()
                 if weight <= skip:
                     self.log('skipping thrash iteration with skip ({skip}) > weight ({weight})'.format(skip=skip, weight=weight))
                     continue
@@ -278,40 +292,41 @@ class MDSThrasher(Greenlet):
                     itercount = itercount + 1
                     if itercount > 10:
                         self.log('mds map: {status}'.format(status=status))
-                    time.sleep(2)
+                    sleep(2)
 
                 if last_laggy_since:
                     self.log(
                         '{label} reported laggy/crashed since: {since}'.format(label=label, since=last_laggy_since))
                 else:
-                    self.log('{label} down, removed from mdsmap'.format(label=label, since=last_laggy_since))
+                    self.log('{label} down, removed from mdsmap'.format(label=label))
 
                 # wait for a standby mds to takeover and become active
-                status, takeover_mds = self.wait_for_stable(rank, gid)
-                self.log('New active mds is mds.{_id}'.format(_id=takeover_mds))
+                status = self.wait_for_stable(rank, gid)
 
                 # wait for a while before restarting old active to become new
                 # standby
                 delay = self.max_revive_delay
                 if self.randomize:
-                    delay = random.randrange(0.0, self.max_revive_delay)
+                    delay = random.uniform(0.0, self.max_revive_delay)
 
                 self.log('waiting for {delay} secs before reviving {label}'.format(
                     delay=delay, label=label))
-                time.sleep(delay)
+                self.sleep_unless_stopped(delay)
 
                 self.log('reviving {label}'.format(label=label))
                 self.revive_mds(name)
 
-                while True:
+                for itercount in itertools.count():
+                    if itercount > 300/2: # 5 minutes
+                        raise RuntimeError('timeout waiting for MDS to revive')
                     status = self.fs.status()
                     info = status.get_mds(name)
-                    if info and info['state'] in ('up:standby', 'up:standby-replay'):
+                    if info and info['state'] in ('up:standby', 'up:standby-replay', 'up:active'):
                         self.log('{label} reported in {state} state'.format(label=label, state=info['state']))
                         break
                     self.log(
-                        'waiting till mds map indicates {label} is in standby or standby-replay'.format(label=label))
-                    time.sleep(2)
+                        'waiting till mds map indicates {label} is in active, standby or standby-replay'.format(label=label))
+                    self.sleep_unless_stopped(2)
 
         for stat in stats:
             self.log("stat['{key}'] = {value}".format(key = stat, value = stats[stat]))
@@ -319,21 +334,21 @@ class MDSThrasher(Greenlet):
              # don't do replay thrashing right now
 #            for info in status.get_replays(self.fs.id):
 #                # this might race with replay -> active transition...
-#                if status['state'] == 'up:replay' and random.randrange(0.0, 1.0) < self.thrash_in_replay:
+#                if status['state'] == 'up:replay' and random.uniform(0.0, 1.0) < self.thrash_in_replay:
 #                    delay = self.max_replay_thrash_delay
 #                    if self.randomize:
-#                        delay = random.randrange(0.0, self.max_replay_thrash_delay)
-#                time.sleep(delay)
+#                        delay = random.uniform(0.0, self.max_replay_thrash_delay)
+#                sleep(delay)
 #                self.log('kill replaying mds.{id}'.format(id=self.to_kill))
 #                self.kill_mds(self.to_kill)
 #
 #                delay = self.max_revive_delay
 #                if self.randomize:
-#                    delay = random.randrange(0.0, self.max_revive_delay)
+#                    delay = random.uniform(0.0, self.max_revive_delay)
 #
 #                self.log('waiting for {delay} secs before reviving mds.{id}'.format(
 #                    delay=delay, id=self.to_kill))
-#                time.sleep(delay)
+#                sleep(delay)
 #
 #                self.log('revive mds.{id}'.format(id=self.to_kill))
 #                self.revive_mds(self.to_kill)
@@ -367,7 +382,7 @@ def task(ctx, config):
     log.info('mds thrasher using random seed: {seed}'.format(seed=seed))
     random.seed(seed)
 
-    (first,) = ctx.cluster.only('mds.{_id}'.format(_id=mdslist[0])).remotes.iterkeys()
+    (first,) = ctx.cluster.only('mds.{_id}'.format(_id=mdslist[0])).remotes.keys()
     manager = ceph_manager.CephManager(
         first, ctx=ctx, logger=log.getChild('ceph_manager'),
     )
@@ -384,31 +399,28 @@ def task(ctx, config):
                 break
         if steady:
             break
-        time.sleep(2)
+        sleep(2)
         status = mds_cluster.status()
     log.info('Ready to start thrashing')
 
     manager.wait_for_clean()
-    thrashers = {}
+    assert manager.is_clean()
+
+    if 'cluster' not in config:
+        config['cluster'] = 'ceph'
+
     for fs in status.get_filesystems():
-        name = fs['mdsmap']['fs_name']
-        log.info('Running thrasher against FS {f}'.format(f = name))
-        thrasher = MDSThrasher(
-            ctx, manager, config,
-            log.getChild('fs.[{f}]'.format(f = name)),
-            Filesystem(ctx, fs['id']), fs['mdsmap']['max_mds']
-            )
+        thrasher = MDSThrasher(ctx, manager, config, Filesystem(ctx, fscid=fs['id']), fs['mdsmap']['max_mds'])
         thrasher.start()
-        thrashers[name] = thrasher
+        ctx.ceph[config['cluster']].thrashers.append(thrasher)
 
     try:
         log.debug('Yielding')
         yield
     finally:
-        log.info('joining mds_thrashers')
-        for name in thrashers:
-            log.info('join thrasher mds_thrasher.fs.[{f}]'.format(f=name))
-            thrashers[name].stop()
-            thrashers[name].get()  # Raise any exception from _run()
-            thrashers[name].join()
+        log.info('joining mds_thrasher')
+        thrasher.stop()
+        if thrasher.exception is not None:
+            raise RuntimeError('error during thrashing')
+        thrasher.join()
         log.info('done joining')

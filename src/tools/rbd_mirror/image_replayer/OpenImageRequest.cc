@@ -1,10 +1,9 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "OpenImageRequest.h"
-#include "CloseImageRequest.h"
+#include "common/debug.h"
 #include "common/errno.h"
-#include "common/WorkQueue.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/ImageState.h"
 #include "librbd/Utils.h"
@@ -25,10 +24,9 @@ using librbd::util::create_context_callback;
 template <typename I>
 OpenImageRequest<I>::OpenImageRequest(librados::IoCtx &io_ctx, I **image_ctx,
                                       const std::string &image_id,
-                                      bool read_only, ContextWQ *work_queue,
-                                      Context *on_finish)
+                                      bool read_only, Context *on_finish)
   : m_io_ctx(io_ctx), m_image_ctx(image_ctx), m_image_id(image_id),
-    m_read_only(read_only), m_work_queue(work_queue), m_on_finish(on_finish) {
+    m_read_only(read_only), m_on_finish(on_finish) {
 }
 
 template <typename I>
@@ -42,10 +40,15 @@ void OpenImageRequest<I>::send_open_image() {
 
   *m_image_ctx = I::create("", m_image_id, nullptr, m_io_ctx, m_read_only);
 
+  if (!m_read_only) {
+    // ensure non-primary images can be modified
+    (*m_image_ctx)->read_only_mask = ~librbd::IMAGE_READ_ONLY_FLAG_NON_PRIMARY;
+  }
+
   Context *ctx = create_context_callback<
     OpenImageRequest<I>, &OpenImageRequest<I>::handle_open_image>(
       this);
-  (*m_image_ctx)->state->open(false, ctx);
+  (*m_image_ctx)->state->open(0, ctx);
 }
 
 template <typename I>
@@ -55,35 +58,10 @@ void OpenImageRequest<I>::handle_open_image(int r) {
   if (r < 0) {
     derr << ": failed to open image '" << m_image_id << "': "
          << cpp_strerror(r) << dendl;
-    send_close_image(r);
-    return;
+    *m_image_ctx = nullptr;
   }
 
-  finish(0);
-}
-
-template <typename I>
-void OpenImageRequest<I>::send_close_image(int r) {
-  dout(20) << dendl;
-
-  if (m_ret_val == 0 && r < 0) {
-    m_ret_val = r;
-  }
-
-  Context *ctx = create_context_callback<
-    OpenImageRequest<I>, &OpenImageRequest<I>::handle_close_image>(
-      this);
-  CloseImageRequest<I> *request = CloseImageRequest<I>::create(
-    m_image_ctx, m_work_queue, true, ctx);
-  request->send();
-}
-
-template <typename I>
-void OpenImageRequest<I>::handle_close_image(int r) {
-  dout(20) << dendl;
-
-  assert(r == 0);
-  finish(m_ret_val);
+  finish(r);
 }
 
 template <typename I>

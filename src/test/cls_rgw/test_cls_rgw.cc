@@ -1,33 +1,32 @@
-// -*- mode:C; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
-#include "include/types.h"
 #include "cls/rgw/cls_rgw_client.h"
 #include "cls/rgw/cls_rgw_ops.h"
 
 #include "gtest/gtest.h"
-#include "test/librados/test.h"
+#include "test/librados/test_cxx.h"
+#include "test/librados/test_pool_types.h"
+#include "include/common_fwd.h"
 
-#include <errno.h>
+#include <cerrno>
 #include <string>
 #include <vector>
 #include <map>
 
+#include <fmt/format.h>
+
+using namespace std;
 using namespace librados;
+using ceph::test::PoolType;
+using ceph::test::pool_type_name;
+using ceph::test::create_pool_by_type;
+using ceph::test::destroy_pool_by_type;
 
-librados::Rados rados;
-librados::IoCtx ioctx;
-string pool_name;
-
-
-/* must be the first test! */
-TEST(cls_rgw, init)
-{
-  pool_name = get_temp_pool_name();
-  /* create pool */
-  ASSERT_EQ("", create_one_pool_pp(pool_name, rados));
-  ASSERT_EQ(0, rados.ioctx_create(pool_name.c_str(), ioctx));
-}
+// creates a temporary pool and initializes an IoCtx for each test
+class TestClsRgw : public ceph::test::ClsTestFixture {
+  // Inherits: rados, ioctx, pool_name, pool_type, SetUp(), TearDown()
+};
 
 
 string str_int(string s, int i)
@@ -39,80 +38,66 @@ string str_int(string s, int i)
   return s;
 }
 
-
-class OpMgr {
-  vector<ObjectOperation *> ops;
-
-public:
-  OpMgr() {}
-  ~OpMgr() {
-    vector<ObjectOperation *>::iterator iter;
-    for (iter = ops.begin(); iter != ops.end(); ++iter) {
-      ObjectOperation *op = *iter;
-      delete op;
-    }
-  }
-
-  ObjectReadOperation *read_op() {
-    ObjectReadOperation *op = new ObjectReadOperation;
-    ops.push_back(op);
-    return op;
-  }
-
-  ObjectWriteOperation *write_op() {
-    ObjectWriteOperation *op = new ObjectWriteOperation;
-    ops.push_back(op);
-    return op;
-  }
-};
-
-void test_stats(librados::IoCtx& ioctx, string& oid, int category, uint64_t num_entries, uint64_t total_size)
+static int read_header(librados::IoCtx& ioctx, const string& oid,
+                       rgw_bucket_dir_header& header)
 {
-  map<int, struct rgw_cls_list_ret> results;
-  map<int, string> oids;
-  oids[0] = oid;
-  ASSERT_EQ(0, CLSRGWIssueGetDirHeader(ioctx, oids, results, 8)());
-
-  uint64_t entries = 0;
-  uint64_t size = 0;
-  map<int, struct rgw_cls_list_ret>::iterator iter = results.begin();
-  for (; iter != results.end(); ++iter) {
-    entries += (iter->second).dir.header.stats[category].num_entries;
-    size += (iter->second).dir.header.stats[category].total_size;
+  bufferlist bl;
+  librados::ObjectReadOperation op;
+  op.omap_get_header(&bl, nullptr);
+  int r = ioctx.operate(oid, &op, nullptr);
+  if (r < 0) {
+    return r;
   }
-  ASSERT_EQ(total_size, size);
-  ASSERT_EQ(num_entries, entries);
+  auto p = bl.cbegin();
+  decode(header, p);
+  return r;
 }
 
-void index_prepare(OpMgr& mgr, librados::IoCtx& ioctx, string& oid, RGWModifyOp index_op, string& tag, string& obj, string& loc)
+void test_stats(librados::IoCtx& ioctx, const string& oid, RGWObjCategory category, uint64_t num_entries, uint64_t total_size)
 {
-  ObjectWriteOperation *op = mgr.write_op();
-  cls_rgw_obj_key key(obj, string());
-  cls_rgw_bucket_prepare_op(*op, index_op, tag, key, loc, true, 0);
-  ASSERT_EQ(0, ioctx.operate(oid, op));
+  rgw_bucket_dir_header header;
+  ASSERT_EQ(0, read_header(ioctx, oid, header));
+  ASSERT_EQ(total_size, header.stats[category].total_size);
+  ASSERT_EQ(num_entries, header.stats[category].num_entries);
 }
 
-void index_complete(OpMgr& mgr, librados::IoCtx& ioctx, string& oid, RGWModifyOp index_op, string& tag, int epoch, string& obj, rgw_bucket_dir_entry_meta& meta)
+void index_prepare(librados::IoCtx& ioctx, const string& oid, RGWModifyOp index_op,
+                   const string& tag, const cls_rgw_obj_key& key, const string& loc)
 {
-  ObjectWriteOperation *op = mgr.write_op();
-  cls_rgw_obj_key key(obj, string());
+  ObjectWriteOperation op;
+  cls_rgw_bucket_prepare_op(op, index_op, tag, key, loc);
+  ASSERT_EQ(0, ioctx.operate(oid, &op));
+}
+
+void index_complete(librados::IoCtx& ioctx, const string& oid, RGWModifyOp index_op,
+                    const string& tag, int epoch, const cls_rgw_obj_key& key,
+                    rgw_bucket_dir_entry_meta& meta, uint16_t bi_flags = 0,
+                    bool log_op = true)
+{
+  ObjectWriteOperation op;
   rgw_bucket_entry_ver ver;
   ver.pool = ioctx.get_id();
   ver.epoch = epoch;
   meta.accounted_size = meta.size;
-  cls_rgw_bucket_complete_op(*op, index_op, tag, ver, key, meta, NULL, true, 0);
-  ASSERT_EQ(0, ioctx.operate(oid, op));
+  cls_rgw_bucket_complete_op(op, index_op, tag, ver, key, meta, nullptr, log_op, bi_flags, nullptr);
+  ASSERT_EQ(0, ioctx.operate(oid, &op));
+  if (!key.instance.empty()) {
+    bufferlist olh_tag;
+    olh_tag.append(tag);
+    rgw_zone_set zone_set;
+    ASSERT_EQ(0, cls_rgw_bucket_link_olh(ioctx, oid, key, olh_tag,
+                                         false, tag, &meta, epoch,
+                                         ceph::real_time{}, true, true, zone_set));
+  }
 }
 
-TEST(cls_rgw, index_basic)
+TEST_P(TestClsRgw, index_basic)
 {
   string bucket_oid = str_int("bucket", 0);
 
-  OpMgr mgr;
-
-  ObjectWriteOperation *op = mgr.write_op();
-  cls_rgw_bucket_init(*op);
-  ASSERT_EQ(0, ioctx.operate(bucket_oid, op));
+  ObjectWriteOperation op;
+  cls_rgw_bucket_init_index(op);
+  ASSERT_EQ(0, ioctx.operate(bucket_oid, &op));
 
   uint64_t epoch = 1;
 
@@ -120,70 +105,195 @@ TEST(cls_rgw, index_basic)
 
 #define NUM_OBJS 10
   for (int i = 0; i < NUM_OBJS; i++) {
-    string obj = str_int("obj", i);
+    cls_rgw_obj_key obj = str_int("obj", i);
     string tag = str_int("tag", i);
     string loc = str_int("loc", i);
 
-    index_prepare(mgr, ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
+    index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
 
-    test_stats(ioctx, bucket_oid, 0, i, obj_size * i);
+    test_stats(ioctx, bucket_oid, RGWObjCategory::None, i, obj_size * i);
 
-    op = mgr.write_op();
     rgw_bucket_dir_entry_meta meta;
-    meta.category = 0;
+    meta.category = RGWObjCategory::None;
     meta.size = obj_size;
-    index_complete(mgr, ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, epoch, obj, meta);
+    index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, epoch, obj, meta);
   }
 
-  test_stats(ioctx, bucket_oid, 0, NUM_OBJS, obj_size * NUM_OBJS);
+  test_stats(ioctx, bucket_oid, RGWObjCategory::None, NUM_OBJS,
+	     obj_size * NUM_OBJS);
 }
 
-TEST(cls_rgw, index_multiple_obj_writers)
+TEST_P(TestClsRgw, index_multiple_obj_writers)
 {
   string bucket_oid = str_int("bucket", 1);
 
-  OpMgr mgr;
-
-  ObjectWriteOperation *op = mgr.write_op();
-  cls_rgw_bucket_init(*op);
-  ASSERT_EQ(0, ioctx.operate(bucket_oid, op));
+  ObjectWriteOperation op;
+  cls_rgw_bucket_init_index(op);
+  ASSERT_EQ(0, ioctx.operate(bucket_oid, &op));
 
   uint64_t obj_size = 1024;
 
-  string obj = str_int("obj", 0);
+  cls_rgw_obj_key obj = str_int("obj", 0);
   string loc = str_int("loc", 0);
   /* multi prepare on a single object */
   for (int i = 0; i < NUM_OBJS; i++) {
     string tag = str_int("tag", i);
 
-    index_prepare(mgr, ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
+    index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
 
-    test_stats(ioctx, bucket_oid, 0, 0, 0);
+    test_stats(ioctx, bucket_oid, RGWObjCategory::None, 0, 0);
   }
 
   for (int i = NUM_OBJS; i > 0; i--) {
     string tag = str_int("tag", i - 1);
 
     rgw_bucket_dir_entry_meta meta;
-    meta.category = 0;
+    meta.category = RGWObjCategory::None;
     meta.size = obj_size * i;
 
-    index_complete(mgr, ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, i, obj, meta);
+    index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, i, obj, meta);
 
     /* verify that object size doesn't change, as we went back with epoch */
-    test_stats(ioctx, bucket_oid, 0, 1, obj_size * NUM_OBJS);
+    test_stats(ioctx, bucket_oid, RGWObjCategory::None, 1,
+	       obj_size * NUM_OBJS);
   }
 }
 
-TEST(cls_rgw, index_remove_object)
+// A skipped completion must not lower the entry's version. Three writers'
+// completions arrive at epochs 3, 1 and 2: epoch 1 is stale and skipped,
+// and epoch 2 must then be skipped too, leaving epoch 3's write listed.
+TEST_P(TestClsRgw, index_stale_complete_keeps_newest)
+{
+  string bucket_oid = str_int("bucket", 100);
+
+  ObjectWriteOperation op;
+  cls_rgw_bucket_init_index(op);
+  ASSERT_EQ(0, ioctx.operate(bucket_oid, &op));
+
+  cls_rgw_obj_key obj = str_int("obj", 0);
+  string loc = str_int("loc", 0);
+  const int epochs[] = {3, 1, 2};
+  for (int e : epochs) {
+    index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, str_int("tag", e), obj, loc);
+  }
+  for (int e : epochs) {
+    rgw_bucket_dir_entry_meta meta;
+    meta.category = RGWObjCategory::None;
+    meta.size = 1024 * e;
+    index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, str_int("tag", e), e, obj, meta);
+  }
+  test_stats(ioctx, bucket_oid, RGWObjCategory::None, 1, 1024 * 3);
+}
+
+// The null version of a key with an olh, as in a bucket whose versioning
+// is suspended, lives in the null instance entry behind the key's version
+// marker. A stale completion there must not lower its version either.
+TEST_P(TestClsRgw, index_stale_complete_keeps_newest_null_version)
+{
+  string bucket_oid = str_int("bucket", 110);
+
+  ObjectWriteOperation op;
+  cls_rgw_bucket_init_index(op);
+  ASSERT_EQ(0, ioctx.operate(bucket_oid, &op));
+
+  string loc = str_int("loc", 0);
+  // linking a version turns the key's plain entry into a version marker
+  cls_rgw_obj_key version("obj", "v1");
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, "tag-v1", version, loc);
+  rgw_bucket_dir_entry_meta vmeta;
+  vmeta.category = RGWObjCategory::None;
+  vmeta.size = 512;
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, "tag-v1", 1, version, vmeta);
+
+  cls_rgw_obj_key null_version("obj");
+  const int epochs[] = {3, 1, 2};
+  for (int e : epochs) {
+    index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, str_int("tag", e), null_version, loc);
+  }
+  for (int e : epochs) {
+    rgw_bucket_dir_entry_meta meta;
+    meta.category = RGWObjCategory::None;
+    meta.size = 1024 * e;
+    index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, str_int("tag", e), e, null_version, meta);
+  }
+  test_stats(ioctx, bucket_oid, RGWObjCategory::None, 2, 512 + 1024 * 3);
+}
+
+// A canceled op must not reset the entry's version either: after epoch 2's
+// write, a cancel, and a stale completion at epoch 1, epoch 2's write
+// stays listed.
+TEST_P(TestClsRgw, index_cancel_keeps_newest)
+{
+  string bucket_oid = str_int("bucket", 101);
+
+  ObjectWriteOperation op;
+  cls_rgw_bucket_init_index(op);
+  ASSERT_EQ(0, ioctx.operate(bucket_oid, &op));
+
+  cls_rgw_obj_key obj = str_int("obj", 0);
+  string loc = str_int("loc", 0);
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, "tag-new", obj, loc);
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, "tag-cancel", obj, loc);
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, "tag-old", obj, loc);
+
+  rgw_bucket_dir_entry_meta meta;
+  meta.category = RGWObjCategory::None;
+  meta.size = 2048;
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, "tag-new", 2, obj, meta);
+  rgw_bucket_dir_entry_meta cancel_meta;
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_CANCEL, "tag-cancel", 0, obj, cancel_meta);
+  rgw_bucket_dir_entry_meta old_meta;
+  old_meta.category = RGWObjCategory::None;
+  old_meta.size = 1024;
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, "tag-old", 1, obj, old_meta);
+
+  test_stats(ioctx, bucket_oid, RGWObjCategory::None, 1, 2048);
+}
+
+// A delete, a put and a delete, whose completions arrive at epochs 4, 2
+// and 3: the put (epoch 3) is older than the last delete (epoch 4), so no
+// entry may remain.
+TEST_P(TestClsRgw, index_stale_complete_after_delete)
+{
+  string bucket_oid = str_int("bucket", 102);
+
+  ObjectWriteOperation op;
+  cls_rgw_bucket_init_index(op);
+  ASSERT_EQ(0, ioctx.operate(bucket_oid, &op));
+
+  cls_rgw_obj_key obj = str_int("obj", 0);
+  string loc = str_int("loc", 0);
+  {
+    // the object exists at epoch 1
+    index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, "tag-init", obj, loc);
+    rgw_bucket_dir_entry_meta meta;
+    meta.category = RGWObjCategory::None;
+    meta.size = 1024;
+    index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, "tag-init", 1, obj, meta);
+  }
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_DEL, "tag-del1", obj, loc);
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, "tag-put", obj, loc);
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_DEL, "tag-del2", obj, loc);
+
+  rgw_bucket_dir_entry_meta del_meta;
+  del_meta.category = RGWObjCategory::None;
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_DEL, "tag-del2", 4, obj, del_meta);
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_DEL, "tag-del1", 2, obj, del_meta);
+  rgw_bucket_dir_entry_meta put_meta;
+  put_meta.category = RGWObjCategory::None;
+  put_meta.size = 2048;
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, "tag-put", 3, obj, put_meta);
+
+  test_stats(ioctx, bucket_oid, RGWObjCategory::None, 0, 0);
+}
+
+TEST_P(TestClsRgw, index_remove_object)
 {
   string bucket_oid = str_int("bucket", 2);
 
-  OpMgr mgr;
-
-  ObjectWriteOperation *op = mgr.write_op();
-  cls_rgw_bucket_init(*op);
-  ASSERT_EQ(0, ioctx.operate(bucket_oid, op));
+  ObjectWriteOperation op;
+  cls_rgw_bucket_init_index(op);
+  ASSERT_EQ(0, ioctx.operate(bucket_oid, &op));
 
   uint64_t obj_size = 1024;
   uint64_t total_size = 0;
@@ -192,91 +302,90 @@ TEST(cls_rgw, index_remove_object)
 
   /* prepare multiple objects */
   for (int i = 0; i < NUM_OBJS; i++) {
-    string obj = str_int("obj", i);
+    cls_rgw_obj_key obj = str_int("obj", i);
     string tag = str_int("tag", i);
     string loc = str_int("loc", i);
 
-    index_prepare(mgr, ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
+    index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
 
-    test_stats(ioctx, bucket_oid, 0, i, total_size);
+    test_stats(ioctx, bucket_oid, RGWObjCategory::None, i, total_size);
 
     rgw_bucket_dir_entry_meta meta;
-    meta.category = 0;
+    meta.category = RGWObjCategory::None;
     meta.size = i * obj_size;
     total_size += i * obj_size;
 
-    index_complete(mgr, ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, ++epoch, obj, meta);
+    index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, ++epoch, obj, meta);
 
-    test_stats(ioctx, bucket_oid, 0, i + 1, total_size);
+    test_stats(ioctx, bucket_oid, RGWObjCategory::None, i + 1, total_size);
   }
 
   int i = NUM_OBJS / 2;
   string tag_remove = "tag-rm";
   string tag_modify = "tag-mod";
-  string obj = str_int("obj", i);
+  cls_rgw_obj_key obj = str_int("obj", i);
   string loc = str_int("loc", i);
 
   /* prepare both removal and modification on the same object */
-  index_prepare(mgr, ioctx, bucket_oid, CLS_RGW_OP_DEL, tag_remove, obj, loc);
-  index_prepare(mgr, ioctx, bucket_oid, CLS_RGW_OP_ADD, tag_modify, obj, loc);
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_DEL, tag_remove, obj, loc);
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag_modify, obj, loc);
 
-  test_stats(ioctx, bucket_oid, 0, NUM_OBJS, total_size);
+  test_stats(ioctx, bucket_oid, RGWObjCategory::None, NUM_OBJS, total_size);
 
   rgw_bucket_dir_entry_meta meta;
 
   /* complete object removal */
-  index_complete(mgr, ioctx, bucket_oid, CLS_RGW_OP_DEL, tag_remove, ++epoch, obj, meta);
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_DEL, tag_remove, ++epoch, obj, meta);
 
   /* verify stats correct */
   total_size -= i * obj_size;
-  test_stats(ioctx, bucket_oid, 0, NUM_OBJS - 1, total_size);
+  test_stats(ioctx, bucket_oid, RGWObjCategory::None, NUM_OBJS - 1, total_size);
 
   meta.size = 512;
-  meta.category = 0;
+  meta.category = RGWObjCategory::None;
 
   /* complete object modification */
-  index_complete(mgr, ioctx, bucket_oid, CLS_RGW_OP_ADD, tag_modify, ++epoch, obj, meta);
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag_modify, ++epoch, obj, meta);
 
   /* verify stats correct */
   total_size += meta.size;
-  test_stats(ioctx, bucket_oid, 0, NUM_OBJS, total_size);
+  test_stats(ioctx, bucket_oid, RGWObjCategory::None, NUM_OBJS, total_size);
 
 
   /* prepare both removal and modification on the same object, this time we'll
    * first complete modification then remove*/
-  index_prepare(mgr, ioctx, bucket_oid, CLS_RGW_OP_DEL, tag_remove, obj, loc);
-  index_prepare(mgr, ioctx, bucket_oid, CLS_RGW_OP_DEL, tag_modify, obj, loc);
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_DEL, tag_remove, obj, loc);
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag_modify, obj, loc);
 
   /* complete modification */
   total_size -= meta.size;
   meta.size = i * obj_size * 2;
-  meta.category = 0;
+  meta.category = RGWObjCategory::None;
 
   /* complete object modification */
-  index_complete(mgr, ioctx, bucket_oid, CLS_RGW_OP_ADD, tag_modify, ++epoch, obj, meta);
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag_modify, ++epoch, obj, meta);
 
   /* verify stats correct */
   total_size += meta.size;
-  test_stats(ioctx, bucket_oid, 0, NUM_OBJS, total_size);
+  test_stats(ioctx, bucket_oid, RGWObjCategory::None, NUM_OBJS, total_size);
 
   /* complete object removal */
-  index_complete(mgr, ioctx, bucket_oid, CLS_RGW_OP_DEL, tag_remove, ++epoch, obj, meta);
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_DEL, tag_remove, ++epoch, obj, meta);
 
   /* verify stats correct */
   total_size -= meta.size;
-  test_stats(ioctx, bucket_oid, 0, NUM_OBJS - 1, total_size);
+  test_stats(ioctx, bucket_oid, RGWObjCategory::None, NUM_OBJS - 1,
+	     total_size);
 }
 
-TEST(cls_rgw, index_suggest)
+TEST_P(TestClsRgw, index_suggest)
 {
-  string bucket_oid = str_int("bucket", 3);
-
-  OpMgr mgr;
-
-  ObjectWriteOperation *op = mgr.write_op();
-  cls_rgw_bucket_init(*op);
-  ASSERT_EQ(0, ioctx.operate(bucket_oid, op));
-
+  string bucket_oid = str_int("suggest", 1);
+  {
+    ObjectWriteOperation op;
+    cls_rgw_bucket_init_index(op);
+    ASSERT_EQ(0, ioctx.operate(bucket_oid, &op));
+  }
   uint64_t total_size = 0;
 
   int epoch = 0;
@@ -287,63 +396,63 @@ TEST(cls_rgw, index_suggest)
 
   /* create multiple objects */
   for (int i = 0; i < num_objs; i++) {
-    string obj = str_int("obj", i);
+    cls_rgw_obj_key obj = str_int("obj", i);
     string tag = str_int("tag", i);
     string loc = str_int("loc", i);
 
-    index_prepare(mgr, ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
+    index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
 
-    test_stats(ioctx, bucket_oid, 0, i, total_size);
+    test_stats(ioctx, bucket_oid, RGWObjCategory::None, i, total_size);
 
     rgw_bucket_dir_entry_meta meta;
-    meta.category = 0;
+    meta.category = RGWObjCategory::None;
     meta.size = obj_size;
     total_size += meta.size;
 
-    index_complete(mgr, ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, ++epoch, obj, meta);
+    index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, ++epoch, obj, meta);
 
-    test_stats(ioctx, bucket_oid, 0, i + 1, total_size);
+    test_stats(ioctx, bucket_oid, RGWObjCategory::None, i + 1, total_size);
   }
 
   /* prepare (without completion) some of the objects */
   for (int i = 0; i < num_objs; i += 2) {
-    string obj = str_int("obj", i);
+    cls_rgw_obj_key obj = str_int("obj", i);
     string tag = str_int("tag-prepare", i);
     string loc = str_int("loc", i);
 
-    index_prepare(mgr, ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
+    index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
 
-    test_stats(ioctx, bucket_oid, 0, num_objs, total_size);
+    test_stats(ioctx, bucket_oid, RGWObjCategory::None, num_objs, total_size);
   }
 
   int actual_num_objs = num_objs;
   /* remove half of the objects */
   for (int i = num_objs / 2; i < num_objs; i++) {
-    string obj = str_int("obj", i);
+    cls_rgw_obj_key obj = str_int("obj", i);
     string tag = str_int("tag-rm", i);
     string loc = str_int("loc", i);
 
-    index_prepare(mgr, ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
+    index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
 
-    test_stats(ioctx, bucket_oid, 0, actual_num_objs, total_size);
+    test_stats(ioctx, bucket_oid, RGWObjCategory::None, actual_num_objs, total_size);
 
     rgw_bucket_dir_entry_meta meta;
-    index_complete(mgr, ioctx, bucket_oid, CLS_RGW_OP_DEL, tag, ++epoch, obj, meta);
+    index_complete(ioctx, bucket_oid, CLS_RGW_OP_DEL, tag, ++epoch, obj, meta);
 
     total_size -= obj_size;
     actual_num_objs--;
-    test_stats(ioctx, bucket_oid, 0, actual_num_objs, total_size);
+    test_stats(ioctx, bucket_oid, RGWObjCategory::None, actual_num_objs, total_size);
   }
 
   bufferlist updates;
 
   for (int i = 0; i < num_objs; i += 2) { 
-    string obj = str_int("obj", i);
+    cls_rgw_obj_key obj = str_int("obj", i);
     string tag = str_int("tag-rm", i);
     string loc = str_int("loc", i);
 
     rgw_bucket_dir_entry dirent;
-    dirent.key.name = obj;
+    dirent.key.name = obj.name;
     dirent.locator = loc;
     dirent.exists = (i < num_objs / 2); // we removed half the objects
     dirent.meta.size = 1024;
@@ -353,24 +462,390 @@ TEST(cls_rgw, index_suggest)
     cls_rgw_encode_suggestion(suggest_op, dirent, updates);
   }
 
-  map<int, string> bucket_objs;
-  bucket_objs[0] = bucket_oid;
-  int r = CLSRGWIssueSetTagTimeout(ioctx, bucket_objs, 8 /* max aio */, 1)();
-  ASSERT_EQ(0, r);
+  {
+    librados::ObjectWriteOperation op;
+    cls_rgw_bucket_set_tag_timeout(op, 1);
+    ASSERT_EQ(0, ioctx.operate(bucket_oid, &op));
+  }
 
   sleep(1);
 
   /* suggest changes! */
-  op = mgr.write_op();
-  cls_rgw_suggest_changes(*op, updates);
-  ASSERT_EQ(0, ioctx.operate(bucket_oid, op));
-
+  {
+    ObjectWriteOperation op;
+    cls_rgw_suggest_changes(op, updates);
+    ASSERT_EQ(0, ioctx.operate(bucket_oid, &op));
+  }
   /* suggest changes twice! */
-  op = mgr.write_op();
-  cls_rgw_suggest_changes(*op, updates);
-  ASSERT_EQ(0, ioctx.operate(bucket_oid, op));
+  {
+    ObjectWriteOperation op;
+    cls_rgw_suggest_changes(op, updates);
+    ASSERT_EQ(0, ioctx.operate(bucket_oid, &op));
+  }
+  test_stats(ioctx, bucket_oid, RGWObjCategory::None, num_objs / 2, total_size);
+}
 
-  test_stats(ioctx, bucket_oid, 0, num_objs / 2, total_size);
+static void list_entries(librados::IoCtx& ioctx,
+                         const std::string& oid,
+                         uint32_t num_entries,
+                         rgw_cls_list_ret& result,
+                         const cls_rgw_obj_key& start_key = {},
+                         const std::string& delimiter = "")
+{
+  std::map<int, std::string> oids = { {0, oid} };
+  string empty_prefix;
+  constexpr bool list_versions = true;
+  librados::ObjectReadOperation op;
+  cls_rgw_bucket_list_op(op, start_key, empty_prefix, delimiter,
+                         num_entries, list_versions, &result);
+  ASSERT_EQ(0, ioctx.operate(oid, &op, nullptr));
+}
+
+TEST_P(TestClsRgw, index_suggest_complete)
+{
+  string bucket_oid = str_int("suggest", 2);
+  {
+    ObjectWriteOperation op;
+    cls_rgw_bucket_init_index(op);
+    ASSERT_EQ(0, ioctx.operate(bucket_oid, &op));
+  }
+
+  cls_rgw_obj_key obj = str_int("obj", 0);
+  string tag = str_int("tag-prepare", 0);
+  string loc = str_int("loc", 0);
+
+  // prepare entry
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
+
+  // list entry before completion
+  rgw_bucket_dir_entry dirent;
+  {
+    rgw_cls_list_ret listing;
+    list_entries(ioctx, bucket_oid, 1, listing);
+    const auto& entries = listing.dir.m;
+    ASSERT_EQ(1, entries.size());
+    dirent = entries.begin()->second;
+    ASSERT_EQ(obj, dirent.key);
+  }
+  // complete entry
+  {
+    rgw_bucket_dir_entry_meta meta;
+    index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, 1, obj, meta);
+  }
+  // suggest removal of listed entry
+  {
+    bufferlist updates;
+    cls_rgw_encode_suggestion(CEPH_RGW_REMOVE, dirent, updates);
+
+    ObjectWriteOperation op;
+    cls_rgw_suggest_changes(op, updates);
+    ASSERT_EQ(0, ioctx.operate(bucket_oid, &op));
+  }
+  // list entry again, verify that suggested removal was not applied
+  {
+    rgw_cls_list_ret listing;
+    list_entries(ioctx, bucket_oid, 1, listing);
+    const auto& entries = listing.dir.m;
+    ASSERT_EQ(1, entries.size());
+    EXPECT_TRUE(entries.begin()->second.exists);
+  }
+}
+
+/*
+ * This case is used to test whether get_obj_vals will
+ * return all validate utf8 objnames and filter out those
+ * in BI_PREFIX_CHAR private namespace.
+ */
+TEST_P(TestClsRgw, index_list)
+{
+  string bucket_oid = str_int("bucket", 4);
+
+  ObjectWriteOperation op;
+  cls_rgw_bucket_init_index(op);
+  ASSERT_EQ(0, ioctx.operate(bucket_oid, &op));
+
+  uint64_t epoch = 1;
+  uint64_t obj_size = 1024;
+  const int num_objs = 4;
+  const string keys[num_objs] = {
+    /* single byte utf8 character */
+    { static_cast<char>(0x41) },
+    /* double byte utf8 character */
+    { static_cast<char>(0xCF), static_cast<char>(0x8F) },
+    /* treble byte utf8 character */
+    { static_cast<char>(0xDF), static_cast<char>(0x8F), static_cast<char>(0x8F) },
+    /* quadruple byte utf8 character */
+    { static_cast<char>(0xF7), static_cast<char>(0x8F), static_cast<char>(0x8F), static_cast<char>(0x8F) },
+  };
+
+  for (int i = 0; i < num_objs; i++) {
+    string obj = keys[i];
+    string tag = str_int("tag", i);
+    string loc = str_int("loc", i);
+
+    index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
+
+    rgw_bucket_dir_entry_meta meta;
+    meta.category = RGWObjCategory::None;
+    meta.size = obj_size;
+    index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, epoch, obj, meta,
+		   0 /* bi_flags */, false /* log_op */);
+  }
+
+  map<string, bufferlist> entries;
+  /* insert 998 omap key starts with BI_PREFIX_CHAR,
+   * so bucket list first time will get one key before 0x80 and one key after */
+  for (int i = 0; i < 998; ++i) {
+    char buf[10];
+    snprintf(buf, sizeof(buf), "%c%s%d", 0x80, "1000_", i);
+    entries.emplace(string{buf}, bufferlist{});
+  }
+  ioctx.omap_set(bucket_oid, entries);
+
+  test_stats(ioctx, bucket_oid, RGWObjCategory::None,
+	     num_objs, obj_size * num_objs);
+
+  rgw_cls_list_ret listing;
+  list_entries(ioctx, bucket_oid, 1000, listing);
+  const auto& m = listing.dir.m;
+
+  ASSERT_EQ(4u, m.size());
+  int i = 0;
+  for(auto it2 = m.cbegin(); it2 != m.cend(); it2++, i++) {
+    ASSERT_EQ(it2->first.compare(keys[i]), 0);
+  }
+}
+
+
+/*
+ * This case is used to test when bucket index list that includes a
+ * delimiter can handle the first chunk ending in a delimiter.
+ */
+TEST_P(TestClsRgw, index_list_delimited)
+{
+  string bucket_oid = str_int("bucket", 7);
+
+  ObjectWriteOperation op;
+  cls_rgw_bucket_init_index(op);
+  ASSERT_EQ(0, ioctx.operate(bucket_oid, &op));
+
+  uint64_t epoch = 1;
+  uint64_t obj_size = 1024;
+  const int file_num_objs = 5;
+  const int dir_num_objs = 1005;
+
+  std::vector<std::string> file_prefixes =
+    { "a", "c", "e", "g", "i", "k", "m", "o", "q", "s", "u" };
+  std::vector<std::string> dir_prefixes =
+    { "b/", "d/", "f/", "h/", "j/", "l/", "n/", "p/", "r/", "t/" };
+
+  rgw_bucket_dir_entry_meta meta;
+  meta.category = RGWObjCategory::None;
+  meta.size = obj_size;
+
+  // create top-level files
+  for (const auto& p : file_prefixes) {
+    for (int i = 0; i < file_num_objs; i++) {
+      string tag = str_int("tag", i);
+      string loc = str_int("loc", i);
+      const string obj = str_int(p, i);
+
+      index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
+
+      index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, epoch, obj, meta,
+		     0 /* bi_flags */, false /* log_op */);
+    }
+  }
+
+  // create large directories
+  for (const auto& p : dir_prefixes) {
+    for (int i = 0; i < dir_num_objs; i++) {
+      string tag = str_int("tag", i);
+      string loc = str_int("loc", i);
+      const string obj = p + str_int("f", i);
+
+      index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
+
+      index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, epoch, obj, meta,
+		     0 /* bi_flags */, false /* log_op */);
+    }
+  }
+
+  rgw_cls_list_ret listing;
+  cls_rgw_obj_key start_key("", "");
+  const string delimiter = "/";
+  list_entries(ioctx, bucket_oid, 1000, listing, start_key, delimiter);
+  auto id_entry_map = listing.dir.m;
+
+  // the cls code will make 4 tries to get 1000 entries; however
+  // because each of the subdirectories is so large, each attempt will
+  // only retrieve the first part of the subdirectory
+
+  ASSERT_EQ(48u, id_entry_map.size()) <<
+    "We should get 40 top-level entries and the tops of 8 \"subdirectories\".";
+  ASSERT_EQ(true, listing.is_truncated) << "We did not get all entries.";
+
+  ASSERT_EQ("a-0", id_entry_map.cbegin()->first);
+  ASSERT_EQ("p/", id_entry_map.crbegin()->first);
+
+  // now let's get the rest of the entries
+
+  listing = {};
+  cls_rgw_obj_key start_key2("p/", "");
+  list_entries(ioctx, bucket_oid, 1000, listing, start_key2, delimiter);
+  id_entry_map = listing.dir.m;
+
+  ASSERT_EQ(17u, id_entry_map.size()) <<
+    "We should get 15 top-level entries and the tops of 2 \"subdirectories\".";
+  ASSERT_EQ(false, listing.is_truncated) << "We now have all entries.";
+
+  ASSERT_EQ("q-0", id_entry_map.cbegin()->first);
+  ASSERT_EQ("u-4", id_entry_map.crbegin()->first);
+}
+
+
+TEST_P(TestClsRgw, bi_list)
+{
+  string bucket_oid = str_int("bucket", 5);
+
+  CephContext *cct = reinterpret_cast<CephContext *>(ioctx.cct());
+
+  ObjectWriteOperation op;
+  cls_rgw_bucket_init_index(op);
+  ASSERT_EQ(0, ioctx.operate(bucket_oid, &op));
+
+  const std::string empty_name_filter;
+  uint64_t max = 10;
+  std::list<rgw_cls_bi_entry> entries;
+  bool is_truncated;
+  std::string marker;
+
+  int ret = cls_rgw_bi_list(ioctx, bucket_oid, empty_name_filter, marker, max,
+			    &entries, &is_truncated);
+  ASSERT_EQ(ret, 0);
+  ASSERT_EQ(entries.size(), 0u) <<
+    "The listing of an empty bucket as 0 entries.";
+  ASSERT_EQ(is_truncated, false) <<
+    "The listing of an empty bucket is not truncated.";
+
+  uint64_t epoch = 1;
+  uint64_t obj_size = 1024;
+  const uint64_t num_objs = 35;
+
+  for (uint64_t i = 0; i < num_objs; i++) {
+    string obj = str_int(i % 4 ? "obj" : "об'єкт", i);
+    string tag = str_int("tag", i);
+    string loc = str_int("loc", i);
+    index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
+
+    rgw_bucket_dir_entry_meta meta;
+    meta.category = RGWObjCategory::None;
+    meta.size = obj_size;
+    index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, epoch, obj, meta,
+		   RGW_BILOG_FLAG_VERSIONED_OP);
+  }
+
+  ret = cls_rgw_bi_list(ioctx, bucket_oid, empty_name_filter, marker, num_objs + 10,
+			&entries, &is_truncated);
+  ASSERT_EQ(ret, 0);
+  if (is_truncated) {
+    ASSERT_LT(entries.size(), num_objs);
+  } else {
+    ASSERT_EQ(entries.size(), num_objs);
+  }
+
+  uint64_t num_entries = 0;
+
+  is_truncated = true;
+  marker.clear();
+  while(is_truncated) {
+    ret = cls_rgw_bi_list(ioctx, bucket_oid, empty_name_filter, marker, max,
+			  &entries, &is_truncated);
+    ASSERT_EQ(ret, 0);
+    if (is_truncated) {
+      ASSERT_LT(entries.size(), num_objs - num_entries);
+    } else {
+      ASSERT_EQ(entries.size(), num_objs - num_entries);
+    }
+    num_entries += entries.size();
+    marker = entries.back().idx;
+  }
+
+  // try with marker as final entry
+  ret = cls_rgw_bi_list(ioctx, bucket_oid, empty_name_filter, marker, max,
+			&entries, &is_truncated);
+  ASSERT_EQ(ret, 0);
+  ASSERT_EQ(entries.size(), 0u);
+  ASSERT_EQ(is_truncated, false);
+
+  if (cct->_conf->osd_max_omap_entries_per_request < 15) {
+    num_entries = 0;
+    max = 15;
+    is_truncated = true;
+    marker.clear();
+    while(is_truncated) {
+      ret = cls_rgw_bi_list(ioctx, bucket_oid, empty_name_filter, marker, max,
+			    &entries, &is_truncated);
+      ASSERT_EQ(ret, 0);
+      if (is_truncated) {
+	ASSERT_LT(entries.size(), num_objs - num_entries);
+      } else {
+	ASSERT_EQ(entries.size(), num_objs - num_entries);
+      }
+      num_entries += entries.size();
+      marker = entries.back().idx;
+    }
+
+    // try with marker as final entry
+    ret = cls_rgw_bi_list(ioctx, bucket_oid, empty_name_filter, marker, max,
+			  &entries, &is_truncated);
+    ASSERT_EQ(ret, 0);
+    ASSERT_EQ(entries.size(), 0u);
+    ASSERT_EQ(is_truncated, false);
+  }
+
+  // test with name filters; pairs contain filter and expected number of elements returned
+  const std::list<std::pair<const std::string,unsigned>> filters_results =
+    { { str_int("obj", 9), 1 },
+      { str_int("об'єкт", 8), 1 },
+      { str_int("obj", 8), 0 } };
+  for (const auto& filter_result : filters_results) {
+    is_truncated = true;
+    entries.clear();
+    marker.clear();
+
+    ret = cls_rgw_bi_list(ioctx, bucket_oid, filter_result.first, marker, max,
+			  &entries, &is_truncated);
+
+    ASSERT_EQ(ret, 0) << "bi list test with name filters should succeed";
+    ASSERT_EQ(entries.size(), filter_result.second) <<
+      "bi list test with filters should return the correct number of results";
+    ASSERT_EQ(is_truncated, false) <<
+      "bi list test with filters should return correct truncation indicator";
+  }
+
+  // test whether combined segment count is correct
+  is_truncated = false;
+  entries.clear();
+  marker.clear();
+
+  ret = cls_rgw_bi_list(ioctx, bucket_oid, empty_name_filter, marker, num_objs - 1,
+			&entries, &is_truncated);
+  ASSERT_EQ(ret, 0) << "combined segment count should succeed";
+  ASSERT_EQ(entries.size(), num_objs - 1) <<
+    "combined segment count should return the correct number of results";
+  ASSERT_EQ(is_truncated, true) <<
+    "combined segment count should return correct truncation indicator";
+
+
+  marker = entries.back().idx; // advance marker
+  ret = cls_rgw_bi_list(ioctx, bucket_oid, empty_name_filter, marker, num_objs - 1,
+			&entries, &is_truncated);
+  ASSERT_EQ(ret, 0) << "combined segment count should succeed";
+  ASSERT_EQ(entries.size(), 1) <<
+    "combined segment count should return the correct number of results";
+  ASSERT_EQ(is_truncated, false) <<
+    "combined segment count should return correct truncation indicator";
 }
 
 /* test garbage collection */
@@ -393,8 +868,20 @@ static bool cmp_objs(cls_rgw_obj& obj1, cls_rgw_obj& obj2)
          (obj1.loc == obj2.loc);
 }
 
+static int gc_list(librados::IoCtx& io_ctx, std::string& oid, std::string& marker, uint32_t max, bool expired_only,
+                   std::list<cls_rgw_gc_obj_info>& entries, bool& truncated, std::string& next_marker)
+{
+  librados::ObjectReadOperation op;
+  bufferlist bl;
+  cls_rgw_gc_list(op, marker, max, expired_only, bl);
+  int ret = io_ctx.operate(oid, &op, nullptr);
+  if (ret < 0) {
+    return ret;
+  }
+  return cls_rgw_gc_list_decode(bl, entries, truncated, next_marker);
+}
 
-TEST(cls_rgw, gc_set)
+TEST_P(TestClsRgw, gc_set)
 {
   /* add chains */
   string oid = "obj";
@@ -422,16 +909,18 @@ TEST(cls_rgw, gc_set)
   bool truncated;
   list<cls_rgw_gc_obj_info> entries;
   string marker;
+  string next_marker;
 
   /* list chains, verify truncated */
-  ASSERT_EQ(0, cls_rgw_gc_list(ioctx, oid, marker, 8, true, entries, &truncated));
+  ASSERT_EQ(0, gc_list(ioctx, oid, marker, 8, true, entries, truncated, next_marker));
   ASSERT_EQ(8, (int)entries.size());
   ASSERT_EQ(1, truncated);
 
   entries.clear();
+  next_marker.clear();
 
   /* list all chains, verify not truncated */
-  ASSERT_EQ(0, cls_rgw_gc_list(ioctx, oid, marker, 10, true, entries, &truncated));
+  ASSERT_EQ(0, gc_list(ioctx, oid, marker, 10, true, entries, truncated, next_marker));
   ASSERT_EQ(10, (int)entries.size());
   ASSERT_EQ(0, truncated);
  
@@ -451,7 +940,7 @@ TEST(cls_rgw, gc_set)
     /* verify expected num of objects in chain */
     ASSERT_EQ(2, (int)entry.chain.objs.size());
 
-    list<cls_rgw_obj>::iterator oiter = entry.chain.objs.begin();
+    auto oiter = entry.chain.objs.begin();
     cls_rgw_obj obj1, obj2;
 
     /* create expected objects */
@@ -468,7 +957,85 @@ TEST(cls_rgw, gc_set)
   }
 }
 
-TEST(cls_rgw, gc_defer)
+TEST_P(TestClsRgw, gc_list)
+{
+  /* add chains */
+  string oid = "obj";
+  for (int i = 0; i < 10; i++) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "chain-%d", i);
+    string tag = buf;
+    librados::ObjectWriteOperation op;
+    cls_rgw_gc_obj_info info;
+
+    cls_rgw_obj obj1, obj2;
+    create_obj(obj1, i, 1);
+    create_obj(obj2, i, 2);
+    info.chain.objs.push_back(obj1);
+    info.chain.objs.push_back(obj2);
+
+    op.create(false); // create object
+
+    info.tag = tag;
+    cls_rgw_gc_set_entry(op, 0, info);
+
+    ASSERT_EQ(0, ioctx.operate(oid, &op));
+  }
+
+  bool truncated;
+  list<cls_rgw_gc_obj_info> entries;
+  list<cls_rgw_gc_obj_info> entries2;
+  string marker;
+  string next_marker;
+
+  /* list chains, verify truncated */
+  ASSERT_EQ(0, gc_list(ioctx, oid, marker, 8, true, entries, truncated, next_marker));
+  ASSERT_EQ(8, (int)entries.size());
+  ASSERT_EQ(1, truncated);
+
+  marker = next_marker;
+  next_marker.clear();
+
+  ASSERT_EQ(0, gc_list(ioctx, oid, marker, 8, true, entries2, truncated, next_marker));
+  ASSERT_EQ(2, (int)entries2.size());
+  ASSERT_EQ(0, truncated);
+
+  entries.splice(entries.end(), entries2);
+
+  /* verify all chains are valid */
+  list<cls_rgw_gc_obj_info>::iterator iter = entries.begin();
+  for (int i = 0; i < 10; i++, ++iter) {
+    cls_rgw_gc_obj_info& entry = *iter;
+
+    /* create expected chain name */
+    char buf[32];
+    snprintf(buf, sizeof(buf), "chain-%d", i);
+    string tag = buf;
+
+    /* verify chain name as expected */
+    ASSERT_EQ(entry.tag, tag);
+
+    /* verify expected num of objects in chain */
+    ASSERT_EQ(2, (int)entry.chain.objs.size());
+
+    auto oiter = entry.chain.objs.begin();
+    cls_rgw_obj obj1, obj2;
+
+    /* create expected objects */
+    create_obj(obj1, i, 1);
+    create_obj(obj2, i, 2);
+
+    /* assign returned object names */
+    cls_rgw_obj& ret_obj1 = *oiter++;
+    cls_rgw_obj& ret_obj2 = *oiter;
+
+    /* verify objects are as expected */
+    ASSERT_EQ(1, (int)cmp_objs(obj1, ret_obj1));
+    ASSERT_EQ(1, (int)cmp_objs(obj2, ret_obj2));
+  }
+}
+
+TEST_P(TestClsRgw, gc_defer)
 {
   librados::IoCtx ioctx;
   librados::Rados rados;
@@ -496,9 +1063,10 @@ TEST(cls_rgw, gc_defer)
   bool truncated;
   list<cls_rgw_gc_obj_info> entries;
   string marker;
+  string next_marker;
 
   /* list chains, verify num entries as expected */
-  ASSERT_EQ(0, cls_rgw_gc_list(ioctx, oid, marker, 1, true, entries, &truncated));
+  ASSERT_EQ(0, gc_list(ioctx, oid, marker, 1, true, entries, truncated, next_marker));
   ASSERT_EQ(1, (int)entries.size());
   ASSERT_EQ(0, truncated);
 
@@ -509,22 +1077,24 @@ TEST(cls_rgw, gc_defer)
   ASSERT_EQ(0, ioctx.operate(oid, &op2));
 
   entries.clear();
+  next_marker.clear();
 
   /* verify list doesn't show deferred entry (this may fail if cluster is thrashing) */
-  ASSERT_EQ(0, cls_rgw_gc_list(ioctx, oid, marker, 1, true, entries, &truncated));
+  ASSERT_EQ(0, gc_list(ioctx, oid, marker, 1, true, entries, truncated, next_marker));
   ASSERT_EQ(0, (int)entries.size());
   ASSERT_EQ(0, truncated);
 
   /* wait enough */
   sleep(5);
+  next_marker.clear();
 
   /* verify list shows deferred entry */
-  ASSERT_EQ(0, cls_rgw_gc_list(ioctx, oid, marker, 1, true, entries, &truncated));
+  ASSERT_EQ(0, gc_list(ioctx, oid, marker, 1, true, entries, truncated, next_marker));
   ASSERT_EQ(1, (int)entries.size());
   ASSERT_EQ(0, truncated);
 
   librados::ObjectWriteOperation op3;
-  list<string> tags;
+  vector<string> tags;
   tags.push_back(tag);
 
   /* remove chain */
@@ -532,9 +1102,10 @@ TEST(cls_rgw, gc_defer)
   ASSERT_EQ(0, ioctx.operate(oid, &op3));
 
   entries.clear();
+  next_marker.clear();
 
   /* verify entry was removed */
-  ASSERT_EQ(0, cls_rgw_gc_list(ioctx, oid, marker, 1, true, entries, &truncated));
+  ASSERT_EQ(0, gc_list(ioctx, oid, marker, 1, true, entries, truncated, next_marker));
   ASSERT_EQ(0, (int)entries.size());
   ASSERT_EQ(0, truncated);
 
@@ -543,12 +1114,645 @@ TEST(cls_rgw, gc_defer)
   ASSERT_EQ(0, destroy_one_pool_pp(gc_pool_name, rados));
 }
 
-
-/* must be last test! */
-
-TEST(cls_rgw, finalize)
+auto populate_usage_log_info(std::string user, std::string payer, int total_usage_entries, uint64_t epoch = 0)
 {
-  /* remove pool */
-  ioctx.close();
-  ASSERT_EQ(0, destroy_one_pool_pp(pool_name, rados));
+  rgw_usage_log_info info;
+
+  for (int i=0; i < total_usage_entries; i++){
+    auto bucket = str_int("bucket", i);
+    info.entries.emplace_back(rgw_usage_log_entry(user, payer, bucket));
+    info.entries.back().epoch = epoch;
+  }
+
+  return info;
 }
+
+auto gen_usage_log_info(std::string payer, std::string bucket, int total_usage_entries, uint64_t epoch = 0)
+{
+  rgw_usage_log_info info;
+  for (int i=0; i < total_usage_entries; i++){
+    auto user = str_int("user", i);
+    info.entries.emplace_back(rgw_usage_log_entry(user, payer, bucket));
+    info.entries.back().epoch = epoch;
+  }
+
+  return info;
+}
+
+// Copied from cls_rgw.cc in order to populate usage logs with old keys
+static void usage_record_name_by_time(uint64_t epoch, const std::string& user, const std::string& bucket, std::string& key)
+{
+    key = fmt::format("{:011}_{}_{}", epoch, user, bucket);
+}
+
+static void usage_record_name_by_user_old(const std::string& user, uint64_t epoch, const std::string& bucket, std::string& key)
+{
+    key = fmt::format("{}_{:011}_{}", user, epoch, bucket);
+}
+
+void populate_old_usage_log_info(librados::IoCtx &ioctx,
+                                 std::string& oid,
+                                 std::string& user,
+                                 std::string& payer,
+                                 int total_usage_entries,
+                                 uint64_t epoch)
+{
+  for (int i=0; i < total_usage_entries; ++i) {
+    auto bucket = str_int("bucket", i);
+    rgw_usage_log_entry entry(user, payer, bucket);
+    entry.epoch = epoch;
+    bufferlist bl;
+    encode(entry, bl);
+
+    std::string key_by_time;
+    std::string key_by_user;
+    std::string owner = payer.empty() ? user : payer;
+
+    usage_record_name_by_time(epoch, owner, bucket, key_by_time);
+    usage_record_name_by_user_old(owner, epoch, bucket, key_by_user);
+
+    map<std::string, bufferlist> omap_records{
+      {key_by_time, bl},
+      {key_by_user, bl}
+    };
+
+    librados::ObjectWriteOperation op;
+    op.omap_set(omap_records);
+    ASSERT_EQ(0, ioctx.operate(oid, &op));
+  }
+}
+
+TEST_P(TestClsRgw, usage_key_transition)
+{
+  string oid="usage.1";
+  string user="012-345-678";
+  uint64_t an_hour{3600}, start_epoch{0}, log_epoch{1755892800}, end_epoch{log_epoch + an_hour * 3};
+  int total_usage_entries = 8, extra_entries = 4;
+  uint64_t max_entries = 12;
+  string payer;
+
+  // Populate logs with old keys
+  populate_old_usage_log_info(ioctx, oid, user, payer, total_usage_entries, log_epoch);
+  populate_old_usage_log_info(ioctx, oid, user, payer, total_usage_entries, log_epoch + an_hour);
+
+  // Populate logs with new keys with the same epoch as the last old ones. They override the old ones.
+  auto info = populate_usage_log_info(user, payer, total_usage_entries / 2, log_epoch + an_hour);
+  ObjectWriteOperation op;
+  cls_rgw_usage_log_add(op, info);
+  ASSERT_EQ(0, ioctx.operate(oid, &op));
+
+  // Populate logs with new keys with the new epoch
+  info = populate_usage_log_info(user, payer, total_usage_entries + extra_entries, log_epoch + an_hour * 2);
+  ObjectWriteOperation another_op;
+  cls_rgw_usage_log_add(another_op, info);
+  ASSERT_EQ(0, ioctx.operate(oid, &another_op));
+
+  string read_iter;
+  map <rgw_user_bucket, rgw_usage_log_entry> usage, usage2, usage3;
+  bool truncated;
+  int ret = cls_rgw_usage_log_read(ioctx, oid, user, payer, start_epoch, end_epoch, max_entries, read_iter, usage, &truncated);
+  ASSERT_EQ(ret, 0);
+  ASSERT_TRUE(truncated);
+  ASSERT_TRUE(!read_iter.empty() && read_iter.at(0) == '0'); // Old key;
+  ASSERT_EQ(usage.size(), total_usage_entries);
+
+  ret = cls_rgw_usage_log_read(ioctx, oid, user, payer, start_epoch, end_epoch, max_entries, read_iter, usage2, &truncated);
+  ASSERT_EQ(ret, 0);
+  ASSERT_TRUE(truncated); // Still have more left
+  ASSERT_TRUE(!read_iter.empty() && read_iter.at(0) == '~'); // New key;
+  ASSERT_EQ(usage2.size(), total_usage_entries);
+
+  ret = cls_rgw_usage_log_read(ioctx, oid, user, payer, start_epoch, end_epoch, max_entries, read_iter, usage3, &truncated);
+  ASSERT_EQ(ret, 0);
+  ASSERT_FALSE(truncated); // Nothing left
+  ASSERT_TRUE(read_iter.empty()); // Done
+  ASSERT_EQ(usage3.size(), extra_entries);
+
+  ret = cls_rgw_usage_log_trim(ioctx, oid, user, payer, start_epoch, end_epoch);
+  ASSERT_EQ(ret, 0);
+
+  usage.clear();
+  ret = cls_rgw_usage_log_read(ioctx, oid, user, payer, start_epoch, end_epoch, max_entries, read_iter, usage, &truncated);
+  ASSERT_EQ(ret, 0);
+  ASSERT_FALSE(truncated); // Nothing left
+  ASSERT_EQ(usage.size(), 0); // Got nothing
+}
+
+TEST_P(TestClsRgw, usage_basic)
+{
+  string oid="usage.1";
+  string user="user1";
+  uint64_t a_minute{60}, an_hour{3600};
+  uint64_t start_epoch{0}, log_epoch{1755892800}, end_epoch{log_epoch + a_minute};
+  int total_usage_entries = 512;
+  uint64_t max_entries = 2000;
+  string payer;
+
+  auto info = populate_usage_log_info(user, payer, total_usage_entries, log_epoch);
+  ObjectWriteOperation op;
+  cls_rgw_usage_log_add(op, info);
+  ASSERT_EQ(0, ioctx.operate(oid, &op));
+
+  // Slip in some records of a user whose name could cause those records to be among key_by_time ones.
+  auto extra_info = populate_usage_log_info("01234", payer, total_usage_entries, log_epoch + an_hour);
+  ObjectWriteOperation extra_op;
+  cls_rgw_usage_log_add(extra_op, extra_info);
+  ASSERT_EQ(0, ioctx.operate(oid, &extra_op));
+
+  string read_iter;
+  map <rgw_user_bucket, rgw_usage_log_entry> usage, usage2;
+  bool truncated;
+
+  int ret = cls_rgw_usage_log_read(ioctx, oid, user, "", start_epoch, end_epoch,
+				   max_entries, read_iter, usage, &truncated);
+  // read the entries, and see that we have all the added entries
+  ASSERT_EQ(0, ret);
+  ASSERT_FALSE(truncated);
+  ASSERT_EQ(static_cast<uint64_t>(total_usage_entries), usage.size());
+
+  // delete and read to assert that we've deleted all the values
+  ASSERT_EQ(0, cls_rgw_usage_log_trim(ioctx, oid, "", "", start_epoch, end_epoch));
+
+  ret = cls_rgw_usage_log_read(ioctx, oid, user, "", start_epoch, end_epoch,
+			       max_entries, read_iter, usage2, &truncated);
+  ASSERT_EQ(0, ret);
+  ASSERT_EQ(0u, usage2.size());
+
+  // add and read to assert that bucket option is valid for usage reading
+  string bucket1 = "bucket-usage-1";
+  string bucket2 = "bucket-usage-2";
+  info = gen_usage_log_info(payer, bucket1, 100);
+  cls_rgw_usage_log_add(op, info);
+  ASSERT_EQ(0, ioctx.operate(oid, &op));
+
+  info = gen_usage_log_info(payer, bucket2, 100);
+  cls_rgw_usage_log_add(op, info);
+  ASSERT_EQ(0, ioctx.operate(oid, &op));
+  ret = cls_rgw_usage_log_read(ioctx, oid, "", bucket1, start_epoch, end_epoch,
+                              max_entries, read_iter, usage2, &truncated);
+  ASSERT_EQ(0, ret);
+  ASSERT_EQ(100u, usage2.size());
+
+  // delete and read to assert that bucket option is valid for usage trim
+  ASSERT_EQ(0, cls_rgw_usage_log_trim(ioctx, oid, "", bucket1, start_epoch, end_epoch));
+
+  ret = cls_rgw_usage_log_read(ioctx, oid, "", bucket1, start_epoch, end_epoch,
+                               max_entries, read_iter, usage2, &truncated);
+  ASSERT_EQ(0, ret);
+  ASSERT_EQ(0u, usage2.size());
+  ASSERT_EQ(0, cls_rgw_usage_log_trim(ioctx, oid, "", bucket2, start_epoch, end_epoch));
+}
+
+TEST_P(TestClsRgw, usage_clear_no_obj)
+{
+  string user="user1";
+  string oid="usage.10";
+  librados::ObjectWriteOperation op;
+  cls_rgw_usage_log_clear(op);
+  int ret = ioctx.operate(oid, &op);
+  ASSERT_EQ(0, ret);
+
+}
+
+TEST_P(TestClsRgw, usage_clear)
+{
+  string user="user1";
+  string payer;
+  string oid="usage.10";
+  librados::ObjectWriteOperation op;
+  int max_entries=2000;
+
+  auto info = populate_usage_log_info(user, payer, max_entries);
+
+  cls_rgw_usage_log_add(op, info);
+  ASSERT_EQ(0, ioctx.operate(oid, &op));
+
+  ObjectWriteOperation op2;
+  cls_rgw_usage_log_clear(op2);
+  int ret = ioctx.operate(oid, &op2);
+  ASSERT_EQ(0, ret);
+
+  map <rgw_user_bucket, rgw_usage_log_entry> usage;
+  bool truncated;
+  uint64_t start_epoch{0}, end_epoch{(uint64_t) -1};
+  string read_iter;
+  ret = cls_rgw_usage_log_read(ioctx, oid, user, "", start_epoch, end_epoch,
+			       max_entries, read_iter, usage, &truncated);
+  ASSERT_EQ(0, ret);
+  ASSERT_EQ(0u, usage.size());
+}
+
+static int bilog_list(librados::IoCtx& ioctx, const std::string& oid,
+                      cls_rgw_bi_log_list_ret *result)
+{
+  int retcode = 0;
+  librados::ObjectReadOperation op;
+  cls_rgw_bilog_list(op, "", 128, result, &retcode);
+  int ret = ioctx.operate(oid, &op, nullptr);
+  if (ret < 0) {
+    return ret;
+  }
+  return retcode;
+}
+
+static int bilog_trim(librados::IoCtx& ioctx, const std::string& oid,
+                      const std::string& start_marker,
+                      const std::string& end_marker)
+{
+  librados::ObjectWriteOperation op;
+  cls_rgw_bilog_trim(op, start_marker, end_marker);
+  return ioctx.operate(oid, &op);
+}
+
+TEST_P(TestClsRgw, bi_log_trim)
+{
+  string bucket_oid = str_int("bucket", 6);
+
+  ObjectWriteOperation op;
+  cls_rgw_bucket_init_index(op);
+  ASSERT_EQ(0, ioctx.operate(bucket_oid, &op));
+
+  // create 10 versioned entries. this generates instance and olh bi entries,
+  // allowing us to check that bilog trim doesn't remove any of those
+  for (int i = 0; i < 10; i++) {
+    cls_rgw_obj_key obj{str_int("obj", i), "inst"};
+    string tag = str_int("tag", i);
+    string loc = str_int("loc", i);
+
+    index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
+    rgw_bucket_dir_entry_meta meta;
+    index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, 1, obj, meta);
+  }
+  // bi list
+  {
+    list<rgw_cls_bi_entry> entries;
+    bool truncated{false};
+    ASSERT_EQ(0, cls_rgw_bi_list(ioctx, bucket_oid, "", "", 128,
+                                 &entries, &truncated));
+    // prepare/complete/instance/olh entry for each
+    EXPECT_EQ(40u, entries.size());
+    EXPECT_FALSE(truncated);
+  }
+  // bilog list
+  vector<rgw_bi_log_entry> bilog1;
+  {
+    cls_rgw_bi_log_list_ret bilog;
+    ASSERT_EQ(0, bilog_list(ioctx, bucket_oid, &bilog));
+    // complete/olh entry for each
+    EXPECT_EQ(20u, bilog.entries.size());
+
+    bilog1.assign(std::make_move_iterator(bilog.entries.begin()),
+                  std::make_move_iterator(bilog.entries.end()));
+  }
+  // trim front of bilog
+  {
+    const std::string from = "";
+    const std::string to = bilog1[0].id;
+    ASSERT_EQ(0, bilog_trim(ioctx, bucket_oid, from, to));
+    cls_rgw_bi_log_list_ret bilog;
+    ASSERT_EQ(0, bilog_list(ioctx, bucket_oid, &bilog));
+    EXPECT_EQ(19u, bilog.entries.size());
+    EXPECT_EQ(bilog1[1].id, bilog.entries.begin()->id);
+    ASSERT_EQ(-ENODATA, bilog_trim(ioctx, bucket_oid, from, to));
+  }
+  // trim back of bilog
+  {
+    const std::string from = bilog1[18].id;
+    const std::string to = "9";
+    ASSERT_EQ(0, bilog_trim(ioctx, bucket_oid, from, to));
+    cls_rgw_bi_log_list_ret bilog;
+    ASSERT_EQ(0, bilog_list(ioctx, bucket_oid, &bilog));
+    EXPECT_EQ(18u, bilog.entries.size());
+    EXPECT_EQ(bilog1[18].id, bilog.entries.rbegin()->id);
+    ASSERT_EQ(-ENODATA, bilog_trim(ioctx, bucket_oid, from, to));
+  }
+  // trim middle of bilog
+  {
+    const std::string from = bilog1[13].id;
+    const std::string to = bilog1[14].id;
+    ASSERT_EQ(0, bilog_trim(ioctx, bucket_oid, from, to));
+    cls_rgw_bi_log_list_ret bilog;
+    ASSERT_EQ(0, bilog_list(ioctx, bucket_oid, &bilog));
+    EXPECT_EQ(17u, bilog.entries.size());
+    ASSERT_EQ(-ENODATA, bilog_trim(ioctx, bucket_oid, from, to));
+  }
+  // trim full bilog
+  {
+    const std::string from = "";
+    const std::string to = "9";
+    ASSERT_EQ(0, bilog_trim(ioctx, bucket_oid, from, to));
+    cls_rgw_bi_log_list_ret bilog;
+    ASSERT_EQ(0, bilog_list(ioctx, bucket_oid, &bilog));
+    EXPECT_EQ(0u, bilog.entries.size());
+    ASSERT_EQ(-ENODATA, bilog_trim(ioctx, bucket_oid, from, to));
+  }
+  // bi list should be the same
+  {
+    list<rgw_cls_bi_entry> entries;
+    bool truncated{false};
+    ASSERT_EQ(0, cls_rgw_bi_list(ioctx, bucket_oid, "", "", 128,
+                                 &entries, &truncated));
+    EXPECT_EQ(40u, entries.size());
+    EXPECT_FALSE(truncated);
+  }
+}
+
+TEST_P(TestClsRgw, index_racing_removes)
+{
+  string bucket_oid = str_int("bucket", 8);
+
+  ObjectWriteOperation op;
+  cls_rgw_bucket_init_index(op);
+  ASSERT_EQ(0, ioctx.operate(bucket_oid, &op));
+
+  int epoch = 0;
+  rgw_bucket_dir_entry dirent;
+  rgw_bucket_dir_entry_meta meta;
+
+  // prepare/complete add for single object
+  const cls_rgw_obj_key obj{"obj"};
+  std::string loc = "loc";
+  {
+    std::string tag = "tag-add";
+    index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
+    index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, ++epoch, obj, meta);
+    test_stats(ioctx, bucket_oid, RGWObjCategory::None, 1, 0);
+  }
+
+  // list to verify no pending ops
+  {
+    rgw_cls_list_ret listing;
+    list_entries(ioctx, bucket_oid, 1, listing);
+    const auto& entries = listing.dir.m;
+    ASSERT_EQ(1, entries.size());
+    dirent = std::move(entries.begin()->second);
+    ASSERT_EQ(obj, dirent.key);
+    ASSERT_TRUE(dirent.exists);
+    ASSERT_TRUE(dirent.pending_map.empty());
+  }
+
+  // prepare three racing removals
+  std::string tag1 = "tag-rm1";
+  std::string tag2 = "tag-rm2";
+  std::string tag3 = "tag-rm3";
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_DEL, tag1, obj, loc);
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_DEL, tag2, obj, loc);
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_DEL, tag3, obj, loc);
+
+  test_stats(ioctx, bucket_oid, RGWObjCategory::None, 1, 0);
+
+  // complete on tag2
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_DEL, tag2, ++epoch, obj, meta);
+  {
+    rgw_cls_list_ret listing;
+    list_entries(ioctx, bucket_oid, 1, listing);
+    const auto& entries = listing.dir.m;
+    ASSERT_EQ(1, entries.size());
+    dirent = std::move(entries.begin()->second);
+    ASSERT_EQ(obj, dirent.key);
+    ASSERT_FALSE(dirent.exists);
+    ASSERT_FALSE(dirent.pending_map.empty());
+  }
+
+  // cancel on tag1
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_CANCEL, tag1, ++epoch, obj, meta);
+  {
+    rgw_cls_list_ret listing;
+    list_entries(ioctx, bucket_oid, 1, listing);
+    const auto& entries = listing.dir.m;
+    ASSERT_EQ(1, entries.size());
+    dirent = std::move(entries.begin()->second);
+    ASSERT_EQ(obj, dirent.key);
+    ASSERT_FALSE(dirent.exists);
+    ASSERT_FALSE(dirent.pending_map.empty());
+  }
+
+  // final cancel on tag3
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_CANCEL, tag3, ++epoch, obj, meta);
+
+  // verify that the key was removed
+  {
+    rgw_cls_list_ret listing;
+    list_entries(ioctx, bucket_oid, 1, listing);
+    const auto& entries = listing.dir.m;
+    ASSERT_EQ(0, entries.size());
+  }
+
+  test_stats(ioctx, bucket_oid, RGWObjCategory::None, 0, 0);
+}
+
+void set_reshard_status(librados::IoCtx& ioctx, const std::string& oid,
+                        cls_rgw_reshard_status status)
+{
+  librados::ObjectWriteOperation op;
+  cls_rgw_set_bucket_resharding(op, status);
+  ASSERT_EQ(0, ioctx.operate(oid, &op));
+}
+
+static int reshardlog_list(librados::IoCtx& ioctx, const std::string& oid,
+                           std::list<rgw_cls_bi_entry> *entries, bool *is_truncated)
+{
+  int ret = cls_rgw_bi_list(ioctx, oid, "", "", 100, entries, is_truncated, true);
+  if (ret < 0) {
+    return ret;
+  }
+  return 0;
+}
+
+TEST_P(TestClsRgw, reshardlog_list)
+{
+  string bucket_oid = str_int("reshard", 0);
+
+  ObjectWriteOperation op;
+  cls_rgw_bucket_init_index(op);
+  ASSERT_EQ(0, ioctx.operate(bucket_oid, &op));
+
+  cls_rgw_obj_key obj1 = str_int("obj1", 0);
+  string tag = str_int("tag-prepare", 0);
+  string loc = str_int("loc", 0);
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj1, loc);
+  rgw_bucket_dir_entry_meta meta;
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, 1, obj1, meta);
+
+  // do not record logs
+  bool is_truncated = false;
+  std::list<rgw_cls_bi_entry> entries;
+  ASSERT_EQ(0, reshardlog_list(ioctx, bucket_oid, &entries, &is_truncated));
+  ASSERT_FALSE(is_truncated);
+  ASSERT_EQ(0u, entries.size());
+
+  // set reshard status to IN_LOGRECORD
+  set_reshard_status(ioctx, bucket_oid, cls_rgw_reshard_status::IN_LOGRECORD);
+
+  // record a log in prepare
+  cls_rgw_obj_key obj2 = str_int("obj2", 0);
+  entries.clear();
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj2, loc);
+  ASSERT_EQ(0, reshardlog_list(ioctx, bucket_oid, &entries, &is_truncated));
+  ASSERT_FALSE(is_truncated);
+  ASSERT_EQ(1u, entries.size());
+
+  // overwrite the log writen in prepare
+  entries.clear();
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, 1, obj2, meta);
+  ASSERT_EQ(0, reshardlog_list(ioctx, bucket_oid, &entries, &is_truncated));
+  ASSERT_FALSE(is_truncated);
+  ASSERT_EQ(1u, entries.size());
+
+  // record a log in deleting obj
+  entries.clear();
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_DEL, tag, obj1, loc);
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_DEL, tag, 1, obj1, meta);
+  ASSERT_EQ(0, reshardlog_list(ioctx, bucket_oid, &entries, &is_truncated));
+  ASSERT_FALSE(is_truncated);
+  ASSERT_EQ(2u, entries.size());
+
+  // overwrite the log writen
+  entries.clear();
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_DEL, tag, obj2, loc);
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_DEL, tag, 1, obj2, meta);
+  ASSERT_EQ(0, reshardlog_list(ioctx, bucket_oid, &entries, &is_truncated));
+  ASSERT_FALSE(is_truncated);
+  ASSERT_EQ(2u, entries.size());
+}
+
+void reshardlog_entries(librados::IoCtx& ioctx, const std::string& oid, uint32_t num_entries)
+{
+  rgw_bucket_dir_header header;
+  ASSERT_EQ(0, read_header(ioctx, oid, header));
+  ASSERT_EQ(num_entries, header.reshardlog_entries);
+}
+
+TEST_P(TestClsRgw, reshardlog_num)
+{
+  string bucket_oid = str_int("reshard2", 0);
+
+  ObjectWriteOperation op;
+  cls_rgw_bucket_init_index(op);
+  ASSERT_EQ(0, ioctx.operate(bucket_oid, &op));
+
+  cls_rgw_obj_key obj1 = str_int("obj1", 0);
+  string tag = str_int("tag-prepare", 0);
+  string loc = str_int("loc", 0);
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj1, loc);
+  rgw_bucket_dir_entry_meta meta;
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, 1, obj1, meta);
+
+  // do not record logs
+  reshardlog_entries(ioctx, bucket_oid, 0u);
+
+  // set reshard status to IN_LOGRECORD
+  set_reshard_status(ioctx, bucket_oid, cls_rgw_reshard_status::IN_LOGRECORD);
+
+  // record a log in prepare not add reshardlog_entry
+  cls_rgw_obj_key obj2 = str_int("obj2", 0);
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj2, loc);
+  reshardlog_entries(ioctx, bucket_oid, 0u);
+  // record a log in complete add reshardlog_entry
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, 1, obj2, meta);
+  reshardlog_entries(ioctx, bucket_oid, 1u);
+
+  // record a log in deleting obj not add reshardlog_entry
+  index_prepare(ioctx, bucket_oid, CLS_RGW_OP_DEL, tag, obj1, loc);
+  index_complete(ioctx, bucket_oid, CLS_RGW_OP_DEL, tag, 2, obj1, meta);
+  reshardlog_entries(ioctx, bucket_oid, 2u);
+}
+
+TEST_P(TestClsRgw, bi_put_entries)
+{
+  const string src_bucket = str_int("bi_put_entries", 0);
+  const string dst_bucket = str_int("bi_put_entries", 1);
+
+  const cls_rgw_obj_key obj1 = str_int("obj", 1);
+  const cls_rgw_obj_key obj2 = str_int("obj", 2);
+  const cls_rgw_obj_key obj3 = str_int("obj", 3);
+  const cls_rgw_obj_key obj4 = str_int("obj", 4);
+  const string tag = str_int("tag", 0);
+  const string loc = str_int("loc", 0);
+  auto meta = rgw_bucket_dir_entry_meta{
+    .category = RGWObjCategory::Main, .size = 8192};
+
+  // prepare src_bucket and add two objects
+  {
+    ObjectWriteOperation op;
+    cls_rgw_bucket_init_index2(op);
+    ASSERT_EQ(0, ioctx.operate(src_bucket, &op));
+
+    index_prepare(ioctx, src_bucket, CLS_RGW_OP_ADD, tag, obj1, loc);
+    index_complete(ioctx, src_bucket, CLS_RGW_OP_ADD, tag, 1, obj1, meta);
+
+    index_prepare(ioctx, src_bucket, CLS_RGW_OP_ADD, tag, obj2, loc);
+    index_complete(ioctx, src_bucket, CLS_RGW_OP_ADD, tag, 2, obj2, meta);
+
+    test_stats(ioctx, src_bucket, RGWObjCategory::Main, 2, 16384);
+  }
+
+  // prepare dst_bucket and copy the bi entries
+  {
+    ObjectWriteOperation op;
+    cls_rgw_bucket_init_index2(op);
+    ASSERT_EQ(0, ioctx.operate(dst_bucket, &op));
+  }
+  {
+    list<rgw_cls_bi_entry> src_entries;
+    bool truncated{false};
+    ASSERT_EQ(0, cls_rgw_bi_list(ioctx, src_bucket, "", "", 128,
+                                 &src_entries, &truncated));
+    ASSERT_EQ(2u, src_entries.size());
+
+    ObjectWriteOperation op;
+    cls_rgw_bi_put_entries(op, {src_entries.begin(), src_entries.end()}, true);
+    ASSERT_EQ(0, ioctx.operate(dst_bucket, &op));
+
+    test_stats(ioctx, dst_bucket, RGWObjCategory::Main, 2, 16384);
+  }
+
+  {
+    // start reshard on src_bucket
+    set_reshard_status(ioctx, src_bucket, cls_rgw_reshard_status::IN_LOGRECORD);
+
+    // delete obj1 and log a ReshardDeleted entry
+    index_prepare(ioctx, src_bucket, CLS_RGW_OP_DEL, tag, obj1, loc);
+    index_complete(ioctx, src_bucket, CLS_RGW_OP_DEL, tag, 3, obj1, meta);
+
+    // overwrite obj2 and record its reshardlog entry
+    index_prepare(ioctx, src_bucket, CLS_RGW_OP_ADD, tag, obj2, loc);
+    index_complete(ioctx, src_bucket, CLS_RGW_OP_ADD, tag, 4, obj2, meta);
+
+    // add two more objects
+    index_prepare(ioctx, src_bucket, CLS_RGW_OP_ADD, tag, obj3, loc);
+    index_complete(ioctx, src_bucket, CLS_RGW_OP_ADD, tag, 5, obj3, meta);
+
+    index_prepare(ioctx, src_bucket, CLS_RGW_OP_ADD, tag, obj4, loc);
+    index_complete(ioctx, src_bucket, CLS_RGW_OP_ADD, tag, 6, obj4, meta);
+
+    test_stats(ioctx, src_bucket, RGWObjCategory::Main, 3, 24576);
+  }
+
+  // copy the reshardlog entries from src_bucket to dst_bucket
+  {
+    list<rgw_cls_bi_entry> src_entries;
+    bool truncated{false};
+    const bool reshardlog = true;
+    ASSERT_EQ(0, cls_rgw_bi_list(ioctx, src_bucket, "", "", 128,
+                                 &src_entries, &truncated, reshardlog));
+    ASSERT_EQ(4u, src_entries.size());
+
+    const auto& entry = src_entries.front();
+    EXPECT_EQ(BIIndexType::ReshardDeleted, entry.type);
+
+    ObjectWriteOperation op;
+    cls_rgw_bi_put_entries(op, {src_entries.begin(), src_entries.end()}, true);
+    ASSERT_EQ(0, ioctx.operate(dst_bucket, &op));
+
+    test_stats(ioctx, dst_bucket, RGWObjCategory::Main, 3, 24576);
+  }
+}
+
+
+INSTANTIATE_TEST_SUITE_P(, TestClsRgw,
+  ::testing::Values(PoolType::REPLICATED, PoolType::FAST_EC),
+  [](const ::testing::TestParamInfo<PoolType>& info) {
+  return pool_type_name(info.param);
+  }
+);

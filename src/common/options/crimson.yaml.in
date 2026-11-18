@@ -1,0 +1,534 @@
+# -*- mode: YAML -*-
+---
+
+options:
+
+# Crimson CPU options:
+
+- name: crimson_cpu_set
+  type: str
+  level: advanced
+  desc: CPU cores on which Seastar reactor threads will run in cpuset(7) format per OSD with pinning.
+  long_desc: CPU cores on which Seastar reactor threads will run in cpuset(7) format per OSD with pinning.
+             Overrides crimson_cpu_num.
+             smp::count is deduced from this option.
+  flags:
+  - startup
+
+- name: crimson_cpu_num
+  type: uint
+  level: advanced
+  default: 0
+  desc: The number of CPUs to use for serving Seastar reactors per OSD without CPU pinning.
+  long_desc: The number of CPUs to use for serving Seastar reactors per OSD without CPU pinning.
+             Overridden if crimson_cpu_set is set.
+             smp::count is deduced from this option.
+  flags:
+  - startup
+  min: 0
+  max: 32
+- name: crimson_memory
+  type: size
+  level: advanced
+  default: 0
+  desc: Total memory to use for the Seastar allocator per OSD.
+  long_desc: Total memory to use for the Seastar allocator per OSD.
+             Maps to Seastar's --memory flag. 0 means use Seastar's default
+             (all available memory minus a reserve).
+  flags:
+  - startup
+
+# Reactor options:
+
+- name: crimson_reactor_backend
+  type: str
+  level: advanced
+  default:
+  enum_values:
+  - io_uring
+  - linux-aio
+  - epoll
+  desc: Select which Seastar's internal reactor implementation to use
+  long_desc: Controls which asynchronous I/O engine the Seastar reactor will use
+             during OSD startup. Different backends have different
+             performance characteristics and require different kernel capabilities.
+             Note, if none is selected, let Seastar choose.
+
+  flags:
+  - startup
+
+- name: crimson_reactor_task_quota_ms
+  type: float
+  level: advanced
+  default: 0.5
+  desc: The maximum time (ms) Seastar reactors will wait between polls.
+  long_desc: The maximum time (ms) Seastar reactors will wait between polls.
+             Shorter time between polls will result in larger CPU utilization.
+  flags:
+  - startup
+
+- name: crimson_reactor_idle_poll_time_us
+  type: uint
+  level: advanced
+  default: 200
+  desc: Seastar's reactor idle polling time (ms) before going back to sleep.
+  long_desc: Seastar's reactor idle polling time (ms) before going back to sleep.
+             Longer reactor poll time will result in larger CPU utilization.
+  flags:
+  - startup
+
+- name: crimson_reactor_io_latency_goal_ms
+  type: float
+  level: advanced
+  default: 0
+  desc: The maximum time (ms) Seastar's reactor I/O operations must take.
+        If not set (0 means not set), defaults to 1.5 * crimson_reactor_task_quota_ms
+  long_desc: The maximum time (ms) Seastar's reactor I/O operations must take.
+             If not set, defaults to 1.5 * crimson_reactor_task_quota_ms.
+             Increasing this value will allow more I/O requests to be dispatched concurrently.
+  flags:
+  - startup
+
+# Prometheus endpoint. Seastar serves its metric registry at /metrics.
+
+- name: crimson_prometheus_port_base
+  type: uint
+  level: advanced
+  default: 0
+  min: 0
+  max: 65535
+  desc: Base TCP port for the Prometheus metrics endpoint. 0 disables it.
+  long_desc: When non-zero, OSD N listens on the TCP port equal to this
+             value plus N and serves Seastar metrics at /metrics.
+             The endpoint does not authenticate clients.
+             Changes only apply when the OSD restarts.
+             Ports below 1024 are privileged. Choose a base so that
+             every base plus OSD id is at least 1024. An OSD that would
+             bind a privileged port fails to start unless it can bind
+             privileged ports.
+  flags:
+  - startup
+
+- name: crimson_prometheus_address
+  type: str
+  level: advanced
+  default: "0.0.0.0"
+  desc: Address the Prometheus metrics endpoint binds.
+  long_desc: Bind address for the Prometheus endpoint. The default 0.0.0.0
+             listens on every network interface. Set a specific address
+             to expose the endpoint on that interface only.
+             Changes only apply when the OSD restarts.
+  flags:
+  - startup
+
+- name: crimson_prometheus_prefix
+  type: str
+  level: advanced
+  default: osd
+  desc: Prefix prepended to Prometheus metric names.
+  long_desc: Seastar inserts an underscore between this prefix and the metric
+             family. With the default, reactor_utilization is exported as
+             osd_reactor_utilization. Changes only apply when the OSD restarts.
+  flags:
+  - startup
+
+# Crimson OSD options:
+
+- name: crimson_osd_obc_lru_size
+  type: uint
+  level: advanced
+  desc: Number of obcs to cache
+  default: 512
+- name: crimson_osd_scheduler_concurrency
+  type: uint
+  level: advanced
+  desc: The maximum number of concurrent I/O operations, 0 for unlimited
+  default: 0
+
+- name: crimson_osd_stat_interval
+  type: int
+  level: advanced
+  default: 0
+  desc: Report OSD status periodically in seconds, 0 to disable
+
+- name: crimson_poll_mode
+  type: bool
+  level: advanced
+  default: false
+  desc: Let the Seastar reactor poll continuously without sleeping at the expense of 100% CPU usage.
+  flags:
+  - startup
+
+- name: crimson_osd_max_send_buffers
+  type: uint
+  level: advanced
+  default: 1024
+  min: 1
+  max: 65535
+  desc: Maximum buffer fragments to batch in a single outgoing network write
+  long_desc: Limits how many buffer::ptr entries are batched into one Seastar
+             packet during the outgoing message sweep. Prevents overflow of the
+             Seastar packet fragment counter (uint16_t).
+
+- name: crimson_msgr_ack_delay
+  type: millisecs
+  level: advanced
+  default: 5
+  desc: How long a lossless connection may defer acking received messages
+  long_desc: Every outgoing message carries the ack of the messages received
+             so far, so on request/reply traffic (e.g. a repop and its reply)
+             acks need no frame of their own. A standalone ack frame is written
+             only if no message was written for this long since an ack became
+             owed. 0 writes an ack frame as soon as a message is received,
+             unless a message is already pending to carry it. Read when a
+             connection is created.
+  see_also:
+  - crimson_msgr_ack_max_pending_msgs
+  - crimson_msgr_ack_max_pending_bytes
+
+- name: crimson_msgr_ack_max_pending_msgs
+  type: uint
+  level: advanced
+  default: 64
+  min: 1
+  desc: Write an ack frame once this many received messages are unacked
+  long_desc: Bounds the number of messages the peer of a lossless connection
+             keeps for resending while acks are deferred. Read when a
+             connection is created.
+  see_also:
+  - crimson_msgr_ack_delay
+
+- name: crimson_msgr_ack_max_pending_bytes
+  type: size
+  level: advanced
+  default: 4_M
+  min: 1
+  desc: Write an ack frame once this many received payload bytes are unacked
+  long_desc: Bounds the memory the peer of a lossless connection keeps for
+             resending while acks are deferred. Read when a connection is
+             created.
+  see_also:
+  - crimson_msgr_ack_delay
+
+- name: crimson_allow_pg_split
+  type: bool
+  level: advanced
+  default: true
+  desc: Allow Crimson pools to increase their PG count (split)
+  long_desc: When enabled, allows the monitor to increase pg_num for pools using
+             the crimson flag.
+  services:
+  - osd
+  - mon
+
+# Bluestore options:
+
+- name: crimson_bluestore_num_threads
+  type: uint
+  level: advanced
+  desc: The number of POSIX threads alienized to Seastar for serving BlueStore
+  default: 6
+  flags:
+  - startup
+
+- name: crimson_bluestore_cpu_set
+  type: str
+  level: advanced
+  desc: CPU cores on which POSIX threads alienized to Seastar will run in cpuset(7) format
+  flags:
+  - startup
+- name: seastore_lbc_test_stress
+  type: bool
+  level: dev
+  desc: Enable SeaStore Logical Bucket Cache stress mode. When enabled, SeaStore forces
+        promotion/demotion activity and probabilistic write-through behavior.
+        Intended for testing only.
+  default: false
+
+# Seastore options
+
+- name: seastore_segment_size
+  type: size
+  desc: Segment size to use for SegmentManager
+  level: advanced
+  default: 64_M
+- name: seastore_device_size
+  type: size
+  desc: Total size to use for SegmentManager block file if created
+  level: dev
+  default: 50_G
+- name: seastore_block_create
+  type: bool
+  level: dev
+  desc: Create SegmentManager file if it doesn't exist
+  default: true
+  see_also:
+  - seastore_device_size
+- name: seastore_journal_batch_capacity
+  type: uint
+  level: dev
+  desc: The number limit of records in a journal batch
+  default: 16
+- name: seastore_journal_batch_flush_size
+  type: size
+  level: dev
+  desc: The size threshold to force flush a journal batch
+  default: 16_M
+- name: seastore_journal_iodepth_limit
+  type: uint
+  level: dev
+  desc: The I/O depth limit to submit journal records
+  default: 5
+- name: seastore_journal_batch_preferred_fullness
+  type: float
+  level: dev
+  desc: The record fullness threshold to flush a journal batch
+  default: 0.95
+- name: seastore_default_max_object_size
+  type: uint
+  level: dev
+  desc: default logical address space reservation for SeaStore objects' data
+  default: 16777216
+# TODO: implement sub-extent checksum and deprecate this configuration.
+- name: seastore_full_integrity_check
+  type: bool
+  level: dev
+  desc: Whether SeaStore needs to fully check the integrity of each extent,
+        non-full integrity check means the integrity check might be skipped
+        during extent remapping for better performance, disable with caution
+  default: false
+# TODO: seastore_max_data_allocation_size should be dropped once the sub-extent
+#       read/checksum is implemented.
+- name: seastore_max_data_allocation_size
+  type: size
+  level: advanced
+  desc: Max size in bytes that an extent can be, 0 to disable
+  default: 0
+- name: seastore_cachepin_size_pershard
+  type: size
+  level: advanced
+  desc: Size in bytes of extents to keep in cache (per reactor).
+  default: 2_G
+- name: seastore_cachepin_type
+  type: str
+  level: dev
+  desc: The cache replacement algorithm used by extent pinboard in SeaStore. (LRU/2Q)
+  default: LRU
+  enum_values:
+  - LRU
+  - 2Q
+- name: seastore_cachepin_2q_in_ratio
+  type: float
+  level: advanced
+  desc: Ratio of A1_in queue size to cache size(seastore_cachepin_size_pershard) in 2Q cache algorithm.
+        Note that the size of Am(primary) queue in 2Q is cache_size * (1 - in_ratio).
+  default: 0.5
+- name: seastore_cachepin_2q_out_ratio
+  type: float
+  level: advanced
+  desc: Ratio of A1_out queue size to cache size(seastore_cachepin_size_pershard) in 2Q cache algorithm.
+        Note this size ratio does not reflect actual memory usage, as it represents the size of evicted
+        pages from A1_in queue.
+  default: 0.5
+- name: seastore_max_concurrent_transactions
+  type: uint
+  level: advanced
+  desc: maximum concurrent transactions that SeaStore allows (per reactor)
+  default: 128
+- name: seastore_cache_device_type
+  type: str
+  level: dev
+  desc: Device type of the cache device, only SSD is supported. It selects the
+        driver within the configured backend, the backend itself is
+        seastore_cache_backend_type. The cache device holds the journal,
+        the root and the metadata trees.
+  default: SSD
+- name: seastore_cache_backend_type
+  type: str
+  level: dev
+  desc: Backend used by the cache device, valid values are SEGMENTED and RANDOM_BLOCK
+  default: SEGMENTED
+- name: seastore_cache_device_bw_throttle
+  type: size
+  level: advanced
+  desc: Size in bytes per second written to the cache device, 0 indicates no limit
+  default: 0
+- name: seastore_data_device_type
+  type: str
+  level: dev
+  desc: Device type of the data devices, valid values are HDD, SSD and ZBD.
+        It selects the driver within seastore_data_backend_type.
+  default: SSD
+  enum_values:
+  - HDD
+  - SSD
+  - ZBD
+- name: seastore_data_backend_type
+  type: str
+  level: dev
+  desc: Backend used by the data devices, valid values are SEGMENTED and RANDOM_BLOCK
+  default: RANDOM_BLOCK
+- name: seastore_data_device_bw_throttle
+  type: size
+  level: advanced
+  desc: Size in bytes per second written to cold devices, 0 indicates no limit
+  default: 0
+- name: seastore_cbjournal_size
+  type: size
+  level: dev
+  desc: Total size to use for CircularBoundedJournal if created, it is valid only if
+        the backend type of the device holding it is RANDOM_BLOCK
+  default: 5_G
+- name: seastore_cold_evict_stop_ratio
+  type: float
+  level: advanced
+  desc: When the used ratio of cache device is less than this value, then stop evicting cold data to the data devices.
+  default: 0.5
+- name: seastore_cold_evict_start_ratio
+  type: float
+  level: advanced
+  desc: Begin evicting cold data to the data devices when the used ratio of the cache devices reaches this value.
+  default: 0.6
+- name: seastore_cold_evict_fast_ratio
+  type: float
+  level: advanced
+  desc: Start fast eviction when the used ratio of the hot tier reaches this value.
+  default: 0.7
+- name: seastore_cache_device_generations
+  type: uint
+  level: advanced
+  desc: The number of generations in the cache devices or the whole SeaStore instance if there's only one tier.
+  default: 5
+  min: 5
+- name: seastore_data_device_generations
+  type: uint
+  level: advanced
+  desc: The number of generations in the data devices if it exists.
+  default: 3
+- name: seastore_segment_cleaner_gc_formula
+  type: str
+  level: advanced
+  desc: The algorithm that SegmentCleaner will use to select segments to reclaim
+  default: cost_benefit
+  enum_values:
+  - greedy
+  - cost_benefit
+  - benefit
+- name: seastore_segment_cleaner_gc_autotune
+  type: bool
+  level: advanced
+  desc: When the configured gc formula (cost_benefit or benefit) picks a segment
+        whose free-space fraction (1 - utilization) is at least
+        seastore_segment_cleaner_gc_autotune_ratio times smaller than the
+        lowest-utilization candidate, override the pick with the greedy choice.
+  long_desc: COST_BENEFIT and BENEFIT weight segment age, which is the right
+             call when age predicts dead-byte accumulation (journaling / LIFO
+             workloads). Under random-write at high alive_ratio dead bytes
+             spread uniformly across segments, age stops predicting deadness,
+             and the formula can pick a high-util old segment whose reclaim
+             frees several times less space than the lowest-util candidate.
+             When this option is enabled the cleaner detects the mis-selection
+             at runtime and overrides the formula's pick with the greedy
+             choice. Disable to honor the configured formula unconditionally.
+             Ignored when seastore_segment_cleaner_gc_formula = greedy.
+  default: true
+- name: seastore_segment_cleaner_gc_autotune_ratio
+  type: float
+  level: advanced
+  desc: Override threshold for the gc auto-tune. The configured formula's
+        pick is overridden with the greedy candidate when greedy's free
+        fraction is at least this ratio times the formula's pick's free
+        fraction.
+  long_desc: Higher is more conservative (override fires less often, the
+             configured formula's age weighting is preserved more
+             aggressively). Lower is more aggressive (override fires more
+             often, behavior converges toward pure greedy). The default
+             (2.0) captures the random-write failure regime while staying
+             clear of normal-operation fluctuations.
+  default: 2.0
+  min: 1.0
+- name: seastore_data_delta_based_overwrite
+  type: size
+  level: dev
+  desc: Overwrite the existing data block based on delta if the overwrite size
+        is equal to or less than the value, otherwise do overwrite based on
+        remapping, set to 0 to enforce the remap-based overwrite.
+  default: 0
+- name: seastore_disable_end_to_end_data_protection
+  type: bool
+  level: dev
+  desc: When false, upon mkfs, try to discover whether the NVMe device supports
+        internal checksum feature without using server CPU and enable if available,
+        set to true to disable unconditionally.
+  default: true
+- name: seastore_require_partition_count_match_reactor_count
+  type: bool
+  level: advanced
+  default: true
+  desc: disable osd shards changes upon restart.
+  flags:
+  - startup
+- name: seastore_lbc_promote_size
+  type: size
+  level: advanced
+  desc: Size in bytes of extents to be promoted from the data devices, set 0 to disable promotion
+  default: 2_M
+- name: seastore_lbc_index_memory
+  type: size
+  level: advanced
+  desc: Size in bytes of memory used by the logical bucket cache index
+  default: 200_M
+- name: seastore_lbc_demote_size_per_cycle
+  type: size
+  level: advanced
+  desc: Size in bytes of extents to be demoted to the cold tier per cycle
+  default: 2_M
+- name: seastore_lbc_write_through_size
+  type: size
+  level: dev
+  desc: Write data directly to the cold tier when its length is greater than this value.
+  default: 512_K
+- name: seastore_lbc_test_write_through_probability
+  type: float
+  level: dev
+  desc: The percentage of writes that are applied directly to the cold tier
+  default: 0.5
+- name: seastore_lbc_test_2q_promote_probability
+  type: float
+  level: dev
+  desc: The probability of promoting the extents evicted from the warm_in queue to the hot tier
+  default: 0.5
+- name: seastore_lbc_test_force_background_period
+  type: uint
+  level: dev
+  desc: Seconds of the period to force process background tasks
+  default: 5
+
+- name: seastore_spdk_transport_id
+  type: str
+  level: advanced
+  desc: SPDK NVMe transport id for the seastore device
+  long_desc: When set (e.g. "0000:01:00.0" or "trtype:PCIe traddr:0000:01:00.0"),
+    seastore drives the device over SPDK's userspace polled NVMe driver instead
+    of the kernel/io_uring path. The device must be bound to vfio-pci and
+    hugepages configured. Not supported for zoned (ZBD/ZNS) devices. Requires a
+    build with WITH_SPDK. Empty (default) uses the kernel path. Reactor shards
+    driving an SPDK device stay in poll mode (the completion poller never
+    agrees to enter the reactor's idle interrupt mode), so completions are
+    always reaped by polling and no kernel interrupt handling is relied upon;
+    such shards do not sleep when idle. The transport id format matches the
+    "spdk:" prefix accepted by bluestore_block_path.
+  flags:
+  - startup
+
+- name: seastore_spdk_iova_mode
+  type: str
+  level: advanced
+  desc: IOVA mode for the SPDK/DPDK environment ("va", "pa", or empty)
+  long_desc: Controls DPDK's DMA addressing mode. Empty (default) lets DPDK
+    auto-detect - virtual-address (VA) when an IOMMU is present (the vfio-pci
+    production setup), physical-address (PA) otherwise. Force "va" in
+    unprivileged environments without an IOMMU that do no device DMA (e.g. an
+    NVMe-oF/TCP initiator). Only consulted when seastore_spdk_transport_id is set.
+  flags:
+  - startup

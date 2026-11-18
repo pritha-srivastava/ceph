@@ -1,10 +1,12 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-[ $# -lt 1 ] && echo "usage: $0 <num-clusters>" && exit 1
+[ $# -lt 1 ] && echo "usage: $0 <num-zones> <num-zonegroups>[rgw parameters...]" && exit 1
 
-num_clusters=$1
+num_zones=$1
+num_zonegroups=$2
+shift
 
-[ $num_clusters -lt 1 ] && echo "clusters num must be at least 1" && exit 1
+[ $num_zones -lt 1 ] && echo "clusters num must be at least 1" && exit 1
 
 . "`dirname $0`/test-rgw-common.sh"
 . "`dirname $0`/test-rgw-meta-sync.sh"
@@ -12,44 +14,118 @@ num_clusters=$1
 set -e
 
 realm_name=earth
-zg=us
-
-i=1
-while [ $i -le $num_clusters ]; do
-  eval zone$i=${zg}-$i
-  eval zone${i}_port=$((8000+$i))
-  i=$((i+1))
-done
+zg=zg1
 
 system_access_key="1234567890"
 system_secret="pencil"
+regular_access_key="0987654321"
+regular_secret="crayon"
 
 # bring up first cluster
-x $(start_ceph_cluster 1) -n
+x $(start_ceph_cluster c1) -n $(get_mstart_parameters 1)
 
-# create realm, zonegroup, zone, start rgw
-init_first_zone 1 $realm_name $zg $zone1 $zone1_port $system_access_key $system_secret
+if [ -n "$RGW_PER_ZONE" ]; then
+  rgws="$RGW_PER_ZONE"
+else
+  rgws=1
+fi
 
-output=`$(rgw_admin 1) realm get`
+url=http://localhost
+
+i=1
+while [ $i -le $rgws ]; do
+  port=$((8100+i))
+  endpoints="$endpoints""$url:$port,"
+  i=$((i+1))
+done
+
+# create realm, zonegroup, zone, start rgws
+init_first_zone c1 $realm_name $zg ${zg}-1 $endpoints $system_access_key $system_secret
+# create a regular (non-system) user for S3 operations
+x $(rgw_admin c1) user create --uid=regular.user --display-name=RegularUser --access-key=${regular_access_key} --secret=${regular_secret}
+i=1
+while [ $i -le $rgws ]; do
+  port=$((8100+i))
+  x $(rgw c1 "$port" "$@")
+  i="$((i+1))"
+done
+
+output=`$(rgw_admin c1) realm get`
 
 echo realm_status=$output
 
 # bring up next clusters
 
+endpoints=""
 i=2
-while [ $i -le $num_clusters ]; do
-  x $(start_ceph_cluster $i) -n
-
+while [ $i -le $num_zones ]; do
+  x $(start_ceph_cluster c$i) -n $(get_mstart_parameters $i)
+  j=1
+  endpoints=""
+  while [ $j -le $rgws ]; do
+    port=$((8000+i*100+j))
+    endpoints="$endpoints""$url:$port,"
+    j=$((j+1))
+  done
 
   # create new zone, start rgw
-  zone_port=eval echo '$'zone${i}_port
-  init_zone_in_existing_zg $i $realm_name $zg $zone1 $zone1_port $zone_port $system_access_key $system_secret
-
+  init_zone_in_existing_zg c$i $realm_name $zg ${zg}-${i} 8101 $endpoints $zone_port $system_access_key $system_secret
+  j=1
+  while [ $j -le $rgws ]; do
+    port=$((8000+i*100+j))
+    x $(rgw c$i "$port" "$@")
+    j="$((j+1))"
+  done
   i=$((i+1))
 done
 
-i=2
-while [ $i -le $num_clusters ]; do
-  wait_for_meta_sync 1 $i $realm_name
+endpoints=""
+k=2
+while [ $k -le $num_zonegroups ]; do
+  x $(start_ceph_cluster c$i) -n $(get_mstart_parameters $i)
+  j=1
+  endpoints=""
+  while [ $j -le $rgws ]; do
+    port=$((8000+i*100+j))
+    endpoints="$endpoints""$url:$port,"
+    j=$((j+1))
+  done
+
+  # create new zone, start rgw
+  init_first_zone_in_peer_zg c$i $realm_name zg${k} zg${k}-${i} 8101 $endpoints  $system_access_key $system_secret
+  j=1
+  while [ $j -le $rgws ]; do
+    port=$((8000+i*100+j))
+    x $(rgw c$i "$port" "$@")
+    j="$((j+1))"
+  done
+# bring up next clusters in zonegroup k
+  i=$((i+1))
+
+  endpoints=""
+  l=2
+  while [ $l -le $num_zones ]; do
+    x $(start_ceph_cluster c$i) -n $(get_mstart_parameters $i)
+    j=1
+    endpoints=""
+    while [ $j -le $rgws ]; do
+      port=$((8000+i*100+j))
+      endpoints="$endpoints""$url:$port,"
+      j=$((j+1))
+    done
+
+    # create new zone, start rgw
+    init_zone_in_existing_zg c$i $realm_name zg${k} zg${k}-${i} 8101 $endpoints $zone_port $system_access_key $system_secret
+    j=1
+    while [ $j -le $rgws ]; do
+      port=$((8000+i*100+j))
+      x $(rgw c$i "$port" "$@")
+      j="$((j+1))"
+    done
+    l=$((l+1))
+    i=$((i+1))
+  done
+
+  k=$((k+1))
 done
 

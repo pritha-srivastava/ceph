@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -18,20 +19,42 @@
 #include "auth/AuthServiceHandler.h"
 #include "auth/Auth.h"
 
+#include "common/ceph_mutex.h"
+
 class KeyServer;
+struct CephXAuthenticate;
+struct CephXServiceTicketInfo;
 
 class CephxServiceHandler  : public AuthServiceHandler {
   KeyServer *key_server;
-  uint64_t server_challenge;
+  uint64_t server_challenge = 0;
+
+  ceph::shared_mutex lock = ceph::make_shared_mutex("CephxServiceHandler::lock");
 
 public:
-  CephxServiceHandler(CephContext *cct_, KeyServer *ks) 
-    : AuthServiceHandler(cct_), key_server(ks), server_challenge(0) {}
-  ~CephxServiceHandler() {}
+  CephxServiceHandler(CephContext *cct_, KeyServer *ks);
+  ~CephxServiceHandler() override {}
   
-  int start_session(EntityName& name, bufferlist::iterator& indata, bufferlist& result_bl, AuthCapsInfo& caps);
-  int handle_request(bufferlist::iterator& indata, bufferlist& result_bl, uint64_t& global_id, AuthCapsInfo& caps, uint64_t *auid = NULL);
-  void build_cephx_response_header(int request_type, int status, bufferlist& bl);
+  int handle_request(
+    ceph::buffer::list::const_iterator& indata,
+    size_t connection_secret_required_length,
+    ceph::buffer::list *result_bl,
+    AuthCapsInfo *caps,
+    CryptoKey *session_key,
+    std::string *connection_secret) override;
+
+private:
+  int do_start_session(bool is_new_global_id,
+		       ceph::buffer::list *result_bl,
+		       AuthCapsInfo *caps) override;
+
+  int verify_old_ticket(const CephXAuthenticate& req,
+			CephXServiceTicketInfo& old_ticket_info,
+			bool& should_enc_ticket);
+  void build_cephx_response_header(int request_type, int status,
+				   ceph::buffer::list& bl);
+
+  bool cipher_is_allowed(int type);
 };
 
 #endif

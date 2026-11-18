@@ -1,3 +1,5 @@
+.. _librados-intro:
+
 ==========================
  Introduction to librados
 ==========================
@@ -15,7 +17,7 @@ the Ceph Storage Cluster:
 - The :term:`Ceph Monitor`, which maintains a master copy of the cluster map. 
 - The :term:`Ceph OSD Daemon` (OSD), which stores data as objects on a storage node.
 
-.. ditaa::  
+.. ditaa::
             +---------------------------------+
             |  Ceph Storage Cluster Protocol  |
             |           (librados)            |
@@ -25,7 +27,7 @@ the Ceph Storage Cluster:
             +---------------+ +---------------+
 
 This guide provides a high-level introduction to using ``librados``. 
-Refer to :doc:`../../architecture` for additional details of the Ceph
+Refer to :doc:`../../architecture/index` for additional details of the Ceph
 Storage Cluster. To use the API, you need a running Ceph Storage Cluster. 
 See `Installation (Quick)`_ for details.
 
@@ -43,39 +45,53 @@ Getting librados for C/C++
 --------------------------
 
 To install ``librados`` development support files for C/C++ on Debian/Ubuntu
-distributions, execute the following::
+distributions, execute the following:
 
-	sudo apt-get install librados-dev
+.. prompt:: bash $
+
+   sudo apt-get install librados-dev
 
 To install ``librados`` development support files for C/C++ on RHEL/CentOS
-distributions, execute the following::
+distributions, execute the following:
 
-	sudo yum install librados2-devel
+.. prompt:: bash $
+
+   sudo yum install librados2-devel libradospp-devel
 
 Once you install ``librados`` for developers, you can find the required 
-headers for C/C++ under ``/usr/include/rados``. ::
+headers for C/C++ under ``/usr/include/rados``:
 
-	ls /usr/include/rados
+.. prompt:: bash $
+
+   ls /usr/include/rados
 
 
 Getting librados for Python
 ---------------------------
 
 The ``rados`` module provides ``librados`` support to Python
-applications. The ``librados-dev`` package for Debian/Ubuntu
-and the ``librados2-devel`` package for RHEL/CentOS will install the
-``python-rados`` package for you. You may install ``python-rados``
-directly too.
+applications. You may install the ``python3-rados`` package.
 
 To install ``librados`` development support files for Python on Debian/Ubuntu
-distributions, execute the following::
+distributions, execute the following:
 
-	sudo apt-get install python-rados
+.. prompt:: bash $
+
+   sudo apt-get install python3-rados
 
 To install ``librados`` development support files for Python on RHEL/CentOS
-distributions, execute the following::
+distributions, execute the following:
 
-	sudo yum install python-rados
+.. prompt:: bash $
+
+   sudo yum install python3-rados
+
+To install ``librados`` development support files for Python on SLE/openSUSE
+distributions, execute the following:
+
+.. prompt:: bash $
+
+   sudo zypper install python3-rados
 
 You can find the module under ``/usr/share/pyshared`` on Debian systems,
 or under ``/usr/lib/python*/site-packages`` on CentOS/RHEL systems.
@@ -86,67 +102,87 @@ Getting librados for Java
 
 To install ``librados`` for Java, you need to execute the following procedure:
 
-#. Install ``jna.jar``. For Debian/Ubuntu, execute:: 
+#. Install ``jna.jar``. For Debian/Ubuntu, execute:
 
-	sudo apt-get install libjna-java
+   .. prompt:: bash $
 
-   For CentOS/RHEL, execute::
+      sudo apt-get install libjna-java
 
-	sudo yum install jna
+   For CentOS/RHEL, execute:
+
+   .. prompt:: bash $
+
+      sudo yum install jna
 
    The JAR files are located in ``/usr/share/java``.
 
-#. Clone the ``rados-java`` repository::
+#. Clone the ``rados-java`` repository:
 
-	git clone --recursive https://github.com/ceph/rados-java.git
+   .. prompt:: bash $
 
-#. Build the ``rados-java`` repository:: 
+      git clone --recursive https://github.com/ceph/rados-java.git
 
-	cd rados-java
-	ant
+#. Build the ``rados-java`` repository:
+
+   .. prompt:: bash $
+
+      cd rados-java
+      ant
 
    The JAR file is located under ``rados-java/target``.
 
 #. Copy the JAR for RADOS to a common location (e.g., ``/usr/share/java``) and 
-   ensure that it and the JNA JAR are in your JVM's classpath. For example::
+   ensure that it and the JNA JAR are in your JVM's classpath. For example:
 
-	sudo cp target/rados-0.1.3.jar /usr/share/java/rados-0.1.3.jar
-	sudo ln -s /usr/share/java/jna-3.2.7.jar /usr/lib/jvm/default-java/jre/lib/ext/jna-3.2.7.jar  
-	sudo ln -s /usr/share/java/rados-0.1.3.jar  /usr/lib/jvm/default-java/jre/lib/ext/rados-0.1.3.jar
+   .. prompt:: bash $
 
-To build the documentation, execute the following::
+      sudo cp target/rados-0.1.3.jar /usr/share/java/rados-0.1.3.jar
+      sudo ln -s /usr/share/java/jna-3.2.7.jar /usr/lib/jvm/default-java/jre/lib/ext/jna-3.2.7.jar  
+      sudo ln -s /usr/share/java/rados-0.1.3.jar  /usr/lib/jvm/default-java/jre/lib/ext/rados-0.1.3.jar
 
-	ant docs
+To build the documentation, execute the following:
+
+.. prompt:: bash $
+
+   ant docs
 
 
 Getting librados for PHP
--------------------------
+------------------------
 
 To install the ``librados`` extension for PHP, you need to execute the following procedure:
 
-#. Install php-dev. For Debian/Ubuntu, execute::
+#. Install php-dev. For Debian/Ubuntu, execute:
 
-	sudo apt-get install php5-dev build-essential
+   .. prompt:: bash $
 
-   For CentOS/RHEL, execute::
+      sudo apt-get install php5-dev build-essential
 
-	sudo yum install php-devel
+   For CentOS/RHEL, execute:
 
-#. Clone the ``phprados`` repository::
+   .. prompt:: bash $
 
-	git clone https://github.com/ceph/phprados.git
+      sudo yum install php-devel
 
-#. Build ``phprados``::
+#. Clone the ``phprados`` repository:
 
-	cd phprados
-	phpize
-	./configure
-	make
-	sudo make install
+   .. prompt:: bash $
 
-#. Enable ``phprados`` in php.ini by adding::
+      git clone https://github.com/ceph/phprados.git
 
-	extension=rados.so
+#. Build ``phprados``:
+
+   .. prompt:: bash $
+
+      cd phprados
+      phpize
+      ./configure
+      make
+      sudo make install
+
+#. Enable ``phprados`` by adding the following line to ``php.ini``::
+   
+      extension=rados.so
 
 
 Step 2: Configuring a Cluster Handle
@@ -157,7 +193,7 @@ and retrieve data. To interact with OSDs, the client app must invoke
 ``librados``  and connect to a Ceph Monitor. Once connected, ``librados``
 retrieves the  :term:`Cluster Map` from the Ceph Monitor. When the client app
 wants to read or write data, it creates an I/O context and binds to a
-:term:`pool`. The pool has an associated :term:`ruleset` that defines how it
+:term:`Pool`. The pool has an associated :term:`CRUSH rule` that defines how it
 will place data in the storage cluster. Via the I/O context, the client 
 provides the object name to ``librados``, which takes the object name
 and the cluster map (i.e., the topology of the cluster) and `computes`_ the
@@ -165,7 +201,7 @@ placement group and `OSD`_  for locating the data. Then the client application
 can read or write data. The client app doesn't need to learn about the topology
 of the cluster directly.
 
-.. ditaa:: 
+.. ditaa::
             +--------+  Retrieves  +---------------+
             | Client |------------>|  Cluster Map  |
             +--------+             +---------------+
@@ -177,7 +213,7 @@ of the cluster directly.
                  |      To
                  v
             +--------+           +---------------+
-            |  Pool  |---------->| CRUSH Ruleset |
+            |  Pool  |---------->| CRUSH Rule |
             +--------+  Selects  +---------------+
 
 
@@ -186,26 +222,26 @@ The Ceph Storage Cluster handle encapsulates the client configuration, including
 - The `user ID`_ for ``rados_create()`` or user name for ``rados_create2()`` 
   (preferred).
 - The :term:`cephx` authentication key
-- The monitor ID and IP address
+- The Monitor ID and IP address
 - Logging levels
 - Debugging levels
 
 Thus, the first steps in using the cluster from your app are to 1) create
 a cluster handle that your app will use to connect to the storage cluster,
 and then 2) use that handle to connect. To connect to the cluster, the
-app must supply a monitor address, a username and an authentication key
-(cephx is enabled by default).
+app must supply a Monitor address, a username and an authentication key
+(CephX is enabled by default).
 
 .. tip:: Talking to different Ceph Storage Clusters – or to the same cluster 
    with different users – requires different cluster handles.
 
 RADOS provides a number of ways for you to set the required values. For
-the monitor and encryption key settings, an easy way to handle them is to ensure
+the Monitor and encryption key settings, an easy way to handle them is to ensure
 that your Ceph configuration file contains a ``keyring`` path to a keyring file
-and at least one monitor address (e.g,. ``mon host``). For example:: 
+and at least one Monitor address (e.g., ``mon_host``). For example::
 
 	[global]
-	mon host = 192.168.1.1
+	mon_host = 192.168.1.1
 	keyring = /etc/ceph/ceph.client.admin.keyring
 
 Once you create the handle, you can read a Ceph configuration file to configure
@@ -217,7 +253,8 @@ these capabilities. The following diagram provides a high-level flow for the
 initial connection.
 
 
-.. ditaa:: +---------+     +---------+
+.. ditaa::
+           +---------+     +---------+
            | Client  |     | Monitor |
            +---------+     +---------+
                 |               |
@@ -253,7 +290,7 @@ uses SSDs for frequently used objects or a "cold" pool that uses erasure coding.
 
 The main difference in the various ``librados`` bindings is between C and
 the object-oriented bindings for C++, Java and Python. The object-oriented
-bindings use objects to represent cluster handles, IO Contexts, iterators,
+bindings use objects to represent cluster handles, I/O Contexts, iterators,
 exceptions, etc.
 
 
@@ -266,17 +303,18 @@ it and connecting to the cluster might look something like this:
 .. code-block:: c
 
 	#include <stdio.h>
+	#include <stdlib.h>
 	#include <string.h>
 	#include <rados/librados.h>
 
-	int main (int argc, char argv**) 
+	int main (int argc, const char **argv) 
 	{
 
 		/* Declare the cluster handle and required arguments. */
 		rados_t cluster;
 		char cluster_name[] = "ceph";
 		char user_name[] = "client.admin";
-		uint64_t flags; 
+		uint64_t flags = 0;
 	
 		/* Initialize the cluster handle with the "ceph" cluster name and the "client.admin" user */  
 		int err;
@@ -319,9 +357,11 @@ it and connecting to the cluster might look something like this:
 
 	}
 
-Compile your client and link to ``librados`` using ``-lrados``. For example:: 
+Compile your client and link to ``librados`` using ``-lrados``. For example:
 
-	gcc ceph-client.c -lrados -o ceph-client
+.. prompt:: bash $
+
+   gcc ceph-client.c -lrados -o ceph-client
 
 
 C++ Example
@@ -346,7 +386,7 @@ you to initialize a ``librados::Rados`` cluster handle object:
 		librados::Rados cluster;
 		char cluster_name[] = "ceph";
 		char user_name[] = "client.admin";
-		uint64_t flags; 
+		uint64_t flags = 0; 
 	
 		/* Initialize the cluster handle with the "ceph" cluster name and "client.admin" user */ 
 		{
@@ -397,10 +437,12 @@ you to initialize a ``librados::Rados`` cluster handle object:
 	
 
 Compile the source; then, link ``librados`` using ``-lrados``. 
-For example::
+For example:
 
-	g++ -g -c ceph-client.cc -o ceph-client.o
-	g++ -g ceph-client.o -lrados -o ceph-client
+.. prompt:: bash $
+
+   g++ -g -c ceph-client.cc -o ceph-client.o
+   g++ -g ceph-client.o -lrados -o ceph-client
 
 
 
@@ -420,30 +462,32 @@ into exceptions.
 	try:
 		cluster = rados.Rados(conffile='')
 	except TypeError as e:
-		print 'Argument validation error: ', e
+		print('Argument validation error: {}'.format(e))
 		raise e
 		
-	print "Created cluster handle."
+	print("Created cluster handle.")
 
 	try:
 		cluster.connect()
 	except Exception as e:
-		print "connection error: ", e
+		print("connection error: {}".format(e))
 		raise e
 	finally:
-		print "Connected to the cluster."
+		print("Connected to the cluster.")
 
 
-Execute the example to verify that it connects to your cluster. ::
+Execute the example to verify that it connects to your cluster:
 
-	python ceph-client.py
+.. prompt:: bash $
+
+   python ceph-client.py
 
 
 Java Example
 ------------
 
 Java requires you to specify the user ID (``admin``) or user name
-(``client.admin``), and uses the ``ceph`` cluster name by default . The Java
+(``client.admin``), and uses the ``ceph`` cluster name by default. The Java
 binding converts C++-based errors into exceptions.
 
 .. code-block:: java
@@ -475,11 +519,13 @@ binding converts C++-based errors into exceptions.
 
 
 Compile the source; then, run it. If you have copied the JAR to
-``/usr/share/java`` and sym linked from your ``ext`` directory, you won't need
-to specify the classpath. For example::
+``/usr/share/java`` and symlinked from your ``ext`` directory, you won't need
+to specify the classpath. For example:
 
-	javac CephClient.java
-	java CephClient
+.. prompt:: bash $
+
+   javac CephClient.java
+   java CephClient
 
 
 PHP Example
@@ -500,9 +546,11 @@ With the RADOS extension enabled in PHP you can start creating a new cluster han
 	}
 
 
-Save this as rados.php and run the code::
+Save this as rados.php and run the code:
 
-	php rados.php
+.. prompt:: bash $
+
+   php rados.php
 
 
 Step 3: Creating an I/O Context
@@ -520,7 +568,8 @@ functionality includes:
 - Snapshot pools, list snapshots, etc.
 
 
-.. ditaa:: +---------+     +---------+     +---------+
+.. ditaa::
+           +---------+     +---------+     +---------+
            | Client  |     | Monitor |     |   OSD   |
            +---------+     +---------+     +---------+
                 |               |               |
@@ -577,9 +626,9 @@ C Example
 .. code-block:: c
 
 	#include <stdio.h>
+	#include <stdlib.h>
 	#include <string.h>
 	#include <rados/librados.h>
-       #include <stdlib.h>
 
 	int main (int argc, const char **argv) 
 	{
@@ -835,42 +884,43 @@ Python Example
 
 .. code-block:: python
 
-	print "\n\nI/O Context and Object Operations"
-	print "================================="
+	print("\n\nI/O Context and Object Operations")
+	print("=================================")
 	
-	print "\nCreating a context for the 'data' pool"
+	print("\nCreating a context for the 'data' pool")
 	if not cluster.pool_exists('data'):
 		raise RuntimeError('No data pool exists')
 	ioctx = cluster.open_ioctx('data')
 	
-	print "\nWriting object 'hw' with contents 'Hello World!' to pool 'data'."
-	ioctx.write("hw", "Hello World!")
-	print "Writing XATTR 'lang' with value 'en_US' to object 'hw'"
-	ioctx.set_xattr("hw", "lang", "en_US")
+	print("\nWriting object 'hw' with contents 'Hello World!' to pool 'data'.")
+	ioctx.write("hw", b"Hello World!")
+	print("Writing XATTR 'lang' with value 'en_US' to object 'hw'")
+	ioctx.set_xattr("hw", "lang", b"en_US")
 	
 	
-	print "\nWriting object 'bm' with contents 'Bonjour tout le monde!' to pool 'data'."
-	ioctx.write("bm", "Bonjour tout le monde!")
-	print "Writing XATTR 'lang' with value 'fr_FR' to object 'bm'"
-	ioctx.set_xattr("bm", "lang", "fr_FR")
+	print("\nWriting object 'bm' with contents 'Bonjour tout le monde!' to pool
+	'data'.")
+	ioctx.write("bm", b"Bonjour tout le monde!")
+	print("Writing XATTR 'lang' with value 'fr_FR' to object 'bm'")
+	ioctx.set_xattr("bm", "lang", b"fr_FR")
 	
-	print "\nContents of object 'hw'\n------------------------"
-	print ioctx.read("hw")
+	print("\nContents of object 'hw'\n------------------------")
+	print(ioctx.read("hw"))
 	
-	print "\n\nGetting XATTR 'lang' from object 'hw'"
-	print ioctx.get_xattr("hw", "lang")
+	print("\n\nGetting XATTR 'lang' from object 'hw'")
+	print(ioctx.get_xattr("hw", "lang"))
 	
-	print "\nContents of object 'bm'\n------------------------"
-	print ioctx.read("bm")
+	print("\nContents of object 'bm'\n------------------------")
+	print(ioctx.read("bm"))
 	
-	print "Getting XATTR 'lang' from object 'bm'"
-	print ioctx.get_xattr("bm", "lang")
+	print("\n\nGetting XATTR 'lang' from object 'bm'")
+	print(ioctx.get_xattr("bm", "lang"))
 	
 	
-	print "\nRemoving object 'hw'"
+	print("\nRemoving object 'hw'")
 	ioctx.remove_object("hw")
 	
-	print "Removing object 'bm'"
+	print("Removing object 'bm'")
 	ioctx.remove_object("bm")
 
 
@@ -978,10 +1028,10 @@ Python Example
 
 .. code-block:: python
 
-	print "\nClosing the connection."
+	print("\nClosing the connection.")
 	ioctx.close()
 	
-	print "Shutting down the handle."
+	print("Shutting down the handle.")
 	cluster.shutdown()
 
 PHP Example
@@ -996,7 +1046,7 @@ PHP Example
 .. _user ID: ../../operations/user-management#command-line-usage
 .. _CAPS: ../../operations/user-management#authorization-capabilities
 .. _Installation (Quick): ../../../start
-.. _Smart Daemons Enable Hyperscale: ../../../architecture#smart-daemons-enable-hyperscale
-.. _Calculating PG IDs: ../../../architecture#calculating-pg-ids
-.. _computes: ../../../architecture#calculating-pg-ids
-.. _OSD: ../../../architecture#mapping-pgs-to-osds
+.. _Smart Daemons Enable Hyperscale: ../../../architecture/scalability-high-availability#smart-daemons-enable-hyperscale
+.. _Calculating PG IDs: ../../../architecture/dynamic-cluster-management#calculating-pg-ids
+.. _computes: ../../../architecture/dynamic-cluster-management#calculating-pg-ids
+.. _OSD: ../../../architecture/dynamic-cluster-management#mapping-pgs-to-osds

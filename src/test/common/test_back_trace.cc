@@ -1,16 +1,18 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <boost/algorithm/string.hpp>
-// std::regex support in libstdc++ 4.8 is incomplete, so let's stick to
-// boost::regex now.
-#include <boost/regex.hpp>
 #include <gtest/gtest.h>
+#include <regex>
 #include <sstream>
 #include <string>
 
 #include "common/BackTrace.h"
 #include "common/version.h"
+
+#ifndef __has_feature
+#define __has_feature(x) 0
+#endif
 
 // a dummy function, so we can check "foo" in the backtrace.
 // do not mark this function as static or put it into an anonymous namespace,
@@ -18,7 +20,20 @@
 std::string foo()
 {
   std::ostringstream oss;
-  oss << ceph::BackTrace(1);
+  // but if ASan is enabled, backtrace() returns one more frame, and the
+  // backtrace would look like:
+  //
+  // ceph version Development (no_version)
+  // 1: (ceph::ClibBackTrace::ClibBackTrace(int)+0xf5) [0x555555722bf5]
+  // 2: (foo[abi:cxx11]()+0x1fc) [0x555555721b5c]
+  // 3: (BackTrace_Basic_Test::TestBody()+0x2db) [0x55555572208b]
+  //
+  // so we need to skip one more frame
+#if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
+  oss << ceph::ClibBackTrace(2);
+#else
+  oss << ceph::ClibBackTrace(1);
+#endif
   return oss.str();
 }
 
@@ -34,7 +49,7 @@ TEST(BackTrace, Basic) {
   const unsigned lineno = 1;
   ASSERT_GT(lines.size(), lineno);
   ASSERT_EQ(lines[0].find(pretty_version_to_str()), 1U);
-  boost::regex e{"^ 1: "
+  std::regex e{"^ 1: "
 #ifdef __FreeBSD__
 		 "<foo.*>\\s"
 		 "at\\s.*$"};
@@ -42,5 +57,5 @@ TEST(BackTrace, Basic) {
 		 "\\(foo.*\\)\\s"
 		 "\\[0x[[:xdigit:]]+\\]$"};
 #endif
-  EXPECT_TRUE(boost::regex_match(lines[lineno], e));
+  EXPECT_TRUE(std::regex_match(lines[lineno], e));
 }

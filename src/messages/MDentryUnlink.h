@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,42 +17,58 @@
 #ifndef CEPH_MDENTRYUNLINK_H
 #define CEPH_MDENTRYUNLINK_H
 
-class MDentryUnlink : public Message {
+#include <string_view>
+
+#include "messages/MMDSOp.h"
+
+class MDentryUnlink final : public MMDSOp {
+private:
+  static constexpr int HEAD_VERSION = 1;
+  static constexpr int COMPAT_VERSION = 1;
+  
   dirfrag_t dirfrag;
-  string dn;
+  std::string dn;
 
  public:
-  dirfrag_t get_dirfrag() { return dirfrag; }
-  string& get_dn() { return dn; }
+  dirfrag_t get_dirfrag() const { return dirfrag; }
+  const std::string& get_dn() const { return dn; }
 
-  bufferlist straybl;
+  ceph::buffer::list straybl;
+  ceph::buffer::list snapbl;
 
+protected:
   MDentryUnlink() :
-    Message(MSG_MDS_DENTRYUNLINK) { }
-  MDentryUnlink(dirfrag_t df, string& n) :
-    Message(MSG_MDS_DENTRYUNLINK),
+    MMDSOp(MSG_MDS_DENTRYUNLINK, HEAD_VERSION, COMPAT_VERSION) { }
+  MDentryUnlink(dirfrag_t df, std::string_view n) :
+    MMDSOp(MSG_MDS_DENTRYUNLINK, HEAD_VERSION, COMPAT_VERSION),
     dirfrag(df),
     dn(n) {}
-private:
-  ~MDentryUnlink() {}
+  ~MDentryUnlink() final {}
 
 public:
-  const char *get_type_name() const { return "dentry_unlink";}
-  void print(ostream& o) const {
+  std::string_view get_type_name() const override { return "dentry_unlink";}
+  void print(std::ostream& o) const override {
     o << "dentry_unlink(" << dirfrag << " " << dn << ")";
   }
   
-  void decode_payload() {
-    bufferlist::iterator p = payload.begin();
-    ::decode(dirfrag, p);
-    ::decode(dn, p);
-    ::decode(straybl, p);
+  void decode_payload() override {
+    using ceph::decode;
+    auto p = payload.cbegin();
+    decode(dirfrag, p);
+    decode(dn, p);
+    decode(straybl, p);
   }
-  void encode_payload(uint64_t features) {
-    ::encode(dirfrag, payload);
-    ::encode(dn, payload);
-    ::encode(straybl, payload);
+  void encode_payload(uint64_t features) override {
+    using ceph::encode;
+    encode(dirfrag, payload);
+    encode(dn, payload);
+    encode(straybl, payload);
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
+  template<class T, typename... Args>
+  friend MURef<T> crimson::make_message(Args&&... args);
 };
 
 #endif

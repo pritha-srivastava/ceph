@@ -1,0 +1,16 @@
+overrides:
+  ceph:
+    conf:
+      client:
+        setuser: ceph
+        setgroup: ceph
+        rgw crypt require ssl: false
+        debug rgw: 20
+        rgw sts key: AQA/3Fxpz2k2AxAAYWJjZGVmZ2hpamtsbW5vcA==
+        rgw s3 auth use sts: true
+  rgw:
+    compression type: random
+
+tasks:
+- rgw:
+    client.0:

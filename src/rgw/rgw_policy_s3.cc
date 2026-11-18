@@ -1,15 +1,21 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
+
+#include "rgw_policy_s3.h"
 
 #include <errno.h>
 
 #include "common/ceph_json.h"
-#include "rgw_policy_s3.h"
+#include "common/Clock.h" // for ceph_clock_now()
+#include "include/timegm.h"
 #include "rgw_common.h"
-
+#include "rgw_crypt_sanitize.h"
+#include "rgw_cksum.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
+
+using namespace std;
 
 class RGWPolicyCondition {
 protected:
@@ -30,8 +36,11 @@ public:
      string first, second;
      env->get_value(v1, first, checked_vars);
      env->get_value(v2, second, checked_vars);
-
-     dout(1) << "policy condition check " << v1 << " [" << first << "] " << v2 << " [" << second << "]" << dendl;
+     dout(1) << "policy condition check " << v1 << " ["
+         << rgw::crypt_sanitize::s3_policy{v1, first}
+         << "] " << v2 << " ["
+         << rgw::crypt_sanitize::s3_policy{v2, second}
+         << "]" << dendl;
      bool ret = check(first, second, err_msg);
      if (!ret) {
        err_msg.append(": ");
@@ -96,15 +105,20 @@ bool RGWPolicyEnv::get_value(const string& s, string& val, map<string, bool, lts
   return get_var(var, val);
 }
 
-
-bool RGWPolicyEnv::match_policy_vars(map<string, bool, ltstr_nocase>& policy_vars, string& err_msg)
+bool RGWPolicyEnv::match_policy_vars(
+       map<string, bool, ltstr_nocase>& policy_vars, string& err_msg)
 {
   map<string, string, ltstr_nocase>::iterator iter;
   string ignore_prefix = "x-ignore-";
   for (iter = vars.begin(); iter != vars.end(); ++iter) {
     const string& var = iter->first;
-    if (strncasecmp(ignore_prefix.c_str(), var.c_str(), ignore_prefix.size()) == 0)
+    if (strncasecmp(ignore_prefix.c_str(), var.c_str(),
+		    ignore_prefix.size()) == 0) {
       continue;
+    }
+    if (rgw::cksum::is_checksum_hdr(var)) {
+      continue;
+    }
     if (policy_vars.count(var) == 0) {
       err_msg = "Policy missing condition: ";
       err_msg.append(iter->first);
@@ -113,7 +127,7 @@ bool RGWPolicyEnv::match_policy_vars(map<string, bool, ltstr_nocase>& policy_var
     }
   }
   return true;
-}
+} /* match_policy_vars */
 
 RGWPolicy::~RGWPolicy()
 {
@@ -130,7 +144,7 @@ int RGWPolicy::set_expires(const string& e)
   if (!parse_iso8601(e.c_str(), &t))
       return -EINVAL;
 
-  expires = timegm(&t);
+  expires = internal_timegm(&t);
 
   return 0;
 }
@@ -289,7 +303,7 @@ int RGWPolicy::from_json(bufferlist& bl, string& err_msg)
         return r;
     } else if (!citer.end()) {
       JSONObj *c = *citer;
-      dout(0) << "adding simple_check: " << c->get_name() << " : " << c->get_data() << dendl;
+      dout(20) << "adding simple_check: " << c->get_name() << " : " << c->get_data() << dendl;
 
       add_simple_check(c->get_name(), c->get_data());
     } else {

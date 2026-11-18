@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -13,7 +14,6 @@
  */
 
 #include "include/Context.h"
-#include <set>
 
 /**
  * The Continuation interface is designed to help easily create multi-step
@@ -58,7 +58,7 @@ class Continuation {
     Callback(Continuation *c, int stage) :
       continuation(c),
       stage_to_activate(stage) {}
-    void finish(int r) {
+    void finish(int r) override {
       continuation->continue_function(r, stage_to_activate);
     }
   };
@@ -73,8 +73,8 @@ protected:
    * @param r The return code that will be provided to the next stage
    */
   bool immediate(int stage, int r) {
-    assert(!stages_in_flight.count(stage));
-    assert(!stages_processing.count(stage));
+    ceph_assert(!stages_in_flight.count(stage));
+    ceph_assert(!stages_processing.count(stage));
     stages_in_flight.insert(stage);
     stages_processing.insert(stage);
     return _continue_function(r, stage);
@@ -105,7 +105,7 @@ protected:
    * @param func The function to use
    */
   void set_callback(int stage, stagePtr func) {
-    assert(callbacks.find(stage) == callbacks.end());
+    ceph_assert(callbacks.find(stage) == callbacks.end());
     callbacks[stage] = func;
   }
   
@@ -123,19 +123,20 @@ private:
   std::map<int, Continuation::stagePtr> callbacks;
 
   bool _continue_function(int r, int n) {
-    set<int>::iterator stage_iter = stages_in_flight.find(n);
-    assert(stage_iter != stages_in_flight.end());
-    assert(callbacks.count(n));
+    std::set<int>::iterator in_flight_iter = stages_in_flight.find(n);
+    ceph_assert(in_flight_iter != stages_in_flight.end());
+    ceph_assert(callbacks.count(n));
     stagePtr p = callbacks[n];
 
-    pair<set<int>::iterator,bool> insert_r = stages_processing.insert(n);
+    [[maybe_unused]] auto [processing_iter, inserted] =
+      stages_processing.insert(n);
 
     bool done = (this->*p)(r);
     if (done)
       reported_done = true;
 
-    stages_processing.erase(insert_r.first);
-    stages_in_flight.erase(stage_iter);
+    stages_processing.erase(processing_iter);
+    stages_in_flight.erase(in_flight_iter);
     return done;
   }
 
@@ -145,8 +146,7 @@ private:
     assert (!done ||
             stages_in_flight.size() == stages_processing.size());
 
-    if (done ||
-        (reported_done && stages_processing.empty())) {
+    if ((done || reported_done) && stages_processing.empty()) {
       _done();
       delete this;
     }
@@ -167,7 +167,7 @@ public:
   /**
    * Clean up.
    */
-  virtual ~Continuation() { assert(on_finish == NULL); }
+  virtual ~Continuation() { ceph_assert(on_finish == NULL); }
   /**
    * Begin running the Continuation.
    */

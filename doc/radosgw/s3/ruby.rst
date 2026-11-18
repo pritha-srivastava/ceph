@@ -6,7 +6,7 @@ Ruby `AWS::SDK`_ Examples (aws-sdk gem ~>2)
 Settings
 ---------------------
 
-You can setup the connection on global way:
+You can set up the connection on global way:
 
 .. code-block:: ruby
 
@@ -84,7 +84,7 @@ The output will look something like this if the bucket has some files::
 Deleting a Bucket
 -----------------
 .. note::
-   The Bucket must be empty! Otherwise it won't work!
+   The bucket must be empty! Otherwise it won't work!
 
 .. code-block:: ruby
 
@@ -184,7 +184,7 @@ The output of this will look something like::
    http://objects.dreamhost.com/my-bucket-name/hello.txt
    http://objects.dreamhost.com/my-bucket-name/secret_plans.txt?Signature=XXXXXXXXXXXXXXXXXXXXXXXXXXX&Expires=1316027075&AWSAccessKeyId=XXXXXXXXXXXXXXXXXXX
 
-.. _`AWS::SDK`: http://docs.aws.amazon.com/sdkforruby/api/Aws/S3/Client.html
+.. _`AWS::SDK`: https://docs.aws.amazon.com/sdkforruby/api/Aws/S3/Client.html
 
 
 
@@ -258,7 +258,7 @@ The output will look something like this if the bucket has some files::
 Deleting a Bucket
 -----------------
 .. note::
-   The Bucket must be empty! Otherwise it won't work!
+   The bucket must be empty! Otherwise it won't work!
 
 .. code-block:: ruby
 
@@ -359,6 +359,6 @@ The output of this will look something like::
    http://objects.dreamhost.com/my-bucket-name/hello.txt
    http://objects.dreamhost.com/my-bucket-name/secret_plans.txt?Signature=XXXXXXXXXXXXXXXXXXXXXXXXXXX&Expires=1316027075&AWSAccessKeyId=XXXXXXXXXXXXXXXXXXX
 
-.. _`AWS::S3`: http://amazon.rubyforge.org/
-.. _`AWS::S3::Bucket`: http://amazon.rubyforge.org/doc/
+.. _`AWS::S3`: https://rubygems.org/gems/aws-s3
+.. _`AWS::S3::Bucket`: https://www.rubydoc.info/gems/aws-s3
 

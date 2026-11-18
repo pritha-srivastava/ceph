@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -22,10 +23,10 @@
 # endif
 
 class XFS : public FS {
-  const char *get_name() {
+  const char *get_name() override {
     return "xfs";
   }
-  int set_alloc_hint(int fd, uint64_t hint);
+  int set_alloc_hint(int fd, uint64_t hint) override;
 };
 
 #endif

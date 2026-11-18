@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -18,7 +19,14 @@
 /*
  * Likely / Unlikely macros
  */
+#ifndef likely
 #define likely(x)       __builtin_expect((x),1)
+#endif
+#ifndef unlikely
 #define unlikely(x)     __builtin_expect((x),0)
+#endif
+#ifndef expect
+#define expect(x, hint) __builtin_expect((x),(hint))
+#endif
 
 #endif

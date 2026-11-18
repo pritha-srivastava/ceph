@@ -1,14 +1,16 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_COMMON_SLOPPYCRCMAP_H
 #define CEPH_COMMON_SLOPPYCRCMAP_H
 
-#include "include/types.h"
+#include <map>
+
 #include "include/encoding.h"
 
-#include <map>
-#include <ostream>
+namespace ceph {
+class Formatter;
+}
 
 /**
  * SloppyCRCMap
@@ -33,7 +35,7 @@ public:
     block_size = b;
     //zero_crc = ceph_crc32c(0xffffffff, NULL, block_size);
     if (b) {
-      bufferlist bl;
+      ceph::buffer::list bl;
       bl.append_zero(block_size);
       zero_crc = bl.crc32c(crc_iv);
     } else {
@@ -42,7 +44,7 @@ public:
   }
 
   /// update based on a write
-  void write(uint64_t offset, uint64_t len, const bufferlist& bl,
+  void write(uint64_t offset, uint64_t len, const ceph::buffer::list& bl,
 	     std::ostream *out = NULL);
 
   /// update based on a truncate
@@ -64,12 +66,12 @@ public:
    * @param err option ostream to describe errors in detail
    * @returns error count, 0 for success
    */
-  int read(uint64_t offset, uint64_t len, const bufferlist& bl, std::ostream *err);
+  int read(uint64_t offset, uint64_t len, const ceph::buffer::list& bl, std::ostream *err);
 
-  void encode(bufferlist& bl) const;
-  void decode(bufferlist::iterator& bl);
-  void dump(Formatter *f) const;
-  static void generate_test_instances(list<SloppyCRCMap*>& ls);
+  void encode(ceph::buffer::list& bl) const;
+  void decode(ceph::buffer::list::const_iterator& bl);
+  void dump(ceph::Formatter *f) const;
+  static std::list<SloppyCRCMap> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(SloppyCRCMap)
 

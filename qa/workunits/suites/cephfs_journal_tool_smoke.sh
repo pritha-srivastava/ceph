@@ -1,9 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-set -e
-set -x
+set -ex
 
-export BIN="${BIN:-cephfs-journal-tool}"
+export BIN="${BIN:-cephfs-journal-tool --rank=cephfs:0}"
 export JOURNAL_FILE=/tmp/journal.bin
 export JSON_OUTPUT=/tmp/json.tmp
 export BINARY_OUTPUT=/tmp/binary.tmp
@@ -51,11 +50,20 @@ if [ ! -s $JOURNAL_FILE ] ; then
 fi
 
 # Can we execute a journal reset?
-$BIN journal reset
+$BIN journal reset --yes-i-really-really-mean-it
 $BIN journal inspect
 $BIN header get
 
-# Can we import what we exported?
+echo "Rolling back journal to original state..."
+$BIN journal import $JOURNAL_FILE
+
+echo "Testing 'header' commands..."
+$BIN header get
+$BIN header set write_pos 123
+$BIN header set expire_pos 123
+$BIN header set trimmed_pos 123
+
+echo "Rolling back journal to original state..."
 $BIN journal import $JOURNAL_FILE
 
 echo "Testing 'event' commands..."
@@ -71,19 +79,15 @@ if [ ! -s $BINARY_OUTPUT ] ; then
     echo "Export to $BINARY_OUTPUT failed"
     exit -1
 fi
-$BIN event apply summary
+$BIN event recover_dentries summary
 $BIN event splice summary
 
-echo "Rolling back journal to original state..."
-$BIN journal import $JOURNAL_FILE
+# Tests finish.
+# Metadata objects have been modified by the 'event recover_dentries' command.
+# Journal is no long consistent with respect to metadata objects (especially inotable).
+# To ensure mds successfully replays its journal, we need to do journal reset.
+$BIN journal reset --yes-i-really-really-mean-it
+cephfs-table-tool all reset session
 
-echo "Testing 'header' commands..."
-
-$BIN header get
-$BIN header set write_pos 123
-$BIN header set expire_pos 123
-$BIN header set trimmed_pos 123
-
-echo "Rolling back journal to original state..."
-$BIN journal import $JOURNAL_FILE
-
+$BIN header recover 2>/dev/null #dry-run
+$BIN header recover --force 2>/dev/null #mutation

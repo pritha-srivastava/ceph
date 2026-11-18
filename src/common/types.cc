@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -21,12 +22,5 @@
 #ifndef UINT8_MAX
 #define UINT8_MAX (255)
 #endif
-
-const shard_id_t shard_id_t::NO_SHARD(-1);
-
-ostream &operator<<(ostream &lhs, const shard_id_t &rhs)
-{
-  return lhs << (unsigned)(uint8_t)rhs.id;
-}
 
 #endif

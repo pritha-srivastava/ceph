@@ -4,8 +4,10 @@ Rbd testing task
 import contextlib
 import logging
 import os
+import tempfile
+import sys
 
-from cStringIO import StringIO
+from io import StringIO
 from teuthology.orchestra import run
 from teuthology import misc as teuthology
 from teuthology import contextutil
@@ -14,7 +16,14 @@ from teuthology.task.common_fs_utils import generic_mkfs
 from teuthology.task.common_fs_utils import generic_mount
 from teuthology.task.common_fs_utils import default_image_name
 
+
+#V1 image unsupported but required for testing purposes
+os.environ["RBD_FORCE_ALLOW_V1"] = "1"
+
 log = logging.getLogger(__name__)
+
+ENCRYPTION_PASSPHRASE = "password"
+CLONE_ENCRYPTION_PASSPHRASE = "password2"
 
 @contextlib.contextmanager
 def create_image(ctx, config):
@@ -30,6 +39,7 @@ def create_image(ctx, config):
                 image_name: testimage
                 image_size: 100
                 image_format: 1
+                encryption_format: luks2
             client.1:
 
     Image size is expressed as a number of megabytes; default value
@@ -47,20 +57,24 @@ def create_image(ctx, config):
         images = [(role, None) for role in config]
 
     testdir = teuthology.get_testdir(ctx)
+    passphrase_file = '{tdir}/passphrase'.format(tdir=testdir)
     for role, properties in images:
         if properties is None:
             properties = {}
         name = properties.get('image_name', default_image_name(role))
         size = properties.get('image_size', 10240)
         fmt = properties.get('image_format', 1)
+        encryption_format = properties.get('encryption_format', 'none')
+        cluster, _, _ = teuthology.split_role(role)
         (remote,) = ctx.cluster.only(role).remotes.keys()
         log.info('Creating image {name} with size {size}'.format(name=name,
                                                                  size=size))
         args = [
                 'adjust-ulimits',
-                'ceph-coverage'.format(tdir=testdir),
+                'ceph-coverage',
                 '{tdir}/archive/coverage'.format(tdir=testdir),
                 'rbd',
+                '--cluster', cluster,
                 '-p', 'rbd',
                 'create',
                 '--size', str(size),
@@ -71,14 +85,42 @@ def create_image(ctx, config):
         if int(fmt) != 1:
             args += ['--image-format', str(fmt)]
         remote.run(args=args)
+
+        if encryption_format != 'none':
+            remote.run(
+                args=[
+                    'echo',
+                    ENCRYPTION_PASSPHRASE,
+                    run.Raw('>'),
+                    passphrase_file
+                    ]
+                )
+            remote.run(
+                args=[
+                    'adjust-ulimits',
+                    'ceph-coverage',
+                    '{tdir}/archive/coverage'.format(tdir=testdir),
+                    'rbd',
+                    '--cluster', cluster,
+                    'encryption',
+                    'format',
+                    name,
+                    encryption_format,
+                    passphrase_file,
+                    '-p',
+                    'rbd'
+                    ]
+                )
     try:
         yield
     finally:
         log.info('Deleting rbd images...')
+        remote.run(args=['rm', '-f', passphrase_file])
         for role, properties in images:
             if properties is None:
                 properties = {}
             name = properties.get('image_name', default_image_name(role))
+            cluster, _, _ = teuthology.split_role(role)
             (remote,) = ctx.cluster.only(role).remotes.keys()
             remote.run(
                 args=[
@@ -86,6 +128,7 @@ def create_image(ctx, config):
                     'ceph-coverage',
                     '{tdir}/archive/coverage'.format(tdir=testdir),
                     'rbd',
+                    '--cluster', cluster,
                     '-p', 'rbd',
                     'rm',
                     name,
@@ -105,6 +148,7 @@ def clone_image(ctx, config):
             client.0:
                 parent_name: testimage
                 image_name: cloneimage
+                encryption_format: luks2
     """
     assert isinstance(config, dict) or isinstance(config, list), \
         "task clone_image only supports a list or dictionary for configuration"
@@ -115,11 +159,13 @@ def clone_image(ctx, config):
         images = [(role, None) for role in config]
 
     testdir = teuthology.get_testdir(ctx)
+    clone_passphrase_file = '{tdir}/clone-passphrase'.format(tdir=testdir)
     for role, properties in images:
         if properties is None:
             properties = {}
 
         name = properties.get('image_name', default_image_name(role))
+        cluster, _, _ = teuthology.split_role(role)
         parent_name = properties.get('parent_name')
         assert parent_name is not None, \
             "parent_name is required"
@@ -128,14 +174,34 @@ def clone_image(ctx, config):
         (remote,) = ctx.cluster.only(role).remotes.keys()
         log.info('Clone image {parent} to {child}'.format(parent=parent_name,
                                                           child=name))
-        for cmd in [('snap', 'create', parent_spec),
+
+        commands = [('snap', 'create', parent_spec),
                     ('snap', 'protect', parent_spec),
-                    ('clone', parent_spec, name)]:
+                    ('clone', parent_spec, name)
+                    ]
+
+        encryption_format = properties.get('encryption_format', 'none')
+        if encryption_format != 'none':
+            remote.run(
+                args=[
+                    'echo',
+                    CLONE_ENCRYPTION_PASSPHRASE,
+                    run.Raw('>'),
+                    clone_passphrase_file
+                    ]
+                )
+
+            commands.append(
+                ('encryption', 'format', name, encryption_format,
+                 clone_passphrase_file)
+            )
+
+        for cmd in commands:
             args = [
                     'adjust-ulimits',
-                    'ceph-coverage'.format(tdir=testdir),
+                    'ceph-coverage',
                     '{tdir}/archive/coverage'.format(tdir=testdir),
-                    'rbd', '-p', 'rbd'
+                    'rbd', '--cluster', cluster, '-p', 'rbd'
                     ]
             args.extend(cmd)
             remote.run(args=args)
@@ -144,10 +210,12 @@ def clone_image(ctx, config):
         yield
     finally:
         log.info('Deleting rbd clones...')
+        remote.run(args=['rm', '-f', clone_passphrase_file])
         for role, properties in images:
             if properties is None:
                 properties = {}
             name = properties.get('image_name', default_image_name(role))
+            cluster, _, _ = teuthology.split_role(role)
             parent_name = properties.get('parent_name')
             parent_spec = '{name}@{snap}'.format(name=parent_name, snap=name)
 
@@ -158,9 +226,9 @@ def clone_image(ctx, config):
                         ('snap', 'rm', parent_spec)]:
                 args = [
                         'adjust-ulimits',
-                        'ceph-coverage'.format(tdir=testdir),
+                        'ceph-coverage',
                         '{tdir}/archive/coverage'.format(tdir=testdir),
-                        'rbd', '-p', 'rbd'
+                        'rbd', '--cluster', cluster, '-p', 'rbd'
                         ]
                 args.extend(cmd)
                 remote.run(args=args)
@@ -220,25 +288,84 @@ def dev_create(ctx, config):
         - rbd.create_image: [client.0]
         - rbd.modprobe: [client.0]
         - rbd.dev_create:
-            client.0: testimage.client.0
+            client.0:
+                image_name: testimage.client.0
+                encryption_format: luks2
+                parent_encryption_format: luks1
     """
     assert isinstance(config, dict) or isinstance(config, list), \
         "task dev_create only supports a list or dictionary for configuration"
 
     if isinstance(config, dict):
-        role_images = config.items()
+        images = config.items()
     else:
-        role_images = [(role, None) for role in config]
+        images = [(role, None) for role in config]
 
     log.info('Creating rbd block devices...')
 
     testdir = teuthology.get_testdir(ctx)
+    passphrase_file = '{tdir}/passphrase'.format(tdir=testdir)
+    clone_passphrase_file = '{tdir}/clone-passphrase'.format(tdir=testdir)
+    device_path = {}
 
-    for role, image in role_images:
-        if image is None:
-            image = default_image_name(role)
+    for role, properties in images:
+        if properties is None:
+            properties = {}
+        name = properties.get('image_name', default_image_name(role))
+        cluster, _, _ = teuthology.split_role(role)
+        parent_encryption_format = properties.get('parent_encryption_format',
+                                                  'none')
+        encryption_format = properties.get('encryption_format',
+                                           parent_encryption_format)
         (remote,) = ctx.cluster.only(role).remotes.keys()
 
+        if encryption_format == 'none' and parent_encryption_format == 'none':
+            device_path[role] = '/dev/rbd/rbd/{image}'.format(image=name)
+            device_specific_args = []
+        else:
+            device_specific_args = ['-t', 'nbd', '-o']
+
+            is_cloned = properties.get('parent_name') is not None
+            encryption_args = ""
+            if is_cloned and properties.get('encryption_format') != 'none':
+                remote.run(
+                    args=[
+                        'echo',
+                        CLONE_ENCRYPTION_PASSPHRASE,
+                        run.Raw('>'),
+                        clone_passphrase_file
+                        ]
+                    )
+
+                encryption_args = \
+                    'encryption-format=%s,encryption-passphrase-file=%s' % (
+                        encryption_format, clone_passphrase_file)
+
+            if not is_cloned or parent_encryption_format != 'none':
+                remote.run(
+                    args=[
+                        'echo',
+                        ENCRYPTION_PASSPHRASE,
+                        run.Raw('>'),
+                        passphrase_file
+                        ]
+                    )
+
+                if is_cloned and properties.get('encryption_format') != 'none':
+                    encryption_args += ","
+
+                if parent_encryption_format != 'none':
+                    encryption_args += \
+                        'encryption-format=%s,encryption-passphrase-file=%s' % (
+                            parent_encryption_format, passphrase_file)
+                else:
+                    encryption_args += \
+                        'encryption-format=%s,encryption-passphrase-file=%s' % (
+                            encryption_format, passphrase_file)
+
+            device_specific_args.append(encryption_args)
+
+        map_fp = StringIO()
         remote.run(
             args=[
                 'sudo',
@@ -246,25 +373,40 @@ def dev_create(ctx, config):
                 'ceph-coverage',
                 '{tdir}/archive/coverage'.format(tdir=testdir),
                 'rbd',
-                '--user', role.rsplit('.')[-1],
+                '--cluster', cluster,
+                '--id', role.rsplit('.')[-1],
                 '-p', 'rbd',
                 'map',
-                image,
-                run.Raw('&&'),
-                # wait for the symlink to be created by udev
-                'while', 'test', '!', '-e', '/dev/rbd/rbd/{image}'.format(image=image), run.Raw(';'), 'do',
-                'sleep', '1', run.Raw(';'),
-                'done',
-                ],
+                name] + device_specific_args,
+            stdout=map_fp,
             )
+
+        if encryption_format != 'none' or parent_encryption_format != 'none':
+            device_path[role] = map_fp.getvalue().rstrip()
+            properties['device_path'] = device_path[role]
+            remote.run(args=['sudo', 'chmod', '666', device_path[role]])
     try:
         yield
     finally:
         log.info('Unmapping rbd devices...')
-        for role, image in role_images:
-            if image is None:
-                image = default_image_name(role)
+        remote.run(args=['rm', '-f', passphrase_file, clone_passphrase_file])
+        for role, properties in images:
+            if not device_path.get(role):
+                continue
+
+            if properties is None:
+                properties = {}
+            encryption_format = properties.get('encryption_format', 'none')
+            parent_encryption_format = properties.get(
+                'parent_encryption_format', 'none')
             (remote,) = ctx.cluster.only(role).remotes.keys()
+
+            if encryption_format == 'none' and \
+                    parent_encryption_format == 'none':
+                device_specific_args = []
+            else:
+                device_specific_args = ['-t', 'nbd']
+
             remote.run(
                 args=[
                     'LD_LIBRARY_PATH={tdir}/binary/usr/local/lib'.format(tdir=testdir),
@@ -275,15 +417,8 @@ def dev_create(ctx, config):
                     'rbd',
                     '-p', 'rbd',
                     'unmap',
-                    '/dev/rbd/rbd/{imgname}'.format(imgname=image),
-                    run.Raw('&&'),
-                    # wait for the symlink to be deleted by udev
-                    'while', 'test', '-e', '/dev/rbd/rbd/{image}'.format(image=image),
-                    run.Raw(';'),
-                    'do',
-                    'sleep', '1', run.Raw(';'),
-                    'done',
-                    ],
+                    device_path[role],
+                    ] + device_specific_args,
                 )
 
 
@@ -334,11 +469,23 @@ def run_xfstests(ctx, config):
                 scratch_dev: 'scratch_dev'
                 fs_type: 'xfs'
                 tests: 'generic/100 xfs/003 xfs/005 xfs/006 generic/015'
+                exclude:
+                - generic/42
                 randomize: true
     """
     with parallel() as p:
         for role, properties in config.items():
             p.spawn(run_xfstests_one_client, ctx, role, properties)
+        exc = None
+        while True:
+            try:
+                p.next()
+            except StopIteration:
+                break
+            except:
+                exc = sys.exc_info()[1]
+        if exc is not None:
+            raise exc
     yield
 
 def run_xfstests_one_client(ctx, role, properties):
@@ -360,14 +507,14 @@ def run_xfstests_one_client(ctx, role, properties):
 
         fs_type = properties.get('fs_type')
         tests = properties.get('tests')
+        exclude_list = properties.get('exclude')
         randomize = properties.get('randomize')
-
 
         (remote,) = ctx.cluster.only(role).remotes.keys()
 
         # Fetch the test script
         test_root = teuthology.get_testdir(ctx)
-        test_script = 'run_xfstests_krbd.sh'
+        test_script = 'run_xfstests.sh'
         test_path = os.path.join(test_root, test_script)
 
         xfstests_url = properties.get('xfstests_url')
@@ -390,7 +537,15 @@ def run_xfstests_one_client(ctx, role, properties):
         log.info('    scratch device: {dev}'.format(dev=scratch_dev))
         log.info('     using fs_type: {fs_type}'.format(fs_type=fs_type))
         log.info('      tests to run: {tests}'.format(tests=tests))
+        log.info('      exclude list: {}'.format(' '.join(exclude_list)))
         log.info('         randomize: {randomize}'.format(randomize=randomize))
+
+        if exclude_list:
+            with tempfile.NamedTemporaryFile(mode='w', prefix='exclude') as exclude_file:
+                for test in exclude_list:
+                    exclude_file.write("{}\n".format(test))
+                exclude_file.flush()
+                remote.put_file(exclude_file.name, exclude_file.name)
 
         # Note that the device paths are interpreted using
         # readlink -f <path> in order to get their canonical
@@ -398,7 +553,6 @@ def run_xfstests_one_client(ctx, role, properties):
         args = [
             '/usr/bin/sudo',
             'TESTDIR={tdir}'.format(tdir=testdir),
-            'URL_BASE={url}'.format(url=xfstests_url),
             'adjust-ulimits',
             'ceph-coverage',
             '{tdir}/archive/coverage'.format(tdir=testdir),
@@ -409,6 +563,8 @@ def run_xfstests_one_client(ctx, role, properties):
             '-t', test_dev,
             '-s', scratch_dev,
             ]
+        if exclude_list:
+            args.extend(['-x', exclude_file.name])
         if randomize:
             args.append('-r')
         if tests:
@@ -445,9 +601,10 @@ def xfstests(ctx, config):
                 scratch_format: 1
                 fs_type: 'xfs'
                 tests: 'generic/100 xfs/003 xfs/005 xfs/006 generic/015'
+                exclude:
+                - generic/42
                 randomize: true
-                xfstests_branch: master
-                xfstests_url: 'https://raw.github.com/ceph/branch/master/qa'
+                xfstests_url: 'https://raw.github.com/ceph/ceph-ci/wip-55555/qa'
     """
     if config is None:
         config = { 'all': None }
@@ -461,7 +618,8 @@ def xfstests(ctx, config):
 
     running_xfstests = {}
     for role, properties in runs:
-        assert role.startswith('client.'), \
+        cluster, typ, _ = teuthology.split_role(role)
+        assert typ == "client", \
             "task xfstests can only run on client nodes"
         for host, roles_for_host in ctx.cluster.remotes.items():
             if role in roles_for_host:
@@ -508,6 +666,7 @@ def xfstests(ctx, config):
             fs_type=properties.get('fs_type', 'xfs'),
             randomize=properties.get('randomize', False),
             tests=properties.get('tests'),
+            exclude=properties.get('exclude', []),
             xfstests_url=xfstests_url,
             )
 
@@ -517,8 +676,8 @@ def xfstests(ctx, config):
         log.info('   scratch ({size} MB): {image}'.format(size=scratch_size,
                                                         image=scratch_image))
         modprobe_config[role] = None
-        image_map_config[role] = test_image
-        scratch_map_config[role] = scratch_image
+        image_map_config[role] = {'image_name': test_image}
+        scratch_map_config[role] = {'image_name': scratch_image}
 
     with contextutil.nested(
         lambda: create_image(ctx=ctx, config=images_config),
@@ -577,7 +736,7 @@ def task(ctx, config):
         norm_config = teuthology.replace_all_with_clients(ctx.cluster, config)
     if isinstance(norm_config, dict):
         role_images = {}
-        for role, properties in norm_config.iteritems():
+        for role, properties in norm_config.items():
             if properties is None:
                 properties = {}
             role_images[role] = properties.get('image_name')
@@ -589,7 +748,7 @@ def task(ctx, config):
     with contextutil.nested(
         lambda: create_image(ctx=ctx, config=norm_config),
         lambda: modprobe(ctx=ctx, config=norm_config),
-        lambda: dev_create(ctx=ctx, config=role_images),
+        lambda: dev_create(ctx=ctx, config=norm_config),
         lambda: generic_mkfs(ctx=ctx, config=norm_config,
                 devname_rtn=rbd_devname_rtn),
         lambda: generic_mount(ctx=ctx, config=role_images,

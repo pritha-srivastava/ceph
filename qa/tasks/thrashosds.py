@@ -3,7 +3,7 @@ Thrash -- Simulate random osd failures.
 """
 import contextlib
 import logging
-import ceph_manager
+from tasks import ceph_manager
 from teuthology import misc as teuthology
 
 
@@ -24,7 +24,7 @@ def task(ctx, config):
 
     cluster: (default 'ceph') the name of the cluster to thrash
 
-    min_in: (default 3) the minimum number of OSDs to keep in the
+    min_in: (default 4) the minimum number of OSDs to keep in the
        cluster
 
     min_out: (default 0) the minimum number of OSDs to keep out of the
@@ -63,10 +63,14 @@ def task(ctx, config):
        - kills that osd
        - revives all other osds
        - verifies that the osds fully recover
+    
+    test_min_size_duration: (1800) the number of seconds for
+        test_pool_min_size to last.
 
-    timeout: (360) the number of seconds to wait for the cluster
-       to become clean after each cluster change. If this doesn't
-       happen within the timeout, an exception will be raised.
+    timeout: (360) the number of seconds to wait for all osds to come
+       back up and for the cluster to become clean after each cluster
+       change. If this doesn't happen within the timeout, an exception
+       will be raised.
 
     revive_timeout: (150) number of seconds to wait for an osd asok to
        appear after attempting to revive the osd
@@ -76,6 +80,8 @@ def task(ctx, config):
     chance_pgnum_grow: (0) chance to increase a pool's size
     chance_pgpnum_fix: (0) chance to adjust pgpnum to pg for a pool
     pool_grow_by: (10) amount to increase pgnum by
+    chance_pgnum_shrink: (0) chance to decrease a pool's size
+    pool_shrink_by: (10) amount to decrease pgnum by
     max_pgs_per_pool_osd: (1200) don't expand pools past this size per osd
 
     pause_short: (3) duration of short pause
@@ -120,6 +126,13 @@ def task(ctx, config):
     disable_objectstore_tool_tests: (false) disable ceph_objectstore_tool based
                                     tests
 
+    chance_thrash_cluster_full: .05
+
+    chance_thrash_pg_upmap: 1.0
+    chance_thrash_pg_upmap_items: 1.0
+
+    aggressive_pg_num_changes: (true)  whether we should bypass the careful throttling of pg_num and pgp_num changes in mgr's adjust_pgs() controller
+
     example:
 
     tasks:
@@ -144,6 +157,9 @@ def task(ctx, config):
     config['dump_ops_enable'] = config.get('dump_ops_enable', "true")
     # add default value for noscrub_toggle_delay
     config['noscrub_toggle_delay'] = config.get('noscrub_toggle_delay', 2.0)
+    # add default value for random_eio
+    config['random_eio'] = config.get('random_eio', 0.0)
+    aggro = config.get('aggressive_pg_num_changes', True)
 
     log.info("config is {config}".format(config=str(config)))
 
@@ -164,7 +180,7 @@ def task(ctx, config):
             for remote in ctx.cluster.remotes.keys():
                 log.debug('checking console status of %s' % remote.shortname)
                 if not remote.console.check_status():
-                    log.warn('Failed to get console status for %s',
+                    log.warning('Failed to get console status for %s',
                              remote.shortname)
 
             # check that all osd remotes have a valid console
@@ -181,15 +197,35 @@ def task(ctx, config):
         if config.get(f):
             cluster_manager.config[f] = config.get(f)
 
+    if aggro:
+        cluster_manager.raw_cluster_cmd(
+            'config', 'set', 'mgr',
+            'mgr_debug_aggressive_pg_num_changes',
+            'true')
+
     log.info('Beginning thrashosds...')
-    thrash_proc = ceph_manager.Thrasher(
+    thrash_proc = ceph_manager.OSDThrasher(
         cluster_manager,
         config,
+        "OSDThrasher",
         logger=log.getChild('thrasher')
         )
+    ctx.ceph[cluster].thrashers.append(thrash_proc)
     try:
         yield
     finally:
         log.info('joining thrashosds')
-        thrash_proc.do_join()
-        cluster_manager.wait_for_recovery(config.get('timeout', 360))
+        try:
+            thrash_proc.stop_and_join()
+            if thrash_proc.exception is not None:
+                raise RuntimeError(
+                    f'error during osd thrashing: {thrash_proc.exception}')
+            timeout = config.get('timeout', 360)
+            cluster_manager.wait_for_all_osds_up(timeout=timeout)
+            cluster_manager.flush_all_pg_stats()
+            cluster_manager.wait_for_recovery(timeout)
+        finally:
+            if aggro:
+                cluster_manager.raw_cluster_cmd(
+                    'config', 'rm', 'mgr',
+                    'mgr_debug_aggressive_pg_num_changes')

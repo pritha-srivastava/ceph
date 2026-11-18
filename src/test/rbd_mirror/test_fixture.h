@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_TEST_RBD_MIRROR_TEST_FIXTURE_H
 #define CEPH_TEST_RBD_MIRROR_TEST_FIXTURE_H
@@ -7,6 +7,7 @@
 #include "include/int_types.h"
 #include "include/rados/librados.hpp"
 #include <gtest/gtest.h>
+#include <memory>
 #include <set>
 
 namespace librbd {
@@ -17,7 +18,7 @@ class RBD;
 namespace rbd {
 namespace mirror {
 
-class Threads;
+template <typename> class Threads;
 
 class TestFixture : public ::testing::Test {
 public:
@@ -26,8 +27,8 @@ public:
   static void SetUpTestCase();
   static void TearDownTestCase();
 
-  virtual void SetUp();
-  virtual void TearDown();
+  void SetUp() override;
+  void TearDown() override;
 
   librados::IoCtx m_local_io_ctx;
   librados::IoCtx m_remote_io_ctx;
@@ -37,7 +38,7 @@ public:
 
   std::set<librbd::ImageCtx *> m_image_ctxs;
 
-  Threads *m_threads = nullptr;
+  Threads<librbd::ImageCtx> *m_threads = nullptr;
 
 
   int create_image(librbd::RBD &rbd, librados::IoCtx &ioctx,

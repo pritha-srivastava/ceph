@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
 * Ceph - scalable distributed file system
 *
@@ -68,12 +69,14 @@ int main(int argc, const char **argv)
   RETURN1_IF_NONZERO(CrossProcessSem::create(0, &pool_setup_sem));
   CrossProcessSem *delete_pool_sem = NULL;
   RETURN1_IF_NONZERO(CrossProcessSem::create(0, &delete_pool_sem));
+  CrossProcessSem *deleted_pool_sem = NULL;
+  RETURN1_IF_NONZERO(CrossProcessSem::create(0, &deleted_pool_sem));
 
   // first test: create a pool, then delete that pool
   {
     StRadosCreatePool r1(argc, argv, NULL, pool_setup_sem, NULL,
 			 pool, 50, ".obj");
-    StRadosDeletePool r2(argc, argv, pool_setup_sem, NULL, pool);
+    StRadosDeletePool r2(argc, argv, pool_setup_sem, deleted_pool_sem, pool);
     vector < SysTestRunnable* > vec;
     vec.push_back(&r1);
     vec.push_back(&r2);
@@ -89,7 +92,7 @@ int main(int argc, const char **argv)
   RETURN1_IF_NONZERO(pool_setup_sem->reinit(0));
   RETURN1_IF_NONZERO(delete_pool_sem->reinit(0));
   {
-    StRadosCreatePool r1(argc, argv, NULL, pool_setup_sem, NULL,
+    StRadosCreatePool r1(argc, argv, deleted_pool_sem, pool_setup_sem, NULL,
 			 pool, g_num_objects, ".obj");
     StRadosDeletePool r2(argc, argv, delete_pool_sem, NULL, pool);
     StRadosListObjects r3(argc, argv, pool, true, g_num_objects / 2,

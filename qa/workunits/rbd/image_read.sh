@@ -1,4 +1,4 @@
-#!/bin/bash -e
+#!/usr/bin/env bash
 
 # Copyright (C) 2013 Inktank Storage, Inc.
 #
@@ -41,6 +41,7 @@
 # supercede these defaults.  Such variables have names that begin
 # with "IMAGE_READ_", for e.g. use IMAGE_READ_PAGE_SIZE=65536
 # to use 65536 as the page size.
+set -e
 
 DEFAULT_VERBOSE=true
 DEFAULT_TEST_CLONES=true
@@ -52,6 +53,8 @@ DEFAULT_PAGE_SIZE=4096
 DEFAULT_OBJECT_ORDER=22
 MIN_OBJECT_ORDER=12	# technically 9, but the rbd CLI enforces 12
 MAX_OBJECT_ORDER=32
+
+RBD_FORCE_ALLOW_V1=1
 
 PROGNAME=$(basename $0)
 
@@ -216,7 +219,7 @@ function parseargs() {
 	echo "    object order is ${OBJECT_ORDER}, so" \
 		"objects are ${OBJECT_SIZE} bytes"
 	echo "    page size is ${PAGE_SIZE} bytes, so" \
-		"there are are ${OBJECT_PAGES} pages in an object"
+		"there are ${OBJECT_PAGES} pages in an object"
 	echo "    derived image size is ${IMAGE_SIZE} MB, so" \
 		"there are ${IMAGE_OBJECTS} objects in an image"
 	if [ "${TEST_CLONES}" = true ]; then

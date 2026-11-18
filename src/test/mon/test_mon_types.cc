@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -76,7 +77,6 @@ TEST(mon_features, binary_ops) {
 
 TEST(mon_features, set_funcs) {
 
-  mon_feature_t FEATURE_NONE(0ULL);
   mon_feature_t FEATURE_A((1ULL << 1));
   mon_feature_t FEATURE_B((1ULL << 2));
   mon_feature_t FEATURE_C((1ULL << 3));

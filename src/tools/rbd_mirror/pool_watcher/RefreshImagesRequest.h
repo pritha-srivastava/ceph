@@ -1,14 +1,13 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_RBD_MIRROR_POOL_WATCHER_REFRESH_IMAGES_REQUEST_H
 #define CEPH_RBD_MIRROR_POOL_WATCHER_REFRESH_IMAGES_REQUEST_H
 
 #include "include/buffer.h"
 #include "include/rados/librados.hpp"
-#include "tools/rbd_mirror/types.h"
+#include "tools/rbd_mirror/Types.h"
 #include <string>
-#include <unordered_map>
 
 struct Context;
 
@@ -21,8 +20,8 @@ namespace pool_watcher {
 template <typename ImageCtxT = librbd::ImageCtx>
 class RefreshImagesRequest {
 public:
-  RefreshImagesRequest *create(librados::IoCtx &remote_io_ctx,
-                               ImageIds *image_ids, Context *on_finish) {
+  static RefreshImagesRequest *create(librados::IoCtx &remote_io_ctx,
+                                      ImageIds *image_ids, Context *on_finish) {
     return new RefreshImagesRequest(remote_io_ctx, image_ids, on_finish);
   }
 
@@ -45,18 +44,11 @@ private:
    *    v   v             | (more images)
    * MIRROR_IMAGE_LIST ---/
    *    |
-   *    |   /-------------\
-   *    |   |             |
-   *    v   v             | (more images)
-   * DIR_LIST ------------/
-   *    |
    *    v
    * <finish>
    *
    * @endverbatim
    */
-
-  typedef std::unordered_map<std::string, std::string> LocalToGlobalIds;
 
   librados::IoCtx &m_remote_io_ctx;
   ImageIds *m_image_ids;
@@ -64,13 +56,9 @@ private:
 
   bufferlist m_out_bl;
   std::string m_start_after;
-  LocalToGlobalIds m_local_to_global_ids;
 
   void mirror_image_list();
   void handle_mirror_image_list(int r);
-
-  void dir_list();
-  void handle_dir_list(int r);
 
   void finish(int r);
 

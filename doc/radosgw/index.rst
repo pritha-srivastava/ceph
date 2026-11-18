@@ -1,26 +1,31 @@
+.. _object-gateway:
+
 =====================
  Ceph Object Gateway
 =====================
 
 :term:`Ceph Object Gateway` is an object storage interface built on top of
-``librados`` to provide applications with a RESTful gateway to
-Ceph Storage Clusters. :term:`Ceph Object Storage` supports two interfaces:
+``librados``. It provides a RESTful gateway between applications and Ceph
+Storage Clusters. :term:`Ceph Object Storage` supports two interfaces:
 
-#. **S3-compatible:** Provides object storage functionality with an interface 
+#. **S3-compatible:** Provides object storage functionality with an interface
    that is compatible with a large subset of the Amazon S3 RESTful API.
 
 #. **Swift-compatible:** Provides object storage functionality with an interface
    that is compatible with a large subset of the OpenStack Swift API.
-   
-Ceph Object Storage uses the Ceph Object Gateway daemon (``radosgw``), which is
-a FastCGI module for interacting with a Ceph Storage Cluster. Since it
-provides interfaces compatible with OpenStack Swift and Amazon S3, the Ceph
-Object Gateway has its own user management. Ceph Object Gateway can store data
-in the same Ceph Storage Cluster used to store data from Ceph Filesystem clients
-or Ceph Block Device clients. The S3 and Swift APIs share a common namespace, so
-you may write data with one API and retrieve it with the other. 
 
-.. ditaa::  +------------------------+ +------------------------+
+Ceph Object Storage uses the Ceph Object Gateway daemon (``radosgw``), an HTTP
+server designed to interact with a Ceph Storage Cluster. The Ceph Object
+Gateway provides interfaces that are compatible with both Amazon S3 and
+OpenStack Swift, and it has its own user management. Ceph Object Gateway can
+use a single Ceph Storage cluster to store data from Ceph File System and from
+Ceph Block device clients. The S3 API and the Swift API share a common
+namespace, which means that it is possible to write data to a Ceph Storage
+Cluster with one API and then retrieve that data with the other API.
+
+.. ditaa::
+
+            +------------------------+ +------------------------+
             |   S3 compatible API    | |  Swift compatible API  |
             +------------------------+-+------------------------+
             |                      radosgw                      |
@@ -28,27 +33,81 @@ you may write data with one API and retrieve it with the other.
             |                      librados                     |
             +------------------------+-+------------------------+
             |          OSDs          | |        Monitors        |
-            +------------------------+ +------------------------+   
+            +------------------------+ +------------------------+
 
 .. note:: Ceph Object Storage does **NOT** use the Ceph Metadata Server.
 
+Configuration
+=============
 
 .. toctree::
-	:maxdepth: 1
+   :maxdepth: 1
 
-	Manual Install <../../install/install-ceph-gateway>
-	Simple Configuration with FastCGI <config-fcgi>
-	Federated Configuration <federated-config>
-	Multisite Configuration <multisite>
-	Config Reference <config-ref>
-	Admin Guide <admin>
-	S3 API <s3>
-	Swift API <swift>
-	Admin Ops API <adminops>
-	OpenStack Keystone Integration <keystone>
-	Multi-tenancy <multitenancy>
-	Compression <compression>
-	troubleshooting
-	Manpage radosgw <../../man/8/radosgw>
-	Manpage radosgw-admin <../../man/8/radosgw-admin>
-	
+   Deploying with cephadm <../cephadm/services/rgw>
+   Config Reference <config-ref>
+   HTTP Frontends <frontends>
+   Configuring Pools <pools>
+   Zone Features <zone-features>
+   Multisite Configuration <multisite>
+   Compression <compression>
+
+
+Administration
+==============
+
+.. toctree::
+   :maxdepth: 1
+
+   Admin Guide <admin>
+   User Accounts <account>
+   Multi-tenancy <multitenancy>
+   Metrics <metrics>
+   Lua Scripting <lua-scripting>
+   Troubleshooting <troubleshooting>
+   Orphan List and Associated Tooling <orphans>
+   Manpage radosgw <../../man/8/radosgw>
+   Manpage radosgw-admin <../../man/8/radosgw-admin>
+
+
+Authentication
+==============
+
+.. toctree::
+   :maxdepth: 1
+
+   OpenStack Keystone Integration <keystone>
+   LDAP Authentication <ldap-auth>
+   Multi-factor Authentication <mfa>
+   Open Policy Agent Integration <opa>
+
+
+APIs
+====
+
+.. toctree::
+   :maxdepth: 1
+
+   AWS IAM <iam>
+   AWS S3 <s3>
+   AWS SNS <notifications>
+   AWS STS <STS>
+   OpenStack Swift <swift>
+   Admin Ops API <adminops>
+   Python Binding <api>
+
+
+Other
+=====
+
+.. toctree::
+   :maxdepth: 1
+
+   Dynamic Bucket Index Resharding <dynamicresharding>
+   Sync Modules <sync-modules>
+   Data Layout in RADOS <layout>
+   Data Caching and CDN <rgw-cache>
+   D3N Data Cache <d3n_datacache>
+   Export over NFS <nfs>
+   Share over SMB <smb>
+   Full Object Deduplication <s3_objects_dedup>
+   S3 Vectors <s3vectors>

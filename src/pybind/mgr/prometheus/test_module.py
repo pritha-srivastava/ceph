@@ -1,0 +1,1047 @@
+from typing import Dict
+from unittest import TestCase, mock
+import errno
+
+from prometheus.module import Metric, LabelValues, Number, HealthHistory, ThreadSafeLRUCacheDict, Module
+import json
+import threading
+
+
+class MetricGroupTest(TestCase):
+    def setUp(self):
+        self.DISK_OCCUPATION = (
+            "ceph_daemon",
+            "device",
+            "db_device",
+            "wal_device",
+            "instance",
+        )
+        self.metric_value: Dict[LabelValues, Number] = {
+            ("osd.0", "/dev/dm-0", "", "", "node1"): 1,
+            ("osd.1", "/dev/dm-0", "", "", "node3"): 1,
+            ("osd.2", "/dev/dm-0", "", "", "node2"): 1,
+            ("osd.3", "/dev/dm-1", "", "", "node1"): 1,
+            ("osd.4", "/dev/dm-1", "", "", "node3"): 1,
+            ("osd.5", "/dev/dm-1", "", "", "node2"): 1,
+            ("osd.6", "/dev/dm-1", "", "", "node2"): 1,
+        }
+
+    def test_metric_group_by(self):
+        m = Metric("untyped", "disk_occupation", "", self.DISK_OCCUPATION)
+        m.value = self.metric_value
+        grouped_metric = m.group_by(
+            ["device", "instance"],
+            {"ceph_daemon": lambda xs: "+".join(xs)},
+            name="disk_occupation_display",
+        )
+        self.assertEqual(
+            grouped_metric.value,
+            {
+                ("osd.0", "/dev/dm-0", "node1"): 1,
+                ("osd.1", "/dev/dm-0", "node3"): 1,
+                ("osd.2", "/dev/dm-0", "node2"): 1,
+                ("osd.3", "/dev/dm-1", "node1"): 1,
+                ("osd.4", "/dev/dm-1", "node3"): 1,
+                ("osd.5+osd.6", "/dev/dm-1", "node2"): 1,
+            },
+        )
+        self.maxDiff = None
+        self.assertEqual(
+            grouped_metric.str_expfmt(),
+            """
+# HELP ceph_disk_occupation_display 
+# TYPE ceph_disk_occupation_display untyped
+ceph_disk_occupation_display{ceph_daemon="osd.0",device="/dev/dm-0",instance="node1"} 1.0
+ceph_disk_occupation_display{ceph_daemon="osd.1",device="/dev/dm-0",instance="node3"} 1.0
+ceph_disk_occupation_display{ceph_daemon="osd.2",device="/dev/dm-0",instance="node2"} 1.0
+ceph_disk_occupation_display{ceph_daemon="osd.3",device="/dev/dm-1",instance="node1"} 1.0
+ceph_disk_occupation_display{ceph_daemon="osd.4",device="/dev/dm-1",instance="node3"} 1.0
+ceph_disk_occupation_display{ceph_daemon="osd.5+osd.6",device="/dev/dm-1",instance="node2"} 1.0""",  # noqa: W291
+        )
+        self.assertEqual(
+            grouped_metric.labelnames, ("ceph_daemon", "device", "instance")
+        )
+
+    def test_metric_group_by__no_value(self):
+        m = Metric("metric_type", "name", "desc", labels=('foo', 'bar'))
+        grouped = m.group_by(['foo'], {'bar': lambda bars: ', '.join(bars)})
+        self.assertEqual(grouped.value, {})
+        self.assertEqual(grouped.str_expfmt(),
+                         '\n# HELP ceph_name desc\n# TYPE ceph_name metric_type')
+
+    def test_metric_group_by__no_labels(self):
+        m = Metric("metric_type", "name", "desc", labels=None)
+        with self.assertRaises(AssertionError) as cm:
+            m.group_by([], {})
+        self.assertEqual(str(cm.exception), "cannot match keys without label names")
+
+    def test_metric_group_by__key_not_in_labels(self):
+        m = Metric("metric_type", "name", "desc", labels=("foo", "bar"))
+        m.value = self.metric_value
+        with self.assertRaises(AssertionError) as cm:
+            m.group_by(["baz"], {})
+        self.assertEqual(str(cm.exception), "unknown key: baz")
+
+    def test_metric_group_by__empty_joins(self):
+        m = Metric("", "", "", ("foo", "bar"))
+        with self.assertRaises(AssertionError) as cm:
+            m.group_by(["foo"], joins={})
+        self.assertEqual(str(cm.exception), "joins must not be empty")
+
+    def test_metric_group_by__joins_not_callable(self):
+        m = Metric("", "", "", ("foo", "bar"))
+        m.value = self.metric_value
+        with self.assertRaises(AssertionError) as cm:
+            m.group_by(["foo"], {"bar": "not callable str"})
+        self.assertEqual(str(cm.exception), "joins must be callable")
+
+
+class HealthHistoryTest(TestCase):
+    def setUp(self):
+        self.mgr = mock.MagicMock()
+        self.mgr.get_localized_module_option.return_value = 1000
+        self.mgr.get_store.return_value = "{}"
+        self.health_history = HealthHistory(self.mgr)
+
+    def test_check_save_no_deadlock(self):
+        """Verifies that check() can call save() without deadlocking."""
+        info = {'severity': 1}
+        health_data = {
+            'checks': {
+                'OSD_DOWN': info
+            }
+        }
+
+        def call_check():
+            self.health_history.check(health_data)
+
+        t = threading.Thread(target=call_check)
+        t.start()
+        t.join(timeout=2)
+
+        self.assertFalse(t.is_alive(), "Deadlock detected: Thread is still hung!")
+        self.mgr.set_store.assert_called()
+
+
+class HealthDetailTest(TestCase):
+    def setUp(self):
+        from prometheus.module import HEALTHCHECK_DETAIL
+        self.module = mock.MagicMock(spec=Module)
+        self.module.log = mock.MagicMock()
+        self.module.get_localized_module_option.return_value = 1000
+        self.module.get_store.return_value = "{}"
+        self.module.health_history = HealthHistory(self.module)
+        self.module.metrics = {
+            'health_status': Metric('gauge', 'health_status', ''),
+            'health_detail': Metric('untyped', 'health_detail', '', HEALTHCHECK_DETAIL),
+        }
+        self.module._process_health_checks_with_message = (
+            Module._process_health_checks_with_message.__get__(self.module)
+        )
+        self.module.get_health = Module.get_health.__get__(self.module)
+
+    def test_bluestore_free_fragmentation_summary_with_details(self):
+        health_data = {
+            'status': 'HEALTH_WARN',
+            'checks': {
+                'BLUESTORE_FREE_FRAGMENTATION': {
+                    'severity': 'HEALTH_WARN',
+                    'summary': {
+                        'message': '2 OSD(s) experiencing high free space fragmentation of BlueStore',
+                        'count': 2
+                    },
+                    'detail': [
+                        {'message': ' osd.4 0.301470'},
+                        {'message': ' osd.15 0.309722'}
+                    ]
+                }
+            }
+        }
+        self.module.get.return_value = {'json': json.dumps(health_data)}
+        self.module.get_health()
+
+        expected_labels = (
+            'BLUESTORE_FREE_FRAGMENTATION',
+            'HEALTH_WARN',
+            '2 OSD(s) experiencing high free space fragmentation of BlueStore. Affected OSDs: osd.4 0.301470, osd.15 0.309722'
+        )
+        self.assertEqual(
+            self.module.metrics['health_detail'].value.get(expected_labels),
+            1
+        )
+        self.assertNotIn(
+            ('BLUESTORE_FREE_FRAGMENTATION', 'HEALTH_WARN', 'osd.4 0.301470'),
+            self.module.metrics['health_detail'].value
+        )
+
+    def test_bluestore_free_fragmentation_summary_without_details(self):
+        health_data = {
+            'status': 'HEALTH_WARN',
+            'checks': {
+                'BLUESTORE_FREE_FRAGMENTATION': {
+                    'severity': 'HEALTH_WARN',
+                    'summary': {
+                        'message': '3 OSD(s) experiencing high free space fragmentation of BlueStore',
+                        'count': 3
+                    }
+                }
+            }
+        }
+        self.module.get.return_value = {'json': json.dumps(health_data)}
+        self.module.get_health()
+
+        expected_labels = (
+            'BLUESTORE_FREE_FRAGMENTATION',
+            'HEALTH_WARN',
+            '3 OSD(s) experiencing high free space fragmentation of BlueStore'
+        )
+        self.assertEqual(
+            self.module.metrics['health_detail'].value.get(expected_labels),
+            1
+        )
+
+    def test_bluestore_string_summary(self):
+        health_data = {
+            'status': 'HEALTH_WARN',
+            'checks': {
+                'BLUESTORE_FREE_FRAGMENTATION': {
+                    'severity': 'HEALTH_WARN',
+                    'summary': '3 OSD(s) experiencing high free space fragmentation of BlueStore',
+                    'detail': [
+                        {'message': 'osd.0 0.000089'}
+                    ]
+                }
+            }
+        }
+        self.module.get.return_value = {'json': json.dumps(health_data)}
+        self.module.get_health()
+
+        expected_labels = (
+            'BLUESTORE_FREE_FRAGMENTATION',
+            'HEALTH_WARN',
+            '3 OSD(s) experiencing high free space fragmentation of BlueStore. Affected OSDs: osd.0 0.000089'
+        )
+        self.assertEqual(
+            self.module.metrics['health_detail'].value.get(expected_labels),
+            1
+        )
+
+    def test_bluestore_empty_or_missing_summary(self):
+        health_data = {
+            'status': 'HEALTH_WARN',
+            'checks': {
+                'BLUESTORE_FREE_FRAGMENTATION': {
+                    'severity': 'HEALTH_WARN',
+                    'summary': {}
+                }
+            }
+        }
+        self.module.get.return_value = {'json': json.dumps(health_data)}
+        self.module.get_health()
+
+        self.assertNotIn(
+            ('BLUESTORE_FREE_FRAGMENTATION', 'HEALTH_WARN', ''),
+            self.module.metrics['health_detail'].value
+        )
+
+    def test_generic_health_check_without_message(self):
+        health_data = {
+            'status': 'HEALTH_WARN',
+            'checks': {
+                'OSD_DOWN': {
+                    'severity': 'HEALTH_WARN',
+                    'summary': {
+                        'message': '1 osds down',
+                        'count': 1
+                    }
+                }
+            }
+        }
+        self.module.get.return_value = {'json': json.dumps(health_data)}
+        self.module.get_health()
+
+        expected_labels = ('OSD_DOWN', 'HEALTH_WARN', '')
+        self.assertEqual(
+            self.module.metrics['health_detail'].value.get(expected_labels),
+            1
+        )
+
+    def test_string_summary(self):
+        health_data = {
+            'status': 'HEALTH_WARN',
+            'checks': {
+                'MON_CLOCK_SKEW': {
+                    'severity': 'HEALTH_WARN',
+                    'summary': 'clock skew detected'
+                }
+            }
+        }
+        self.module.get.return_value = {'json': json.dumps(health_data)}
+        self.module.get_health()
+
+        expected_labels = ('MON_CLOCK_SKEW', 'HEALTH_WARN', '')
+        self.assertEqual(
+            self.module.metrics['health_detail'].value.get(expected_labels),
+            1
+        )
+
+    def test_empty_or_missing_summary(self):
+        health_data = {
+            'status': 'HEALTH_WARN',
+            'checks': {
+                'CHECK_EMPTY_SUMMARY': {
+                    'severity': 'HEALTH_WARN',
+                    'summary': {}
+                },
+                'CHECK_NO_SUMMARY': {
+                    'severity': 'HEALTH_WARN'
+                }
+            }
+        }
+        self.module.get.return_value = {'json': json.dumps(health_data)}
+        self.module.get_health()
+
+        self.assertEqual(
+            self.module.metrics['health_detail'].value.get(('CHECK_EMPTY_SUMMARY', 'HEALTH_WARN', '')),
+            1
+        )
+        self.assertEqual(
+            self.module.metrics['health_detail'].value.get(('CHECK_NO_SUMMARY', 'HEALTH_WARN', '')),
+            1
+        )
+
+    def test_inactive_health_check(self):
+        # First active
+        active_health = {
+            'status': 'HEALTH_WARN',
+            'checks': {
+                'OSD_DOWN': {
+                    'severity': 'HEALTH_WARN',
+                    'summary': {'message': '1 osds down'}
+                }
+            }
+        }
+        self.module.get.return_value = {'json': json.dumps(active_health)}
+        self.module.get_health()
+
+        # Then recovered / OK
+        recovered_health = {
+            'status': 'HEALTH_OK',
+            'checks': {}
+        }
+        self.module.get.return_value = {'json': json.dumps(recovered_health)}
+        self.module.get_health()
+
+        self.assertEqual(
+            self.module.metrics['health_detail'].value.get(('OSD_DOWN', 'HEALTH_WARN', '')),
+            0
+        )
+
+    def test_cert_checks_preserved(self):
+        health_data = {
+            'status': 'HEALTH_ERR',
+            'checks': {
+                'CEPHADM_CERT_ERROR': {
+                    'severity': 'HEALTH_ERR',
+                    'summary': {'message': 'cert expired'},
+                    'detail': [
+                        {'message': 'Certificate expired on host1'},
+                        {'message': 'Certificate expired on host2'}
+                    ]
+                }
+            }
+        }
+        self.module.get.return_value = {'json': json.dumps(health_data)}
+        self.module.get_health()
+
+        self.assertEqual(
+            self.module.metrics['health_detail'].value.get(('CEPHADM_CERT_ERROR', 'HEALTH_ERR', 'Certificate expired on host1')),
+            1
+        )
+        self.assertEqual(
+            self.module.metrics['health_detail'].value.get(('CEPHADM_CERT_ERROR', 'HEALTH_ERR', 'Certificate expired on host2')),
+            1
+        )
+
+
+class ThreadSafeLRUCacheDictTest(TestCase):
+    def test_items_returns_snapshot(self):
+        """items() should return a list snapshot, not a live view."""
+        d = ThreadSafeLRUCacheDict(maxsize=10)
+        d['a'] = 1
+        d['b'] = 2
+        items = d.items()
+        self.assertIsInstance(items, list)
+        self.assertEqual(items, [('a', 1), ('b', 2)])
+
+    def test_keys_returns_snapshot(self):
+        d = ThreadSafeLRUCacheDict(maxsize=10)
+        d['a'] = 1
+        keys = d.keys()
+        self.assertIsInstance(keys, list)
+        self.assertEqual(keys, ['a'])
+
+    def test_values_returns_snapshot(self):
+        d = ThreadSafeLRUCacheDict(maxsize=10)
+        d['a'] = 1
+        values = d.values()
+        self.assertIsInstance(values, list)
+        self.assertEqual(values, [1])
+
+    def test_lru_eviction(self):
+        d = ThreadSafeLRUCacheDict(maxsize=2)
+        d['a'] = 1
+        d['b'] = 2
+        d['c'] = 3  # This should evict 'a'
+        self.assertNotIn('a', d)
+        self.assertIn('b', d)
+        self.assertIn('c', d)
+
+    def test_reentrancy(self):
+        cache = ThreadSafeLRUCacheDict(maxsize=10)
+
+        with cache._lock:
+            cache['key1'] = 'value1'
+            self.assertEqual(cache['key1'], 'value1')
+            self.assertEqual(len(cache), 1)
+
+    def test_concurrent_writes(self):
+        cache = ThreadSafeLRUCacheDict(maxsize=100)
+
+        def writer(start, end):
+            for i in range(start, end):
+                cache[f'key{i}'] = f'value{i}'
+
+        threads = []
+        for i in range(5):
+            t = threading.Thread(target=writer, args=(i * 20, (i + 1) * 20))
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(cache), 100)
+        for i in range(100):
+            self.assertEqual(cache[f'key{i}'], f'value{i}')
+
+
+MOCK_HW_FULLREPORT = {
+    'host.example.com': {
+        'host': 'host.example.com',
+        'sn': '11S03NK990YM30ZP58E02X',
+        'status': {
+            'storage': {'Self': {
+                'nvme_device0_nsid1': {
+                    'capacity_bytes': 512110190592,
+                    'model': 'Micron_2550_MTFDKBK512TGE',
+                    'protocol': 'NVMe',
+                    'serial_number': '24424BAA3C40',
+                    'firmware_version': 'V6MA001',
+                    'slot': '0',
+                    'status': {'health': 'OK', 'state': 'Enabled'},
+                },
+            }},
+            'processors': {'Self': {
+                'devtype1_cpu0': {
+                    'total_cores': 48,
+                    'total_threads': 96,
+                    'model': 'unknown',
+                    'manufacturer': 'Advanced Micro Devices, Inc.',
+                    'status': {'health': 'OK', 'state': 'Enabled'},
+                },
+            }},
+            'memory': {'Self': {
+                'devtype2_dimm0': {
+                    'memory_device_type': 'DDR5',
+                    'capacity_mi_b': 131072,
+                    'status': {'health': 'OK', 'state': 'Enabled'},
+                },
+            }},
+            'power': {'Self': {
+                '38': {
+                    'name': 'PSU1_PIN',
+                    'status': {'health': 'OK', 'state': 'Enabled'},
+                },
+                '39': {
+                    'name': 'PSU1_POUT',
+                    'status': {'health': 'OK', 'state': 'Enabled'},
+                },
+            }},
+            'network': {'Self': {
+                'networkinterfaces_devtype7_nic0': {
+                    'name': 'NetworkAdapter_0',
+                    'status': {'health': 'OK', 'state': 'Enabled'},
+                },
+            }},
+            'fans': {'Self': {
+                '0': {
+                    'name': 'FAN1_TACH_IN',
+                    'reading': 23940,
+                    'reading_units': 'RPM',
+                    'status': {'health': 'OK', 'state': 'Enabled'},
+                },
+            }},
+            'temperatures': {'Self': {
+                '0': {
+                    'name': 'C1_DCSCM_TEMP',
+                    'reading': 32,
+                    'reading_units': 'Cel',
+                    'status': {'health': 'OK', 'state': 'Enabled'},
+                },
+                '6': {
+                    'name': 'C1_CPU_TEMP',
+                    'reading': 47,
+                    'reading_units': 'Cel',
+                    'status': {'health': 'OK', 'state': 'Enabled'},
+                },
+            }},
+        },
+        'firmware': {
+            'bios': {
+                'name': 'BIOS',
+                'version': 'unknown',
+            },
+            'bmc': {
+                'name': 'BMC',
+                'version': '0.50.d57cfd',
+            },
+            'cpld': {
+                'name': 'CPLD',
+                'version': 'unknown',
+            },
+        },
+    }
+}
+
+
+class HardwareMetricsTest(TestCase):
+    """Tests for hardware metrics processing from node-proxy fullreport data."""
+
+    def setUp(self):
+        from prometheus.module import (
+            Module, HW_STORAGE_LABELS, HW_CPU_LABELS, HW_MEMORY_LABELS,
+            HW_HEALTH_LABELS, HW_TEMP_LABELS, HW_FAN_LABELS, HW_FIRMWARE_LABELS,
+        )
+        self.module = mock.MagicMock(spec=Module)
+        self.module.log = mock.MagicMock()
+        self.module.metrics = {
+            'hardware_storage_capacity_bytes': Metric(
+                'gauge', 'hardware_storage_capacity_bytes', '', HW_STORAGE_LABELS),
+            'hardware_cpu_cores': Metric(
+                'gauge', 'hardware_cpu_cores', '', HW_CPU_LABELS),
+            'hardware_memory_capacity_bytes': Metric(
+                'gauge', 'hardware_memory_capacity_bytes', '', HW_MEMORY_LABELS),
+            'hardware_health': Metric(
+                'gauge', 'hardware_health', '', HW_HEALTH_LABELS),
+            'hardware_temperature_celsius': Metric(
+                'gauge', 'hardware_temperature_celsius', '', HW_TEMP_LABELS),
+            'hardware_fan_rpm': Metric(
+                'gauge', 'hardware_fan_rpm', '', HW_FAN_LABELS),
+            'hardware_firmware_info': Metric(
+                'gauge', 'hardware_firmware_info', '', HW_FIRMWARE_LABELS),
+        }
+        self.hostname = 'host.example.com'
+        self.data = MOCK_HW_FULLREPORT[self.hostname]
+        self.status = self.data['status']
+        self.module._hw_get_health_value = Module._hw_get_health_value.__get__(self.module)
+        self.module._hw_set_health_metric = Module._hw_set_health_metric.__get__(self.module)
+        self.module._hw_iter_components = Module._hw_iter_components.__get__(self.module)
+        self.module._hw_set_sensor_metric = Module._hw_set_sensor_metric.__get__(self.module)
+        self.module._process_storage = Module._process_storage.__get__(self.module)
+        self.module._process_processors = Module._process_processors.__get__(self.module)
+        self.module._process_memory = Module._process_memory.__get__(self.module)
+        self.module._process_power_network = Module._process_power_network.__get__(self.module)
+        self.module._process_sensors = Module._process_sensors.__get__(self.module)
+        self.module._process_firmware = Module._process_firmware.__get__(self.module)
+
+    # --- _hw_get_health_value ---
+
+    def test_health_value_ok(self):
+        val = self.module._hw_get_health_value({'health': 'OK'})
+        self.assertEqual(val, 0)
+
+    def test_health_value_warning(self):
+        val = self.module._hw_get_health_value({'health': 'Warning'})
+        self.assertEqual(val, 1)
+
+    def test_health_value_critical(self):
+        val = self.module._hw_get_health_value({'health': 'Critical'})
+        self.assertEqual(val, 2)
+
+    def test_health_value_string_input(self):
+        val = self.module._hw_get_health_value('OK')
+        self.assertEqual(val, 0)
+
+    def test_health_value_unknown_logs_warning(self):
+        val = self.module._hw_get_health_value(
+            {'health': 'Exploded'}, 'host1', 'comp1', 'storage')
+        self.assertIsNone(val)
+        self.module.log.warning.assert_called_once()
+
+    def test_health_value_unknown_skips_metric(self):
+        self.module._hw_set_health_metric(
+            {'health': 'Exploded'}, 'host1', 'comp1', 'storage')
+        self.assertEqual(self.module.metrics['hardware_health'].value, {})
+
+    # --- _process_storage ---
+
+    def test_storage_capacity_and_labels(self):
+        self.module._process_storage(self.status, self.hostname)
+        expected_labels = (
+            self.hostname, 'nvme_device0_nsid1',
+            'Micron_2550_MTFDKBK512TGE', 'NVMe', 'V6MA001', '0', '24424BAA3C40',
+        )
+        self.assertEqual(
+            self.module.metrics['hardware_storage_capacity_bytes'].value[expected_labels],
+            512110190592,
+        )
+
+    def test_storage_sets_health(self):
+        self.module._process_storage(self.status, self.hostname)
+        health_labels = (self.hostname, 'nvme_device0_nsid1', 'storage')
+        self.assertEqual(
+            self.module.metrics['hardware_health'].value[health_labels], 0)
+
+    # --- _process_processors ---
+
+    def test_cpu_cores_and_threads_label(self):
+        self.module._process_processors(self.status, self.hostname)
+        expected_labels = (
+            self.hostname, 'devtype1_cpu0',
+            'Advanced Micro Devices, Inc.', 'unknown', 96,
+        )
+        self.assertEqual(
+            self.module.metrics['hardware_cpu_cores'].value[expected_labels], 48)
+
+    # --- _process_memory ---
+
+    def test_memory_mib_to_bytes_conversion(self):
+        self.module._process_memory(self.status, self.hostname)
+        expected_labels = (self.hostname, 'devtype2_dimm0', 'DDR5')
+        self.assertEqual(
+            self.module.metrics['hardware_memory_capacity_bytes'].value[expected_labels],
+            131072 * 1048576,
+        )
+
+    # --- _process_power_network ---
+
+    def test_power_uses_name_not_numeric_id(self):
+        """Power components use human-readable name (PSU1_PIN) not dict key (38)."""
+        self.module._process_power_network(self.status, self.hostname)
+        health = self.module.metrics['hardware_health'].value
+        self.assertIn((self.hostname, 'PSU1_PIN', 'power'), health)
+        self.assertIn((self.hostname, 'PSU1_POUT', 'power'), health)
+        self.assertNotIn((self.hostname, '38', 'power'), health)
+        self.assertNotIn((self.hostname, '39', 'power'), health)
+
+    def test_network_uses_comp_id_not_generic_name(self):
+        """Network uses descriptive comp_id, not generic 'NetworkAdapter_0'."""
+        self.module._process_power_network(self.status, self.hostname)
+        health = self.module.metrics['hardware_health'].value
+        self.assertIn(
+            (self.hostname, 'networkinterfaces_devtype7_nic0', 'network'), health)
+        self.assertNotIn(
+            (self.hostname, 'NetworkAdapter_0', 'network'), health)
+
+    # --- _process_sensors ---
+
+    def test_temperature_uses_sensor_name(self):
+        """Temperature reading uses 'C1_DCSCM_TEMP' not numeric key '0'."""
+        self.module._process_sensors(self.status, self.hostname)
+        temp = self.module.metrics['hardware_temperature_celsius'].value
+        self.assertIn((self.hostname, 'C1_DCSCM_TEMP'), temp)
+        self.assertEqual(temp[(self.hostname, 'C1_DCSCM_TEMP')], 32.0)
+        self.assertNotIn((self.hostname, '0'), temp)
+
+    def test_temperature_health_uses_sensor_name(self):
+        """Health metric for temperatures also uses sensor name, not numeric key."""
+        self.module._process_sensors(self.status, self.hostname)
+        health = self.module.metrics['hardware_health'].value
+        self.assertIn((self.hostname, 'C1_DCSCM_TEMP', 'temperatures'), health)
+        self.assertIn((self.hostname, 'C1_CPU_TEMP', 'temperatures'), health)
+        self.assertNotIn((self.hostname, '0', 'temperatures'), health)
+        self.assertNotIn((self.hostname, '6', 'temperatures'), health)
+
+    def test_fan_uses_fan_name(self):
+        """Fan reading uses 'FAN1_TACH_IN' not numeric key '0'."""
+        self.module._process_sensors(self.status, self.hostname)
+        fan = self.module.metrics['hardware_fan_rpm'].value
+        self.assertIn((self.hostname, 'FAN1_TACH_IN'), fan)
+        self.assertEqual(fan[(self.hostname, 'FAN1_TACH_IN')], 23940.0)
+
+    def test_sensor_unknown_reading_skipped(self):
+        """Sensors with 'unknown' reading should not set reading metric but still set health."""
+        status = {'temperatures': {'Self': {
+            '99': {
+                'name': 'GHOST_TEMP',
+                'reading': 'unknown',
+                'status': {'health': 'OK', 'state': 'Enabled'},
+            },
+        }}}
+        self.module._process_sensors(status, self.hostname)
+        self.assertNotIn(
+            (self.hostname, 'GHOST_TEMP'),
+            self.module.metrics['hardware_temperature_celsius'].value)
+        self.assertIn(
+            (self.hostname, 'GHOST_TEMP', 'temperatures'),
+            self.module.metrics['hardware_health'].value)
+
+    # --- _process_firmware ---
+
+    def test_firmware_known_version_exported(self):
+        self.module._process_firmware(self.hostname, self.data)
+        fw = self.module.metrics['hardware_firmware_info'].value
+        self.assertIn((self.hostname, 'BMC', '0.50.d57cfd'), fw)
+        self.assertEqual(fw[(self.hostname, 'BMC', '0.50.d57cfd')], 1)
+
+    def test_firmware_unknown_version_skipped(self):
+        """BIOS and CPLD with version='unknown' should not be exported."""
+        self.module._process_firmware(self.hostname, self.data)
+        fw = self.module.metrics['hardware_firmware_info'].value
+        for labels in fw:
+            self.assertNotEqual(labels[1], 'BIOS')
+            self.assertNotEqual(labels[1], 'CPLD')
+
+    # --- label count consistency ---
+
+    def test_storage_label_count_matches(self):
+        self.module._process_storage(self.status, self.hostname)
+        for labels in self.module.metrics['hardware_storage_capacity_bytes'].value:
+            self.assertEqual(len(labels), 7)
+
+    def test_cpu_label_count_matches(self):
+        self.module._process_processors(self.status, self.hostname)
+        for labels in self.module.metrics['hardware_cpu_cores'].value:
+            self.assertEqual(len(labels), 5)
+
+
+class RgwSyncMetricsTest(TestCase):
+    def setUp(self):
+        from prometheus.module import Module
+        self.module = mock.MagicMock(spec=Module)
+        self.module.metrics = {}
+        self.module.add_fixed_name_metrics = Module.add_fixed_name_metrics.__get__(
+            self.module)
+
+    def _add_sync_metric(self, zone_name: str, counter: str,
+                         value: float = 1.0) -> str:
+        """Insert a raw RGW sync perf-counter metric and return its path."""
+        path = 'data-sync-from-{}.{}'.format(zone_name, counter)
+        m = Metric('counter', path, 'test desc', ('instance_id',))
+        m.set(value, ('rgw.0',))
+        self.module.metrics[path] = m
+        return path
+
+    def test_hyphenated_zone_name(self):
+        """Zone names with hyphens are recognised and the full name extracted."""
+        self._add_sync_metric('zone-a', 'fetch_bytes')
+        self.module.add_fixed_name_metrics()
+        self.assertIn('data-sync-from-zone.fetch_bytes', self.module.metrics)
+        fixed = self.module.metrics['data-sync-from-zone.fetch_bytes']
+        self.assertIn('source_zone', fixed.labelnames)
+        label_idx = fixed.labelnames.index('source_zone')
+        zones = {lv[label_idx] for lv in fixed.value}
+        self.assertEqual(zones, {'zone-a'})
+
+    def test_multi_hyphenated_zone_name(self):
+        """Zone names with multiple hyphens must be extracted in full."""
+        self._add_sync_metric('zone2-zg1-realm1', 'fetch_bytes')
+        self.module.add_fixed_name_metrics()
+        fixed = self.module.metrics['data-sync-from-zone.fetch_bytes']
+        label_idx = fixed.labelnames.index('source_zone')
+        zones = {lv[label_idx] for lv in fixed.value}
+        self.assertEqual(zones, {'zone2-zg1-realm1'})
+
+    def test_underscore_zone_name(self):
+        """Zone names with underscores are recognised and the full name extracted."""
+        self._add_sync_metric('my_zone', 'fetch_bytes')
+        self.module.add_fixed_name_metrics()
+        self.assertIn('data-sync-from-zone.fetch_bytes', self.module.metrics)
+        fixed = self.module.metrics['data-sync-from-zone.fetch_bytes']
+        label_idx = fixed.labelnames.index('source_zone')
+        zones = {lv[label_idx] for lv in fixed.value}
+        self.assertEqual(zones, {'my_zone'})
+
+    def test_underscore_zone_name_long(self):
+        """Long zone names with underscores (reviewer's exact test case)."""
+        zone = 'A_ZONE_WITHUNDERSCORE_IN_THE_NAME'
+        self._add_sync_metric(zone, 'fetch_bytes')
+        self.module.add_fixed_name_metrics()
+        fixed = self.module.metrics['data-sync-from-zone.fetch_bytes']
+        label_idx = fixed.labelnames.index('source_zone')
+        zones = {lv[label_idx] for lv in fixed.value}
+        self.assertEqual(zones, {zone})
+
+    def test_longrunavg_counters_get_separate_fixed_paths(self):
+        """poll_latency_sum and poll_latency_count must each get their own path."""
+        self._add_sync_metric('my_zone', 'poll_latency_sum')
+        self._add_sync_metric('my_zone', 'poll_latency_count')
+        self.module.add_fixed_name_metrics()
+        self.assertIn('data-sync-from-zone.poll_latency_sum', self.module.metrics)
+        self.assertIn('data-sync-from-zone.poll_latency_count', self.module.metrics)
+
+    def test_multiple_zones_merged_under_fixed_path(self):
+        """Metrics from different source zones share one fixed path, distinguished by label."""
+        self._add_sync_metric('zone-a', 'fetch_bytes', 10.0)
+        self._add_sync_metric('zone_b', 'fetch_bytes', 20.0)
+        self.module.add_fixed_name_metrics()
+        fixed = self.module.metrics['data-sync-from-zone.fetch_bytes']
+        label_idx = fixed.labelnames.index('source_zone')
+        zones = {lv[label_idx] for lv in fixed.value}
+        self.assertEqual(zones, {'zone-a', 'zone_b'})
+
+    def test_underscore_zone_with_underscore_counter(self):
+        """
+        Regression: zone name with underscore + counter suffix with underscore.
+
+        Old greedy regex  r'^data-sync-from-(.*)\\.'  would match up to the
+        *last* dot, so for path 'data-sync-from-my_zone.poll_latency_sum' it
+        captured 'my_zone.poll_latency' as group(1) instead of 'my_zone'.
+        The new regex anchors group(2) to the final word-only token, leaving
+        the full zone name in group(1).
+        """
+        self._add_sync_metric('my_zone', 'poll_latency_sum')
+        self.module.add_fixed_name_metrics()
+        fixed = self.module.metrics['data-sync-from-zone.poll_latency_sum']
+        label_idx = fixed.labelnames.index('source_zone')
+        zones = {lv[label_idx] for lv in fixed.value}
+        # Must be 'my_zone', NOT 'my_zone.poll_latency'
+        self.assertEqual(zones, {'my_zone'})
+
+    def test_empty_zone_name_not_matched(self):
+        """
+        Paths with an empty zone segment (e.g. 'data-sync-from-.fetch_bytes')
+        must not produce a fixed metric — the new regex requires (.+) (one or
+        more chars) so empty zone names are rejected, unlike the old (.*).
+        """
+        path = 'data-sync-from-.fetch_bytes'
+        m = Metric('counter', path, 'test desc', ('instance_id',))
+        m.set(1.0, ('rgw.0',))
+        self.module.metrics[path] = m
+        self.module.add_fixed_name_metrics()
+        sync_keys = [k for k in self.module.metrics if k.startswith('data-sync-from-zone')]
+        self.assertEqual(sync_keys, [])
+
+    def test_non_sync_metric_not_affected(self):
+        """Metrics that are not RGW sync counters must not be modified."""
+        unrelated = Metric('counter', 'rgw.op_put_obj', '', ('instance_id',))
+        unrelated.set(5.0, ('rgw.0',))
+        self.module.metrics['rgw.op_put_obj'] = unrelated
+        self.module.add_fixed_name_metrics()
+        # No new data-sync-from-zone.* key should appear for non-sync metrics
+        sync_keys = [k for k in self.module.metrics if k.startswith('data-sync-from-zone')]
+        self.assertEqual(sync_keys, [])
+
+
+class TestSSLCertificateCLI(TestCase):
+    def setUp(self):
+        self.module = mock.MagicMock()
+        self.module.set_store = mock.MagicMock()
+
+    def test_set_ssl_certificate_no_inbuf(self):
+        ret, out, err = Module.set_ssl_certificate(self.module, inbuf=None)
+        self.assertEqual(ret, -errno.EINVAL)
+        self.assertIn('certificate', err)
+
+    def test_set_ssl_certificate_key_no_inbuf(self):
+        ret, out, err = Module.set_ssl_certificate_key(self.module, inbuf=None)
+        self.assertEqual(ret, -errno.EINVAL)
+        self.assertIn('certificate key', err)
+
+    def test_set_ssl_certificate_global(self):
+        ret, out, err = Module.set_ssl_certificate(self.module, inbuf='cert-data')
+        self.assertEqual(ret, 0)
+        self.module.set_store.assert_called_once_with('crt', 'cert-data')
+
+    def test_set_ssl_certificate_key_global(self):
+        ret, out, err = Module.set_ssl_certificate_key(self.module, inbuf='key-data')
+        self.assertEqual(ret, 0)
+        self.module.set_store.assert_called_once_with('key', 'key-data')
+
+    def test_set_ssl_certificate_per_mgr(self):
+        ret, out, err = Module.set_ssl_certificate(self.module, mgr_id='mgr.a', inbuf='cert-data')
+        self.assertEqual(ret, 0)
+        self.module.set_store.assert_called_once_with('mgr.a/crt', 'cert-data')
+
+    def test_set_ssl_certificate_key_per_mgr(self):
+        ret, out, err = Module.set_ssl_certificate_key(self.module, mgr_id='mgr.a', inbuf='key-data')
+        self.assertEqual(ret, 0)
+        self.module.set_store.assert_called_once_with('mgr.a/key', 'key-data')
+
+
+class TestConfigureSSL(TestCase):
+    def setUp(self):
+        self.module = mock.MagicMock(spec=Module)
+
+    def test_configure_calls_direct_tls_when_ssl_enabled(self):
+        self.module.mon_command = mock.MagicMock(return_value=(-22, None, ''))
+        self.module.get_localized_module_option = mock.MagicMock(return_value=True)
+        self.module.setup_direct_tls_config = mock.MagicMock(
+            return_value=({}, {'cert': '/tmp/c', 'key': '/tmp/k'}, 'https'))
+        Module.configure(self.module)
+        self.module.setup_direct_tls_config.assert_called_once()
+
+    def test_configure_prefers_orchestrator_over_direct_ssl(self):
+        self.module.mon_command = mock.MagicMock(
+            return_value=(0, '{"security_enabled": true}', ''))
+        self.module.get_localized_module_option = mock.MagicMock(return_value=True)
+        self.module.setup_tls_config = mock.MagicMock(
+            return_value=({}, {'cert': '/tmp/c', 'key': '/tmp/k'}, 'https'))
+        Module.configure(self.module)
+        self.module.setup_tls_config.assert_called_once()
+        self.module.setup_direct_tls_config.assert_not_called()
+
+    def test_configure_uses_direct_ssl_when_orchestrator_security_disabled(self):
+        self.module.mon_command = mock.MagicMock(
+            return_value=(0, '{"security_enabled": false}', ''))
+        self.module.get_localized_module_option = mock.MagicMock(return_value=True)
+        self.module.setup_direct_tls_config = mock.MagicMock(
+            return_value=({}, {'cert': '/tmp/c', 'key': '/tmp/k', 'context': mock.MagicMock()}, 'https'))
+        Module.configure(self.module)
+        self.module.setup_direct_tls_config.assert_called_once()
+        self.module.setup_tls_config.assert_not_called()
+
+    def test_configure_skips_direct_tls_when_ssl_disabled(self):
+        self.module.mon_command = mock.MagicMock(return_value=(0, None, ''))
+        self.module.get_localized_module_option = mock.MagicMock(return_value=False)
+        self.module.setup_default_config = mock.MagicMock(return_value=({}, None, 'http'))
+        Module.configure(self.module)
+        self.module.setup_direct_tls_config.assert_not_called()
+
+
+class TestFileSDConfig(TestCase):
+    def setUp(self):
+        self.module = mock.MagicMock(spec=Module)
+        self.module.list_servers = mock.MagicMock(return_value=[
+            {
+                'hostname': 'host1',
+                'services': [{'type': 'mgr', 'id': 'x'}]
+            }
+        ])
+
+    def test_file_sd_config_uses_default_port(self):
+        self.module._get_module_option = mock.MagicMock(
+            side_effect=lambda opt, default, id_: {
+                'ssl': False,
+                'server_port': 9283,
+            }.get(opt, default))
+        ret, out, err = Module.get_file_sd_config(self.module)
+        self.assertEqual(ret, 0)
+        self.assertIn('host1:9283', out)
+
+    def test_file_sd_config_uses_ssl_port(self):
+        self.module._get_module_option = mock.MagicMock(
+            side_effect=lambda opt, default, id_: {
+                'ssl': True,
+                'ssl_server_port': 9284,
+            }.get(opt, default))
+        ret, out, err = Module.get_file_sd_config(self.module)
+        self.assertEqual(ret, 0)
+        self.assertIn('host1:9284', out)
+
+
+class TestBuildSSLInfo(TestCase):
+    def setUp(self):
+        self.module = mock.MagicMock()
+        # By default no cert/key in the config-key store.
+        self.module.get_localized_store.return_value = None
+
+    def _set_options(self, **opts):
+        self.module.get_localized_module_option.side_effect = \
+            lambda opt: opts.get(opt)
+
+    def test_propagates_cert_error(self):
+        # A missing/invalid cert must raise so the caller can stay down
+        # instead of the module crashing with an unhandled exception.
+        from prometheus.module import _build_ssl_info
+        self._set_options(crt_file='/does/not/exist.pem',
+                          key_file='/does/not/exist.key')
+        with mock.patch('prometheus.module.verify_tls_files',
+                        side_effect=RuntimeError('Certificate does not exist')):
+            with self.assertRaises(RuntimeError):
+                _build_ssl_info(self.module)
+
+    def test_store_takes_precedence_and_warns(self):
+        # When both the config-key store and crt_file/key_file are set, the
+        # store wins and the user is warned about the precedence.
+        from prometheus.module import _build_ssl_info
+        self.module.get_localized_store.side_effect = \
+            lambda k: {'crt': 'CERT', 'key': 'KEY'}.get(k)
+        self._set_options(crt_file='/some/file.pem', key_file='/some/file.key')
+        with mock.patch('prometheus.module.verify_tls_files'), \
+                mock.patch('prometheus.module.ssl'):
+            _build_ssl_info(self.module)
+        self.module.log.warning.assert_called_once()
+
+    def test_no_warning_when_only_file_source(self):
+        # Only file-based config, no store values: no precedence conflict.
+        from prometheus.module import _build_ssl_info
+        self._set_options(crt_file='/some/file.pem', key_file='/some/file.key')
+        with mock.patch('prometheus.module.verify_tls_files'), \
+                mock.patch('prometheus.module.ssl'):
+            _build_ssl_info(self.module)
+        self.module.log.warning.assert_not_called()
+
+
+class TestRgwZoneIds(TestCase):
+    def setUp(self):
+        self.module = mock.MagicMock(spec=Module)
+
+    def _set_service_map(self, service_map):
+        self.module.get = mock.MagicMock(return_value=service_map)
+
+    def test_rgw_metadata_has_zone_id_label(self):
+        from prometheus.module import RGW_METADATA
+        self.assertEqual(RGW_METADATA[-1], 'zone_id')
+
+    def test_no_rgw_service(self):
+        self._set_service_map({'services': {}})
+        self.assertEqual(Module.get_rgw_zone_ids(self.module), {})
+
+    def test_empty_service_map(self):
+        self._set_service_map({})
+        self.assertEqual(Module.get_rgw_zone_ids(self.module), {})
+
+    def test_keyed_by_gid_and_daemon_id(self):
+        self._set_service_map({'services': {'rgw': {'daemons': {
+            '4123': {'metadata': {'id': 'rgw.a', 'zone_id': 'zone-uuid-1'}},
+        }}}})
+        self.assertEqual(
+            Module.get_rgw_zone_ids(self.module),
+            {'4123': 'zone-uuid-1', 'rgw.a': 'zone-uuid-1'})
+
+    def test_missing_zone_id_defaults_to_empty(self):
+        self._set_service_map({'services': {'rgw': {'daemons': {
+            '4123': {'metadata': {'id': 'rgw.a'}},
+        }}}})
+        self.assertEqual(
+            Module.get_rgw_zone_ids(self.module),
+            {'4123': '', 'rgw.a': ''})
+
+    def test_missing_metadata_id_only_gid_key(self):
+        self._set_service_map({'services': {'rgw': {'daemons': {
+            '4123': {'metadata': {'zone_id': 'zone-uuid-1'}},
+        }}}})
+        self.assertEqual(
+            Module.get_rgw_zone_ids(self.module), {'4123': 'zone-uuid-1'})
+
+    def test_non_dict_daemon_entries_skipped(self):
+        # The service map's 'daemons' dict also carries scalar entries such
+        # as 'summary'.
+        self._set_service_map({'services': {'rgw': {'daemons': {
+            'summary': '',
+            '4123': {'metadata': {'id': 'rgw.a', 'zone_id': 'zone-uuid-1'}},
+        }}}})
+        self.assertEqual(
+            Module.get_rgw_zone_ids(self.module),
+            {'4123': 'zone-uuid-1', 'rgw.a': 'zone-uuid-1'})
+
+    def test_multiple_daemons_different_zones(self):
+        self._set_service_map({'services': {'rgw': {'daemons': {
+            '1': {'metadata': {'id': 'a', 'zone_id': 'z1'}},
+            '2': {'metadata': {'id': 'b', 'zone_id': 'z2'}},
+        }}}})
+        self.assertEqual(
+            Module.get_rgw_zone_ids(self.module),
+            {'1': 'z1', 'a': 'z1', '2': 'z2', 'b': 'z2'})

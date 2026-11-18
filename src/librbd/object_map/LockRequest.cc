@@ -1,5 +1,5 @@
-// -*- mode:C; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/object_map/LockRequest.h"
 #include "cls/lock/cls_lock_client.h"
@@ -16,8 +16,7 @@
 namespace librbd {
 namespace object_map {
 
-using util::create_rados_ack_callback;
-using util::create_rados_safe_callback;
+using util::create_rados_callback;
 
 template <typename I>
 LockRequest<I>::LockRequest(I &image_ctx, Context *on_finish)
@@ -36,14 +35,14 @@ void LockRequest<I>::send_lock() {
   ldout(cct, 10) << this << " " << __func__ << ": oid=" << oid << dendl;
 
   librados::ObjectWriteOperation op;
-  rados::cls::lock::lock(&op, RBD_LOCK_NAME, LOCK_EXCLUSIVE, "", "", "",
+  rados::cls::lock::lock(&op, RBD_LOCK_NAME, ClsLockType::EXCLUSIVE, "", "", "",
                            utime_t(), 0);
 
   using klass = LockRequest<I>;
   librados::AioCompletion *rados_completion =
-    create_rados_safe_callback<klass, &klass::handle_lock>(this);
+    create_rados_callback<klass, &klass::handle_lock>(this);
   int r = m_image_ctx.md_ctx.aio_operate(oid, rados_completion, &op);
-  assert(r == 0);
+  ceph_assert(r == 0);
   rados_completion->release();
 }
 
@@ -80,9 +79,9 @@ void LockRequest<I>::send_get_lock_info() {
 
   using klass = LockRequest<I>;
   librados::AioCompletion *rados_completion =
-    create_rados_ack_callback<klass, &klass::handle_get_lock_info>(this);
+    create_rados_callback<klass, &klass::handle_get_lock_info>(this);
   int r = m_image_ctx.md_ctx.aio_operate(oid, rados_completion, &op, &m_out_bl);
-  assert(r == 0);
+  ceph_assert(r == 0);
   rados_completion->release();
 }
 
@@ -99,7 +98,7 @@ Context *LockRequest<I>::handle_get_lock_info(int *ret_val) {
   ClsLockType lock_type;
   std::string lock_tag;
   if (*ret_val == 0) {
-    bufferlist::iterator it = m_out_bl.begin();
+    auto it = m_out_bl.cbegin();
     *ret_val = rados::cls::lock::get_lock_info_finish(&it, &m_lockers,
                                                       &lock_type, &lock_tag);
   }
@@ -129,9 +128,9 @@ void LockRequest<I>::send_break_locks() {
 
   using klass = LockRequest<I>;
   librados::AioCompletion *rados_completion =
-    create_rados_safe_callback<klass, &klass::handle_break_locks>(this);
+    create_rados_callback<klass, &klass::handle_break_locks>(this);
   int r = m_image_ctx.md_ctx.aio_operate(oid, rados_completion, &op);
-  assert(r == 0);
+  ceph_assert(r == 0);
   rados_completion->release();
 }
 

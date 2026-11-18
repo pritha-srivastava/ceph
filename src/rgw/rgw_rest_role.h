@@ -1,112 +1,211 @@
-#ifndef CEPH_RGW_REST_ROLE_H
-#define CEPH_RGW_REST_ROLE_H
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
-class RGWRestRole : public RGWOp {
-protected:
-  string role_name;
-  string role_path;
-  string trust_policy;
-  string policy_name;
-  string perm_policy;
-  string path_prefix;
+#pragma once
 
-public:
-  virtual void send_response() override;
+#include <boost/optional.hpp>
+#include "common/async/yield_context.h"
+
+#include "rgw_arn.h"
+#include "rgw_role.h"
+#include "rgw_rest.h"
+
+class RGWRestRole : public RGWRESTOp {
+  const uint64_t action;
+  const uint32_t perm;
+ protected:
+  rgw_account_id account_id;
+  rgw::ARN resource; // must be initialized before verify_permission()
+  int check_caps(const RGWUserCaps& caps) override;
+
+  RGWRestRole(uint64_t action, uint32_t perm) : action(action), perm(perm) {}
+ public:
+  int verify_permission(optional_yield y) override;
 };
 
-class RGWRoleRead : public RGWRestRole {
+class RGWCreateRole : public RGWRestRole {
+  bufferlist bl_post_body;
+  std::string role_name;
+  std::string role_path;
+  std::string trust_policy;
+  std::string description;
+  std::string max_session_duration;
+  std::multimap<std::string, std::string> tags;
 public:
-  RGWRoleRead() = default;
-  virtual int verify_permission() override;
-  virtual uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
-};
-
-class RGWRoleWrite : public RGWRestRole {
-public:
-  RGWRoleWrite() = default;
-  virtual int verify_permission() override;
-  virtual uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
-};
-
-class RGWCreateRole : public RGWRoleWrite {
-public:
-  RGWCreateRole() = default;
-  void execute() override;
-  int get_params();
-  const string name() override { return "create_role"; }
+  explicit RGWCreateRole(const bufferlist& bl_post_body)
+    : RGWRestRole(rgw::IAM::iamCreateRole, RGW_CAP_WRITE),
+      bl_post_body(bl_post_body) {}
+  int init_processing(optional_yield y) override;
+  void execute(optional_yield y) override;
+  const char* name() const override { return "create_role"; }
   RGWOpType get_type() override { return RGW_OP_CREATE_ROLE; }
 };
 
-class RGWDeleteRole : public RGWRoleWrite {
+class RGWDeleteRole : public RGWRestRole {
+  bufferlist bl_post_body;
+  std::string role_name;
+  std::unique_ptr<rgw::sal::RGWRole> role;
 public:
-  RGWDeleteRole() = default;
-  void execute() override;
-  int get_params();
-  const string name() override { return "delete_role"; }
+  explicit RGWDeleteRole(const bufferlist& bl_post_body)
+    : RGWRestRole(rgw::IAM::iamDeleteRole, RGW_CAP_WRITE),
+      bl_post_body(bl_post_body) {}
+  int init_processing(optional_yield y) override;
+  void execute(optional_yield y) override;
+  const char* name() const override { return "delete_role"; }
   RGWOpType get_type() override { return RGW_OP_DELETE_ROLE; }
 };
 
-class RGWGetRole : public RGWRoleRead {
+class RGWGetRole : public RGWRestRole {
+  std::string role_name;
+  std::unique_ptr<rgw::sal::RGWRole> role;
 public:
-  RGWGetRole() = default;
-  void execute() override;
-  int get_params();
-  const string name() override { return "get_role"; }
+  RGWGetRole() : RGWRestRole(rgw::IAM::iamGetRole, RGW_CAP_READ) {}
+  int init_processing(optional_yield y) override;
+  void execute(optional_yield y) override;
+  const char* name() const override { return "get_role"; }
   RGWOpType get_type() override { return RGW_OP_GET_ROLE; }
 };
 
-class RGWModifyRole : public RGWRoleWrite {
+class RGWModifyRoleTrustPolicy : public RGWRestRole {
+  bufferlist bl_post_body;
+  std::string role_name;
+  std::string trust_policy;
+  std::unique_ptr<rgw::sal::RGWRole> role;
 public:
-  RGWModifyRole() = default;
-  void execute() override;
-  int get_params();
-  const string name() override { return "modify_role"; }
-  RGWOpType get_type() override { return RGW_OP_MODIFY_ROLE; }
+  explicit RGWModifyRoleTrustPolicy(const bufferlist& bl_post_body)
+    : RGWRestRole(rgw::IAM::iamModifyRoleTrustPolicy, RGW_CAP_WRITE),
+      bl_post_body(bl_post_body) {}
+  int init_processing(optional_yield y) override;
+  void execute(optional_yield y) override;
+  const char* name() const override { return "modify_role_trust_policy"; }
+  RGWOpType get_type() override { return RGW_OP_MODIFY_ROLE_TRUST_POLICY; }
 };
 
-class RGWListRoles : public RGWRoleRead {
+class RGWListRoles : public RGWRestRole {
+  std::string path_prefix;
+  std::string marker;
+  int max_items = 100;
 public:
-  RGWListRoles() = default;
-  void execute() override;
-  int get_params();
-  const string name() override { return "list_roles"; }
+  RGWListRoles() : RGWRestRole(rgw::IAM::iamListRoles, RGW_CAP_READ) {}
+  int init_processing(optional_yield y) override;
+  void execute(optional_yield y) override;
+  const char* name() const override { return "list_roles"; }
   RGWOpType get_type() override { return RGW_OP_LIST_ROLES; }
 };
 
-class RGWPutRolePolicy : public RGWRoleWrite {
+class RGWPutRolePolicy : public RGWRestRole {
+  bufferlist bl_post_body;
+  std::string role_name;
+  std::string policy_name;
+  std::string perm_policy;
+  std::unique_ptr<rgw::sal::RGWRole> role;
 public:
-  RGWPutRolePolicy() = default;
-  void execute() override;
-  int get_params();
-  const string name() override { return "put_role_policy"; }
+  explicit RGWPutRolePolicy(const bufferlist& bl_post_body)
+    : RGWRestRole(rgw::IAM::iamPutRolePolicy, RGW_CAP_WRITE),
+      bl_post_body(bl_post_body) {}
+  int init_processing(optional_yield y) override;
+  void execute(optional_yield y) override;
+  const char* name() const override { return "put_role_policy"; }
   RGWOpType get_type() override { return RGW_OP_PUT_ROLE_POLICY; }
 };
 
-class RGWGetRolePolicy : public RGWRoleRead {
+class RGWGetRolePolicy : public RGWRestRole {
+  std::string role_name;
+  std::string policy_name;
+  std::string perm_policy;
+  std::unique_ptr<rgw::sal::RGWRole> role;
 public:
-  RGWGetRolePolicy() = default;
-  void execute() override;
-  int get_params();
-  const string name() override { return "get_role_policy"; }
+  RGWGetRolePolicy() : RGWRestRole(rgw::IAM::iamGetRolePolicy, RGW_CAP_READ) {}
+  int init_processing(optional_yield y) override;
+  void execute(optional_yield y) override;
+  const char* name() const override { return "get_role_policy"; }
   RGWOpType get_type() override { return RGW_OP_GET_ROLE_POLICY; }
 };
 
-class RGWListRolePolicies : public RGWRoleRead {
+class RGWListRolePolicies : public RGWRestRole {
+  std::string role_name;
+  std::unique_ptr<rgw::sal::RGWRole> role;
 public:
-  RGWListRolePolicies() = default;
-  void execute() override;
-  int get_params();
-  const string name() override { return "list_role_policies"; }
+  RGWListRolePolicies() : RGWRestRole(rgw::IAM::iamListRolePolicies, RGW_CAP_READ) {}
+  int init_processing(optional_yield y) override;
+  void execute(optional_yield y) override;
+  const char* name() const override { return "list_role_policies"; }
   RGWOpType get_type() override { return RGW_OP_LIST_ROLE_POLICIES; }
 };
 
-class RGWDeleteRolePolicy : public RGWRoleWrite {
+class RGWDeleteRolePolicy : public RGWRestRole {
+  bufferlist bl_post_body;
+  std::string role_name;
+  std::string policy_name;
+  std::unique_ptr<rgw::sal::RGWRole> role;
 public:
-  RGWDeleteRolePolicy() = default;
-  void execute() override;
-  int get_params();
-  const string name() override { return "delete_role_policy"; }
+  explicit RGWDeleteRolePolicy(const bufferlist& bl_post_body)
+    : RGWRestRole(rgw::IAM::iamDeleteRolePolicy, RGW_CAP_WRITE),
+      bl_post_body(bl_post_body) {}
+  int init_processing(optional_yield y) override;
+  void execute(optional_yield y) override;
+  const char* name() const override { return "delete_role_policy"; }
   RGWOpType get_type() override { return RGW_OP_DELETE_ROLE_POLICY; }
 };
-#endif /* CEPH_RGW_REST_ROLE_H */
 
+class RGWTagRole : public RGWRestRole {
+  bufferlist bl_post_body;
+  std::string role_name;
+  std::multimap<std::string, std::string> tags;
+  std::unique_ptr<rgw::sal::RGWRole> role;
+public:
+  explicit RGWTagRole(const bufferlist& bl_post_body)
+    : RGWRestRole(rgw::IAM::iamTagRole, RGW_CAP_WRITE),
+      bl_post_body(bl_post_body) {}
+  int init_processing(optional_yield y) override;
+  void execute(optional_yield y) override;
+  const char* name() const override { return "tag_role"; }
+  RGWOpType get_type() override { return RGW_OP_TAG_ROLE; }
+};
+
+class RGWListRoleTags : public RGWRestRole {
+  std::string role_name;
+  std::multimap<std::string, std::string> tags;
+  std::unique_ptr<rgw::sal::RGWRole> role;
+public:
+  RGWListRoleTags() : RGWRestRole(rgw::IAM::iamListRoleTags, RGW_CAP_READ) {}
+  int init_processing(optional_yield y) override;
+  void execute(optional_yield y) override;
+  const char* name() const override { return "list_role_tags"; }
+  RGWOpType get_type() override { return RGW_OP_LIST_ROLE_TAGS; }
+};
+
+class RGWUntagRole : public RGWRestRole {
+  bufferlist bl_post_body;
+  std::string role_name;
+  std::vector<std::string> untag;
+  std::unique_ptr<rgw::sal::RGWRole> role;
+public:
+  explicit RGWUntagRole(const bufferlist& bl_post_body)
+    : RGWRestRole(rgw::IAM::iamUntagRole, RGW_CAP_WRITE),
+      bl_post_body(bl_post_body) {}
+  int init_processing(optional_yield y) override;
+  void execute(optional_yield y) override;
+  const char* name() const override { return "untag_role"; }
+  RGWOpType get_type() override { return RGW_OP_UNTAG_ROLE; }
+};
+
+class RGWUpdateRole : public RGWRestRole {
+  bufferlist bl_post_body;
+  std::string role_name;
+  boost::optional<std::string> description;
+  std::string max_session_duration;
+  std::unique_ptr<rgw::sal::RGWRole> role;
+public:
+  explicit RGWUpdateRole(const bufferlist& bl_post_body)
+    : RGWRestRole(rgw::IAM::iamUpdateRole, RGW_CAP_WRITE),
+      bl_post_body(bl_post_body) {}
+  int init_processing(optional_yield y) override;
+  void execute(optional_yield y) override;
+  const char* name() const override { return "update_role"; }
+  RGWOpType get_type() override { return RGW_OP_UPDATE_ROLE; }
+};
+
+RGWOp* make_iam_attach_role_policy_op(const ceph::bufferlist& post_body);
+RGWOp* make_iam_detach_role_policy_op(const ceph::bufferlist& post_body);
+RGWOp* make_iam_list_attached_role_policies_op(const ceph::bufferlist& unused);

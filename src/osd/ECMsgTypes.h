@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,6 +16,11 @@
 #ifndef ECBMSGTYPES_H
 #define ECBMSGTYPES_H
 
+#include <fmt/format.h>
+#if FMT_VERSION >= 90000
+#include <fmt/ostream.h>
+#endif
+
 #include "osd_types.h"
 #include "include/buffer.h"
 #include "os/ObjectStore.h"
@@ -29,12 +35,12 @@ struct ECSubWrite {
   ObjectStore::Transaction t;
   eversion_t at_version;
   eversion_t trim_to;
-  eversion_t roll_forward_to;
-  vector<pg_log_entry_t> log_entries;
-  set<hobject_t> temp_added;
-  set<hobject_t> temp_removed;
-  boost::optional<pg_hit_set_history_t> updated_hit_set_history;
-  bool backfill = false;
+  eversion_t pg_committed_to;
+  std::vector<pg_log_entry_t> log_entries;
+  std::set<hobject_t> temp_added;
+  std::set<hobject_t> temp_removed;
+  std::optional<pg_hit_set_history_t> updated_hit_set_history;
+  bool backfill_or_async_recovery = false;
   ECSubWrite() : tid(0) {}
   ECSubWrite(
     pg_shard_t from,
@@ -45,21 +51,21 @@ struct ECSubWrite {
     const ObjectStore::Transaction &t,
     eversion_t at_version,
     eversion_t trim_to,
-    eversion_t roll_forward_to,
-    vector<pg_log_entry_t> log_entries,
-    boost::optional<pg_hit_set_history_t> updated_hit_set_history,
-    const set<hobject_t> &temp_added,
-    const set<hobject_t> &temp_removed,
-    bool backfill)
+    eversion_t pg_committed_to,
+    std::vector<pg_log_entry_t> log_entries,
+    std::optional<pg_hit_set_history_t> updated_hit_set_history,
+    const std::set<hobject_t> &temp_added,
+    const std::set<hobject_t> &temp_removed,
+    bool backfill_or_async_recovery)
     : from(from), tid(tid), reqid(reqid),
       soid(soid), stats(stats), t(t),
       at_version(at_version),
-      trim_to(trim_to), roll_forward_to(roll_forward_to),
+      trim_to(trim_to), pg_committed_to(pg_committed_to),
       log_entries(log_entries),
       temp_added(temp_added),
       temp_removed(temp_removed),
       updated_hit_set_history(updated_hit_set_history),
-      backfill(backfill)
+      backfill_or_async_recovery(backfill_or_async_recovery)
     {}
   void claim(ECSubWrite &other) {
     from = other.from;
@@ -70,22 +76,28 @@ struct ECSubWrite {
     t.swap(other.t);
     at_version = other.at_version;
     trim_to = other.trim_to;
-    roll_forward_to = other.roll_forward_to;
+    pg_committed_to = other.pg_committed_to;
     log_entries.swap(other.log_entries);
     temp_added.swap(other.temp_added);
     temp_removed.swap(other.temp_removed);
     updated_hit_set_history = other.updated_hit_set_history;
-    backfill = other.backfill;
+    backfill_or_async_recovery = other.backfill_or_async_recovery;
   }
-  void encode(bufferlist &bl) const;
-  void decode(bufferlist::iterator &bl);
-  void dump(Formatter *f) const;
-  static void generate_test_instances(list<ECSubWrite*>& o);
+  void encode(ceph::buffer::list &bl) const;
+  void encode(ceph::buffer::list &p_bl,
+	      ceph::buffer::list &d_bll,
+	      uint64_t features=0) const;
+  void decode(ceph::buffer::list::const_iterator &bl);
+  void decode(ceph::buffer::list::const_iterator &p_bl,
+	      ceph::buffer::list::const_iterator &d_bl);
+  void dump(ceph::Formatter *f) const;
+  static std::list<ECSubWrite> generate_test_instances();
 private:
   // no outside copying -- slow
   ECSubWrite(ECSubWrite& other);
   const ECSubWrite& operator=(const ECSubWrite& other);
 };
+
 WRITE_CLASS_ENCODER(ECSubWrite)
 
 struct ECSubWriteReply {
@@ -95,35 +107,54 @@ struct ECSubWriteReply {
   bool committed;
   bool applied;
   ECSubWriteReply() : tid(0), committed(false), applied(false) {}
-  void encode(bufferlist &bl) const;
-  void decode(bufferlist::iterator &bl);
-  void dump(Formatter *f) const;
-  static void generate_test_instances(list<ECSubWriteReply*>& o);
+  void encode(ceph::buffer::list &bl) const;
+  void decode(ceph::buffer::list::const_iterator &bl);
+  void dump(ceph::Formatter *f) const;
+  static std::list<ECSubWriteReply> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(ECSubWriteReply)
 
 struct ECSubRead {
   pg_shard_t from;
   ceph_tid_t tid;
-  map<hobject_t, list<boost::tuple<uint64_t, uint64_t, uint32_t> >> to_read;
-  set<hobject_t> attrs_to_read;
-  void encode(bufferlist &bl, uint64_t features) const;
-  void decode(bufferlist::iterator &bl);
-  void dump(Formatter *f) const;
-  static void generate_test_instances(list<ECSubRead*>& o);
+  std::map<hobject_t, std::list<boost::tuple<uint64_t, uint64_t, uint32_t> >> to_read;
+  std::set<hobject_t> attrs_to_read;
+  std::map<hobject_t, std::vector<std::pair<int, int>>> subchunks;
+  std::set<hobject_t> omap_headers_to_read;
+  std::map<hobject_t, std::pair<std::string, uint64_t>> omap_read_from;
+  /**
+    * Calculate the cost of the SubOp read operation for mClock scheduler.
+    *
+    * @param *cct: *CephContext
+    * @param pair<int, int>&: subchunk_count and subchunk_size
+    * @return uint64_t - Cost of EC SubOpRead (size in Bytes)
+    */
+  uint64_t cost(CephContext *cct, std::pair<int, int>& subchunk_info);
+  void encode(ceph::buffer::list &bl, uint64_t features) const;
+  void decode(ceph::buffer::list::const_iterator &bl);
+  void dump(ceph::Formatter *f) const;
+  static std::list<ECSubRead> generate_test_instances();
 };
 WRITE_CLASS_ENCODER_FEATURES(ECSubRead)
 
 struct ECSubReadReply {
   pg_shard_t from;
   ceph_tid_t tid;
-  map<hobject_t, list<pair<uint64_t, bufferlist> >> buffers_read;
-  map<hobject_t, map<string, bufferlist>> attrs_read;
-  map<hobject_t, int> errors;
-  void encode(bufferlist &bl) const;
-  void decode(bufferlist::iterator &bl);
-  void dump(Formatter *f) const;
-  static void generate_test_instances(list<ECSubReadReply*>& o);
+  std::map<hobject_t, std::list<std::pair<uint64_t, ceph::buffer::list> >> buffers_read;
+  std::map<hobject_t, std::map<std::string, ceph::buffer::list, std::less<>>> attrs_read;
+  std::map<hobject_t, int> errors;
+  std::map<hobject_t, ceph::buffer::list> omap_headers_read;
+  std::map<hobject_t, std::map<std::string, ceph::buffer::list>> omap_entries_read;
+  std::map<hobject_t, bool> omaps_complete;
+  void encode(ceph::buffer::list &bl) const;
+  void encode(ceph::buffer::list &p_bl,
+	      ceph::buffer::list &d_pl,
+	      uint64_t features=0) const;
+  void decode(ceph::buffer::list::const_iterator &bl);
+  void decode(ceph::buffer::list::const_iterator &p_bl,
+	      ceph::buffer::list::const_iterator &d_pl);
+  void dump(ceph::Formatter *f) const;
+  static std::list<ECSubReadReply> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(ECSubReadReply)
 
@@ -135,5 +166,10 @@ std::ostream &operator<<(
   std::ostream &lhs, const ECSubRead &rhs);
 std::ostream &operator<<(
   std::ostream &lhs, const ECSubReadReply &rhs);
+
+template <> struct fmt::formatter<ECSubWrite> : fmt::ostream_formatter {};
+template <> struct fmt::formatter<ECSubWriteReply> : fmt::ostream_formatter {};
+template <> struct fmt::formatter<ECSubRead> : fmt::ostream_formatter {};
+template <> struct fmt::formatter<ECSubReadReply> : fmt::ostream_formatter {};
 
 #endif

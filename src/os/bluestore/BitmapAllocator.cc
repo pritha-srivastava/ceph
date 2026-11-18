@@ -1,0 +1,147 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
+#include "BitmapAllocator.h"
+#include <cstdint>
+#include "include/types.h" // for byte_u_t
+
+#define dout_context cct
+#define dout_subsys ceph_subsys_bluestore
+#undef dout_prefix
+#define dout_prefix *_dout << "fbmap_alloc " << this << " "
+
+BitmapAllocator::BitmapAllocator(CephContext* _cct,
+					 int64_t capacity,
+					 int64_t alloc_unit,
+					 std::string_view name) :
+    AllocatorBase(name, capacity, alloc_unit),
+    AllocatorLevel02<AllocatorLevel01Loose>(_cct, name),
+    cct(_cct)
+{
+  ldout(cct, 10) << __func__ << " 0x" << std::hex << capacity << "/"
+		 << alloc_unit << std::dec << dendl;
+  _init(capacity, alloc_unit, false);
+}
+
+int64_t BitmapAllocator::allocate(
+  uint64_t want_size, uint64_t alloc_unit, uint64_t max_alloc_size,
+  int64_t hint, PExtentVector *extents)
+{
+  uint64_t allocated = 0;
+  size_t old_size = extents->size();
+  ldout(cct, 10) << __func__ << std::hex << " 0x" << want_size
+		 << "/" << alloc_unit << "," << max_alloc_size << "," << hint
+		 << std::dec << dendl;
+    
+    
+  _allocate_l2(want_size, alloc_unit, max_alloc_size, hint,
+    &allocated, extents);
+  if (!allocated) {
+    return -ENOSPC;
+  }
+  if (cct->_conf->subsys.should_gather<dout_subsys, 10>()) {
+    for (auto i = old_size; i < extents->size(); ++i) {
+      auto& e = (*extents)[i];
+      ldout(cct, 10) << __func__
+                     << " extent: 0x" << std::hex << e.offset << "~" << e.length
+		     << "/" << alloc_unit << "," << max_alloc_size << "," << hint
+		     << std::dec << dendl;
+    }
+  }
+  return int64_t(allocated);
+}
+
+void BitmapAllocator::release(
+  const interval_set<uint64_t>& release_set)
+{
+  if (cct->_conf->subsys.should_gather<dout_subsys, 10>()) {
+    for (auto& [offset, len] : release_set) {
+      ldout(cct, 10) << __func__ << " 0x" << std::hex << offset << "~" << len
+                     << std::dec << dendl;
+      ceph_assert(offset + len <= (uint64_t)device_size.load());
+    }
+  }
+  _free_l2(release_set);
+  ldout(cct, 10) << __func__ << " done" << dendl;
+}
+
+
+uint64_t BitmapAllocator::get_free_extents(
+  uint64_t range_begin,
+  uint64_t range_end,
+  size_t max_count,
+  free_extent_vector_t* out)
+{
+  return get_free_extents_internal(
+    range_begin, range_end, max_count,
+    [out](uint64_t offset, uint64_t length) {
+      out->emplace_back(offset, length);
+    });
+}
+
+void BitmapAllocator::init_add_free(uint64_t offset, uint64_t length)
+{
+  ldout(cct, 10) << __func__ << " 0x" << std::hex << offset << "~" << length
+		  << std::dec << dendl;
+
+  auto mas = get_min_alloc_size();
+  uint64_t offs = round_up_to(offset, mas);
+  uint64_t l = p2align(offset + length - offs, mas);
+  ceph_assert(offs + l <= (uint64_t)device_size.load());
+
+  _mark_free(offs, l);
+  ldout(cct, 10) << __func__ << " done" << dendl;
+}
+void BitmapAllocator::init_rm_free(uint64_t offset, uint64_t length)
+{
+  ldout(cct, 10) << __func__ << " 0x" << std::hex << offset << "~" << length
+		 << std::dec << dendl;
+  auto mas = get_min_alloc_size();
+  uint64_t offs = round_up_to(offset, mas);
+  uint64_t l = p2align(offset + length - offs, mas);
+  ceph_assert(offs + l <= (uint64_t)device_size.load());
+  _mark_allocated(offs, l);
+  ldout(cct, 10) << __func__ << " done" << dendl;
+}
+
+void BitmapAllocator::expand(int64_t new_size)
+{
+  std::lock_guard l(expand_lock);
+  int64_t old_size = get_capacity();
+  ceph_assert(new_size >= old_size);
+
+  if (new_size == old_size) {
+    return;
+  }
+
+  ldout(cct, 1) << __func__ << " expanding from 0x" << std::hex << old_size
+                << " to 0x" << new_size << std::dec << dendl;
+
+  Allocator::expand(new_size);
+  AllocatorLevel02::expand(new_size, old_size);
+
+  ldout(cct, 1) << __func__ << " expansion complete, available=0x"
+                << std::hex << get_available() << std::dec << dendl;
+}
+
+void BitmapAllocator::shutdown()
+{
+  ldout(cct, 1) << __func__ << dendl;
+  _shutdown();
+}
+
+void BitmapAllocator::dump()
+{
+  // bin -> interval count
+  std::map<size_t, size_t> bins_overall;
+  collect_stats(bins_overall);
+  auto it = bins_overall.begin();
+  while (it != bins_overall.end()) {
+    ldout(cct, 0) << __func__
+                  << " bin " << it->first
+                  << "(< " << byte_u_t((1 << (it->first + 1)) * get_min_alloc_size()) << ")"
+                  << " : " << it->second << " extents"
+                  << dendl;
+    ++it;
+  }
+}

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -30,25 +31,18 @@ extern "C"{
 #include "common/ceph_json.h"
 #include "common/code_environment.h"
 #include "common/ceph_argparse.h"
+#include "common/armor.h"
 #include "common/Finisher.h"
 #include "global/global_init.h"
-#include "rgw/rgw_common.h"
-#include "rgw/rgw_bucket.h"
-#include "rgw/rgw_rados.h"
+#include "rgw_common.h"
+#include "rgw_datalog.h"
+#include "rgw_mdlog.h"
+#include "rgw_bucket.h"
+#include "rgw_rados.h"
 #include "include/utime.h"
 #include "include/object.h"
-#define GTEST
-#ifdef GTEST
 #include <gtest/gtest.h>
-#else
-#define TEST(x, y) void y()
-#define ASSERT_EQ(v, s) if(v != s)cout << "Error at " << __LINE__ << "(" << #v << "!= " << #s << "\n"; \
-                                else cout << "(" << #v << "==" << #s << ") PASSED\n";
-#define EXPECT_EQ(v, s) ASSERT_EQ(v, s)
-#define ASSERT_TRUE(c) if(c)cout << "Error at " << __LINE__ << "(" << #c << ")" << "\n"; \
-                          else cout << "(" << #c << ") PASSED\n";
-#define EXPECT_TRUE(c) ASSERT_TRUE(c) 
-#endif
+
 using namespace std;
 
 #define CURL_VERBOSE 0
@@ -63,8 +57,6 @@ using namespace std;
 static string uid = "ceph";
 static string display_name = "CEPH";
 
-extern "C" int ceph_armor(char *dst, const char *dst_end, 
-                          const char *src, const char *end);
 static void print_usage(char *exec){
   cout << "Usage: " << exec << " <Options>\n";
   cout << "Options:\n"
@@ -138,8 +130,7 @@ int test_helper::extract_input(int argc, char *argv[]){
       ERR_CHECK_NEXT_PARAM(rgw_admin_path);
     }else return -1;
   }
-  if(host.length() <= 0 ||
-     rgw_admin_path.length() <= 0)
+  if(!host.length() || !rgw_admin_path.length())
     return -1;
   return 0;
 }
@@ -195,7 +186,7 @@ static void calc_hmac_sha1(const char *key, int key_len,
   admin_log::buf_to_hex((unsigned char *)dest, CEPH_CRYPTO_HMACSHA1_DIGESTSIZE, hex_str);
 }
 
-static int get_s3_auth(string method, string creds, string date, string res, string& out){
+static int get_s3_auth(const string &method, string creds, const string &date, string res, string& out){
   string aid, secret, auth_hdr;
   string tmp_res;
   size_t off = creds.find(":");
@@ -318,7 +309,8 @@ int run_rgw_admin(string& cmd, string& resp) {
     /* child */
     list<string> l;
     get_str_list(cmd, " \t", l);
-    char *argv[l.size()];
+    // One extra for argv[0] and one for the NULL.
+    std::vector<char*> argv(l.size() + 2);
     unsigned loop = 1;
 
     argv[0] = (char *)"radosgw-admin";
@@ -330,7 +322,7 @@ int run_rgw_admin(string& cmd, string& resp) {
     if (!freopen(RGW_ADMIN_RESP_PATH, "w+", stdout)) {
       cout << "Unable to open stdout file" << std::endl;
     }
-    execv((g_test->get_rgw_admin_path()).c_str(), argv); 
+    execv((g_test->get_rgw_admin_path()).c_str(), argv.data());
   } else if (pid > 0) {
     int status;
     waitpid(pid, &status, 0);
@@ -498,7 +490,7 @@ static int put_bucket_obj(const char *obj_name, char *data, unsigned len) {
   g_test->send_request(string("PUT"), req,
                        read_bucket_object, (void *)data, (size_t)len);
   if (g_test->get_resp_code() != 200U) {
-    cout << "Errror sending object to the bucket, http_code " << g_test->get_resp_code();
+    cout << "Error sending object to the bucket, http_code " << g_test->get_resp_code();
     return -1;
   }
   return 0;
@@ -509,7 +501,7 @@ static int read_bucket_obj(const char *obj_name) {
   req.append(obj_name);
   g_test->send_request(string("GET"), req);
   if (g_test->get_resp_code() != 200U) {
-    cout << "Errror sending object to the bucket, http_code " << g_test->get_resp_code();
+    cout << "Error sending object to the bucket, http_code " << g_test->get_resp_code();
     return -1;
   }
   return 0;
@@ -520,7 +512,7 @@ static int delete_obj(const char *obj_name) {
   req.append(obj_name);
   g_test->send_request(string("DELETE"), req);
   if (g_test->get_resp_code() != 204U) {
-    cout << "Errror deleting object from bucket, http_code " << g_test->get_resp_code();
+    cout << "Error deleting object from bucket, http_code " << g_test->get_resp_code();
     return -1;
   }
   return 0;
@@ -1569,11 +1561,11 @@ TEST(TestRGWAdmin, bilog_trim) {
 }
 
 int main(int argc, char *argv[]){
-  vector<const char*> args;
-  argv_to_vec(argc, (const char **)argv, args);
+  auto args = argv_to_vec(argc, argv);
 
   auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
-			 CODE_ENVIRONMENT_UTILITY, 0);
+			 CODE_ENVIRONMENT_UTILITY,
+			 CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
   common_init_finish(g_ceph_context);
   g_test = new admin_log::test_helper();
   finisher = new Finisher(g_ceph_context);

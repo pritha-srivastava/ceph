@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Copied from:
  * https://github.com/exclipy/inline_variant_visitor/blob/master/function_signature.hpp
@@ -12,12 +13,9 @@
 
 #include <boost/mpl/pop_front.hpp>
 #include <boost/mpl/push_front.hpp>
-#include <boost/function_types/is_member_function_pointer.hpp>
 #include <boost/function_types/function_type.hpp>
 #include <boost/function_types/result_type.hpp>
 #include <boost/function_types/parameter_types.hpp>
-
-#include <boost/type_traits.hpp>
 
 template <typename F>
 struct signature_of_member

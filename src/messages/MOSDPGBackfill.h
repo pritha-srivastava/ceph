@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,9 +18,10 @@
 
 #include "MOSDFastDispatchOp.h"
 
-class MOSDPGBackfill : public MOSDFastDispatchOp {
-  static const int HEAD_VERSION = 3;
-  static const int COMPAT_VERSION = 1;
+class MOSDPGBackfill final : public MOSDFastDispatchOp {
+private:
+  static constexpr int HEAD_VERSION = 3;
+  static constexpr int COMPAT_VERSION = 3;
 public:
   enum {
     OP_BACKFILL_PROGRESS = 2,
@@ -35,83 +37,82 @@ public:
     }
   }
 
-  __u32 op;
-  epoch_t map_epoch, query_epoch;
+  __u32 op = 0;
+  epoch_t map_epoch = 0, query_epoch = 0;
   spg_t pgid;
   hobject_t last_backfill;
-  bool compat_stat_sum;
   pg_stat_t stats;
 
   epoch_t get_map_epoch() const override {
     return map_epoch;
   }
+  epoch_t get_min_epoch() const override {
+    return query_epoch;
+  }
   spg_t get_spg() const override {
     return pgid;
   }
 
-  virtual void decode_payload() {
-    bufferlist::iterator p = payload.begin();
-    ::decode(op, p);
-    ::decode(map_epoch, p);
-    ::decode(query_epoch, p);
-    ::decode(pgid.pgid, p);
-    ::decode(last_backfill, p);
+  void decode_payload() override {
+    using ceph::decode;
+    auto p = payload.cbegin();
+    decode(op, p);
+    decode(map_epoch, p);
+    decode(query_epoch, p);
+    decode(pgid.pgid, p);
+    decode(last_backfill, p);
 
     // For compatibility with version 1
-    ::decode(stats.stats, p);
+    decode(stats.stats, p);
 
-    if (header.version >= 2) {
-      ::decode(stats, p);
-    } else {
-      compat_stat_sum = true;
-    }
+    decode(stats, p);
 
     // Handle hobject_t format change
     if (!last_backfill.is_max() &&
 	last_backfill.pool == -1)
       last_backfill.pool = pgid.pool();
-    if (header.version >= 3)
-      ::decode(pgid.shard, p);
-    else
-      pgid.shard = shard_id_t::NO_SHARD;
+    decode(pgid.shard, p);
   }
 
-  virtual void encode_payload(uint64_t features) {
-    ::encode(op, payload);
-    ::encode(map_epoch, payload);
-    ::encode(query_epoch, payload);
-    ::encode(pgid.pgid, payload);
-    ::encode(last_backfill, payload);
+  void encode_payload(uint64_t features) override {
+    using ceph::encode;
+    encode(op, payload);
+    encode(map_epoch, payload);
+    encode(query_epoch, payload);
+    encode(pgid.pgid, payload);
+    encode(last_backfill, payload);
 
     // For compatibility with version 1
-    ::encode(stats.stats, payload);
+    encode(stats.stats, payload);
 
-    ::encode(stats, payload);
+    encode(stats, payload);
 
-    ::encode(pgid.shard, payload);
+    encode(pgid.shard, payload);
   }
 
   MOSDPGBackfill()
-    : MOSDFastDispatchOp(MSG_OSD_PG_BACKFILL, HEAD_VERSION, COMPAT_VERSION),
-      compat_stat_sum(false) {}
+    : MOSDFastDispatchOp{MSG_OSD_PG_BACKFILL, HEAD_VERSION, COMPAT_VERSION} {}
   MOSDPGBackfill(__u32 o, epoch_t e, epoch_t qe, spg_t p)
-    : MOSDFastDispatchOp(MSG_OSD_PG_BACKFILL, HEAD_VERSION, COMPAT_VERSION),
+    : MOSDFastDispatchOp{MSG_OSD_PG_BACKFILL, HEAD_VERSION, COMPAT_VERSION},
       op(o),
       map_epoch(e), query_epoch(e),
-      pgid(p),
-      compat_stat_sum(false) {}
+      pgid(p) {}
 private:
-  ~MOSDPGBackfill() {}
+  ~MOSDPGBackfill() final {}
 
 public:
-  const char *get_type_name() const { return "pg_backfill"; }
-  void print(ostream& out) const {
+  std::string_view get_type_name() const override { return "pg_backfill"; }
+  void print(std::ostream& out) const override {
     out << "pg_backfill(" << get_op_name(op)
 	<< " " << pgid
 	<< " e " << map_epoch << "/" << query_epoch
 	<< " lb " << last_backfill
 	<< ")";
   }
+
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,8 +13,7 @@
  *
  */
 
-#ifndef RGW_TOKEN_H
-#define RGW_TOKEN_H
+#pragma once
 
 #include <stdint.h>
 #include <boost/algorithm/string.hpp>
@@ -52,13 +52,10 @@ namespace rgw {
       switch (type) {
       case TOKEN_AD:
 	return "ad";
-	break;
       case TOKEN_LDAP:
 	return "ldap";
-	break;
       case TOKEN_KEYSTONE:
 	return "keystone";
-	break;
       default:
 	return "none";
       };
@@ -83,35 +80,42 @@ namespace rgw {
 	     const std::string& _key)
       : type(_type), id(_id), key(_key) {};
 
-    RGWToken(const string& json) {
+    explicit RGWToken(const string& json) {
       JSONParser p;
       p.parse(json.c_str(), json.length());
       JSONDecoder::decode_json(RGWToken::type_name, *this, &p);
+    }
+
+    RGWToken& operator=(const std::string& json) {
+      JSONParser p;
+      p.parse(json.c_str(), json.length());
+      JSONDecoder::decode_json(RGWToken::type_name, *this, &p);
+      return *this;
     }
 
     void encode(bufferlist& bl) const {
       uint32_t ver = version();
       string typestr{from_type(type)};
       ENCODE_START(1, 1, bl);
-      ::encode(type_name, bl);
-      ::encode(ver, bl);
-      ::encode(typestr, bl);
-      ::encode(id, bl);
-      ::encode(key, bl);
+      encode(type_name, bl);
+      encode(ver, bl);
+      encode(typestr, bl);
+      encode(id, bl);
+      encode(key, bl);
       ENCODE_FINISH(bl);
     }
 
-    void decode(bufferlist::iterator& bl) {
+    void decode(bufferlist::const_iterator& bl) {
       string name;
       string typestr;
       uint32_t version;
       DECODE_START(1, bl);
-      ::decode(name, bl);
-      ::decode(version, bl);
-      ::decode(typestr, bl);
+      decode(name, bl);
+      decode(version, bl);
+      decode(typestr, bl);
       type = to_type(typestr);
-      ::decode(id, bl);
-      ::decode(key, bl);
+      decode(id, bl);
+      decode(key, bl);
       DECODE_FINISH(bl);
     }
 
@@ -147,13 +151,13 @@ namespace rgw {
       return to_base64(std::move(os.str()));
     }
 
-    friend inline ostream& operator<<(ostream& os, const RGWToken& token);
+    friend inline std::ostream& operator<<(std::ostream& os, const RGWToken& token);
 
     virtual ~RGWToken() {};
   };
   WRITE_CLASS_ENCODER(RGWToken)
 
-  inline ostream& operator<<(ostream& os, const RGWToken& token)
+  inline std::ostream& operator<<(std::ostream& os, const RGWToken& token)
   {
     os << "<<RGWToken"
        << " type=" << RGWToken::from_type(token.type)
@@ -164,5 +168,3 @@ namespace rgw {
   }
 
 } /* namespace rgw */
-
-#endif /* RGW_TOKEN_H */

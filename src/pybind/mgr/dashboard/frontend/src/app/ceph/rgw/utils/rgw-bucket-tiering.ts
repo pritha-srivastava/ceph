@@ -1,0 +1,122 @@
+import {
+  Target,
+  TierTarget,
+  TIER_TYPE,
+  TIER_TYPE_DISPLAY,
+  ZoneGroup,
+  ZoneGroupDetails,
+  StorageClassDetails,
+  S3Details,
+  Zone
+} from '../models/rgw-storage-class.model';
+
+type MappedTierTarget = Omit<Partial<StorageClassDetails>, 'host_style'> &
+  Partial<Pick<S3Details, 'region' | 'endpoint' | 'location_constraint'>> & {
+    zonegroup_name: string;
+    placement_target: string;
+    storage_class: string;
+    tier_type: string;
+    host_style?: string | boolean;
+  };
+
+export class BucketTieringUtils {
+  static mapTierTypeDisplay(tierType: string): string {
+    switch (tierType?.toLowerCase()) {
+      case TIER_TYPE.CLOUD_TIER:
+        return TIER_TYPE_DISPLAY.CLOUD_TIER;
+      case TIER_TYPE.LOCAL:
+        return TIER_TYPE_DISPLAY.LOCAL;
+      case TIER_TYPE.GLACIER:
+        return TIER_TYPE_DISPLAY.GLACIER;
+      default:
+        return tierType;
+    }
+  }
+
+  static filterAndMapTierTargets(zonegroupData: ZoneGroupDetails): MappedTierTarget[] {
+    return zonegroupData.zonegroups.flatMap((zoneGroup: ZoneGroup) =>
+      zoneGroup.placement_targets.flatMap((target: Target) => {
+        const storage_class = new Set<string>(
+          (target.tier_targets || []).map((tier_target: TierTarget) => tier_target.key)
+        );
+        const tierTargetDetails = (target.tier_targets || []).map((tierTarget: TierTarget) =>
+          this.getTierTargets(tierTarget, zoneGroup.name, target.name)
+        );
+        const localStorageClasses: MappedTierTarget[] = (target.storage_classes || [])
+          .filter((storageClass) => storageClass !== 'STANDARD' && !storage_class.has(storageClass))
+          .map((storageClass) => ({
+            zonegroup_name: zoneGroup.name,
+            placement_target: target.name,
+            storage_class: storageClass,
+            tier_type: TIER_TYPE.LOCAL
+          }));
+
+        return [...tierTargetDetails, ...localStorageClasses];
+      })
+    );
+  }
+
+  private static getTierTargets(
+    tierTarget: TierTarget,
+    zoneGroup: string,
+    targetName: string
+  ): MappedTierTarget {
+    const val = tierTarget.val;
+    const tierType = val.tier_type;
+    const commonProps = {
+      zonegroup_name: zoneGroup,
+      placement_target: targetName,
+      storage_class: val.storage_class,
+      tier_type: tierType
+    };
+    const cloudProps = {
+      ...commonProps,
+      retain_head_object: val.retain_head_object,
+      allow_read_through: val.allow_read_through,
+      restore_storage_class: val.restore_storage_class,
+      read_through_restore_days: val.read_through_restore_days,
+      acls: val.s3.acl_mappings,
+      ...val.s3,
+      target_storage_class: val.s3?.target_storage_class ?? '',
+      location_constraint: val.s3?.location_constraint ?? ''
+    };
+
+    if (!tierType || tierType === TIER_TYPE.LOCAL) {
+      return commonProps;
+    }
+
+    if (tierType === TIER_TYPE.GLACIER) {
+      return {
+        ...cloudProps,
+        ...val['s3-glacier']
+      };
+    }
+    return cloudProps;
+  }
+
+  static getZoneInfoHelper(zones: Zone[], selectedStorageClass: Partial<StorageClassDetails>) {
+    if (zones && zones.length > 0 && selectedStorageClass) {
+      const zoneFound = zones.find((zone) =>
+        zone.placement_pools.some(
+          (placement) =>
+            placement.key === selectedStorageClass?.placement_target &&
+            placement.val.storage_classes[selectedStorageClass?.storage_class]
+        )
+      );
+
+      if (zoneFound) {
+        const placement = zoneFound.placement_pools.find(
+          (p) =>
+            p.key === selectedStorageClass?.placement_target &&
+            p.val.storage_classes[selectedStorageClass?.storage_class]
+        );
+        const storageClassEntry =
+          placement?.val.storage_classes[selectedStorageClass?.storage_class];
+        if (storageClassEntry) {
+          return { zone_name: zoneFound.name, data_pool: storageClassEntry.data_pool };
+        }
+      }
+    }
+    return { zone_name: '', data_pool: '' };
+  }
+}

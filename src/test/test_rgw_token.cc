@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -20,11 +21,10 @@
 #include "common/config.h"
 #include "common/ceph_argparse.h"
 #include "common/debug.h"
-#include "global/global_init.h"
-#include "include/assert.h"
+#include "include/ceph_assert.h"
 #include "gtest/gtest.h"
-#include "rgw/rgw_token.h"
-#include "rgw/rgw_b64.h"
+#include "rgw_token.h"
+#include "rgw_b64.h"
 
 #define dout_subsys ceph_subsys_rgw
 
@@ -46,23 +46,25 @@ namespace {
   std::string non_base64{"stuff here"};
   std::string non_base64_sploded{"90KLscc0Dz4U49HX-7Tx"};
 
-  Formatter* formatter{nullptr};
+  Formatter* token_formatter{nullptr};
   bool verbose {false};
 }
 
+using namespace std;
+
 TEST(TOKEN, INIT) {
-  formatter = new JSONFormatter(true /* pretty */);
-  ASSERT_NE(formatter, nullptr);
+  token_formatter = new JSONFormatter(true /* pretty */);
+  ASSERT_NE(token_formatter, nullptr);
 }
 
 TEST(TOKEN, ENCODE) {
   // encode the two supported types
   RGWToken token_ad(RGWToken::TOKEN_AD, access_key, secret_key);
-  ASSERT_EQ(token_ad.encode_json_base64(formatter), enc_ad);
+  ASSERT_EQ(token_ad.encode_json_base64(token_formatter), enc_ad);
   tokens.push_back(token_ad); // provies copiable
 
   RGWToken token_ldap(RGWToken::TOKEN_LDAP, access_key, secret_key);
-  ASSERT_EQ(token_ldap.encode_json_base64(formatter), enc_ldap);
+  ASSERT_EQ(token_ldap.encode_json_base64(token_formatter), enc_ldap);
   tokens.push_back(token_ldap);
 }
 
@@ -100,17 +102,15 @@ TEST(TOKEN, BADINPUT3) {
 }
 
 TEST(TOKEN, SHUTDOWN) {
-  delete formatter;
+  delete token_formatter;
 }
 
 int main(int argc, char *argv[])
 {
-  string val;
-  vector<const char*> args;
-
-  argv_to_vec(argc, const_cast<const char**>(argv), args);
+  auto args = argv_to_vec(argc, argv);
   env_to_vec(args);
 
+  string val;
   for (auto arg_iter = args.begin(); arg_iter != args.end();) {
     if (ceph_argparse_flag(args, arg_iter, "--verbose",
 			      (char*) nullptr)) {

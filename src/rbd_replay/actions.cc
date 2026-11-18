@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -20,8 +21,8 @@
 
 #define dout_context g_ceph_context
 
+using std::cerr;
 using namespace rbd_replay;
-using namespace std;
 
 namespace {
 
@@ -33,7 +34,7 @@ std::string create_fake_data() {
   return std::string(data, sizeof(data));
 }
 
-struct ConstructVisitor : public boost::static_visitor<Action::ptr> {
+struct ConstructVisitor {
   inline Action::ptr operator()(const action::StartThreadAction &action) const {
     return Action::ptr(new StartThreadAction(action));
   }
@@ -94,7 +95,7 @@ std::ostream& rbd_replay::operator<<(std::ostream& o, const Action& a) {
 }
 
 Action::ptr Action::construct(const action::ActionEntry &action_entry) {
-  return boost::apply_visitor(ConstructVisitor(), action_entry.action);
+  return std::visit(ConstructVisitor(), action_entry.action);
 }
 
 void StartThreadAction::perform(ActionCtx &ctx) {
@@ -110,7 +111,7 @@ void StopThreadAction::perform(ActionCtx &ctx) {
 void AioReadAction::perform(ActionCtx &worker) {
   dout(ACTION_LEVEL) << "Performing " << *this << dendl;
   librbd::Image *image = worker.get_image(m_action.imagectx_id);
-  assert(image);
+  ceph_assert(image);
   PendingIO::ptr io(new PendingIO(pending_io_id(), worker));
   worker.add_pending(io);
   int r = image->aio_read(m_action.offset, m_action.length, io->bufferlist(), &io->completion());

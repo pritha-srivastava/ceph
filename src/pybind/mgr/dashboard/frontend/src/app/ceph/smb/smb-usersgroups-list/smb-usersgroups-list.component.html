@@ -1,0 +1,35 @@
+<cd-smb-tabs></cd-smb-tabs>
+
+@if (usersGroups$ | async; as usersGroups) {
+  <cd-table
+    headerTitle="Standalone access resources"
+    headerDescription="Logical management units for authorization on Standalone servers"
+    [data]="usersGroups"
+    columnMode="flex"
+    [columns]="columns"
+    selectionType="single"
+    [hasDetails]="false"
+    (fetchData)="loadUsersGroups()"
+    (updateSelection)="updateSelection($event)"
+  >
+    <div class="table-actions">
+      <cd-table-actions
+        [permission]="permission"
+        [selection]="selection"
+        [tableActions]="tableActions"
+      >
+      </cd-table-actions>
+    </div>
+  </cd-table>
+}
+
+<ng-template
+  #groupsNamesTpl
+  let-row="data.row"
+>
+  @for (group of row?.values.groups; track group) {
+    <cds-tag size="md">
+      {{ group?.name }}
+    </cds-tag>
+  }
+</ng-template>

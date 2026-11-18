@@ -1,0 +1,361 @@
+import logging
+import json
+import socket
+from dataclasses import dataclass
+from enum import Enum
+from functools import wraps
+from typing import (
+    Any,
+    Callable,
+    List,
+    NamedTuple,
+    NewType,
+    Optional,
+    TYPE_CHECKING,
+    TypeVar,
+    Union,
+)
+from orchestrator import OrchestratorError
+from functools import lru_cache
+import hashlib
+
+if TYPE_CHECKING:
+    from cephadm import CephadmOrchestrator
+
+T = TypeVar('T')
+logger = logging.getLogger(__name__)
+
+ConfEntity = NewType('ConfEntity', str)
+
+
+class CephadmNoImage(Enum):
+    token = 1
+
+
+# ceph daemon types that use the ceph container image.
+# NOTE: order important here as these are used for upgrade order
+CEPH_TYPES = ['mgr', 'mon', 'crash', 'osd', 'mds', 'rgw',
+              'rbd-mirror', 'cephfs-mirror', 'ceph-exporter']
+GATEWAY_TYPES = ['iscsi', 'nfs', 'nvmeof', 'smb']
+# rgw is a gateway too, but it uses the ceph container image and is therefore
+# listed in CEPH_TYPES, which also places it in the upgrade order. Use this
+# when you mean every gateway daemon type regardless of the image it uses.
+ALL_GATEWAY_TYPES = GATEWAY_TYPES + ['rgw']
+MONITORING_STACK_TYPES = ['node-exporter', 'prometheus',
+                          'alertmanager', 'grafana', 'loki', 'promtail', 'alloy',
+                          'pushgateway']
+MGMT_GATEWAY_STACK_TYPES = ['mgmt-gateway', 'oauth2-proxy']
+INGRESS_TYPES = ['haproxy', 'keepalived']
+RESCHEDULE_FROM_OFFLINE_HOSTS_TYPES = ['haproxy', 'nfs', 'keepalived', 'smb']
+
+# Daemon types that must be upgraded one at a time (serially).
+# osd/mds/mon use the mon ok-to-stop gate; ingress daemons have no
+# such gate but must still be rolled one-at-a-time to preserve HA.
+SERIAL_UPGRADE_DAEMON_TYPES = ['osd', 'mds', 'mon'] + INGRESS_TYPES
+
+CEPH_UPGRADE_ORDER = CEPH_TYPES + GATEWAY_TYPES + INGRESS_TYPES + MONITORING_STACK_TYPES + MGMT_GATEWAY_STACK_TYPES
+
+# these daemon types use the ceph container image
+CEPH_IMAGE_TYPES = CEPH_TYPES + ['iscsi', 'nfs', 'node-proxy']
+
+# these daemons do not use the ceph image. There are other daemons
+# that also don't use the ceph image, but we only care about those
+# that are part of the upgrade order here
+NON_CEPH_IMAGE_TYPES = MONITORING_STACK_TYPES + ['nvmeof', 'smb'] + MGMT_GATEWAY_STACK_TYPES + INGRESS_TYPES
+
+# Used for _run_cephadm used for check-host etc that don't require an --image parameter
+cephadmNoImage = CephadmNoImage.token
+
+# allowed ciphers for cephx keyrings in this version.
+# We do not set preferred ciphers as we may potentially
+# brake clusters on upgrade
+ALLOWED_CIPHERS = ['aes', 'aes256k']
+# ROTATION_CIPHER is the cipher the new keys will be set
+# up with after we rotate them
+ROTATION_CIPHER = 'aes256k'
+# cipher mons should use by default for service requests
+# Do not set the service cipher until all core (mon/mgr/osd/mds)
+# daemons have been upgraded
+SERVICE_CIPHER = 'aes256k'
+
+
+def auth_allowed_cipher_names_from_mon_map(mon_map: Any) -> List[str]:
+    """Return auth_allowed_ciphers names from a MonMap dump (mgr get('mon_map')).
+    """
+    if not isinstance(mon_map, dict):
+        return []
+    raw = mon_map.get('auth_allowed_ciphers')
+    if not isinstance(raw, list):
+        return []
+    names: List[str] = []
+    for item in raw:
+        name = item.get('name') if isinstance(item, dict) else None
+        if name:
+            names.append(str(name))
+    return names
+
+
+def allowed_ciphers_are_aes256k_only(cipher_names: List[str]) -> bool:
+    """True when allowed ciphers are already restricted to aes256k (no legacy aes)."""
+    names = {name.strip() for name in cipher_names if name and name.strip()}
+    return names == {ROTATION_CIPHER}
+
+
+def auth_service_cipher_name_from_mon_map(mon_map: Any) -> Optional[str]:
+    """Return the auth_service_cipher name from a MonMap dump (mgr get('mon_map')).
+    """
+    if not isinstance(mon_map, dict):
+        return None
+    raw = mon_map.get('auth_service_cipher')
+    if not isinstance(raw, dict):
+        return None
+    name = raw.get('name')
+    return str(name) if name else None
+
+
+DEFAULT_SSH_CONFIG = """
+Host *
+  User root
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+  ConnectTimeout=30
+"""
+
+FIPS_SSH_CIPHERS = 'aes256-ctr,aes128-ctr'
+
+
+class ContainerInspectInfo(NamedTuple):
+    image_id: str
+    ceph_version: Optional[str]
+    repo_digests: Optional[List[str]]
+
+
+class SpecialHostLabels(str, Enum):
+    ADMIN: str = '_admin'
+    NO_MEMORY_AUTOTUNE: str = '_no_autotune_memory'
+    DRAIN_DAEMONS: str = '_no_schedule'
+    DRAIN_CONF_KEYRING: str = '_no_conf_keyring'
+
+    def to_json(self) -> str:
+        return self.value
+
+    def __str__(self) -> str:
+        return self.value
+
+
+class Action(str, Enum):
+    NO_ACTION = ''
+    RECONFIG = 'reconfig'
+    REDEPLOY = 'redeploy'
+    RESTART = 'restart'
+    ROTATE_KEY = 'rotate-key'
+    START = 'start'
+    STOP = 'stop'
+
+    @classmethod
+    def create(cls, action: Union[str, 'Action', None]) -> 'Action':
+        if not action:
+            return cls.NO_ACTION
+        return cls(action)
+
+    def __str__(self) -> str:
+        return self.value
+
+
+@dataclass(frozen=True)
+class NextDaemonStep:
+    """Result of CephadmService.choose_next_action: high-level action plus
+    optional reconfig hints (e.g. HAProxy reload via signal instead of restart).
+    """
+    action: Action
+    skip_restart_for_reconfig: bool = False
+    send_signal_to_daemon: Optional[str] = None
+
+
+def name_to_config_section(name: str) -> ConfEntity:
+    """
+    Map from daemon names to ceph entity names (as seen in config)
+    """
+    daemon_type = name.split('.', 1)[0]
+    if daemon_type in ['rgw', 'rbd-mirror', 'nfs', 'crash', 'iscsi', 'ceph-exporter', 'nvmeof', 'smb']:
+        return ConfEntity('client.' + name)
+    elif daemon_type in ['mon', 'osd', 'mds', 'mgr', 'client']:
+        return ConfEntity(name)
+    else:
+        return ConfEntity('mon')
+
+
+def forall_hosts(f: Callable[..., T]) -> Callable[..., List[T]]:
+    @wraps(f)
+    def forall_hosts_wrapper(*args: Any) -> List[T]:
+        from cephadm.module import CephadmOrchestrator
+
+        # Some weird logic to make calling functions with multiple arguments work.
+        if len(args) == 1:
+            vals = args[0]
+            self = None
+        elif len(args) == 2:
+            self, vals = args
+        else:
+            assert 'either f([...]) or self.f([...])'
+
+        def do_work(arg: Any) -> T:
+            if not isinstance(arg, tuple):
+                arg = (arg, )
+            try:
+                if self:
+                    return f(self, *arg)
+                return f(*arg)
+            except Exception:
+                logger.exception(f'executing {f.__name__}({args}) failed.')
+                raise
+
+        assert CephadmOrchestrator.instance is not None
+        return CephadmOrchestrator.instance._worker_pool.map(do_work, vals)
+
+    return forall_hosts_wrapper
+
+
+def get_cluster_health(mgr: 'CephadmOrchestrator') -> str:
+    # check cluster health
+    ret, out, err = mgr.check_mon_command({
+        'prefix': 'health',
+        'format': 'json',
+    })
+    try:
+        j = json.loads(out)
+    except ValueError:
+        msg = 'Failed to parse health status: Cannot decode JSON'
+        logger.exception('%s: \'%s\'' % (msg, out))
+        raise OrchestratorError('failed to parse health status')
+
+    return j['status']
+
+
+def is_repo_digest(image_name: str) -> bool:
+    """
+    repo digest are something like "ceph/ceph@sha256:blablabla"
+    """
+    return '@' in image_name
+
+
+def resolve_ip(hostname: str) -> str:
+    try:
+        r = socket.getaddrinfo(hostname, None, flags=socket.AI_CANONNAME,
+                               type=socket.SOCK_STREAM)
+        # pick first v4 IP, if present
+        for a in r:
+            if a[0] == socket.AF_INET:
+                return a[4][0]
+        return r[0][4][0]
+    except socket.gaierror as e:
+        raise OrchestratorError(f"Cannot resolve ip for host {hostname}: {e}")
+
+
+def ceph_release_to_major(release: str) -> int:
+    return ord(release[0]) - ord('a') + 1
+
+
+def file_mode_to_str(mode: int) -> str:
+    r = ''
+    for shift in range(0, 9, 3):
+        r = (
+            f'{"r" if (mode >> shift) & 4 else "-"}'
+            f'{"w" if (mode >> shift) & 2 else "-"}'
+            f'{"x" if (mode >> shift) & 1 else "-"}'
+        ) + r
+    return r
+
+
+def config_hash(input_value: str) -> str:
+    """
+    Short stable digest for config/dependency change detection.
+    Uses SHA-256 so this works on FIPS-enabled systems (MD5 may be blocked).
+    """
+    input_str = input_value.encode('utf-8')
+    return hashlib.sha256(input_str).hexdigest()[:8]
+
+
+def get_node_proxy_status_value(data: Any, key: str, lower: bool = False) -> str:
+    if not isinstance(data, dict):
+        return ''
+    status = data.get('status', {})
+    if not isinstance(status, dict):
+        return ''
+    value = status.get(key, '')
+    if not isinstance(value, str):
+        return ''
+    return value.lower() if lower else value
+
+
+def get_config_option_meta(
+    mgr: 'CephadmOrchestrator',
+    key: str,
+    cache: Optional[dict[str, Optional[dict[str, Any]]]] = None,
+) -> Optional[dict[str, Any]]:
+    if cache is not None and key in cache:
+        return cache[key]
+
+    try:
+        ret, out, err = mgr.check_mon_command({
+            'prefix': 'config help',
+            'key': key,
+            'format': 'json',
+        })
+        meta = json.loads(out) if out else None
+    except Exception:
+        logger.exception("Failed to fetch config metadata for key %s", key)
+        meta = None
+
+    if cache is not None:
+        cache[key] = meta
+    return meta
+
+
+def can_apply_post_create(
+    mgr: 'CephadmOrchestrator',
+    key: str,
+    cache: Optional[dict[str, Optional[dict[str, Any]]]] = None,
+) -> bool:
+    meta = get_config_option_meta(mgr, key, cache)
+    if not meta:
+        return False
+    return bool(meta.get('can_update_at_runtime', False))
+
+
+@lru_cache(maxsize=1)
+def is_fips_enabled() -> bool:
+    try:
+        with open('/proc/sys/crypto/fips_enabled', 'r') as f:
+            return f.read().strip() == '1'
+    except OSError as error:
+        logger.debug(
+            'Unable to read /proc/sys/crypto/fips_enabled: %s',
+            error,
+        )
+        return False
+
+
+def get_default_ssh_config() -> str:
+    """Return the default cephadm SSH config for the local environment."""
+    ssh_config = DEFAULT_SSH_CONFIG
+
+    if is_fips_enabled():
+        ssh_config += f'  Ciphers {FIPS_SSH_CIPHERS}\n'
+
+    return ssh_config
+
+
+def build_ceph_volume_cmd(
+    log_level: str,
+    command: List[str],
+    prefix: Optional[List[str]] = None,
+) -> List[str]:
+    """Build ceph-volume argv after cephadm's '--' separator.
+
+    prefix is for flags that must appear before '--' (e.g. --config-json).
+    """
+    cmd: List[str] = list(prefix or [])
+    cmd.extend(['--', '--log-level', log_level])
+    cmd.extend(command)
+    return cmd

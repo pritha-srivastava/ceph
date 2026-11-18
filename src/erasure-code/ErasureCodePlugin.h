@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph distributed storage system
  *
@@ -18,7 +19,9 @@
 #ifndef CEPH_ERASURE_CODE_PLUGIN_H
 #define CEPH_ERASURE_CODE_PLUGIN_H
 
-#include "common/Mutex.h"
+#include <functional>
+
+#include "common/ceph_mutex.h"
 #include "ErasureCodeInterface.h"
 
 extern "C" {
@@ -39,14 +42,14 @@ namespace ceph {
     virtual int factory(const std::string &directory,
 			ErasureCodeProfile &profile,
                         ErasureCodeInterfaceRef *erasure_code,
-			ostream *ss) = 0;
+			std::ostream *ss) = 0;
   };
 
   class ErasureCodePluginRegistry {
   public:
-    Mutex lock;
-    bool loading;
-    bool disable_dlclose;
+    ceph::mutex lock = ceph::make_mutex("ErasureCodePluginRegistry::lock");
+    bool loading = false;
+    bool disable_dlclose = false;
     std::map<std::string,ErasureCodePlugin*> plugins;
 
     static ErasureCodePluginRegistry singleton;
@@ -62,20 +65,24 @@ namespace ceph {
 		const std::string &directory,
 		ErasureCodeProfile &profile,
 		ErasureCodeInterfaceRef *erasure_code,
-		ostream *ss);
+		std::ostream *ss);
 
     int add(const std::string &name, ErasureCodePlugin *plugin);
     int remove(const std::string &name);
     ErasureCodePlugin *get(const std::string &name);
 
+    static int register_builtin(
+      const std::string &name,
+      std::function<ErasureCodePlugin*()> create);
+
     int load(const std::string &plugin_name,
 	     const std::string &directory,
 	     ErasureCodePlugin **plugin,
-	     ostream *ss);
+	     std::ostream *ss);
 
     int preload(const std::string &plugins,
 		const std::string &directory,
-		ostream *ss);
+		std::ostream *ss);
   };
 }
 

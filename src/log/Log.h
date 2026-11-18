@@ -1,73 +1,55 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef __CEPH_LOG_LOG_H
 #define __CEPH_LOG_LOG_H
 
-#include "common/Thread.h"
+#include <boost/circular_buffer.hpp>
 
-#include "EntryQueue.h"
+#include <condition_variable>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <queue>
+#include <string>
+#include <string_view>
+
+#include "common/Thread.h"
+#include "common/ceph_time.h"
+#include "common/likely.h"
+
+#include "log/Entry.h"
+
+#include <unistd.h>
+
+struct uuid_d;
 
 namespace ceph {
 namespace logging {
 
 class Graylog;
+class JournaldLogger;
 class SubsystemMap;
-class Entry;
 
 class Log : private Thread
 {
-  Log **m_indirect_this;
-
-  SubsystemMap *m_subs;
-
-  pthread_mutex_t m_queue_mutex;
-  pthread_mutex_t m_flush_mutex;
-  pthread_cond_t m_cond_loggers;
-  pthread_cond_t m_cond_flusher;
-
-  pthread_t m_queue_mutex_holder;
-  pthread_t m_flush_mutex_holder;
-
-  EntryQueue m_new;    ///< new entries
-  EntryQueue m_recent; ///< recent (less new) entries we've already written at low detail
-
-  std::string m_log_file;
-  int m_fd;
-  uid_t m_uid;
-  gid_t m_gid;
-
-  int m_fd_last_error;  ///< last error we say writing to fd (if any)
-
-  int m_syslog_log, m_syslog_crash;
-  int m_stderr_log, m_stderr_crash;
-  int m_graylog_log, m_graylog_crash;
-
-  shared_ptr<Graylog> m_graylog;
-
-  bool m_stop;
-
-  int m_max_new, m_max_recent;
-
-  bool m_inject_segv;
-
-  void *entry();
-
-  void _flush(EntryQueue *q, EntryQueue *requeue, bool crash);
-
-  void _log_message(const char *s, bool crash);
-
 public:
-  explicit Log(SubsystemMap *s);
-  virtual ~Log();
+  using Thread::is_started;
+  using prefix_hook_t = const char* (*)();
+
+  Log(const SubsystemMap *s);
+  ~Log() override;
 
   void set_flush_on_exit();
 
-  void set_max_new(int n);
-  void set_max_recent(int n);
-  void set_log_file(std::string fn);
+  void set_coarse_timestamps(bool coarse);
+  void set_max_new(std::size_t n);
+  void set_max_recent(std::size_t n);
+  void set_log_file(std::string_view fn);
   void reopen_log_file();
   void chown_log_file(uid_t uid, gid_t gid);
+  void set_log_stderr_prefix(std::string_view p);
+  void set_stderr_fd(int fd);
 
   void flush();
 
@@ -77,14 +59,18 @@ public:
   void set_stderr_level(int log, int crash);
   void set_graylog_level(int log, int crash);
 
-  void start_graylog();
+  void start_graylog(const std::string& host,
+		     const uuid_d& fsid);
   void stop_graylog();
 
-  shared_ptr<Graylog> graylog() { return m_graylog; }
+  void set_journald_level(int log, int crash);
 
-  Entry *create_entry(int level, int subsys);
-  Entry *create_entry(int level, int subsys, size_t* expected_size);
-  void submit_entry(Entry *e);
+  void start_journald_logger();
+  void stop_journald_logger();
+
+  std::shared_ptr<Graylog> graylog() { return m_graylog; }
+
+  void submit_entry(Entry&& e);
 
   void start();
   void stop();
@@ -95,6 +81,86 @@ public:
   /// induce a segv on the next log event
   void inject_segv();
   void reset_segv();
+
+  /**
+   * Set a hook to get the log prefix (replaces thread ID in log output).
+   *
+   * @note Designed for unit test harnesses. May be set or cleared while the
+   *       log thread is running.
+   */
+  static void set_prefix_hook(prefix_hook_t hook);
+
+protected:
+  using EntryVector = std::vector<ConcreteEntry>;
+
+  virtual void _flush(EntryVector& q, bool crash);
+
+private:
+  using EntryRing = boost::circular_buffer<ConcreteEntry>;
+  using mono_clock = ceph::coarse_mono_clock;
+  using mono_time = ceph::coarse_mono_time;
+
+  using RecentThreadNames = std::map<pthread_t, std::pair<mono_time, boost::circular_buffer<std::string> > >;
+
+  static const std::size_t DEFAULT_MAX_NEW = 100;
+  static const std::size_t DEFAULT_MAX_RECENT = 10000;
+  static constexpr std::size_t DEFAULT_MAX_THREAD_NAMES = 4;
+
+  Log **m_indirect_this;
+
+  const SubsystemMap *m_subs;
+
+  std::mutex m_queue_mutex;
+  std::mutex m_flush_mutex;
+  std::condition_variable m_cond_loggers;
+  std::condition_variable m_cond_flusher;
+
+  pthread_t m_queue_mutex_holder;
+  pthread_t m_flush_mutex_holder;
+
+  RecentThreadNames m_recent_thread_names; // protected by m_flush_mutex
+  EntryVector m_new;    ///< new entries
+  EntryRing m_recent; ///< recent (less new) entries we've already written at low detail
+  EntryVector m_flush; ///< entries to be flushed (here to optimize heap allocations)
+
+  std::string m_log_file;
+  int m_fd = -1;
+  uid_t m_uid = 0;
+  gid_t m_gid = 0;
+
+  int m_fd_stderr = STDERR_FILENO;
+
+  int m_fd_last_error = 0;  ///< last error we say writing to fd (if any)
+
+  int m_syslog_log = -2, m_syslog_crash = -2;
+  int m_stderr_log = -1, m_stderr_crash = -1;
+  int m_graylog_log = -3, m_graylog_crash = -3;
+  int m_journald_log = -3, m_journald_crash = -3;
+
+  std::string m_log_stderr_prefix;
+  bool do_stderr_poll = false;
+
+  std::shared_ptr<Graylog> m_graylog;
+  std::unique_ptr<JournaldLogger> m_journald;
+
+  std::vector<char> m_log_buf;
+
+  bool m_stop = false;
+
+  std::size_t m_max_new = DEFAULT_MAX_NEW;
+
+  bool m_inject_segv = false;
+
+  void *entry() override;
+
+  void _log_safe_write(std::string_view sv);
+  void _flush_logbuf();
+  void _log_message(std::string_view s, bool crash);
+  void _configure_stderr();
+  void _log_stderr(std::string_view strv);
+
+
+
 };
 
 }

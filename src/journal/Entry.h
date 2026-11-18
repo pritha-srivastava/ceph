@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_JOURNAL_ENTRY_H
 #define CEPH_JOURNAL_ENTRY_H
@@ -7,7 +7,9 @@
 #include "include/int_types.h"
 #include "include/buffer.h"
 #include "include/encoding.h"
+
 #include <iosfwd>
+#include <list>
 #include <string>
 
 namespace ceph {
@@ -37,16 +39,16 @@ public:
   }
 
   void encode(bufferlist &bl) const;
-  void decode(bufferlist::iterator &iter);
+  void decode(bufferlist::const_iterator &iter);
   void dump(ceph::Formatter *f) const;
 
   bool operator==(const Entry& rhs) const;
 
-  static bool is_readable(bufferlist::iterator iter, uint32_t *bytes_needed);
-  static void generate_test_instances(std::list<Entry *> &o);
+  static bool is_readable(bufferlist::const_iterator iter, uint32_t *bytes_needed);
+  static std::list<Entry> generate_test_instances();
 
 private:
-  static const uint64_t preamble = 0x3141592653589793;
+  static constexpr uint64_t preamble = 0x3141592653589793;
 
   uint64_t m_tag_tid;
   uint64_t m_entry_tid;
@@ -54,11 +56,9 @@ private:
 };
 
 std::ostream &operator<<(std::ostream &os, const Entry &entry);
+WRITE_CLASS_ENCODER(journal::Entry)
 
 } // namespace journal
 
-using journal::operator<<;
-
-WRITE_CLASS_ENCODER(journal::Entry)
 
 #endif // CEPH_JOURNAL_ENTRY_H

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph distributed storage system
  *
@@ -18,25 +19,27 @@
 #ifndef COMPRESSION_PLUGIN_H
 #define COMPRESSION_PLUGIN_H
 
+#include <iosfwd>
 #include <iostream>
-#include "common/Mutex.h"
+
 #include "common/PluginRegistry.h"
+#include "include/common_fwd.h"
 #include "Compressor.h"
 
 namespace ceph {
 
   class CompressionPlugin :  public Plugin {
   public:
-    CompressorRef compressor;
+    TOPNSPC::CompressorRef compressor;
 
-    explicit CompressionPlugin(CephContext *cct) : Plugin(cct),
-                                          compressor(0) 
+    explicit CompressionPlugin(CephContext *cct)
+      : Plugin(cct)
     {}
     
-    virtual ~CompressionPlugin() {}
+    ~CompressionPlugin() override {}
 
-    virtual int factory(CompressorRef *cs,
-			                  std::ostream *ss) = 0;
+    virtual int factory(TOPNSPC::CompressorRef *cs,
+			std::ostream *ss) = 0;
 
     virtual const char* name() {return "CompressionPlugin";}
   };

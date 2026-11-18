@@ -1,139 +1,58 @@
-#ifndef CEPH_RGW_TORRENT_H
-#define CEPH_RGW_TORRENT_H
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
-#include <string>
-#include <list>
-#include <map>
-#include <set>
+#pragma once
 
-#include "common/ceph_time.h"
+#include "common/ceph_crypto.h"
+#include "common/dout.h"
+#include "common/async/yield_context.h"
 
-#include "rgw_rados.h"
-#include "rgw_common.h"
+#include "rgw_putobj.h"
+#include "rgw_sal_fwd.h"
 
-using namespace std;
-using ceph::crypto::SHA1;
+//control characters
+void bencode_dict(bufferlist& bl);
+void bencode_list(bufferlist& bl);
+void bencode_end(bufferlist& bl);
 
-struct req_state;
+//key len
+void bencode_key(std::string_view key, bufferlist& bl);
 
-#define RGW_OBJ_TORRENT    "rgw.torrent"
+//single values
+void bencode(int value, bufferlist& bl);
 
-#define ANNOUNCE           "announce"
-#define ANNOUNCE_LIST      "announce-list"
-#define COMMENT            "comment"
-#define CREATED_BY         "created by"
-#define CREATION_DATE      "creation date"
-#define ENCODING           "encoding"
-#define LENGTH             "length"
-#define NAME               "name"
-#define PIECE_LENGTH       "piece length"
-#define PIECES             "pieces"
-#define INFO_PIECES        "info"
-#define GET_TORRENT        "get_torrent"
+//single values
+void bencode(std::string_view str, bufferlist& bl);
 
-class TorrentBencode
-{
-public:
-  TorrentBencode() {}
-  ~TorrentBencode() {}
+//dictionary elements
+void bencode(std::string_view key, int value, bufferlist& bl);
 
-  //control characters
-  void bencode_dict(bufferlist& bl) { bl.append('d'); }
-  void bencode_list(bufferlist& bl) { bl.append('l'); }
-  void bencode_end(bufferlist& bl) { bl.append('e'); }
+//dictionary elements
+void bencode(std::string_view key, std::string_view value, bufferlist& bl);
 
-  //single values
-  void bencode(int value, bufferlist& bl) 
-  {
-    bl.append('i');
-    char info[100] = { 0 };
-    sprintf(info, "%d", value);
-    bl.append(info, strlen(info));
-    bencode_end(bl);
-  }
 
-  //single values
-  void bencode(const std::string& str, bufferlist& bl) 
-  {
-    bencode_key(str, bl);
-  }
+// read the bencoded torrent file from the given object
+int rgw_read_torrent_file(const DoutPrefixProvider* dpp,
+                          rgw::sal::Object* object,
+                          ceph::bufferlist &bl,
+                          optional_yield y);
 
-  //dictionary elements
-  void bencode(const std::string& key, int value, bufferlist& bl) 
-  {
-    bencode_key(key, bl);
-    bencode(value, bl);
-  }
+// PutObj filter that builds a torrent file during upload
+class RGWPutObj_Torrent : public rgw::putobj::Pipe {
+  size_t max_len = 0;
+  size_t piece_len = 0;
+  bufferlist piece_hashes;
+  size_t len = 0;
+  size_t piece_offset = 0;
+  uint32_t piece_count = 0;
+  ceph::crypto::SHA1 digest;
 
-  //dictionary elements
-  void bencode(const std::string& key, const std::string& value, bufferlist& bl) 
-  {
-    bencode_key(key, bl);
-    bencode(value, bl);
-  }
+ public:
+  RGWPutObj_Torrent(rgw::sal::DataProcessor* next,
+                    size_t max_len, size_t piece_len);
 
-  //key len
-  void bencode_key(const std::string& key, bufferlist& bl) 
-  {
-    int len = key.length();
-    char info[100] = { 0 }; 
-    sprintf(info, "%d:", len);
-    bl.append(info, strlen(info));
-    bl.append(key.c_str(), len); 
-  }
+  int process(bufferlist&& data, uint64_t logical_offset) override;
+
+  // after processing is complete, return the bencoded torrent file
+  bufferlist bencode_torrent(std::string_view filename) const;
 };
-
-/* torrent file struct */
-class seed
-{
-private:
-  struct
-  {
-    int piece_length;    // each piece length
-    bufferlist sha1_bl;  // save sha1
-    string name;    // file name
-    off_t len;    // file total bytes
-  }info;
-
-  string  announce;    // tracker
-  string origin; // origin
-  time_t create_date;    // time of the file created
-  string comment;  // comment
-  string create_by;    // app name and version
-  string encoding;    // if encode use gbk rather than gtf-8 use this field
-  uint64_t sha_len;  // sha1 length
-  bool is_torrent;  // flag
-  bufferlist bl;  // bufflist ready to send
-  list<bufferlist> torrent_bl;   // meate data
-
-  struct req_state *s;
-  RGWRados *store;
-
-  TorrentBencode dencode;
-public:
-  seed();
-  ~seed();
-
-  int get_params();
-  void init(struct req_state *p_req, RGWRados *p_store);
-  void get_torrent_file(int &op_ret, RGWRados::Object::Read &read_op, 
-    uint64_t &total_len, bufferlist &bl_data, rgw_obj &obj);
-  
-  off_t get_data_len();
-  bool get_flag();
-
-  int handle_data();
-  void save_data(bufferlist &bl);
-  void set_create_date(ceph::real_time& value);
-  void set_info_name(const string& value); 
-
-private:
-  void do_encode ();
-  void set_announce();
-  void set_exist(bool exist);
-  void set_info_pieces(char *buff);
-  int sha1_process();
-  void sha1(SHA1 *h, bufferlist &bl, off_t bl_len);
-  int save_torrent_file();
-};
-#endif /* CEPH_RGW_TORRENT_H */

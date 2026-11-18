@@ -25,35 +25,39 @@
 
 // -----------------------------------------------------------------------------
 #include "ceph_ver.h"
-#include "common/debug.h"
+#include "include/buffer.h"
 #include "ErasureCodePluginIsa.h"
 #include "ErasureCodeIsa.h"
 // -----------------------------------------------------------------------------
 
 int ErasureCodePluginIsa::factory(const std::string &directory,
-		      ErasureCodeProfile &profile,
-                      ErasureCodeInterfaceRef *erasure_code,
-                      ostream *ss)
+                                  ceph::ErasureCodeProfile &profile,
+                                  ceph::ErasureCodeInterfaceRef *erasure_code,
+                                  std::ostream *ss)
 {
-    ErasureCodeIsa *interface;
-    std::string t;
-    if (profile.find("technique") == profile.end())
-      profile["technique"] = "reed_sol_van";
-    t = profile.find("technique")->second;
-    if ((t == "reed_sol_van")) {
+  ErasureCodeIsa *interface;
+    profile.try_emplace("technique", "reed_sol_van");
+    const auto& technique = profile.at("technique");
+    std::string _m = ErasureCodeIsaDefault::DEFAULT_M;
+    if (auto it = profile.find("m"); it != profile.end()) {
+      _m = it->second;
+    }
+    if ((technique == "reed_sol_van")) {
       interface = new ErasureCodeIsaDefault(tcache,
-                                            ErasureCodeIsaDefault::kVandermonde);
+                                            technique,
+                                            ErasureCodeIsaDefault::kVandermonde,
+                                            _m);
+    } else if ((technique == "cauchy")) {
+      interface = new ErasureCodeIsaDefault(tcache,
+                                            technique,
+                                            ErasureCodeIsaDefault::kCauchy,
+                                            _m);
     } else {
-      if ((t == "cauchy")) {
-        interface = new ErasureCodeIsaDefault(tcache,
-                                              ErasureCodeIsaDefault::kCauchy);
-      } else {
-        *ss << "technique=" << t << " is not a valid coding technique. "
-          << " Choose one of the following: "
-          << "reed_sol_van,"
-          << "cauchy" << std::endl;
-        return -ENOENT;
-      }
+      *ss << "technique=" << technique << " is not a valid coding technique. "
+        << " Choose one of the following: "
+        << "reed_sol_van,"
+        << "cauchy" << std::endl;
+      return -ENOENT;
     }
 
     int r = interface->init(profile, ss);
@@ -61,11 +65,9 @@ int ErasureCodePluginIsa::factory(const std::string &directory,
       delete interface;
       return r;
     }
-    *erasure_code = ErasureCodeInterfaceRef(interface);
+    *erasure_code = ceph::ErasureCodeInterfaceRef(interface);
     return 0;
 }
-
-#ifndef BUILDING_FOR_EMBEDDED
 
 // -----------------------------------------------------------------------------
 
@@ -78,9 +80,17 @@ const char *__erasure_code_version()
 
 int __erasure_code_init(char *plugin_name, char *directory)
 {
-  ErasureCodePluginRegistry &instance = ErasureCodePluginRegistry::instance();
-
-  return instance.add(plugin_name, new ErasureCodePluginIsa());
+  auto& instance = ceph::ErasureCodePluginRegistry::instance();
+  auto plugin = std::make_unique<ErasureCodePluginIsa>();
+  int r = instance.add(plugin_name, plugin.get());
+  if (r == 0) {
+    plugin.release();
+  }
+  return r;
 }
 
+#ifdef WITH_CRIMSON
+[[maybe_unused]] static int _isa_builtin =
+  ceph::ErasureCodePluginRegistry::register_builtin(
+    "isa", []{ return new ErasureCodePluginIsa(); });
 #endif

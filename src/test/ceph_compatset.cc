@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -23,22 +24,25 @@
 
 #include "include/types.h"
 #include "include/compat.h"
-
-//#undef assert
-//#define	assert(foo) if (!(foo)) abort();
+#include "include/coredumpctl.h"
 
 #include "include/CompatSet.h"
 
 #include "gtest/gtest.h"
 #include <vector>
 
+using namespace std;
+
 TEST(CephCompatSet, AllSet) {
   CompatSet::FeatureSet compat;
   CompatSet::FeatureSet ro;
   CompatSet::FeatureSet incompat;
 
-  EXPECT_DEATH(compat.insert(CompatSet::Feature(0, "test")), "");
-  EXPECT_DEATH(compat.insert(CompatSet::Feature(64, "test")), "");
+  {
+    PrCtl unset_dumpable;
+    EXPECT_DEATH(compat.insert(CompatSet::Feature(0, "test")), "");
+    EXPECT_DEATH(compat.insert(CompatSet::Feature(64, "test")), "");
+  }
 
   for (int i = 1; i < 64; i++) {
     stringstream cname;

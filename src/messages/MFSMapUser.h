@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -19,41 +20,46 @@
 #include "mds/FSMapUser.h"
 #include "include/ceph_features.h"
 
-class MFSMapUser : public Message {
- public:
+class MFSMapUser final : public Message {
+public:
   epoch_t epoch;
 
   version_t get_epoch() const { return epoch; }
-  const FSMapUser & get_fsmap() { return fsmap; }
+  const FSMapUser& get_fsmap() const { return fsmap; }
 
   MFSMapUser() :
-    Message(CEPH_MSG_FS_MAP_USER), epoch(0) {}
+    Message{CEPH_MSG_FS_MAP_USER}, epoch(0) {}
   MFSMapUser(const uuid_d &f, const FSMapUser &fsmap_) :
-    Message(CEPH_MSG_FS_MAP_USER), epoch(fsmap_.epoch)
-  {
-    fsmap = fsmap_;
-  }
+    Message{CEPH_MSG_FS_MAP_USER},
+    epoch(fsmap_.epoch),
+    fsmap{fsmap_}
+  {}
 private:
   FSMapUser fsmap;
 
-  ~MFSMapUser() {}
+  ~MFSMapUser() final {}
 
 public:
-  const char *get_type_name() const { return "fsmap.user"; }
-  void print(ostream& out) const {
+  std::string_view get_type_name() const override { return "fsmap.user"; }
+  void print(std::ostream& out) const override {
     out << "fsmap.user(e " << epoch << ")";
   }
 
   // marshalling
-  void decode_payload() {
-    bufferlist::iterator p = payload.begin();
-    ::decode(epoch, p);
-    ::decode(fsmap, p);
+  void decode_payload() override {
+    using ceph::decode;
+    auto p = payload.cbegin();
+    decode(epoch, p);
+    decode(fsmap, p);
   }
-  void encode_payload(uint64_t features) {
-    ::encode(epoch, payload);
-    ::encode(fsmap, payload, features);
+  void encode_payload(uint64_t features) override {
+    using ceph::encode;
+    encode(epoch, payload);
+    encode(fsmap, payload, features);
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

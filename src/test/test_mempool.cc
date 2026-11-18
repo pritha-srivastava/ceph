@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph distributed storage system
  *
@@ -16,11 +17,18 @@
 
 #include <stdio.h>
 
+#include <iostream> // for std::cout
+#include <thread>
+
 #include "global/global_init.h"
 #include "common/ceph_argparse.h"
+#include "common/TableFormatter.h"
 #include "global/global_context.h"
 #include "gtest/gtest.h"
+#include "include/btree_map.h"
 #include "include/mempool.h"
+
+using namespace std;
 
 void check_usage(mempool::pool_index_t ix)
 {
@@ -86,32 +94,32 @@ void do_insert_key(A& a, B& b, int count, int base)
   for (int i = 0; i < count; ++i) {
     a.insert(make_pair(base+i,base+i));
     b.insert(make_pair(base+i,base+i));
-    check_usage(mempool::unittest_1::id);
+    check_usage(mempool::osd::id);
   }
 }
 
 TEST(mempool, vector_context)
 {
-  check_usage(mempool::unittest_1::id);
-  EXPECT_EQ(mempool::unittest_1::allocated_bytes(), 0u);
-  EXPECT_EQ(mempool::unittest_1::allocated_items(), 0u);
+  check_usage(mempool::osd::id);
+  EXPECT_EQ(mempool::osd::allocated_bytes(), 0u);
+  EXPECT_EQ(mempool::osd::allocated_items(), 0u);
   for (unsigned i = 0; i < 10; ++i) {
     vector<int> a;
-    mempool::unittest_1::vector<int> b,c;
+    mempool::osd::vector<int> b,c;
     eq_elements(a,b);
     do_push_back(a,b,i,i);
     eq_elements(a,b);
-    check_usage(mempool::unittest_1::id);
+    check_usage(mempool::osd::id);
 
     mempool::stats_t total;
     map<std::string,mempool::stats_t> by_type;
-    mempool::get_pool(mempool::unittest_1::id).get_stats(&total, &by_type);
-    EXPECT_GE(mempool::unittest_1::allocated_bytes(), i * 4u);
-    EXPECT_GE(mempool::unittest_1::allocated_items(), i);
+    mempool::get_pool(mempool::osd::id).get_stats(&total, &by_type);
+    EXPECT_GE(mempool::osd::allocated_bytes(), i * 4u);
+    EXPECT_GE(mempool::osd::allocated_items(), i);
 
     c.swap(b);
     eq_elements(a,c);
-    check_usage(mempool::unittest_1::id);
+    check_usage(mempool::osd::id);
     a.clear();
     b.clear();
     c.clear();
@@ -122,7 +130,7 @@ TEST(mempool, list_context)
 {
   for (unsigned i = 1; i < 10; ++i) {
     list<int> a;
-    mempool::unittest_1::list<int> b,c;
+    mempool::osd::list<int> b,c;
     eq_elements(a,b);
     do_push_back(a,b,i,i);
     eq_elements(a,b);
@@ -139,12 +147,12 @@ TEST(mempool, list_context)
 
     mempool::stats_t total;
     map<std::string,mempool::stats_t> by_type;
-    mempool::get_pool(mempool::unittest_1::id).get_stats(&total, &by_type);
-    EXPECT_GE(mempool::unittest_1::allocated_bytes(), i * 4u);
-    EXPECT_EQ(mempool::unittest_1::allocated_items(), i);
+    mempool::get_pool(mempool::osd::id).get_stats(&total, &by_type);
+    EXPECT_GE(mempool::osd::allocated_bytes(), i * 4u);
+    EXPECT_EQ(mempool::osd::allocated_items(), i);
 
     eq_elements(a,c);
-    check_usage(mempool::unittest_1::id);
+    check_usage(mempool::osd::id);
   }
 }
 
@@ -152,22 +160,22 @@ TEST(mempool, set_context)
 {
   for (int i = 0; i < 10; ++i) {
     set<int> a;
-    mempool::unittest_1::set<int> b;
+    mempool::osd::set<int> b;
     do_insert(a,b,i,i);
     eq_elements(a,b);
-    check_usage(mempool::unittest_1::id);
+    check_usage(mempool::osd::id);
   }
 
   for (int i = 1; i < 10; ++i) {
     set<int> a;
-    mempool::unittest_1::set<int> b;
+    mempool::osd::set<int> b;
     do_insert(a,b,i,0);
     EXPECT_NE(a.find(i/2),a.end());
     EXPECT_NE(b.find(i/2),b.end());
     a.erase(a.find(i/2));
     b.erase(b.find(i/2));
     eq_elements(a,b);
-    check_usage(mempool::unittest_1::id);
+    check_usage(mempool::osd::id);
   }
 }
 
@@ -176,20 +184,20 @@ struct obj {
   int a;
   int b;
   obj() : a(1), b(1) {}
-  obj(int _a) : a(_a), b(2) {}
+  explicit obj(int _a) : a(_a), b(2) {}
   obj(int _a,int _b) : a(_a), b(_b) {}
   friend inline bool operator<(const obj& l, const obj& r) {
     return l.a < r.a;
   }
 };
-MEMPOOL_DEFINE_OBJECT_FACTORY(obj, obj, unittest_2);
+MEMPOOL_DEFINE_OBJECT_FACTORY(obj, obj, osdmap);
 
 TEST(mempool, test_factory)
 {
    obj *o1 = new obj();
    obj *o2 = new obj(10);
    obj *o3 = new obj(20,30);
-   check_usage(mempool::unittest_2::id);
+   check_usage(mempool::osdmap::id);
    EXPECT_NE(o1,nullptr);
    EXPECT_EQ(o1->a,1);
    EXPECT_EQ(o1->b,1);
@@ -201,18 +209,18 @@ TEST(mempool, test_factory)
    delete o1;
    delete o2;
    delete o3;
-   check_usage(mempool::unittest_2::id);
+   check_usage(mempool::osdmap::id);
 }
 
 TEST(mempool, vector)
 {
   {
-    mempool::unittest_1::vector<int> v;
+    mempool::osd::vector<int> v;
     v.push_back(1);
     v.push_back(2);
   }
   {
-    mempool::unittest_2::vector<obj> v;
+    mempool::osdmap::vector<obj> v;
     v.push_back(obj());
     v.push_back(obj(1));
   }
@@ -220,10 +228,10 @@ TEST(mempool, vector)
 
 TEST(mempool, set)
 {
-  mempool::unittest_1::set<int> set_int;
+  mempool::osd::set<int> set_int;
   set_int.insert(1);
   set_int.insert(2);
-  mempool::unittest_2::set<obj> set_obj;
+  mempool::osdmap::set<obj> set_obj;
   set_obj.insert(obj());
   set_obj.insert(obj(1));
   set_obj.insert(obj(1, 2));
@@ -232,12 +240,12 @@ TEST(mempool, set)
 TEST(mempool, map)
 {
   {
-    mempool::unittest_1::map<int,int> v;
+    mempool::osd::map<int,int> v;
     v[1] = 2;
     v[3] = 4;
   }
   {
-    mempool::unittest_2::map<int,obj> v;
+    mempool::osdmap::map<int,obj> v;
     v[1] = obj();
     v[2] = obj(2);
     v[3] = obj(2, 3);
@@ -247,55 +255,201 @@ TEST(mempool, map)
 TEST(mempool, list)
 {
   {
-    mempool::unittest_1::list<int> v;
+    mempool::osd::list<int> v;
     v.push_back(1);
     v.push_back(2);
   }
   {
-    mempool::unittest_2::list<obj> v;
+    mempool::osdmap::list<obj> v;
     v.push_back(obj());
     v.push_back(obj(1));
   }
+ 
+}
+
+TEST(mempool, dump)
+{
+  ostringstream ostr;
+
+  Formatter* f = Formatter::create("xml-pretty", "xml-pretty", "xml-pretty");
+  mempool::dump(f);
+  f->flush(ostr);
+
+  delete f;
+  ASSERT_NE(ostr.str().find(mempool::get_pool_name((mempool::pool_index_t)0)),
+    std::string::npos);
+
+  ostr.str("");
+
+  f = Formatter::create("html-pretty", "html-pretty", "html-pretty");
+  mempool::dump(f);
+  f->flush(ostr);
+
+  delete f;
+  ASSERT_NE(ostr.str().find(mempool::get_pool_name((mempool::pool_index_t)0)),
+    std::string::npos);
+
+  ostr.str("");
+  f = Formatter::create("table", "table", "table");
+  mempool::dump(f);
+  f->flush(ostr);
+
+  delete f;
+  ASSERT_NE(ostr.str().find(mempool::get_pool_name((mempool::pool_index_t)0)),
+    std::string::npos);
+
+  ostr.str("");
+
+  f = Formatter::create("json-pretty", "json-pretty", "json-pretty");
+  mempool::dump(f);
+  f->flush(ostr);
+  delete f;
+
+  ASSERT_NE(ostr.str().find(mempool::get_pool_name((mempool::pool_index_t)0)),
+    std::string::npos);
 }
 
 TEST(mempool, unordered_map)
 {
-  mempool::unittest_2::unordered_map<int,obj> h;
+  mempool::osdmap::unordered_map<int,obj> h;
   h[1] = obj();
   h[2] = obj(1);
+}
+
+TEST(mempool, string_test)
+{
+  mempool::osdmap::string s;
+  s.reserve(100);
+  EXPECT_GE(mempool::osdmap::allocated_items(), s.capacity() + 1u); // +1 for zero-byte termination :
+  for (size_t i = 0; i < 10; ++i) {
+    s += '1';
+    s.append(s);
+    EXPECT_GE(mempool::osdmap::allocated_items(), s.capacity() + 1u);
+  }
 }
 
 TEST(mempool, bufferlist)
 {
   bufferlist bl;
   int len = 1048576;
-  size_t before = mempool::buffer_data::allocated_bytes();
+  size_t before = mempool::buffer_anon::allocated_bytes();
   cout << "before " << before << std::endl;
   bl.append(buffer::create_aligned(len, 4096));
-  size_t after = mempool::buffer_data::allocated_bytes();
+  size_t after = mempool::buffer_anon::allocated_bytes();
   cout << "after " << after << std::endl;
   ASSERT_GE(after, before + len);
 }
 
-TEST(mempool, string_test)
+TEST(mempool, bufferlist_reassign)
 {
-  mempool::unittest_2::string s;
-  s.reserve(100);
-  EXPECT_GE(mempool::unittest_2::allocated_items(), s.capacity() + 1u); // +1 for zero-byte termination :
-  for (size_t i = 0; i < 10; ++i) {
-    s += '1';
-    s.append(s);
-    EXPECT_GE(mempool::unittest_2::allocated_items(), s.capacity() + 1u);
+  bufferlist bl;
+  size_t items_before = mempool::buffer_anon::allocated_items();
+  size_t bytes_before = mempool::buffer_anon::allocated_bytes();
+  bl.append("fooo");
+  ASSERT_EQ(items_before + 1, mempool::buffer_anon::allocated_items());
+  ASSERT_LT(bytes_before, mempool::buffer_anon::allocated_bytes());
+
+  // move existing bl
+  bl.reassign_to_mempool(mempool::mempool_osd);
+  ASSERT_EQ(items_before, mempool::buffer_anon::allocated_items());
+  ASSERT_EQ(bytes_before, mempool::buffer_anon::allocated_bytes());
+
+  // additional appends should go to the same pool
+  items_before = mempool::osd::allocated_items();
+  bytes_before = mempool::osd::allocated_bytes();
+  cout << "anon b " << mempool::buffer_anon::allocated_bytes() << std::endl;
+  for (unsigned i = 0; i < 1000; ++i) {
+    bl.append("asdfddddddddddddddddddddddasfdasdfasdfasdfasdfasdf");
   }
+  cout << "anon a " << mempool::buffer_anon::allocated_bytes() << std::endl;
+  ASSERT_LT(items_before, mempool::osd::allocated_items());
+  ASSERT_LT(bytes_before, mempool::osd::allocated_bytes());
+
+  // try_.. won't
+  items_before = mempool::osd::allocated_items();
+  bytes_before = mempool::osd::allocated_bytes();
+  bl.try_assign_to_mempool(mempool::mempool_bloom_filter);
+  ASSERT_EQ(items_before, mempool::osd::allocated_items());
+  ASSERT_EQ(bytes_before, mempool::osd::allocated_bytes());
 }
+
+TEST(mempool, bufferlist_c_str)
+{
+  bufferlist bl;
+  int len = 1048576;
+  size_t before = mempool::osd::allocated_bytes();
+  bl.append(buffer::create_aligned(len, 4096));
+  bl.append(buffer::create_aligned(len, 4096));
+  bl.reassign_to_mempool(mempool::mempool_osd);
+  size_t after = mempool::osd::allocated_bytes();
+  ASSERT_GE(after, before + len * 2);
+  bl.c_str();
+  size_t after_c_str = mempool::osd::allocated_bytes();
+  ASSERT_EQ(after, after_c_str);
+}
+
+TEST(mempool, btree_map_test)
+{
+  typedef mempool::pool_allocator<mempool::mempool_osd,
+    pair<const uint64_t,uint64_t>> allocator_t;
+  typedef btree::btree_map<uint64_t,uint64_t,std::less<uint64_t>,allocator_t> btree_t;
+
+  {
+    btree_t btree;
+    ASSERT_EQ(0, mempool::osd::allocated_items());
+    ASSERT_EQ(0, mempool::osd::allocated_bytes());
+    for (size_t i = 0; i < 1000; ++i) {
+      btree[rand()] = rand();
+    }
+    ASSERT_LT(0, mempool::osd::allocated_items());
+    ASSERT_LT(0, mempool::osd::allocated_bytes());
+  }
+
+  ASSERT_EQ(0, mempool::osd::allocated_items());
+  ASSERT_EQ(0, mempool::osd::allocated_bytes());
+}
+
+TEST(mempool, check_shard_select)
+{
+  const size_t samples = mempool::get_num_shards() * 30;
+
+  std::unique_ptr<std::atomic_int[]> shards =
+    std::make_unique<std::atomic_int[]>(mempool::get_num_shards());
+
+  std::vector<std::thread> workers;
+  for (size_t i = 0; i < samples; i++) {
+    workers.push_back(
+      std::thread([&](){
+          size_t i = mempool::pick_a_shard_int();
+          shards[i]++;
+        }));
+  }
+  for (auto& t:workers) {
+    t.join();
+  }
+  workers.clear();
+
+#if !defined(MEMPOOL_SCHED_GETCPU)
+  size_t missed = 0;
+  for (size_t i = 0; i < mempool::get_num_shards(); i++) {
+    if (shards[i] != 30) {
+      // Each shard is expected to have exactly 30 threads
+      missed++;
+    }
+  }
+  EXPECT_EQ(missed, 0u);
+#endif
+  // Else: test_c2c.cc is a better test of the sharding algorithm
+}
+
 
 int main(int argc, char **argv)
 {
-  vector<const char*> args;
-  argv_to_vec(argc, (const char **)argv, args);
+  auto args = argv_to_vec(argc, argv);
 
   auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
-			 CODE_ENVIRONMENT_UTILITY, 0);
+			 CODE_ENVIRONMENT_UTILITY,
+			 CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
   common_init_finish(g_ceph_context);
 
   // enable debug mode for the tests

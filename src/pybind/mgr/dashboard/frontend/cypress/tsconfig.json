@@ -1,0 +1,23 @@
+{
+  "extends": "../tsconfig.json",
+  "exclude": [],
+  "include": [
+    "**/*.ts",
+    "plugins/index.js"
+  ],
+  "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "typeRoots": [
+      "../node_modules",
+      "../node_modules/@types"
+    ],
+    "sourceMap": false,
+    "types": [
+      "cypress",
+      "cypress-axe"
+    ],
+    "target": "ES2022",
+    "skipLibCheck": true
+  }
+}

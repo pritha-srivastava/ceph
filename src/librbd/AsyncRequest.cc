@@ -1,9 +1,10 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #include "librbd/AsyncRequest.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/Utils.h"
-#include "common/WorkQueue.h"
+#include "librbd/asio/ContextWQ.h"
 
 namespace librbd
 {
@@ -12,7 +13,7 @@ template <typename T>
 AsyncRequest<T>::AsyncRequest(T &image_ctx, Context *on_finish)
   : m_image_ctx(image_ctx), m_on_finish(on_finish), m_canceled(false),
     m_xlist_item(this) {
-  assert(m_on_finish != NULL);
+  ceph_assert(m_on_finish != NULL);
   start_request();
 }
 
@@ -27,7 +28,7 @@ void AsyncRequest<T>::async_complete(int r) {
 
 template <typename T>
 librados::AioCompletion *AsyncRequest<T>::create_callback_completion() {
-  return util::create_rados_safe_callback(this);
+  return util::create_rados_callback(this);
 }
 
 template <typename T>
@@ -43,7 +44,7 @@ Context *AsyncRequest<T>::create_async_callback_context() {
 
 template <typename T>
 void AsyncRequest<T>::start_request() {
-  Mutex::Locker async_ops_locker(m_image_ctx.async_ops_lock);
+  std::lock_guard async_ops_locker{m_image_ctx.async_ops_lock};
   m_image_ctx.async_requests.push_back(&m_xlist_item);
 }
 
@@ -51,8 +52,8 @@ template <typename T>
 void AsyncRequest<T>::finish_request() {
   decltype(m_image_ctx.async_requests_waiters) waiters;
   {
-    Mutex::Locker async_ops_locker(m_image_ctx.async_ops_lock);
-    assert(m_xlist_item.remove_myself());
+    std::lock_guard async_ops_locker{m_image_ctx.async_ops_lock};
+    ceph_assert(m_xlist_item.remove_myself());
 
     if (m_image_ctx.async_requests.empty()) {
       waiters = std::move(m_image_ctx.async_requests_waiters);
@@ -66,4 +67,6 @@ void AsyncRequest<T>::finish_request() {
 
 } // namespace librbd
 
+#ifndef TEST_F
 template class librbd::AsyncRequest<librbd::ImageCtx>;
+#endif

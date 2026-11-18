@@ -1,0 +1,7 @@
+.filter {
+  padding-right: 8px;
+}
+
+::ng-deep cd-configuration td[cdstabledata].wrap {
+  word-break: break-all;
+}

@@ -1,14 +1,15 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include <errno.h>
 #include <iostream>
 #include <sstream>
 #include <string>
 
-using namespace std;
 
 #include "auth/Crypto.h"
+
+#include "common/async/context_pool.h"
 
 #include "common/armor.h"
 #include "common/ceph_json.h"
@@ -22,29 +23,29 @@ using namespace std;
 #include "include/utime.h"
 #include "include/str_list.h"
 
-#include "rgw_user.h"
+#include "driver/rados/rgw_user.h"
 #include "rgw_bucket.h"
-#include "rgw_rados.h"
 #include "rgw_acl.h"
 #include "rgw_acl_s3.h"
 #include "rgw_log.h"
 #include "rgw_formats.h"
 #include "rgw_usage.h"
-#include "rgw_replica_log.h"
 #include "rgw_object_expirer_core.h"
+#include "rgw_zone.h"
+#include "rgw_sal_config.h"
 
 #define dout_subsys ceph_subsys_rgw
 
-static RGWRados *store = NULL;
+static rgw::sal::Driver* driver = NULL;
 
 class StoreDestructor {
-  RGWRados *store;
+  rgw::sal::Driver* driver;
 
 public:
-  explicit StoreDestructor(RGWRados *_s) : store(_s) {}
+  explicit StoreDestructor(rgw::sal::Driver* _s) : driver(_s) {}
   ~StoreDestructor() {
-    if (store) {
-      RGWStoreManager::close_storage(store);
+    if (driver) {
+      DriverManager::close_storage(driver);
     }
   }
 };
@@ -54,44 +55,65 @@ static void usage()
   generic_server_usage();
 }
 
+// This has an uncaught exception. Even if the exception is caught, the program
+// would need to be terminated, so the warning is simply suppressed.
+// coverity[root_function:SUPPRESS]
 int main(const int argc, const char **argv)
 {
-  vector<const char *> args;
-  argv_to_vec(argc, argv, args);
-  env_to_vec(args);
+  auto args = argv_to_vec(argc, argv);
+  if (args.empty()) {
+    std::cerr << argv[0] << ": -h or --help for usage" << std::endl;
+    exit(1);
+  }
+  if (ceph_argparse_need_usage(args)) {
+    usage();
+    exit(0);
+  }
 
   auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
 			 CODE_ENVIRONMENT_DAEMON,
-			 CINIT_FLAG_UNPRIVILEGED_DAEMON_DEFAULTS, "rgw_data");
+			 CINIT_FLAG_UNPRIVILEGED_DAEMON_DEFAULTS);
 
   for (std::vector<const char *>::iterator i = args.begin(); i != args.end(); ) {
     if (ceph_argparse_double_dash(args, i)) {
       break;
-    } else if (ceph_argparse_flag(args, i, "-h", "--help", (char*)NULL)) {
-      usage();
-      return 0;
     }
   }
 
-  if (g_conf->daemonize) {
+  if (g_conf()->daemonize) {
     global_init_daemonize(g_ceph_context);
   }
 
   common_init_finish(g_ceph_context);
+  ceph::async::io_context_pool context_pool{cct->_conf->rgw_thread_pool_size};
 
-  store = RGWStoreManager::get_storage(g_ceph_context, false, false, false, false);
-  if (!store) {
+  const DoutPrefix dp(cct.get(), dout_subsys, "rgw object expirer: ");
+  DriverManager::Config cfg = DriverManager::get_config(false, g_ceph_context);
+  cfg.filter_name = "none";
+  std::unique_ptr<rgw::sal::ConfigStore> cfgstore;
+  auto config_store_type = g_conf().get_val<std::string>("rgw_config_store");
+  cfgstore = DriverManager::create_config_store(&dp, config_store_type);
+  if (!cfgstore) {
+    std::cerr << "Unable to initialize config store." << std::endl;
+    exit(1);
+  }
+  rgw::SiteConfig site;
+  auto r = site.load(&dp, null_yield, cfgstore.get());
+  if (r < 0) {
+    std::cerr << "Unable to initialize config store." << std::endl;
+    exit(1);
+  }
+
+  driver = DriverManager::get_storage(&dp, g_ceph_context, cfg, context_pool, site, false, false, false, false, false, false, false, false, true, null_yield, cfgstore.get());
+  if (!driver) {
     std::cerr << "couldn't init storage provider" << std::endl;
     return EIO;
   }
 
-  rgw_user_init(store);
-  rgw_bucket_init(store->meta_mgr);
+  /* Guard to not forget about closing the rados driver. */
+  StoreDestructor store_dtor(driver);
 
-  /* Guard to not forget about closing the rados store. */
-  StoreDestructor store_dtor(store);
-
-  RGWObjectExpirer objexp(store);
+  RGWObjectExpirer objexp(driver);
   objexp.start_processor();
 
   const utime_t interval(g_ceph_context->_conf->rgw_objexp_gc_interval, 0);

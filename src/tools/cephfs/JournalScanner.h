@@ -1,5 +1,6 @@
-// -*- mode:c++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:c++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * ceph - scalable distributed file system
  *
@@ -14,12 +15,12 @@
 #ifndef JOURNAL_SCANNER_H
 #define JOURNAL_SCANNER_H
 
+#include <functional>
+
+#include "include/rados/librados_fwd.hpp"
+
 // For Journaler::Header, can't forward-declare nested classes
 #include <osdc/Journaler.h>
-
-namespace librados {
-  class IoCtx;
-}
 
 #include "JournalFilter.h"
 
@@ -35,7 +36,8 @@ class JournalScanner
   librados::IoCtx &io;
 
   // Input constraints
-  int const rank;
+  const int rank;
+  std::string type;
   JournalFilter const filter;
 
   void gap_advance();
@@ -44,10 +46,13 @@ class JournalScanner
   JournalScanner(
       librados::IoCtx &io_,
       int rank_,
+      const std::string &type_,
       JournalFilter const &filter_) :
     io(io_),
     rank(rank_),
+    type(type_),
     filter(filter_),
+    is_mdlog(false),
     pointer_present(false),
     pointer_valid(false),
     header_present(false),
@@ -56,9 +61,13 @@ class JournalScanner
 
   JournalScanner(
       librados::IoCtx &io_,
-      int rank_) :
+      int rank_,
+      const std::string &type_) :
     io(io_),
     rank(rank_),
+    type(type_),
+    filter(type_),
+    is_mdlog(false),
     pointer_present(false),
     pointer_valid(false),
     header_present(false),
@@ -67,24 +76,28 @@ class JournalScanner
 
   ~JournalScanner();
 
-  int scan(bool const full=true);
+  struct EventRecord {
+    EventRecord(std::unique_ptr<LogEvent> le, uint32_t rs) : log_event(std::move(le)), raw_size(rs) {}
+    EventRecord(std::unique_ptr<PurgeItem> p, uint32_t rs) : pi(std::move(p)), raw_size(rs) {}
+    std::unique_ptr<LogEvent> log_event;
+    std::unique_ptr<PurgeItem> pi;
+    uint32_t raw_size = 0;  //< Size from start offset including all encoding overhead
+  };
+
+  using EventCallback = std::function<void(uint64_t, EventRecord&)>;
+
+  int set_journal_ino();
+  int scan(bool const full=true, EventCallback cb = nullptr);
   int scan_pointer();
   int scan_header();
-  int scan_events();
+  int scan_events(EventCallback cb = nullptr);
   void report(std::ostream &out) const;
 
   std::string obj_name(uint64_t offset) const;
   std::string obj_name(inodeno_t ino, uint64_t offset) const;
 
   // The results of the scan
-  inodeno_t ino;  // Corresponds to JournalPointer.front
-  class EventRecord {
-    public:
-    EventRecord() : log_event(NULL), raw_size(0) {}
-    EventRecord(LogEvent *le, uint32_t rs) : log_event(le), raw_size(rs) {}
-    LogEvent *log_event;
-    uint32_t raw_size;  //< Size from start offset including all encoding overhead
-  };
+  inodeno_t ino;  // Corresponds to journal ino according their type
 
   class EventError {
     public:
@@ -97,18 +110,19 @@ class JournalScanner
   typedef std::map<uint64_t, EventRecord> EventMap;
   typedef std::map<uint64_t, EventError> ErrorMap;
   typedef std::pair<uint64_t, uint64_t> Range;
-  bool pointer_present;
-  bool pointer_valid;
+  bool is_mdlog;
+  bool pointer_present; //mdlog specific
+  bool pointer_valid;   //mdlog specific
   bool header_present;
   bool header_valid;
   Journaler::Header *header;
 
   bool is_healthy() const;
   bool is_readable() const;
-  std::vector<std::string> objects_valid;
   std::vector<uint64_t> objects_missing;
   std::vector<Range> ranges_invalid;
-  std::vector<uint64_t> events_valid;
+  uint64_t num_objects_valid{0};
+  uint64_t num_events_valid{0};
   EventMap events;
 
   // For events present in ::events (i.e. scanned successfully),

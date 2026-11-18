@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,10 +16,12 @@
 #ifndef CEPH_LIBRADOS_IOCTXIMPL_H
 #define CEPH_LIBRADOS_IOCTXIMPL_H
 
+#include <atomic>
+
 #include "common/Cond.h"
-#include "common/Mutex.h"
+#include "common/ceph_mutex.h"
 #include "common/snap_types.h"
-#include "include/atomic.h"
+#include "common/zipkin_trace.h"
 #include "include/types.h"
 #include "include/rados/librados.h"
 #include "include/rados/librados.hpp"
@@ -29,23 +32,27 @@
 class RadosClient;
 
 struct librados::IoCtxImpl {
-  atomic_t ref_cnt;
-  RadosClient *client;
-  int64_t poolid;
+  std::atomic<uint64_t> ref_cnt = { 0 };
+  RadosClient *client = nullptr;
+  int64_t poolid = 0;
   snapid_t snap_seq;
   ::SnapContext snapc;
-  uint64_t assert_ver;
-  version_t last_objver;
-  uint32_t notify_timeout;
+  uint64_t assert_ver = 0;
+  version_t last_objver = 0;
+  uint32_t notify_timeout = 30;
+  bool no_version_on_read = false;
   object_locator_t oloc;
+  int extra_op_flags = 0;
+  int objclass_flags_mask = -1;
 
-  Mutex aio_write_list_lock;
-  ceph_tid_t aio_write_seq;
-  Cond aio_write_cond;
+  ceph::mutex aio_write_list_lock =
+    ceph::make_mutex("librados::IoCtxImpl::aio_write_list_lock");
+  ceph_tid_t aio_write_seq = 0;
+  ceph::condition_variable aio_write_cond;
   xlist<AioCompletionImpl*> aio_write_list;
-  map<ceph_tid_t, std::list<AioCompletionImpl*> > aio_write_waiters;
+  std::map<ceph_tid_t, std::list<AioCompletionImpl*> > aio_write_waiters;
 
-  Objecter *objecter;
+  Objecter *objecter = nullptr;
 
   IoCtxImpl();
   IoCtxImpl(RadosClient *c, Objecter *objecter,
@@ -61,18 +68,19 @@ struct librados::IoCtxImpl {
     last_objver = rhs.last_objver;
     notify_timeout = rhs.notify_timeout;
     oloc = rhs.oloc;
+    extra_op_flags = rhs.extra_op_flags;
     objecter = rhs.objecter;
   }
 
   void set_snap_read(snapid_t s);
-  int set_snap_write_context(snapid_t seq, vector<snapid_t>& snaps);
+  int set_snap_write_context(snapid_t seq, std::vector<snapid_t>& snaps);
 
   void get() {
-    ref_cnt.inc();
+    ref_cnt++;
   }
 
   void put() {
-    if (ref_cnt.dec() == 0)
+    if (--ref_cnt == 0)
       delete this;
   }
 
@@ -85,7 +93,7 @@ struct librados::IoCtxImpl {
     return poolid;
   }
 
-  string get_cached_pool_name();
+  std::string get_cached_pool_name();
 
   int get_object_hash_position(const std::string& oid, uint32_t *hash_position);
   int get_object_pg_hash_position(const std::string& oid, uint32_t *pg_hash_position);
@@ -93,7 +101,7 @@ struct librados::IoCtxImpl {
   ::ObjectOperation *prepare_assert_ops(::ObjectOperation *op);
 
   // snaps
-  int snap_list(vector<uint64_t> *snaps);
+  int snap_list(std::vector<uint64_t> *snaps);
   int snap_lookup(const char *name, uint64_t *snapid);
   int snap_get_name(uint64_t snapid, std::string *s);
   int snap_get_stamp(uint64_t snapid, time_t *t);
@@ -110,6 +118,8 @@ struct librados::IoCtxImpl {
   // io
   int nlist(Objecter::NListContext *context, int max_entries);
   uint32_t nlist_seek(Objecter::NListContext *context, uint32_t pos);
+  uint32_t nlist_seek(Objecter::NListContext *context, const rados_object_list_cursor& cursor);
+  rados_object_list_cursor nlist_get_cursor(Objecter::NListContext *context);
   void object_list_slice(
     const hobject_t start,
     const hobject_t finish,
@@ -129,38 +139,39 @@ struct librados::IoCtxImpl {
 	     std::map<uint64_t,uint64_t>& m);
   int sparse_read(const object_t& oid, std::map<uint64_t,uint64_t>& m,
 		  bufferlist& bl, size_t len, uint64_t off);
+  int checksum(const object_t& oid, uint8_t type, const bufferlist &init_value,
+	       size_t len, uint64_t off, size_t chunk_size, bufferlist *pbl);
   int remove(const object_t& oid);
   int remove(const object_t& oid, int flags);
   int stat(const object_t& oid, uint64_t *psize, time_t *pmtime);
   int stat2(const object_t& oid, uint64_t *psize, struct timespec *pts);
   int trunc(const object_t& oid, uint64_t size);
+  int cmpext(const object_t& oid, uint64_t off, bufferlist& cmp_bl);
 
   int tmap_update(const object_t& oid, bufferlist& cmdbl);
-  int tmap_put(const object_t& oid, bufferlist& bl);
-  int tmap_get(const object_t& oid, bufferlist& bl);
-  int tmap_to_omap(const object_t& oid, bool nullok=false);
 
   int exec(const object_t& oid, const char *cls, const char *method, bufferlist& inbl, bufferlist& outbl);
 
   int getxattr(const object_t& oid, const char *name, bufferlist& bl);
   int setxattr(const object_t& oid, const char *name, bufferlist& bl);
-  int getxattrs(const object_t& oid, map<string, bufferlist>& attrset);
+  int getxattrs(const object_t& oid, std::map<std::string, bufferlist>& attrset);
   int rmxattr(const object_t& oid, const char *name);
 
-  int operate(const object_t& oid, ::ObjectOperation *o, ceph::real_time *pmtime, int flags=0);
-  int operate_read(const object_t& oid, ::ObjectOperation *o, bufferlist *pbl, int flags=0);
+  int operate(const object_t& oid, ::ObjectOperation *o, ceph::real_time *pmtime, int flags=0, const jspan_context *otel_trace = nullptr);
+  int operate_read(const object_t& oid, ::ObjectOperation *o, bufferlist *pbl, int flags=0, int flags_mask=-1);
   int aio_operate(const object_t& oid, ::ObjectOperation *o,
 		  AioCompletionImpl *c, const SnapContext& snap_context,
-		  int flags);
+		  const ceph::real_time *pmtime, int flags,
+		  const blkin_trace_info *trace_info = nullptr, const jspan_context *otel_trace = nullptr);
   int aio_operate_read(const object_t& oid, ::ObjectOperation *o,
-		       AioCompletionImpl *c, int flags, bufferlist *pbl);
+		       AioCompletionImpl *c, int flags, bufferlist *pbl, const blkin_trace_info *trace_info = nullptr);
 
   struct C_aio_stat_Ack : public Context {
     librados::AioCompletionImpl *c;
     time_t *pmtime;
     ceph::real_time mtime;
     C_aio_stat_Ack(AioCompletionImpl *_c, time_t *pm);
-    void finish(int r);
+    void finish(int r) override;
   };
 
   struct C_aio_stat2_Ack : public Context {
@@ -168,27 +179,34 @@ struct librados::IoCtxImpl {
     struct timespec *pts;
     ceph::real_time mtime;
     C_aio_stat2_Ack(AioCompletionImpl *_c, struct timespec *pts);
-    void finish(int r);
+    void finish(int r) override;
   };
 
   struct C_aio_Complete : public Context {
-#if defined(WITH_LTTNG) && defined(WITH_EVENTTRACE)
+#if defined(WITH_EVENTTRACE)
     object_t oid;
 #endif
     AioCompletionImpl *c;
     explicit C_aio_Complete(AioCompletionImpl *_c);
-    void finish(int r);
+    void finish(int r) override;
   };
 
   int aio_read(const object_t oid, AioCompletionImpl *c,
-	       bufferlist *pbl, size_t len, uint64_t off, uint64_t snapid);
+	       bufferlist *pbl, size_t len, uint64_t off, uint64_t snapid,
+	       const blkin_trace_info *info = nullptr);
   int aio_read(object_t oid, AioCompletionImpl *c,
-	       char *buf, size_t len, uint64_t off, uint64_t snapid);
+	       char *buf, size_t len, uint64_t off, uint64_t snapid,
+	       const blkin_trace_info *info = nullptr);
   int aio_sparse_read(const object_t oid, AioCompletionImpl *c,
 		      std::map<uint64_t,uint64_t> *m, bufferlist *data_bl,
 		      size_t len, uint64_t off, uint64_t snapid);
+  int aio_cmpext(const object_t& oid, AioCompletionImpl *c, uint64_t off,
+		      bufferlist& cmp_bl);
+  int aio_cmpext(const object_t& oid, AioCompletionImpl *c,
+		      const char *cmp_buf, size_t cmp_len, uint64_t off);
   int aio_write(const object_t &oid, AioCompletionImpl *c,
-		const bufferlist& bl, size_t len, uint64_t off);
+		const bufferlist& bl, size_t len, uint64_t off,
+		const blkin_trace_info *info = nullptr);
   int aio_append(const object_t &oid, AioCompletionImpl *c,
 		 const bufferlist& bl, size_t len);
   int aio_write_full(const object_t &oid, AioCompletionImpl *c,
@@ -207,13 +225,10 @@ struct librados::IoCtxImpl {
   int aio_setxattr(const object_t& oid, AioCompletionImpl *c,
 		   const char *name, bufferlist& bl);
   int aio_getxattrs(const object_t& oid, AioCompletionImpl *c,
-		    map<string, bufferlist>& attrset);
+		    std::map<std::string, bufferlist>& attrset);
   int aio_rmxattr(const object_t& oid, AioCompletionImpl *c,
 		  const char *name);
   int aio_cancel(AioCompletionImpl *c);
-
-  int pool_change_auid(unsigned long long auid);
-  int pool_change_auid_async(unsigned long long auid, PoolAsyncCompletionImpl *c);
 
   int hit_set_list(uint32_t hash, AioCompletionImpl *c,
 		   std::list< std::pair<time_t, time_t> > *pls);
@@ -268,6 +283,24 @@ struct librados::IoCtxImpl {
   int cache_pin(const object_t& oid);
   int cache_unpin(const object_t& oid);
 
+  int application_enable(const std::string& app_name, bool force);
+  void application_enable_async(const std::string& app_name, bool force,
+                                PoolAsyncCompletionImpl *c);
+  int application_list(std::set<std::string> *app_names);
+  int application_metadata_get(const std::string& app_name,
+                               const std::string &key,
+                               std::string* value);
+  int application_metadata_set(const std::string& app_name,
+                               const std::string &key,
+                               const std::string& value);
+  int application_metadata_remove(const std::string& app_name,
+                                  const std::string &key);
+  int application_metadata_list(const std::string& app_name,
+                                std::map<std::string, std::string> *values);
+
+  void set_no_version_on_read(bool _val);
+ private:
+  version_t *get_objver_for_read(version_t *objver_p) const;
 };
 
 #endif

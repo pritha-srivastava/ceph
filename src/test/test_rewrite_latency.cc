@@ -1,5 +1,6 @@
 
 #include <unistd.h>
+#include <iostream> // for std::cout
 #include <map>
 #include <errno.h>
 
@@ -25,7 +26,7 @@ int main(int argc, const char **argv)
   while (true) {
     utime_t now = ceph_clock_now();
     int r = ::pwrite(fd, fn, strlen(fn), 0);
-    assert(r >= 0);
+    ceph_assert(r >= 0);
     utime_t lat = ceph_clock_now();
     lat -= now;
     utime_t oldmin;

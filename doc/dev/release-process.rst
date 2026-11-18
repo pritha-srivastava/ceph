@@ -1,173 +1,479 @@
-======================
-  Ceph Release Process
-======================
-
-1. Build environment
+====================
+Ceph Release Process
 ====================
 
-There are multiple build environments, debian based packages are built via pbuilder for multiple distributions.  The build hosts are listed in the ``deb_hosts`` file, and the list of distributions are in ``deb_dist``.  All distributions are build on each of the build hosts.  Currently there is 1 64 bit and 1 32 bit build host.
+Prerequisites
+=============
 
-The RPM based packages are built natively, so one distribution per build host.  The list of hosts is found in ``rpm_hosts``.
+Signing Machine
+---------------
 
-Prior to building, it's necessary to update the pbuilder seed tarballs::
+The signing machine, ``signer.os.sepia.ceph.com``, is a virtual machine in the
+`Sepia lab <https://wiki.sepia.ceph.com/doku.php?id=start>`_. SSH access to the
+signing machine is limited to the usual Infrastructure Admins along with a few
+other component leads (e.g., nfs-ganesha, ceph-iscsi).
 
-    ./update_all_pbuilders.sh
+The ``ubuntu`` user on the machine has some `build scripts <https://github.com/ceph/ceph-build/tree/main/scripts>`_ that help with pulling, pushing, and signing packages.
 
-2. Setup keyring for signing packages
-=====================================
+The GPG signing key permanently lives on a `Nitrokey Pro <https://shop.nitrokey.com/shop/product/nkpr2-nitrokey-pro-2-3>`_ and is passed through to the VM via RHV. This helps to ensure that the key cannot be exported or leave the datacenter in any way.
 
-::
+Summarized release process
+==========================
 
-    export GNUPGHOME=<path to keyring dir>
+#. QE finishes testing and finds a stopping point.  That commit is pushed to the ``$release-release`` (e.g. ``squid-release``) branch on `ceph-releases.git <https://github.com/ceph/ceph-releases>`_.  This allows work to continue in the working ``$release`` branch without having to freeze it during the release process.
+#. The Release Manager approves the release and notifies the Build Lead.
+#. The Build Lead starts the `Jenkins ceph-release-pipeline <https://jenkins.ceph.com/view/all/job/ceph-release-pipeline>`_, which triggers all builds, a version commit, and a release tag (on ``ceph-releases.git``).
+#. Unsigned packages are pushed to chacra.ceph.com.
+#. Packages are pulled from chacra.ceph.com to the Signer VM.
+#. Packages are signed.
+#. Signed packages are pushed to a prerelease area on download.ceph.com.
+#. Prerelease containers are built from those signed packages and pushed to quay.ceph.io.
+#. Final test and validation are done on prerelease packages and containers. Optional: upgrade the lab cluster.
+#. Prerelease packages and containers are promoted to official releases on download.ceph.com and quay.io. Tag is pushed to ceph.git. Tagged version commit is merged into ``$release``.
 
-    # verify it's accessible
-    gpg --list-keys
+Hotfix Release Process Deviation
+--------------------------------
 
-The release key should be present::
+A hotfix release has a couple differences.
 
-  pub   4096R/17ED316D 2012-05-20
-  uid   Ceph Release Key <sage@newdream.net>
+#. Check out the most recent tag. For example, if we're releasing a hotfix on top of 19.2.1, ``git checkout -f -B squid-release tags/v19.2.1``.
+#. ``git cherry-pick -x`` the necessary hotfix commits (Note: only "cherry-pick" must be used).
+#. ``git push -f origin squid-release``.
+#. Verify the commits in the ``$release-release`` branch:
 
-
-3. Set up build area
-====================
-
-Clone the ceph and ceph-build source trees::
-
-    git clone http://github.com/ceph/ceph.git
-    git clone http://github.com/ceph/ceph-build.git
-
-In the ceph source directory, checkout next branch (for point releases use the {codename} branch)::
-
-    git checkout next
-
-Checkout the submodules::
-
-    git submodule update --force --init --recursive
-
-4.  Update Build version numbers
-================================
-
-Substitute the ceph release number where indicated below by the string ``0.xx``.
-
-Edit configure.ac and update the version number. Example diff::
-
-	-AC_INIT([ceph], [0.54], [ceph-devel@vger.kernel.org])
-	+AC_INIT([ceph], [0.55], [ceph-devel@vger.kernel.org])
- 
-Update the version number in the debian change log::
-
-	DEBEMAIL user@host dch -v 0.xx-1
-
-Commit the changes::
-
-	git commit -a
-
-Tag the release::
-
-	../ceph-build/tag-release v0.xx
+   #. To check against the previous point release (if we are making 19.2.2, this would be 19.2.1), run ``git log --pretty=oneline --no-merges tags/v19.2.1..origin/squid-release``. Verify that the commits produced are exactly what we want in the next point release.
+   #. To check against the RC in the "ceph-ci" repo (``ceph-ci`` in this example), run ``git log --pretty=oneline --no-merges origin/squid-release...ceph-ci/squid-release``. There should be no output produced if the ``$release-release`` branch in the ceph repo is identical to the RC in ``ceph-ci``. Note the use of git `triple dot notation <https://git-scm.com/book/en/v2/Git-Tools-Revision-Selection>`_, which shows any commit discrepancies between both references.
+#. Notify the "Build Lead" to start the build.
+#. The "Build Lead" should set ``RELEASE_TYPE=HOTFIX`` instead of ``STABLE``.
 
 
-5. Create Makefiles
+Security Release Process Deviation
+----------------------------------
+
+A security/CVE release is similar to a hotfix release with two differences:
+
+#. The fix is pushed to the `ceph-private
+   <https://github.com/ceph/ceph-private>`_ repo instead of ceph.git (requires
+   GitHub Admin Role or membership in the `ceph/security
+   <https://github.com/orgs/ceph/teams/security>`_ GitHub team).
+#. The tags (e.g., v19.2.3) must be manually pushed to ceph.git by the "Build
+   Lead."
+
+The release must be built from the exact commits that were built and tested in
+the advisory fork (see :ref:`build and test cve`). Do **not** cherry-pick the
+fix commits onto a new branch; that rewrites their sha1s and the release would
+no longer match what was tested.
+
+#. Add the ceph-private repo to your remotes and fetch the security fix
+   branch that should already be pushed there by the developer(s)
+   working on the fix:
+
+   .. prompt:: bash $
+
+      git remote add private git@github.com:ceph/ceph-private.git
+
+      git fetch private
+
+#. Point the release branch at the security fix branch. For example, if we're
+   releasing a security fix on top of 19.2.2:
+
+   .. prompt:: bash $
+
+      git checkout -f -B squid-release private/$BRANCH_NAME
+
+#. Push the release branch to ceph-private:
+
+   .. prompt:: bash $
+
+      git push -f private squid-release
+
+#. Notify the "Build Lead" to start the build.
+
+#. The "Build Lead" should set ``RELEASE_TYPE=SECURITY`` instead of
+   ``STABLE``.
+
+#. Finally, the `ceph-tag
+   <https://github.com/ceph/ceph-build/blob/main/ansible/roles/ceph-release/tasks/push.yml>`_
+   steps need to be manually run by the "Build Lead" as close to the
+   Announcement time as possible. The `ceph-setup
+   <https://jenkins.ceph.com/job/ceph-setup/>`_ job will have already created
+   and pushed the tag to ceph-releases.git. Example using squid, pretending
+   19.2.3 is the security release version:
+
+   .. prompt:: bash $
+
+      # Add the ceph-releases repo (also requires GitHub Admin Role)
+      git remote add releases git@github.com:ceph/ceph-releases.git
+      git fetch --all
+      # Check out the version commit
+      git checkout -f -B squid-release releases/squid-release
+      git push -f origin squid-release
+      git push origin v19.2.3
+
+   Now create a Pull Request of ``squid-release`` targeting ``squid`` to merge
+   the version commit and security fixes back into the ``squid`` branch.
+
+1. Preparing the release branch
+===============================
+
+Once QE has determined a stopping point in the working (e.g., ``squid``) branch, that commit should be pushed to the corresponding ``squid-release`` branch.
+
+Notify the Build Lead that the release branch is ready.
+
+2a. Starting the build
+======================
+
+We'll use a stable/regular 19.2.2 release of Squid as an example throughout this document.
+
+#. Browse to https://jenkins.ceph.com/view/all/job/ceph-release-pipeline/build
+#. Log in with GitHub OAuth
+#. Set the parameters as necessary::
+
+    BRANCH=squid
+    TAG=checked
+    VERSION=19.2.2
+    RELEASE_TYPE=STABLE
+    ARCHS=x86_64 arm64
+
+   .. note::
+
+      If for some reason the build has to be restarted (for example if one distro failed) then the ``TAG`` option has to be unchecked.
+
+#. Use :ref:`start-platforms` to determine the ``DISTROS`` parameter.  For example,
+
+    +-------------------+---------------------------------------------------------+
+    | Release           | Distro Codemap                                          |
+    +===================+=========================================================+
+    | squid (19.X.X)    | ``jammy centos9 windows bookworm``                      |
+    +-------------------+---------------------------------------------------------+
+    | tentacle (20.X.X) | ``jammy noble centos9 rocky10 windows bookworm``        |
+    +-------------------+---------------------------------------------------------+
+    | umbrella (21.X.X) | ``jammy noble centos9 rocky10 bookworm trixie windows`` |
+    +-------------------+---------------------------------------------------------+
+
+
+#. Click ``Build``.
+
+2b. What to do if your build fails
+==================================
+
+The ceph-release-pipeline parent job has three stages.
+
+If your build fails during the "create ceph release tag" stage, troubleshoot the child ceph-tag job and re-run the parent ceph-release-pipeline job with the same parameters.
+
+----
+
+If your build fails during the "package build" stage, troubleshoot the child ceph-dev-pipeline job.  If only one variant failed to build (e.g., centos9 arm64), start a new ceph-release-pipeline job specifying::
+
+    DISTROS=centos9
+    ARCHS=arm64
+    TAG=false <-- VERY IMPORTANT
+
+This will leave the version commit and previously-created tag intact in `ceph-releases.git <https://github.com/ceph/ceph-releases>`_.  You will want the subsequent ceph-dev-pipeline job to reuse that SHA1/tag.
+
+.. note:: The ceph-releases repository is private and used to host release tags in case tags need to be recreated.
+
+Once all of your variants are successfully built, you will have to manually run the ceph-tag job.  For example,::
+
+    BRANCH=tentacle
+    TAG=true
+    TAG_PHASE=push
+    VERSION=20.2.0
+    RELEASE_TYPE=STABLE
+
+Then proceed with the normal release process.
+
+----
+
+If your build fails during the "push ceph release tag" stage, troubleshoot the child ceph-tag job and re-run **just** the ceph-tag job again manually.  Do not re-run ceph-release-pipeline.
+
+3. Release Notes
+================
+
+Packages take hours to build. Use those hours to create the Release Notes and Announcements:
+
+#. ceph.git Release Notes (e.g., `v19.2.2's ceph.git (docs.ceph.com) PR <https://github.com/ceph/ceph/pull/62734>`_)
+#. ceph.io Release Notes (e.g., `v19.2.2's ceph.io.git (www.ceph.io) PR <https://github.com/ceph/ceph.io/pull/864>`_)
+#. E-mail announcement
+
+See `the Ceph Tracker wiki page that explains how to write the release notes <https://tracker.ceph.com/projects/ceph-releases/wiki/HOWTO_write_the_release_notes>`_.
+
+.. _Signing and Publishing the Build:
+
+4. Signing and Publishing the Build
+===================================
+
+#. Obtain the sha1 of the version commit from the `build job <https://jenkins.ceph.com/view/all/job/ceph>`_ or the ``sha1`` file created by the `ceph-setup <https://jenkins.ceph.com/job/ceph-setup/>`_ job.
+
+#. Download the packages from chacra.ceph.com to the signing virtual machine. These packages get downloaded to ``/opt/repos`` where the `Sepia Lab Short Running (Ceph) Cluster <https://wiki.sepia.ceph.com/doku.php?id=services:shortrunningcluster>`_ is mounted.  Note: this step will also run a command to transfer the source tarballs from chacra.ceph.com to download.ceph.com directly, by ssh'ing to download.ceph.com and running /home/signer/bin/get-tarballs.sh.
+
+   .. warning::
+
+       A passphrase for the GPG key may be required during this process to use the signing key. Talk to Infrastructure Admins to get access to that.
+
+   .. prompt:: bash $
+
+       ssh ubuntu@signer.os.sepia.ceph.com
+       sync-pull ceph [pacific|quincy|etc] <sha1>
+
+   Example::
+
+      $ sync-pull ceph squid 0eceb0defba60152a8182f7bd87d164b639885b8
+      sync for: ceph squid
+      ********************************************
+      + : 0eceb0defba60152a8182f7bd87d164b639885b8
+      + project=ceph
+      + release=squid
+      + sha1=0eceb0defba60152a8182f7bd87d164b639885b8
+      + echo 'sync for: ceph squid'
+      sync for: ceph squid
+      + echo '********************************************'
+      ********************************************
+      + [[ ceph == \c\e\p\h ]]
+      + current_highest_count=0
+      + for combo in debian/bookworm debian/bullseye ubuntu/bionic ubuntu/focal ubuntu/jammy
+      ++ wc -l
+      ++ curl -fs https://chacra.ceph.com/r/ceph/squid/0eceb0defba60152a8182f7bd87d164b639885b8/debian/bookworm/flavors/default/pool/main/c/ceph/
+      + combo_count=161
+      + [[ 0 -eq 22 ]]
+      + '[' 161 -gt 0 ']'
+      + current_highest_count=161
+      + highest_combo=debian/bookworm
+
+   etc...
+
+#. Sign the DEBs:
+
+   .. prompt:: bash
+
+      sign-debs ceph squid
+
+   Example::
+
+      + project=ceph
+      + releases=(squid)
+      + distro_versions=(jessie)
+      + for release in "${releases[@]}"
+      + for distro_version in "${distro_versions[@]}"
+      + for path in /opt/repos/ceph/squid*
+      + '[' -d /opt/repos/ceph/squid-19.2.2/debian/jessie ']'
+      + needs_signing=0
+      + gpg --verify /opt/repos/ceph/squid-19.2.2/debian/jessie/dists/bookworm/Release.gpg /opt/repos/ceph/squid-19.2.2/debian/jessie/dists/bookworm/Release
+      + needs_signing=1
+      + break
+      + '[' 1 -eq 0 ']'
+      + echo 'Signing: /opt/repos/ceph/squid-19.2.2/debian/jessie'
+      Signing: /opt/repos/ceph/squid-19.2.2/debian/jessie
+      + merfi gpg /opt/repos/ceph/squid-19.2.2/debian/jessie
+      --> Starting path collection, looking for files to sign
+      --> 2 repos found
+      --> signing: /opt/repos/ceph/squid-19.2.2/debian/jessie/dists/bookworm/Release
+      --> Running command: gpg --batch --yes --armor --detach-sig --output Release.gpg Release
+      --> Running command: gpg --batch --yes --clearsign --output InRelease Release
+      --> signing: /opt/repos/ceph/squid-19.2.2/debian/jessie/dists/jammy/Release
+      --> Running command: gpg --batch --yes --armor --detach-sig --output Release.gpg Release
+      --> Running command: gpg --batch --yes --clearsign --output InRelease Release
+      + gpg --verify /opt/repos/ceph/squid-19.2.2/debian/jessie/dists/bookworm/Release.gpg /opt/repos/ceph/squid-19.2.2/debian/jessie/dists/bookworm/Release
+      gpg: Signature made Thu May 14 12:00:00 2026 UTC
+      gpg:                using RSA key 460F3994
+      gpg: Good signature from "Ceph Release Key <security@ceph.com>"
+      + echo 'verifying: /opt/repos/ceph/squid-19.2.2/debian/jessie/dists/bookworm/Release.gpg'
+      verifying: /opt/repos/ceph/squid-19.2.2/debian/jessie/dists/bookworm/Release.gpg
+      + gpg --verify /opt/repos/ceph/squid-19.2.2/debian/jessie/dists/bookworm/InRelease
+      gpg: Signature made Thu May 14 12:00:00 2026 UTC
+      gpg:                using RSA key 460F3994
+      gpg: Good signature from "Ceph Release Key <security@ceph.com>"
+      + echo 'verifying: /opt/repos/ceph/squid-19.2.2/debian/jessie/dists/bookworm/InRelease'
+      verifying: /opt/repos/ceph/squid-19.2.2/debian/jessie/dists/bookworm/InRelease
+      + gpg --verify /opt/repos/ceph/squid-19.2.2/debian/jessie/dists/jammy/Release.gpg /opt/repos/ceph/squid-19.2.2/debian/jessie/dists/jammy/Release
+      gpg: Signature made Thu May 14 12:00:00 2026 UTC
+      gpg:                using RSA key 460F3994
+      gpg: Good signature from "Ceph Release Key <security@ceph.com>"
+      + echo 'verifying: /opt/repos/ceph/squid-19.2.2/debian/jessie/dists/jammy/Release.gpg'
+      verifying: /opt/repos/ceph/squid-19.2.2/debian/jessie/dists/jammy/Release.gpg
+      + gpg --verify /opt/repos/ceph/squid-19.2.2/debian/jessie/dists/jammy/InRelease
+      gpg: Signature made Thu May 14 12:00:00 2026 UTC
+      gpg:                using RSA key 460F3994
+      gpg: Good signature from "Ceph Release Key <security@ceph.com>"
+      + echo 'verifying: /opt/repos/ceph/squid-19.2.2/debian/jessie/dists/jammy/InRelease'
+      verifying: /opt/repos/ceph/squid-19.2.2/debian/jessie/dists/jammy/InRelease
+
+      etc...
+
+#. Sign the RPMs:
+
+   .. prompt:: bash
+
+      sign-rpms ceph squid
+
+   Example::
+
+      $ sign-rpms ceph squid
+
+      + [[ 2 -lt 1 ]]
+      + project=ceph
+      + shift
+      + '[' 1 -eq 0 ']'
+      + releases=("$@")
+      + distros=(centos rhel)
+      + distro_versions=(7 8 9)
+      + read -s -p 'Key Passphrase: ' GPG_PASSPHRASE
+      Key Passphrase: + echo
+
+      + for release in "${releases[@]}"
+      + for distro in "${distros[@]}"
+      + for distro_version in "${distro_versions[@]}"
+      + for path in /opt/repos/$project/$release*
+      + '[' -d /opt/repos/ceph/squid-19.1.0/centos/7 ']'
+      ...
+      + echo 'Checking packages in: /opt/repos/ceph/squid-19.1.0/centos/9'
+      Checking packages in: /opt/repos/ceph/squid-19.1.0/centos/9
+      + update_repo=0
+      + cd /opt/repos/ceph/squid-19.1.0/centos/9
+      ++ find -name '*.rpm'
+      + for rpm in `find -name "*.rpm"`
+      ++ grep '^Signature'
+
+      etc...
+
+#. Publish the packages to download.ceph.com:
+
+   .. prompt:: bash $
+
+      sync-push ceph squid-19.2.2
+
+This leaves the packages, and the tarball, in a password-protected `prerelease
+area <https://download.ceph.com/prerelease/ceph>`_. To gain access, you need to
+contact the infrastructure admins.
+
+
+
+5. Build Containers
 ===================
 
-The actual configure options used to build packages are in the
-``ceph.spec.in`` and ``debian/rules`` files.  At this point we just
-need to create a Makefile.::
+Unlike CI builds, which have access to packages in the correct form for
+the container, release builds do not, because the build does not 
+sign the packages.  Thus, release builds do not build the containers.
+This must be done after :ref:`Signing and Publishing the Build`.
 
-	./do_autogen.sh
+A Jenkins job named `ceph-release-containers
+<https://jenkins.ceph.com/view/all/job/ceph-release-containers/>`_ creates the
+container image with those signed packages. The container image is staged on
+``quay.ceph.io`` so it can be tested before release.
+
+Start the `job <https://jenkins.ceph.com/view/all/job/ceph-release-containers/build>`_ on the Jenkins server. Set the parameters: ``BRANCH`` with the Ceph release name;
+``SHA1`` from the ``ceph-release-pipeline`` job (also the same sha1 as the jenkins tag PR); and, ``VERSION`` with the new Ceph version. Leave other fields as defaults.
+
+The job will:
+
+* build the architecture-specific container images and push them to
+  ``quay.ceph.io/ceph/prerelease-amd64`` and
+  ``quay.ceph.io/ceph/prerelease-arm64``
+
+* fuse the architecture-specific images together into a "manifest-list"
+  or "fat" container image and push it to ``quay.ceph.io/ceph/prerelease``
 
 
-6. Run the release scripts
-==========================
+6. Verify Release
+=================
 
-This creates tarballs and copies them, with other needed files to
-the build hosts listed in deb_hosts and rpm_hosts, runs a local build
-script, then rsyncs the results back to the specified release directory.::
-
-	../ceph-build/do_release.sh /tmp/release
+Verify all release artifacts. At the very least test upgrading a Ceph cluster, often the `LRC <https://wiki.sepia.ceph.com/doku.php?id=services:longrunningcluster>`_ if possible.
 
 
-7. Create RPM Repo
+7. Publish Release
 ==================
 
-Copy the rpms to the destination repo::
+Package Promotion
+-----------------
 
-       mkdir /tmp/rpm-repo
-       ../ceph-build/push_to_rpm_repo.sh /tmp/release /tmp/rpm-repo 0.xx
+When done and ready for release, log into ``download.ceph.com`` to promote the artifacts to the public space. This is most easily done by logging in first to the signer machine as a bounce box:
 
-Next add any additional rpms to the repo that are needed such as leveldb and
-and ceph-deploy.  See RPM Backports section
+.. prompt:: bash
 
-Finally, sign the rpms and build the repo indexes::
+   ssh ubuntu@signer.os.sepia.ceph.com
 
-  ../ceph-build/sign_and_index_rpm_repo.sh /tmp/release /tmp/rpm-repo 0.xx
+then
 
+.. prompt:: bash
 
-8. Create Debian repo
-=====================
-
-The key-id used below is the id of the ceph release key from step 2::
-
-	mkdir /tmp/debian-repo
-	../ceph-build/gen_reprepro_conf.sh /tmp/debian-repo key-id
-	../ceph-build/push_to_deb_repo.sh /tmp/release /tmp/debian-repo 0.xx main
+   ssh -t signer@download.ceph.com bash
 
 
-Next add any addition debian packages that are needed such as leveldb and
-ceph-deploy.  See the Debian Backports section below.
-
-Debian packages are signed when added to the repo, so no further action is
-needed.
+.. note:: The signer machine has ssh keys to login to ``download.ceph.com``.
 
 
-9.  Push repos to ceph.org
-==========================
+Promote the package artifacts by moving directories/tarballs from the prerelease area (``/data/download.ceph.com/www/prerelease/ceph/``) to the release directory (``/data/download.ceph.com/www/``):
 
-For a development release::
+.. prompt:: bash
 
-	rcp ceph-0.xx.tar.bz2 ceph-0.xx.tar.gz \
-	     ceph_site@ceph.com:ceph.com/downloads/.
-	rsync -av /tmp/rpm-repo/0.xx/ ceph_site@ceph.com:ceph.com/rpm-testing
-	rsync -av /tmp/debian-repo/ ceph_site@ceph.com:ceph.com/debian-testing
+   # verify prerelease artifacts
+   ls /data/download.ceph.com/www/prerelease/ceph
 
-For a stable release, replace {CODENAME} with the release codename (e.g., ``argonaut`` or ``bobtail``)::
+   # move deb packages
+   mv -nv /data/download.ceph.com/www/prerelease/ceph/debian-19.2.2 /data/download.ceph.com/www/
+   # move deb link
+   mv -v /data/download.ceph.com/www/prerelease/ceph/debian-squid /data/download.ceph.com/www/
+   # move rpm packages
+   mv -nv /data/download.ceph.com/www/prerelease/ceph/rpm-19.2.2 /data/download.ceph.com/www/
+   # move rpm link
+   mv -v /data/download.ceph.com/www/prerelease/ceph/rpm-squid /data/download.ceph.com/www/
 
-        rcp ceph-0.xx.tar.bz2 \
-            ceph_site@ceph.com:ceph.com/downloads/ceph-0.xx.tar.bz2
-        rcp ceph-0.xx.tar.gz  \
-            ceph_site@ceph.com:ceph.com/downloads/ceph-0.xx.tar.gz
-        rsync -av /tmp/rpm-repo/0.xx/ ceph_site@ceph.com:ceph.com/rpm-{CODENAME}
-        rsync -auv /tmp/debian-repo/ ceph_site@ceph.com:ceph.com/debian-{CODENAME}
+   # move source tarball
+   mv -nv /data/download.ceph.com/www/prerelease/ceph/tarballs/ceph-19.2.2.tar.gz /data/download.ceph.com/www/tarballs/
 
-10. Update Git
-==============
+Container Promotion
+-------------------
 
-Point release
--------------
+Finally, promote the container image from ``quay.ceph.io`` to ``quay.io``. To do this, you need login credentials for both quay servers. Contact the infrastructure team to get access.
 
-For point releases just push the version number update to the
-branch and the new tag::
+Log in to ``quay.ceph.io``:
 
-    git push origin {codename}
-    git push origin v0.xx
+.. prompt:: bash
 
-Development and Stable releases
--------------------------------
+   skopeo login quay.ceph.io
 
-For a development release, update tags for ``ceph.git``::
+Log in to ``quay.io``:
 
-    git push origin v0.xx
-    git push origin HEAD:last
-    git checkout master
-    git merge next
-    git push origin master
-    git push origin HEAD:next
+.. prompt:: bash
 
-Similarly, for a development release, for both ``teuthology.git`` and ``ceph-qa-suite.git``::
+   skopeo login quay.io
 
-    git checkout master
-    git reset --hard origin/master
-    git branch -f last origin/next
-    git push -f origin last
-    git push -f origin master:next
+Now run ``make-manifest-list.py --promote --version 19.2.2`` from the Ceph
+source tree (at ``container/make-manifest-list.py``) to promote the image to
+the final release location on ``quay.io/ceph/ceph``.
+
+.. prompt:: bash
+
+   cd <ceph-checkout>/container
+   ./make-manifest-list.py --promote --version <ver>
+
+The ``--promote`` step should be performed only as the final step in releasing
+containers, after the container images have been tested and have been confirmed
+to be good.
+
+Pushing the Tag
+---------------
+
+The tag is no longer automatically pushed to ceph.git (the version commit PR is).
+
+   .. prompt:: bash $
+
+      # Add the ceph-releases repo (requires permission to the repo)
+      git remote add releases git@github.com:ceph/ceph-releases.git
+      git fetch --all
+      # Check out the version commit
+      git checkout -f -B squid-release releases/squid-release
+      git push origin v19.2.3
+
+Version Commit PR
+-----------------
+
+The `ceph-tag Jenkins job <https://jenkins.ceph.com/job/ceph-tag>`_ creates a Pull Request in ceph.git that targets the release branch.
+
+If this was a regular release (not a hotfix release or a security release), the only commit in that Pull Request should be the version commit.  For example, see `v15.2.17's version commit PR <https://github.com/ceph/ceph/pull/47520>`_.
+
+
+Announce the Release
+--------------------
+
+Publish the Release Notes on ceph.io before announcing the release by email, because the e-mail announcement often references the ceph.io blog post.

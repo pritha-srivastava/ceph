@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
 * Ceph - scalable distributed file system
 *
@@ -32,8 +33,8 @@ public:
 		    CrossProcessSem *pool_setup_sem,
 		    CrossProcessSem *delete_pool_sem,
 		    const std::string &pool_name);
-  ~StRadosDeletePool();
-  virtual int run();
+  ~StRadosDeletePool() override;
+  int run() override;
 private:
   CrossProcessSem *m_pool_setup_sem;
   CrossProcessSem *m_delete_pool_sem;

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph distributed storage system
  *
@@ -18,12 +19,14 @@
 #ifndef CEPH_ERASURE_CODE_JERASURE_H
 #define CEPH_ERASURE_CODE_JERASURE_H
 
+#include <string_view>
+
+#include "common/ceph_mutex.h"
 #include "erasure-code/ErasureCode.h"
 
-#define DEFAULT_RULESET_ROOT "default"
-#define DEFAULT_RULESET_FAILURE_DOMAIN "host"
+using namespace std::literals;
 
-class ErasureCodeJerasure : public ErasureCode {
+class ErasureCodeJerasure : public ceph::ErasureCode {
 public:
   int k;
   std::string DEFAULT_K;
@@ -32,47 +35,71 @@ public:
   int w;
   std::string DEFAULT_W;
   const char *technique;
-  string ruleset_root;
-  string ruleset_failure_domain;
+  std::string rule_root;
+  std::string rule_failure_domain;
   bool per_chunk_alignment;
+  uint64_t flags;
 
-  explicit ErasureCodeJerasure(const char *_technique) :
-    k(0),
-    DEFAULT_K("2"),
-    m(0),
-    DEFAULT_M("1"),
-    w(0),
-    DEFAULT_W("8"),
-    technique(_technique),
-    ruleset_root(DEFAULT_RULESET_ROOT),
-    ruleset_failure_domain(DEFAULT_RULESET_FAILURE_DOMAIN),
-    per_chunk_alignment(false)
-  {}
+  explicit ErasureCodeJerasure(const char *_technique)
+      : k(0),
+        DEFAULT_K("2"),
+        m(0),
+        DEFAULT_M("1"),
+        w(0),
+        DEFAULT_W("8"),
+        technique(_technique),
+        per_chunk_alignment(false) {
+    flags = FLAG_EC_PLUGIN_PARTIAL_READ_OPTIMIZATION |
+      FLAG_EC_PLUGIN_PARTIAL_WRITE_OPTIMIZATION |
+      FLAG_EC_PLUGIN_ZERO_INPUT_ZERO_OUTPUT_OPTIMIZATION |
+      FLAG_EC_PLUGIN_PARITY_DELTA_OPTIMIZATION |
+      FLAG_EC_PLUGIN_DIRECT_READS;
 
-  virtual ~ErasureCodeJerasure() {}
-  
-  virtual int create_ruleset(const string &name,
-			     CrushWrapper &crush,
-			     ostream *ss) const;
+    if (technique == "reed_sol_van"sv) {
+      flags |= FLAG_EC_PLUGIN_OPTIMIZED_SUPPORTED;
+    } else if (technique != "cauchy_orig"sv) {
+      flags |= FLAG_EC_PLUGIN_CRC_ENCODE_DECODE_SUPPORT;
+    }
+  }
 
-  virtual unsigned int get_chunk_count() const {
+  ~ErasureCodeJerasure() override {}
+
+  uint64_t get_supported_optimizations() const override {
+    return flags;
+  }
+
+  unsigned int get_chunk_count() const override {
     return k + m;
   }
 
-  virtual unsigned int get_data_chunk_count() const {
+  unsigned int get_data_chunk_count() const override {
     return k;
   }
 
-  virtual unsigned int get_chunk_size(unsigned int object_size) const;
+  unsigned int get_chunk_size(unsigned int stripe_width) const override;
 
-  virtual int encode_chunks(const set<int> &want_to_encode,
-			    map<int, bufferlist> *encoded);
+  [[deprecated]]
+  int encode_chunks(const std::set<int> &want_to_encode,
+        std::map<int, ceph::buffer::list> *encoded) override;
+  int encode_chunks(const shard_id_map<bufferptr> &in,
+                    shard_id_map<bufferptr> &out) override;
 
-  virtual int decode_chunks(const set<int> &want_to_read,
-			    const map<int, bufferlist> &chunks,
-			    map<int, bufferlist> *decoded);
+  [[deprecated]]
+  int decode_chunks(const std::set<int> &want_to_read,
+		    const std::map<int, ceph::buffer::list> &chunks,
+		    std::map<int, ceph::buffer::list> *decoded) override;
+  int decode_chunks(const shard_id_set &want_to_read,
+                    shard_id_map<bufferptr> &in,
+                    shard_id_map<bufferptr> &out) override;
 
-  virtual int init(ErasureCodeProfile &profile, ostream *ss);
+  void encode_delta(const ceph::bufferptr &old_data,
+                    const ceph::bufferptr &new_data,
+                    ceph::bufferptr *delta_maybe_in_place);
+
+  void apply_delta(const shard_id_map<ceph::bufferptr> &in,
+                   shard_id_map<ceph::bufferptr> &out) = 0;
+
+  int init(ceph::ErasureCodeProfile &profile, std::ostream *ss) override;
 
   virtual void jerasure_encode(char **data,
                                char **coding,
@@ -84,10 +111,27 @@ public:
   virtual unsigned get_alignment() const = 0;
   virtual void prepare() = 0;
   static bool is_prime(int value);
-protected:
-  virtual int parse(ErasureCodeProfile &profile, ostream *ss);
-};
 
+  void matrix_apply_delta(const shard_id_map<bufferptr> &in,
+                          shard_id_map<bufferptr> &out,
+                          int k, int w, int *matrix);
+
+  void schedule_apply_delta(const shard_id_map<bufferptr> &in,
+                            shard_id_map<bufferptr> &out,
+                            int k, int w, int packetsize,
+                            int ** simple_schedule);
+
+  void do_scheduled_ops(char **ptrs, int **operations, int packetsize, int s, int d);
+
+protected:
+  virtual int parse(ceph::ErasureCodeProfile &profile, std::ostream *ss);
+
+  // The Jerasure library has thread safety issues in functions
+  // like cauchy_good_general_coding_matrix() which use global variables
+  // without proper synchronization. This mutex serializes all prepare()
+  // calls to prevent race conditions during initialization.
+  static ceph::mutex jerasure_init_mutex;
+};
 class ErasureCodeJerasureReedSolomonVandermonde : public ErasureCodeJerasure {
 public:
   int *matrix;
@@ -100,22 +144,28 @@ public:
     DEFAULT_M = "3";
     DEFAULT_W = "8";
   }
-  virtual ~ErasureCodeJerasureReedSolomonVandermonde() {
+  ~ErasureCodeJerasureReedSolomonVandermonde() override {
     if (matrix)
       free(matrix);
   }
 
-  virtual void jerasure_encode(char **data,
+  void jerasure_encode(char **data,
                                char **coding,
-                               int blocksize);
-  virtual int jerasure_decode(int *erasures,
+                               int blocksize) override;
+  int jerasure_decode(int *erasures,
                                char **data,
                                char **coding,
-                               int blocksize);
-  virtual unsigned get_alignment() const;
-  virtual void prepare();
+                               int blocksize) override;
+  void apply_delta(const shard_id_map<ceph::bufferptr> &in,
+                   shard_id_map<ceph::bufferptr> &out) override;
+  unsigned get_alignment() const override;
+  size_t get_minimum_granularity() override
+  {
+    return 1;
+  }
+  void prepare() override;
 private:
-  virtual int parse(ErasureCodeProfile &profile, ostream *ss);
+  int parse(ceph::ErasureCodeProfile& profile, std::ostream *ss) override;
 };
 
 class ErasureCodeJerasureReedSolomonRAID6 : public ErasureCodeJerasure {
@@ -127,24 +177,31 @@ public:
     matrix(0)
   {
     DEFAULT_K = "7";
+    DEFAULT_M = "2";
     DEFAULT_W = "8";
   }
-  virtual ~ErasureCodeJerasureReedSolomonRAID6() {
+  ~ErasureCodeJerasureReedSolomonRAID6() override {
     if (matrix)
       free(matrix);
   }
 
-  virtual void jerasure_encode(char **data,
+  void jerasure_encode(char **data,
                                char **coding,
-                               int blocksize);
-  virtual int jerasure_decode(int *erasures,
+                               int blocksize) override;
+  int jerasure_decode(int *erasures,
                                char **data,
                                char **coding,
-                               int blocksize);
-  virtual unsigned get_alignment() const;
-  virtual void prepare();
+                               int blocksize) override;
+  void apply_delta(const shard_id_map<ceph::bufferptr> &in,
+                   shard_id_map<ceph::bufferptr> &out) override;
+  unsigned get_alignment() const override;
+  size_t get_minimum_granularity() override
+  {
+    return 1;
+  }
+  void prepare() override;
 private:
-  virtual int parse(ErasureCodeProfile &profile, ostream *ss);
+  int parse(ceph::ErasureCodeProfile& profile, std::ostream *ss) override;
 };
 
 #define DEFAULT_PACKETSIZE "2048"
@@ -153,36 +210,39 @@ class ErasureCodeJerasureCauchy : public ErasureCodeJerasure {
 public:
   int *bitmatrix;
   int **schedule;
+  int **simple_schedule;
   int packetsize;
 
   explicit ErasureCodeJerasureCauchy(const char *technique) :
     ErasureCodeJerasure(technique),
     bitmatrix(0),
     schedule(0),
+    simple_schedule(0),
     packetsize(0)
   {
     DEFAULT_K = "7";
     DEFAULT_M = "3";
     DEFAULT_W = "8";
   }
-  virtual ~ErasureCodeJerasureCauchy() {
-    if (bitmatrix)
-      free(bitmatrix);
-    if (schedule)
-      free(schedule);
-  }
+  ~ErasureCodeJerasureCauchy() override;
 
-  virtual void jerasure_encode(char **data,
+  void jerasure_encode(char **data,
                                char **coding,
-                               int blocksize);
-  virtual int jerasure_decode(int *erasures,
+                               int blocksize) override;
+  int jerasure_decode(int *erasures,
                                char **data,
                                char **coding,
-                               int blocksize);
-  virtual unsigned get_alignment() const;
+                               int blocksize) override;
+  void apply_delta(const shard_id_map<ceph::bufferptr> &in,
+                   shard_id_map<ceph::bufferptr> &out) override;
+  unsigned get_alignment() const override;
+  size_t get_minimum_granularity() override
+  {
+    return w * packetsize;
+  }
   void prepare_schedule(int *matrix);
 private:
-  virtual int parse(ErasureCodeProfile &profile, ostream *ss);
+  int parse(ceph::ErasureCodeProfile& profile, std::ostream *ss) override;
 };
 
 class ErasureCodeJerasureCauchyOrig : public ErasureCodeJerasureCauchy {
@@ -191,7 +251,7 @@ public:
     ErasureCodeJerasureCauchy("cauchy_orig")
   {}
 
-  virtual void prepare();
+  void prepare() override;
 };
 
 class ErasureCodeJerasureCauchyGood : public ErasureCodeJerasureCauchy {
@@ -200,44 +260,52 @@ public:
     ErasureCodeJerasureCauchy("cauchy_good")
   {}
 
-  virtual void prepare();
+  void prepare() override;
 };
 
 class ErasureCodeJerasureLiberation : public ErasureCodeJerasure {
 public:
   int *bitmatrix;
   int **schedule;
+  int **simple_schedule;
   int packetsize;
 
   explicit ErasureCodeJerasureLiberation(const char *technique = "liberation") :
     ErasureCodeJerasure(technique),
     bitmatrix(0),
     schedule(0),
+    simple_schedule(0),
     packetsize(0)
   {
     DEFAULT_K = "2";
     DEFAULT_M = "2";
     DEFAULT_W = "7";
   }
-  virtual ~ErasureCodeJerasureLiberation();
+  ~ErasureCodeJerasureLiberation() override;
 
-  virtual void jerasure_encode(char **data,
+  void jerasure_encode(char **data,
                                char **coding,
-                               int blocksize);
-  virtual int jerasure_decode(int *erasures,
+                               int blocksize) override;
+  int jerasure_decode(int *erasures,
                                char **data,
                                char **coding,
-                               int blocksize);
-  virtual unsigned get_alignment() const;
-  virtual bool check_k(ostream *ss) const;
-  virtual bool check_w(ostream *ss) const;
-  virtual bool check_packetsize_set(ostream *ss) const;
-  virtual bool check_packetsize(ostream *ss) const;
-  virtual int revert_to_default(ErasureCodeProfile &profile,
-				ostream *ss);
-  virtual void prepare();
+                               int blocksize) override;
+  void apply_delta(const shard_id_map<ceph::bufferptr> &in,
+                   shard_id_map<ceph::bufferptr> &out) override;
+  unsigned get_alignment() const override;
+  size_t get_minimum_granularity() override
+  {
+    return w * packetsize;
+  }
+  virtual bool check_k(std::ostream *ss) const;
+  virtual bool check_w(std::ostream *ss) const;
+  virtual bool check_packetsize_set(std::ostream *ss) const;
+  virtual bool check_packetsize(std::ostream *ss) const;
+  virtual int revert_to_default(ceph::ErasureCodeProfile& profile,
+				std::ostream *ss);
+  void prepare() override;
 private:
-  virtual int parse(ErasureCodeProfile &profile, ostream *ss);
+  int parse(ceph::ErasureCodeProfile& profile, std::ostream *ss) override;
 };
 
 class ErasureCodeJerasureBlaumRoth : public ErasureCodeJerasureLiberation {
@@ -245,10 +313,11 @@ public:
   ErasureCodeJerasureBlaumRoth() :
     ErasureCodeJerasureLiberation("blaum_roth")
   {
+    DEFAULT_W = "6"; //The recommended default value of w when using blaum-roth is 6, see Jerasure documentation for more details.
   }
 
-  virtual bool check_w(ostream *ss) const;
-  virtual void prepare();
+  bool check_w(std::ostream *ss) const override;
+  void prepare() override;
 };
 
 class ErasureCodeJerasureLiber8tion : public ErasureCodeJerasureLiberation {
@@ -261,9 +330,9 @@ public:
     DEFAULT_W = "8";
   }
 
-  virtual void prepare();
+  void prepare() override;
 private:
-  virtual int parse(ErasureCodeProfile &profile, ostream *ss);
+  int parse(ceph::ErasureCodeProfile& profile, std::ostream *ss) override;
 };
 
 #endif

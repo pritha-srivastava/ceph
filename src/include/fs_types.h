@@ -1,10 +1,29 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #ifndef CEPH_INCLUDE_FS_TYPES_H
 #define CEPH_INCLUDE_FS_TYPES_H
 
-#include "types.h"
-#include "utime.h"
+#include <cstdint>
+#include <list>
+#include <iosfwd>
+#include <string>
+
+#include "include/buffer.h"
+#include "include/ceph_fs.h" // for struct ceph_file_layout
+#include "include/encoding.h"
+#include "include/hash.h" // for rjhash
+
+namespace ceph {
+  class Formatter;
+}
+
+class JSONObj;
+
+// taken from linux kernel: include/uapi/linux/fcntl.h
+#define CEPHFS_AT_FDCWD        -100    /* Special value used to indicate
+                                          openat should use the current
+                                          working directory. */
 
 // --------------------------------------
 // ino
@@ -19,11 +38,20 @@ struct inodeno_t {
   inodeno_t operator+=(inodeno_t o) { val += o.val; return *this; }
   operator _inodeno_t() const { return val; }
 
-  void encode(bufferlist& bl) const {
-    ::encode(val, bl);
+  void encode(ceph::buffer::list& bl) const {
+    using ceph::encode;
+    encode(val, bl);
   }
-  void decode(bufferlist::iterator& p) {
-    ::decode(val, p);
+  void decode(ceph::buffer::list::const_iterator& p) {
+    using ceph::decode;
+    decode(val, p);
+  }
+  void dump(ceph::Formatter *f) const;
+  static std::list<inodeno_t> generate_test_instances() {
+    std::list<inodeno_t> ls;
+    ls.push_back(inodeno_t(1));
+    ls.push_back(inodeno_t(123456789));
+    return ls;
   }
 } __attribute__ ((__may_alias__));
 WRITE_CLASS_ENCODER(inodeno_t)
@@ -33,36 +61,34 @@ struct denc_traits<inodeno_t> {
   static constexpr bool supported = true;
   static constexpr bool featured = false;
   static constexpr bool bounded = true;
+  static constexpr bool need_contiguous = true;
   static void bound_encode(const inodeno_t &o, size_t& p) {
     denc(o.val, p);
   }
-  static void encode(const inodeno_t &o, buffer::list::contiguous_appender& p) {
+  static void encode(const inodeno_t &o, ceph::buffer::list::contiguous_appender& p) {
     denc(o.val, p);
   }
-  static void decode(inodeno_t& o, buffer::ptr::iterator &p) {
+  static void decode(inodeno_t& o, ceph::buffer::ptr::const_iterator &p) {
     denc(o.val, p);
   }
 };
 
-inline ostream& operator<<(ostream& out, inodeno_t ino) {
-  return out << hex << ino.val << dec;
-}
+std::ostream& operator<<(std::ostream& out, const inodeno_t& ino);
 
 namespace std {
-  template<> struct hash< inodeno_t >
-  {
-    size_t operator()( const inodeno_t& x ) const
-    {
-      static rjhash<uint64_t> H;
-      return H(x.val);
-    }
-  };
+template<>
+struct hash<inodeno_t> {
+  size_t operator()( const inodeno_t& x ) const {
+    static rjhash<uint64_t> H;
+    return H(x.val);
+  }
+};
 } // namespace std
 
 
 // file modes
 
-static inline bool file_mode_is_readonly(int mode) {
+inline bool file_mode_is_readonly(int mode) {
   return (mode & CEPH_FILE_MODE_WR) == 0;
 }
 
@@ -71,9 +97,6 @@ static inline bool file_mode_is_readonly(int mode) {
 #define MAX_DENTRY_LEN 255
 
 // --
-namespace ceph {
-  class Formatter;
-}
 void dump(const ceph_file_layout& l, ceph::Formatter *f);
 void dump(const ceph_dir_layout& l, ceph::Formatter *f);
 
@@ -88,7 +111,7 @@ struct file_layout_t {
   uint32_t object_size;   ///< until objects are this big
 
   int64_t pool_id;        ///< rados pool id
-  string pool_ns;         ///< rados pool namespace
+  std::string pool_ns;         ///< rados pool namespace
 
   file_layout_t(uint32_t su=0, uint32_t sc=0, uint32_t os=0)
     : stripe_unit(su),
@@ -96,6 +119,8 @@ struct file_layout_t {
       object_size(os),
       pool_id(-1) {
   }
+
+  bool operator==(const file_layout_t&) const = default;
 
   static file_layout_t get_default() {
     return file_layout_t(1<<22, 1, 1<<22);
@@ -110,15 +135,14 @@ struct file_layout_t {
 
   bool is_valid() const;
 
-  void encode(bufferlist& bl, uint64_t features) const;
-  void decode(bufferlist::iterator& p);
-  void dump(Formatter *f) const;
-  static void generate_test_instances(list<file_layout_t*>& o);
+  void encode(ceph::buffer::list& bl, uint64_t features) const;
+  void decode(ceph::buffer::list::const_iterator& p);
+  void dump(ceph::Formatter *f) const;
+  void decode_json(JSONObj *obj);
+  static std::list<file_layout_t> generate_test_instances();
 };
 WRITE_CLASS_ENCODER_FEATURES(file_layout_t)
 
-WRITE_EQ_OPERATORS_5(file_layout_t, stripe_unit, stripe_count, object_size, pool_id, pool_ns);
-
-ostream& operator<<(ostream& out, const file_layout_t &layout);
+std::ostream& operator<<(std::ostream& out, const file_layout_t &layout);
 
 #endif

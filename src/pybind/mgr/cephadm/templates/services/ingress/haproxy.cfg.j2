@@ -1,0 +1,137 @@
+# {{ cephadm_managed }}
+global
+{% if spec.haproxy_log_target != 'none' %}
+    log         stdout format raw local0 {{ spec.haproxy_log_level }}
+{% endif %}
+    chroot      /var/lib/haproxy
+    pidfile     /var/lib/haproxy/haproxy.pid
+    maxconn     8000
+    daemon
+    stats socket /var/lib/haproxy/stats
+{% if spec.ssl_cert %}
+  {% if spec.ssl_dh_param %}
+    tune.ssl.default-dh-param {{ spec.ssl_dh_param }}
+  {% endif %}
+  {% if spec.ssl_ciphers %}
+    ssl-default-bind-ciphers {{ spec.ssl_ciphers | join(':') }}
+  {% endif %}
+  {% if spec.ssl_options %}
+    ssl-default-bind-options {{ spec.ssl_options | join(' ') }}
+  {% endif %}
+{% endif %}
+
+defaults
+    mode                    {{ mode }}
+{% if spec.haproxy_log_target != 'none' %}
+    log                     global
+{% endif %}
+{% if spec.haproxy_log_target != 'none' and spec.haproxy_log_level == 'debug' %}
+    option                  log-health-checks
+{% endif %}
+{% if mode == 'http' %}
+    option                  httplog
+    option                  dontlognull
+    option http-server-close
+    option forwardfor       except 127.0.0.0/8
+    option                  redispatch
+    retries                 3
+    timeout queue           20s
+    timeout connect         5s
+    timeout http-request    1s
+    timeout http-keep-alive 5s
+    timeout client          30s
+    timeout server          30s
+    timeout check           5s
+{% endif %}
+{% if mode == 'tcp' %}
+    option tcplog
+    timeout queue           1m
+    timeout connect         10s
+    timeout client          1m
+    timeout server          1m
+    timeout check           10s
+{% endif %}
+    maxconn                 8000
+
+frontend stats
+    mode http
+{% for monitor_ip in monitor_ips %}
+    {% if spec.monitor_ssl %}
+    bind {{ monitor_ip }}:{{ monitor_port }} ssl crt /var/lib/haproxy/{{ monitor_ssl_file }}
+    {% else %}
+    bind {{ monitor_ip }}:{{ monitor_port }}
+    {% endif %}
+{% endfor %}
+{% if spec.enable_stats %}
+    stats enable
+    stats uri /stats
+    stats refresh 10s
+    stats auth {{ user }}:{{ password }}
+    http-request use-service prometheus-exporter if { path /metrics }
+{% endif %}
+    monitor-uri /health
+
+frontend frontend
+{% if spec.ssl or spec.ssl_cert %}
+    bind {{ ip }}:{{ frontend_port }} ssl crt /var/lib/haproxy/haproxy.pem {{ v4v6_flag }}
+{% else %}
+    bind {{ ip }}:{{ frontend_port }} {{ v4v6_flag }}
+{% endif %}
+{% if mode == 'tcp' %}
+    option tcplog
+{% endif %}
+    default_backend backend
+
+{% if backend_spec.service_type == 'nfs' and peer_hosts %}
+peers haproxy_peers
+    {% for hostname, ip in peer_hosts.items() %}
+     peer {{ hostname }} {{ ip }}:{{ spec.haproxy_peer_communication_port  | default(1024, true) }}
+    {% endfor %}
+
+{% endif %}
+backend backend
+{% if mode == 'http' %}
+    option forwardfor
+{% if backend_spec.ssl is defined and backend_spec.ssl %}
+    default-server ssl
+    default-server verify none
+{% endif %}
+    balance static-rr
+    option httpchk HEAD / HTTP/1.0
+{% endif %}
+{% if mode == 'tcp' %}
+    mode        tcp
+    balance     roundrobin
+    {% if backend_spec.service_type == 'nfs' %}
+    {% if is_ipv6 or v4v6_flag %}
+    stick-table type ipv6 size 1m store server_id peers haproxy_peers
+    {% endif %}
+    {% if not is_ipv6 or v4v6_flag %}
+    stick-table type ip size 1m store server_id peers haproxy_peers
+    {% endif %}
+    stick match src
+    stick store-request src
+    option tcp-check
+    retries 3
+    retry-on all-retryable-errors
+    timeout connect 2s
+    {% endif %}
+    hash-type   consistent
+{% if spec.use_tcp_mode_over_rgw %}
+{% if backend_spec.ssl %}
+    option ssl-hello-chk
+{% endif %}
+{% endif %}
+{% if default_server_opts %}
+    default-server {{ default_server_opts|join(" ") }} fall 2 inter 5000 rise 1 on-marked-down shutdown-sessions
+{% endif %}
+{% endif %}
+{% if backend_spec.service_type == 'rgw' %}
+    {% for server in servers %}
+    server {{ server.name }} {{ server.ip }}:{{ server.port }} check weight 100 inter {{ health_check_interval }}
+    {% endfor %}
+{% else %}
+    {% for server in servers %}
+    server {{ server.name }} {{ server.ip }}:{{ server.port }} id {{ server.name.split('.')[-1] | int + 1 }} check inter {{ health_check_interval }} rise 2 fall 3
+    {% endfor %}
+{% endif %}

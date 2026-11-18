@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -38,12 +39,12 @@ int KqueueDriver::restore_events() {
   struct kevent ke[2];
   int i;
 
-  ldout(cct,10) << __func__ << " on kqfd = " << kqfd << dendl;
+  ldout(cct,30) << __func__ << " on kqfd = " << kqfd << dendl;
   for(i=0;i<size;i++) {
     int num = 0;
     if (sav_events[i].mask == 0 )
       continue;
-    ldout(cct,10) << __func__ << " restore kqfd = " << kqfd 
+    ldout(cct,30) << __func__ << " restore kqfd = " << kqfd 
                   << " fd = " << i << " mask " << sav_events[i].mask << dendl;
     if (sav_events[i].mask & EVENT_READABLE)
       EV_SET(&ke[num++], i, EVFILT_READ, EV_ADD, 0, 0, NULL);
@@ -66,21 +67,21 @@ int KqueueDriver::test_thread_change(const char* funcname) {
   int oldkqfd = kqfd;
 
   if (!pthread_equal(mythread, pthread_self())) {
-    ldout(cct,10) << funcname << " We changed thread from " << mythread
+    ldout(cct,20) << funcname << " We changed thread from " << mythread
                   << " to " << pthread_self() << dendl;
     mythread = pthread_self();
     kqfd = -1;
   } else if ((kqfd != -1) && (test_kqfd() < 0)) {
     // should this ever happen?
     // It would be strange to change kqfd with thread change.
-    // Might nee to change this into an assert() in the future.
+    // Might nee to change this into an ceph_assert() in the future.
     ldout(cct,0) << funcname << " Warning: Recreating old kqfd. "
                  << "This should not happen!!!"  << dendl;
     kqfd = -1;
   }
   if (kqfd == -1) {
     kqfd = kqueue();
-    ldout(cct,10) << funcname << " kqueue: new kqfd = " << kqfd
+    ldout(cct,30) << funcname << " kqueue: new kqfd = " << kqfd
                   << " (was: " << oldkqfd << ")"
                   << dendl;
     if (kqfd < 0) {
@@ -135,7 +136,7 @@ int KqueueDriver::add_event(int fd, int cur_mask, int add_mask)
   struct kevent ke[2];
   int num = 0;
 
-  ldout(cct,20) << __func__ << " add event kqfd = " << kqfd << " fd = " << fd 
+  ldout(cct,30) << __func__ << " add event kqfd = " << kqfd << " fd = " << fd 
 	<< " cur_mask = " << cur_mask << " add_mask = " << add_mask 
 	<< dendl;
 
@@ -168,7 +169,7 @@ int KqueueDriver::del_event(int fd, int cur_mask, int del_mask)
   int num = 0;
   int mask = cur_mask & del_mask;
 
-  ldout(cct,20) << __func__ << " delete event kqfd = " << kqfd 
+  ldout(cct,30) << __func__ << " delete event kqfd = " << kqfd 
 	<< " fd = " << fd << " cur_mask = " << cur_mask 
 	<< " del_mask = " << del_mask << dendl;
 
@@ -196,14 +197,14 @@ int KqueueDriver::del_event(int fd, int cur_mask, int del_mask)
 
 int KqueueDriver::resize_events(int newsize)
 {
-  ldout(cct,10) << __func__ << " kqfd = " << kqfd << "newsize = " << newsize 
+  ldout(cct,30) << __func__ << " kqfd = " << kqfd << "newsize = " << newsize 
                 << dendl;
-  if(newsize > sav_max) {
-    sav_events = (struct SaveEvent*)realloc( sav_events, 
-                    sizeof(struct SaveEvent)*newsize);
+  if (newsize > sav_max) {
+    sav_events = (struct SaveEvent*)realloc(sav_events, sizeof(struct SaveEvent)*newsize);
     if (!sav_events) {
       lderr(cct) << __func__ << " unable to realloc memory: "
                              << cpp_strerror(errno) << dendl;
+      ceph_assert(sav_events);
       return -ENOMEM;
     }
     memset(&sav_events[size], 0, sizeof(struct SaveEvent)*(newsize-sav_max));
@@ -212,7 +213,8 @@ int KqueueDriver::resize_events(int newsize)
   return 0;
 }
 
-int KqueueDriver::event_wait(vector<FiredFileEvent> &fired_events, struct timeval *tvp)
+int KqueueDriver::event_wait(std::vector<FiredFileEvent> &fired_events,
+			     struct timeval *tvp)
 {
   int retval, numevents = 0;
   struct timespec timeout;
@@ -232,7 +234,7 @@ int KqueueDriver::event_wait(vector<FiredFileEvent> &fired_events, struct timeva
 		<< dendl;
       retval = kevent(kqfd, NULL, 0, res_events, size, &timeout);
   } else {
-      ldout(cct,20) << __func__ << " event_wait: " << " NULL" << dendl;
+      ldout(cct,30) << __func__ << " event_wait: " << " NULL" << dendl;
       retval = kevent(kqfd, NULL, 0, res_events, size, KEVENT_NOWAIT);
   }
 

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "cls/rbd/cls_rbd_types.h"
 #include "test/rbd_mirror/test_fixture.h"
@@ -8,7 +8,8 @@
 #include "librbd/ImageCtx.h"
 #include "librbd/ImageState.h"
 #include "librbd/Operations.h"
-#include "test/librados/test.h"
+#include "librbd/internal.h"
+#include "test/librados/test_cxx.h"
 #include "tools/rbd_mirror/Threads.h"
 
 namespace rbd {
@@ -31,8 +32,16 @@ void TestFixture::SetUpTestCase() {
   _local_pool_name = get_temp_pool_name("test-rbd-mirror-");
   ASSERT_EQ(0, _rados->pool_create(_local_pool_name.c_str()));
 
+  librados::IoCtx local_ioctx;
+  ASSERT_EQ(0, _rados->ioctx_create(_local_pool_name.c_str(), local_ioctx));
+  local_ioctx.application_enable("rbd", true);
+
   _remote_pool_name = get_temp_pool_name("test-rbd-mirror-");
   ASSERT_EQ(0, _rados->pool_create(_remote_pool_name.c_str()));
+
+  librados::IoCtx remote_ioctx;
+  ASSERT_EQ(0, _rados->ioctx_create(_remote_pool_name.c_str(), remote_ioctx));
+  remote_ioctx.application_enable("rbd", true);
 
   ASSERT_EQ(0, create_image_data_pool(_data_pool));
   if (!_data_pool.empty()) {
@@ -55,7 +64,7 @@ void TestFixture::SetUp() {
   if (!seeded) {
     seeded = true;
     int seed = getpid();
-    cout << "seed " << seed << std::endl;
+    std::cout << "seed " << seed << std::endl;
     srand(seed);
   }
 
@@ -63,8 +72,7 @@ void TestFixture::SetUp() {
   ASSERT_EQ(0, _rados->ioctx_create(_remote_pool_name.c_str(), m_remote_io_ctx));
   m_image_name = get_temp_image_name();
 
-  m_threads = new rbd::mirror::Threads(reinterpret_cast<CephContext*>(
-    m_local_io_ctx.cct()));
+  m_threads = new rbd::mirror::Threads<>(_rados);
 }
 
 void TestFixture::TearDown() {
@@ -87,16 +95,17 @@ int TestFixture::create_image(librbd::RBD &rbd, librados::IoCtx &ioctx,
 int TestFixture::open_image(librados::IoCtx &io_ctx,
                             const std::string &image_name,
                             librbd::ImageCtx **image_ctx) {
-  *image_ctx = new librbd::ImageCtx(image_name.c_str(), "", NULL, io_ctx,
+  *image_ctx = new librbd::ImageCtx(image_name.c_str(), "", nullptr, io_ctx,
                                     false);
   m_image_ctxs.insert(*image_ctx);
-  return (*image_ctx)->state->open(false);
+  return (*image_ctx)->state->open(0);
 }
 
 int TestFixture::create_snap(librbd::ImageCtx *image_ctx, const char* snap_name,
                              librados::snap_t *snap_id) {
-  int r = image_ctx->operations->snap_create(snap_name,
-					     cls::rbd::UserSnapshotNamespace());
+  librbd::NoOpProgressContext prog_ctx;
+  int r = image_ctx->operations->snap_create(cls::rbd::UserSnapshotNamespace(),
+					     snap_name, 0, prog_ctx);
   if (r < 0) {
     return r;
   }
@@ -106,12 +115,14 @@ int TestFixture::create_snap(librbd::ImageCtx *image_ctx, const char* snap_name,
     return r;
   }
 
-  if (image_ctx->snap_ids.count(snap_name) == 0) {
+  if (image_ctx->snap_ids.count({cls::rbd::UserSnapshotNamespace(),
+				 snap_name}) == 0) {
     return -ENOENT;
   }
 
   if (snap_id != nullptr) {
-    *snap_id = image_ctx->snap_ids[snap_name];
+    *snap_id = image_ctx->snap_ids[{cls::rbd::UserSnapshotNamespace(),
+				    snap_name}];
   }
   return 0;
 }
@@ -131,12 +142,19 @@ int TestFixture::create_image_data_pool(std::string &data_pool) {
   }
 
   r = _rados->pool_create(pool.c_str());
-  if (r == 0) {
-    data_pool = pool;
-    return 0;
+  if (r < 0) {
+    return r;
   }
 
-  return r;
+  librados::IoCtx data_ioctx;
+  r = _rados->ioctx_create(pool.c_str(), data_ioctx);
+  if (r < 0) {
+    return r;
+  }
+
+  data_ioctx.application_enable("rbd", true);
+  data_pool = pool;
+  return 0;
 }
 
 } // namespace mirror

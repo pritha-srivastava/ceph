@@ -1,18 +1,17 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef __CEPH_LOG_GRAYLOG_H
 #define __CEPH_LOG_GRAYLOG_H
 
-
-#include <memory>
-
-#include <boost/asio.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/udp.hpp>
 #include <boost/iostreams/filtering_stream.hpp>
 #include <boost/iostreams/filter/zlib.hpp>
 
-#include "include/memory.h"
-#include "include/assert.h"  // boost clobbers this
+#include "include/ceph_assert.h"  // boost clobbers this
+
+#include <sstream>
 
 struct uuid_d;
 class LogEntry;
@@ -23,7 +22,7 @@ class Formatter;
 
 namespace logging {
 
-struct Entry;
+class Entry;
 class SubsystemMap;
 
 // Graylog logging backend: Convert log datastructures (LogEntry, Entry) to
@@ -40,14 +39,14 @@ class Graylog
    * @param s SubsystemMap
    * @param logger Value for key "_logger" in GELF
    */
-  Graylog(const SubsystemMap * const s, std::string logger);
+  Graylog(const SubsystemMap * const s, const std::string &logger);
 
   /**
    * Create Graylog without SubsystemMap. Logging will not be ready
    * until set_destination is called
    * @param logger Value for key "_logger" in GELF
    */
-  explicit Graylog(std::string logger);
+  explicit Graylog(const std::string &logger);
   virtual ~Graylog();
 
   void set_hostname(const std::string& host);
@@ -55,22 +54,22 @@ class Graylog
 
   void set_destination(const std::string& host, int port);
 
-  void log_entry(Entry const * const e);
+  void log_entry(const Entry& e);
   void log_log_entry(LogEntry const * const e);
 
-  typedef ceph::shared_ptr<Graylog> Ref;
+  typedef std::shared_ptr<Graylog> Ref;
 
  private:
   SubsystemMap const * const m_subs;
 
-  bool m_log_dst_valid;
+  bool m_log_dst_valid = false;
 
   std::string m_hostname;
   std::string m_fsid;
   std::string m_logger;
 
   boost::asio::ip::udp::endpoint m_endpoint;
-  boost::asio::io_service m_io_service;
+  boost::asio::io_context m_io_service;
 
   std::unique_ptr<Formatter> m_formatter;
   std::unique_ptr<Formatter> m_formatter_section;

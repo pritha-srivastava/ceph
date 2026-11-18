@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -31,15 +32,15 @@
 #undef dout_prefix
 #define dout_prefix _prefix(_dout)
 
-static ostream& _prefix(std::ostream* _dout)
+static std::ostream& _prefix(std::ostream* _dout)
 {
   return *_dout << "ErasureCodePluginShec: ";
 }
 
 int ErasureCodePluginShec::factory(const std::string &directory,
-		      ErasureCodeProfile &profile,
-		      ErasureCodeInterfaceRef *erasure_code,
-		      ostream *ss) {
+				   ceph::ErasureCodeProfile &profile,
+				   ceph::ErasureCodeInterfaceRef *erasure_code,
+				   std::ostream *ss) {
     ErasureCodeShec *interface;
 
     if (profile.find("technique") == profile.end())
@@ -61,26 +62,27 @@ int ErasureCodePluginShec::factory(const std::string &directory,
       delete interface;
       return r;
     }
-    *erasure_code = ErasureCodeInterfaceRef(interface);
+    *erasure_code = ceph::ErasureCodeInterfaceRef(interface);
 
     dout(10) << "ErasureCodePluginShec: factory() completed" << dendl;
 
     return 0;
 }
 
-#ifndef BUILDING_FOR_EMBEDDED
-
 const char *__erasure_code_version() { return CEPH_GIT_NICE_VER; }
 
 int __erasure_code_init(char *plugin_name, char *directory = (char *)"")
 {
-  ErasureCodePluginRegistry &instance = ErasureCodePluginRegistry::instance();
+  auto& instance = ceph::ErasureCodePluginRegistry::instance();
   int w[] = { 8, 16, 32 };
   int r = jerasure_init(3, w);
   if (r) {
     return -r;
   }
-  return instance.add(plugin_name, new ErasureCodePluginShec());
+  auto plugin = std::make_unique<ErasureCodePluginShec>();
+  r = instance.add(plugin_name, plugin.get());
+  if (r == 0) {
+    plugin.release();
+  }
+  return r;
 }
-
-#endif

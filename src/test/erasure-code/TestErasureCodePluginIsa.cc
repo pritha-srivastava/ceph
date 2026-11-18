@@ -18,8 +18,10 @@
 #include "arch/intel.h"
 #include "erasure-code/ErasureCodePlugin.h"
 #include "global/global_context.h"
-#include "common/config.h"
+#include "common/config_proxy.h"
 #include "gtest/gtest.h"
+
+using namespace std;
 
 TEST(ErasureCodePlugin, factory)
 {
@@ -29,7 +31,7 @@ TEST(ErasureCodePlugin, factory)
     ErasureCodeInterfaceRef erasure_code;
     EXPECT_FALSE(erasure_code);
     EXPECT_EQ(-EIO, instance.factory("no-isa",
-				     g_conf->erasure_code_dir,
+				     g_conf().get_val<std::string>("erasure_code_dir"),
 				     profile,
 				     &erasure_code, &cerr));
     EXPECT_FALSE(erasure_code);
@@ -41,12 +43,38 @@ TEST(ErasureCodePlugin, factory)
   for(const char **technique = techniques; *technique; technique++) {
     ErasureCodeInterfaceRef erasure_code;
     profile["technique"] = *technique;
+    profile["m"] = "2";
     EXPECT_FALSE(erasure_code);
     EXPECT_EQ(0, instance.factory("isa",
-				  g_conf->erasure_code_dir,
+				  g_conf().get_val<std::string>("erasure_code_dir"),
 				  profile,
                                   &erasure_code, &cerr));
     EXPECT_TRUE(erasure_code.get());
+  }
+}
+
+TEST(ErasureCodePlugin, factory_default_technique)
+{
+  ErasureCodePluginRegistry &instance = ErasureCodePluginRegistry::instance();
+  {
+    ErasureCodeProfile profile;
+    ErasureCodeInterfaceRef erasure_code;
+    EXPECT_EQ(0, instance.factory("isa",
+				  g_conf().get_val<std::string>("erasure_code_dir"),
+				  profile,
+				  &erasure_code, &cerr));
+    ASSERT_TRUE(erasure_code.get());
+    EXPECT_EQ("reed_sol_van", erasure_code->get_profile().at("technique"));
+  }
+  {
+    ErasureCodeProfile profile;
+    profile["technique"] = "unknown";
+    ErasureCodeInterfaceRef erasure_code;
+    EXPECT_EQ(-ENOENT, instance.factory("isa",
+				        g_conf().get_val<std::string>("erasure_code_dir"),
+				        profile,
+				        &erasure_code, &cerr));
+    EXPECT_FALSE(erasure_code);
   }
 }
 

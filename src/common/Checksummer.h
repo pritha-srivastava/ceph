@@ -1,10 +1,13 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_OS_BLUESTORE_CHECKSUMMER
 #define CEPH_OS_BLUESTORE_CHECKSUMMER
 
 #include "include/buffer.h"
+#include "include/byteorder.h"
+#include "include/ceph_assert.h"
+
 #include "xxHash/xxhash.h"
 
 class Checksummer {
@@ -44,6 +47,18 @@ public:
       return CSUM_CRC32C_8;
     return -EINVAL;
   }
+
+  static size_t get_csum_init_value_size(int csum_type) {
+    switch (csum_type) {
+    case CSUM_NONE: return 0;
+    case CSUM_XXHASH32: return sizeof(xxhash32::init_value_t);
+    case CSUM_XXHASH64: return sizeof(xxhash64::init_value_t);
+    case CSUM_CRC32C: return sizeof(crc32c::init_value_t);
+    case CSUM_CRC32C_16: return sizeof(crc32c_16::init_value_t);
+    case CSUM_CRC32C_8: return sizeof(crc32c_8::init_value_t);
+    default: return 0;
+    }
+  }
   static size_t get_csum_value_size(int csum_type) {
     switch (csum_type) {
     case CSUM_NONE: return 0;
@@ -57,7 +72,8 @@ public:
   }
 
   struct crc32c {
-    typedef __le32 value_t;
+    typedef uint32_t init_value_t;
+    typedef ceph_le32 value_t;
 
     // we have no execution context/state.
     typedef int state_t;
@@ -66,17 +82,19 @@ public:
     static void fini(state_t *state) {
     }
 
-    static value_t calc(
+    static init_value_t calc(
       state_t state,
+      init_value_t init_value,
       size_t len,
-      bufferlist::const_iterator& p
+      ceph::buffer::list::const_iterator& p
       ) {
-      return p.crc32c(len, -1);
+      return p.crc32c(len, init_value);
     }
   };
 
   struct crc32c_16 {
-    typedef __le16 value_t;
+    typedef uint32_t init_value_t;
+    typedef ceph_le16 value_t;
 
     // we have no execution context/state.
     typedef int state_t;
@@ -85,16 +103,18 @@ public:
     static void fini(state_t *state) {
     }
 
-    static value_t calc(
+    static init_value_t calc(
       state_t state,
+      init_value_t init_value,
       size_t len,
-      bufferlist::const_iterator& p
+      ceph::buffer::list::const_iterator& p
       ) {
-      return p.crc32c(len, -1) & 0xffff;
+      return p.crc32c(len, init_value) & 0xffff;
     }
   };
 
   struct crc32c_8 {
+    typedef uint32_t init_value_t;
     typedef __u8 value_t;
 
     // we have no execution context/state.
@@ -104,17 +124,19 @@ public:
     static void fini(state_t *state) {
     }
 
-    static value_t calc(
+    static init_value_t calc(
       state_t state,
+      init_value_t init_value,
       size_t len,
-      bufferlist::const_iterator& p
+      ceph::buffer::list::const_iterator& p
       ) {
-      return p.crc32c(len, -1) & 0xff;
+      return p.crc32c(len, init_value) & 0xff;
     }
   };
 
   struct xxhash32 {
-    typedef __le32 value_t;
+    typedef uint32_t init_value_t;
+    typedef ceph_le32 value_t;
 
     typedef XXH32_state_t *state_t;
     static void init(state_t *s) {
@@ -124,12 +146,13 @@ public:
       XXH32_freeState(*s);
     }
 
-    static value_t calc(
+    static init_value_t calc(
       state_t state,
+      init_value_t init_value,
       size_t len,
-      bufferlist::const_iterator& p
+      ceph::buffer::list::const_iterator& p
       ) {
-      XXH32_reset(state, -1);
+      XXH32_reset(state, init_value);
       while (len > 0) {
 	const char *data;
 	size_t l = p.get_ptr_and_advance(len, &data);
@@ -141,7 +164,8 @@ public:
   };
 
   struct xxhash64 {
-    typedef __le64 value_t;
+    typedef uint64_t init_value_t;
+    typedef ceph_le64 value_t;
 
     typedef XXH64_state_t *state_t;
     static void init(state_t *s) {
@@ -151,12 +175,13 @@ public:
       XXH64_freeState(*s);
     }
 
-    static value_t calc(
+    static init_value_t calc(
       state_t state,
+      init_value_t init_value,
       size_t len,
-      bufferlist::const_iterator& p
+      ceph::buffer::list::const_iterator& p
       ) {
-      XXH64_reset(state, -1);
+      XXH64_reset(state, init_value);
       while (len > 0) {
 	const char *data;
 	size_t l = p.get_ptr_and_advance(len, &data);
@@ -172,25 +197,36 @@ public:
     size_t csum_block_size,
     size_t offset,
     size_t length,
-    const bufferlist &bl,
-    bufferptr* csum_data
+    const ceph::buffer::list &bl,
+    ceph::buffer::ptr* csum_data
     ) {
-    assert(length % csum_block_size == 0);
+    return calculate<Alg>(-1, csum_block_size, offset, length, bl, csum_data);
+  }
+
+  template<class Alg>
+  static int calculate(
+      typename Alg::init_value_t init_value,
+      size_t csum_block_size,
+      size_t offset,
+      size_t length,
+      const ceph::buffer::list &bl,
+      ceph::buffer::ptr* csum_data) {
+    ceph_assert(length % csum_block_size == 0);
     size_t blocks = length / csum_block_size;
-    bufferlist::const_iterator p = bl.begin();
-    assert(bl.length() >= length);
+    ceph::buffer::list::const_iterator p = bl.begin();
+    ceph_assert(bl.length() >= length);
 
     typename Alg::state_t state;
     Alg::init(&state);
 
-    assert(csum_data->length() >= (offset + length) / csum_block_size *
+    ceph_assert(csum_data->length() >= (offset + length) / csum_block_size *
 	   sizeof(typename Alg::value_t));
 
     typename Alg::value_t *pv =
       reinterpret_cast<typename Alg::value_t*>(csum_data->c_str());
     pv += offset / csum_block_size;
     while (blocks--) {
-      *pv = Alg::calc(state, csum_block_size, p);
+      *pv = Alg::calc(state, init_value, csum_block_size, p);
       ++pv;
     }
     Alg::fini(&state);
@@ -202,13 +238,13 @@ public:
     size_t csum_block_size,
     size_t offset,
     size_t length,
-    const bufferlist &bl,
-    const bufferptr& csum_data,
+    const ceph::buffer::list &bl,
+    const ceph::buffer::ptr& csum_data,
     uint64_t *bad_csum=0
     ) {
-    assert(length % csum_block_size == 0);
-    bufferlist::const_iterator p = bl.begin();
-    assert(bl.length() >= length);
+    ceph_assert(length % csum_block_size == 0);
+    ceph::buffer::list::const_iterator p = bl.begin();
+    ceph_assert(bl.length() >= length);
 
     typename Alg::state_t state;
     Alg::init(&state);
@@ -218,7 +254,7 @@ public:
     pv += offset / csum_block_size;
     size_t pos = offset;
     while (length > 0) {
-      typename Alg::value_t v = Alg::calc(state, csum_block_size, p);
+      typename Alg::init_value_t v = Alg::calc(state, -1, csum_block_size, p);
       if (*pv != v) {
 	if (bad_csum) {
 	  *bad_csum = v;

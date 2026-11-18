@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,13 +16,18 @@
 #ifndef CEPH_FINISHER_H
 #define CEPH_FINISHER_H
 
-#include "include/atomic.h"
-#include "common/Mutex.h"
-#include "common/Cond.h"
-#include "common/Thread.h"
-#include "common/perf_counters.h"
+#include <atomic>
+#include <future>
+#include <list>
+#include <mutex>
+#include <string>
+#include <vector>
 
-class CephContext;
+#include "include/Context.h"
+#include "common/Thread.h"
+#include "common/ceph_mutex.h"
+
+namespace TOPNSPC::common { class PerfCounters; }
 
 /// Finisher queue length performance counter ID.
 enum {
@@ -37,87 +43,72 @@ enum {
  * contexts to complete is thread-safe.
  */
 class Finisher {
-  CephContext *cct;
-  Mutex        finisher_lock; ///< Protects access to queues and finisher_running.
-  Cond         finisher_cond; ///< Signaled when there is something to process.
-  Cond         finisher_empty_cond; ///< Signaled when the finisher has nothing more to process.
-  bool         finisher_stop; ///< Set when the finisher should stop.
-  bool         finisher_running; ///< True when the finisher is currently executing contexts.
+  CephContext *const cct;
+  ceph::mutex finisher_lock; ///< Protects access to queues and finisher_running.
+  ceph::condition_variable finisher_cond; ///< Signaled when there is something to process.
+  ceph::condition_variable finisher_empty_cond; ///< Signaled when the finisher has nothing more to process.
+  bool         finisher_stop = false; ///< Set when the finisher should stop.
+  bool         finisher_running = false; ///< True when the finisher is currently executing contexts.
+  bool	       finisher_empty_wait = false; ///< True mean someone wait finisher empty.
+  std::atomic<pid_t> finisher_tid{0}; ///< TID of the finisher worker thread, set on startup
+  std::promise<void> tid_promise; ///< Fulfilled by the worker thread once it has started.
+  std::future<void>  started_future; ///< Becomes ready when the finisher thread is running; use on_started() to observe.
+
   /// Queue for contexts for which complete(0) will be called.
-  /// NULLs in this queue indicate that an item from finisher_queue_rval
-  /// should be completed in that place instead.
-  vector<Context*> finisher_queue;
+  std::vector<std::pair<Context*,int>> finisher_queue;
+  std::vector<std::pair<Context*,int>> in_progress_queue;
 
-  string thread_name;
-
-  /// Queue for contexts for which the complete function will be called
-  /// with a parameter other than 0.
-  list<pair<Context*,int> > finisher_queue_rval;
+  const std::string thread_name;
 
   /// Performance counter for the finisher's queue length.
   /// Only active for named finishers.
-  PerfCounters *logger;
-  
+  TOPNSPC::common::PerfCounters *logger = nullptr;
+
   void *finisher_thread_entry();
 
   struct FinisherThread : public Thread {
-    Finisher *fin;    
+    Finisher *fin;
     explicit FinisherThread(Finisher *f) : fin(f) {}
-    void* entry() { return (void*)fin->finisher_thread_entry(); }
+    void* entry() override { return fin->finisher_thread_entry(); }
   } finisher_thread;
+
+  void LoggerInc(int idx, uint64_t v = 1);
 
  public:
   /// Add a context to complete, optionally specifying a parameter for the complete function.
   void queue(Context *c, int r = 0) {
-    finisher_lock.Lock();
-    if (finisher_queue.empty()) {
-      finisher_cond.Signal();
+    {
+      const std::lock_guard l{finisher_lock};
+      const bool should_notify = finisher_queue.empty() && !finisher_running;
+      finisher_queue.push_back(std::make_pair(c, r));
+      if (should_notify) {
+	finisher_cond.notify_one();
+      }
     }
-    if (r) {
-      finisher_queue_rval.push_back(pair<Context*, int>(c, r));
-      finisher_queue.push_back(NULL);
-    } else
-      finisher_queue.push_back(c);
-    if (logger)
-      logger->inc(l_finisher_queue_len);
-    finisher_lock.Unlock();
+
+    LoggerInc(l_finisher_queue_len);
   }
-  void queue(vector<Context*>& ls) {
-    finisher_lock.Lock();
-    if (finisher_queue.empty()) {
-      finisher_cond.Signal();
+
+  // TODO use C++20 concept checks instead of SFINAE
+  template<typename T>
+  auto queue(T &ls) -> decltype(std::distance(ls.begin(), ls.end()), void()) {
+    {
+      const std::lock_guard l{finisher_lock};
+      const bool should_notify = finisher_queue.empty() && !finisher_running;
+      for (Context *i : ls) {
+	finisher_queue.push_back(std::make_pair(i, 0));
+      }
+      if (should_notify) {
+	finisher_cond.notify_one();
+      }
     }
-    finisher_queue.insert(finisher_queue.end(), ls.begin(), ls.end());
-    if (logger)
-      logger->inc(l_finisher_queue_len, ls.size());
-    finisher_lock.Unlock();
-    ls.clear();
-  }
-  void queue(deque<Context*>& ls) {
-    finisher_lock.Lock();
-    if (finisher_queue.empty()) {
-      finisher_cond.Signal();
-    }
-    finisher_queue.insert(finisher_queue.end(), ls.begin(), ls.end());
-    if (logger)
-      logger->inc(l_finisher_queue_len, ls.size());
-    finisher_lock.Unlock();
-    ls.clear();
-  }
-  void queue(list<Context*>& ls) {
-    finisher_lock.Lock();
-    if (finisher_queue.empty()) {
-      finisher_cond.Signal();
-    }
-    finisher_queue.insert(finisher_queue.end(), ls.begin(), ls.end());
-    if (logger)
-      logger->inc(l_finisher_queue_len, ls.size());
-    finisher_lock.Unlock();
+    LoggerInc(l_finisher_queue_len, ls.size());
     ls.clear();
   }
 
   /// Start the worker thread.
   void start();
+  std::future<void>& on_started() { return started_future; }
 
   /** @brief Stop the worker thread.
    *
@@ -132,36 +123,20 @@ class Finisher {
    * finishes, but this class should never be used in this way. */
   void wait_for_empty();
 
+  bool is_empty();
+  pid_t get_tid() const { return finisher_tid; }
+
+  std::string_view get_thread_name() const noexcept {
+    return thread_name;
+  }
+
   /// Construct an anonymous Finisher.
   /// Anonymous finishers do not log their queue length.
-  explicit Finisher(CephContext *cct_) :
-    cct(cct_), finisher_lock("Finisher::finisher_lock"),
-    finisher_stop(false), finisher_running(false),
-    thread_name("fn_anonymous"), logger(0),
-    finisher_thread(this) {}
+  explicit Finisher(CephContext *cct_);
 
   /// Construct a named Finisher that logs its queue length.
-  Finisher(CephContext *cct_, string name, string tn) :
-    cct(cct_), finisher_lock("Finisher::finisher_lock"),
-    finisher_stop(false), finisher_running(false),
-    thread_name(tn), logger(0),
-    finisher_thread(this) {
-    PerfCountersBuilder b(cct, string("finisher-") + name,
-			  l_finisher_first, l_finisher_last);
-    b.add_u64(l_finisher_queue_len, "queue_len");
-    b.add_time_avg(l_finisher_complete_lat, "complete_latency");
-    logger = b.create_perf_counters();
-    cct->get_perfcounters_collection()->add(logger);
-    logger->set(l_finisher_queue_len, 0);
-    logger->set(l_finisher_complete_lat, 0);
-  }
-
-  ~Finisher() {
-    if (logger && cct) {
-      cct->get_perfcounters_collection()->remove(logger);
-      delete logger;
-    }
-  }
+  Finisher(CephContext *cct_, std::string_view name, std::string &&tn);
+  ~Finisher();
 };
 
 /// Context that is completed asynchronously on the supplied finisher.
@@ -170,20 +145,66 @@ class C_OnFinisher : public Context {
   Finisher *fin;
 public:
   C_OnFinisher(Context *c, Finisher *f) : con(c), fin(f) {
-    assert(fin != NULL);
-    assert(con != NULL);
+    ceph_assert(fin != NULL);
+    ceph_assert(con != NULL);
   }
 
-  ~C_OnFinisher() {
+  ~C_OnFinisher() override {
     if (con != nullptr) {
       delete con;
       con = nullptr;
     }
   }
 
-  void finish(int r) {
+  void finish(int r) override {
     fin->queue(con, r);
     con = nullptr;
+  }
+};
+
+class ContextQueue {
+  std::list<Context *> q;
+  std::mutex q_mutex;
+  ceph::mutex& mutex;
+  ceph::condition_variable& cond;
+  std::atomic_bool q_empty = true;
+public:
+  ContextQueue(ceph::mutex& mut,
+	       ceph::condition_variable& con)
+    : mutex(mut), cond(con) {}
+
+  void queue(std::list<Context *>& ls) {
+    bool was_empty = false;
+    {
+      std::scoped_lock l(q_mutex);
+      if (q.empty()) {
+	q.swap(ls);
+	was_empty = true;
+      } else {
+	q.insert(q.end(), ls.begin(), ls.end());
+      }
+      q_empty = q.empty();
+    }
+
+    if (was_empty) {
+      std::scoped_lock l{mutex};
+      cond.notify_all();
+    }
+
+    ls.clear();
+  }
+
+  void move_to(std::list<Context *>& ls) {
+    ls.clear();
+    std::scoped_lock l(q_mutex);
+    if (!q.empty()) {
+      q.swap(ls);
+    }
+    q_empty = true;
+  }
+
+  bool empty() {
+    return q_empty;
   }
 };
 

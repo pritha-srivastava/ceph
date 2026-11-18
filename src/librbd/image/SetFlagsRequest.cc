@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/image/SetFlagsRequest.h"
 #include "common/dout.h"
@@ -7,7 +7,7 @@
 #include "cls/rbd/cls_rbd_client.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/Utils.h"
-#include "include/assert.h"
+#include "include/ceph_assert.h"
 
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
@@ -17,7 +17,7 @@ namespace librbd {
 namespace image {
 
 using util::create_context_callback;
-using util::create_rados_ack_callback;
+using util::create_rados_callback;
 
 template <typename I>
 SetFlagsRequest<I>::SetFlagsRequest(I *image_ctx, uint64_t flags,
@@ -36,7 +36,7 @@ void SetFlagsRequest<I>::send_set_flags() {
   CephContext *cct = m_image_ctx->cct;
   ldout(cct, 20) << __func__ << dendl;
 
-  RWLock::WLocker snap_locker(m_image_ctx->snap_lock);
+  std::unique_lock image_locker{m_image_ctx->image_lock};
   std::vector<uint64_t> snap_ids;
   snap_ids.push_back(CEPH_NOSNAP);
   for (auto it : m_image_ctx->snap_info) {
@@ -52,9 +52,9 @@ void SetFlagsRequest<I>::send_set_flags() {
     cls_client::set_flags(&op, snap_id, m_flags, m_mask);
 
     librados::AioCompletion *comp =
-      create_rados_ack_callback(gather_ctx->new_sub());
+      create_rados_callback(gather_ctx->new_sub());
     int r = m_image_ctx->md_ctx.aio_operate(m_image_ctx->header_oid, comp, &op);
-    assert(r == 0);
+    ceph_assert(r == 0);
     comp->release();
   }
   gather_ctx->activate();

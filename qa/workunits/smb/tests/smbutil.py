@@ -1,0 +1,363 @@
+import base64
+import contextlib
+import functools
+import os
+import pathlib
+import time
+
+import cephutil
+
+import smbclient
+from smbprotocol.header import NtStatus
+from smbprotocol.exceptions import SMBResponseException
+
+
+class SMBTestHost:
+    """Host configuration wrapper."""
+
+    def __init__(self, data):
+        self._server_data = data
+
+    @property
+    def ip_address(self):
+        return self._server_data.get('ip_address', '')
+
+    @property
+    def name(self):
+        return self._server_data.get('name', '')
+
+
+class SMBTestServer(SMBTestHost):
+    """Server configuration wrapper."""
+
+    @property
+    def port(self):
+        return 445
+
+    @property
+    def ssh_user(self):
+        return self._server_data.get('user', '')
+
+
+class SMBTestConf:
+    """Global test configuration wrapper."""
+
+    def __init__(self, data):
+        self._data = data
+
+    @property
+    def shares(self):
+        return self._data['smb_shares']
+
+    @property
+    def username(self):
+        users = self._data.get('smb_users', [])
+        if users and users[0] and (un := users[0].get('username')):
+            return un
+        return r'domain1\bwayne'
+
+    @property
+    def password(self):
+        users = self._data.get('smb_users', [])
+        if users and users[0] and (pw := users[0].get('password')):
+            return pw
+        return base64.b64decode(b'MTExNVJvc2Uu').decode()
+
+    @property
+    def server(self):
+        nodes = self._data.get('smb_nodes', [])
+        return SMBTestServer(nodes[0])
+
+    @property
+    def admin_node(self):
+        return SMBTestServer(self._data.get('admin_node', {}))
+
+    @property
+    def ssh_user(self):
+        uname = self.admin_node.ssh_user
+        assert uname, 'no ssh_user found'
+        return uname
+
+    @property
+    def ssh_admin_host(self):
+        return self.admin_node.ip_address
+
+    def clients(self):
+        clients = self._data.get('client_nodes') or []
+        return [SMBTestHost(node_info) for node_info in clients]
+
+    @property
+    def default_client(self):
+        # ideally we check that this is *our* ip or name, but we'll just wing
+        # it for now until we really need to check
+        return self.clients()[0]
+
+    @property
+    def testdir(self):
+        return self._data.get('testdir') or os.path.expanduser('~/cephtest')
+
+    @property
+    def params(self):
+        return self._data.get('params') or {}
+
+
+@contextlib.contextmanager
+def connection(conf, share, username=None, password=None):
+    """Return a PathWrapper connecting to the given share."""
+    server = conf.server.ip_address
+    port = conf.server.port
+    username = conf.username if username is None else username
+    password = conf.password if password is None else password
+
+    smbclient.register_session(
+        server=server,
+        port=port,
+        username=username,
+        password=password,
+    )
+    try:
+        spath = pathlib.PureWindowsPath(f'//{server}/{share}')
+        yield PathWrapper(spath)
+    finally:
+        smbclient.delete_session(server, port)
+
+
+class PathWrapper:
+    """Object that wraps the share connection and path within the share to act
+    similarly to a pathlib.Path.
+    """
+
+    def __init__(self, share_path):
+        self.share_path = share_path
+
+    def __truediv__(self, other):
+        return self.__class__(self.share_path / other)
+
+    def listdir(self, **kwargs):
+        """List directory contents."""
+        return smbclient.listdir(str(self.share_path), **kwargs)
+
+    def mkdir(self, exist_ok=False):
+        """Create a new directory."""
+        # TODO: parents=False
+        if exist_ok:
+            try:
+                return smbclient.mkdir(str(self.share_path))
+            except OSError as err:
+                code = getattr(err, 'ntstatus', None)
+                if code == NtStatus.STATUS_OBJECT_NAME_COLLISION:
+                    return
+                raise
+        return smbclient.mkdir(str(self.share_path))
+
+    def rmdir(self):
+        """Remove a directory."""
+        return smbclient.rmdir(str(self.share_path))
+
+    def open(self, mode='r'):
+        """Open a file."""
+        return smbclient.open_file(str(self.share_path), mode=mode)
+
+    def read_text(self):
+        """Open the file in text mode, read it, and close the file."""
+        with self.open() as fh:
+            return fh.read()
+
+    def write_text(self, txt):
+        """Open the file in text mode, write to it, and close the file."""
+        with self.open(mode='w') as fh:
+            fh.write(txt)
+
+    def write_bytes(self, data):
+        """Open the file in binary mode, write bytes to it, and close the file."""
+        with self.open(mode='wb') as fh:
+            fh.write(data)
+
+    def unlink(self):
+        """Unlink (remove) a file."""
+        smbclient.remove(str(self.share_path))
+
+    def stat(self):
+        return smbclient.stat(str(self.share_path))
+
+    def get_security_descriptor(self):
+        import smbclient.security
+
+        return smbclient.security.get_security_descriptor(
+            str(self.share_path)
+        )
+
+    def set_security_descriptor(self, sec_desc):
+        import smbclient.security
+
+        return smbclient.security.set_security_descriptor(
+            str(self.share_path),
+            sec_desc,
+        )
+
+    def rmtree(self, *, ignore_errors=False):
+        import smbclient.shutil
+
+        return smbclient.shutil.rmtree(
+            str(self.share_path), ignore_errors=ignore_errors
+        )
+
+
+def _get_resources(smb_cfg, rtype):
+    jres = cephutil.cephadm_shell_cmd(
+        smb_cfg,
+        ["ceph", "smb", "show", "--results=full", rtype],
+        load_json=True,
+    )
+    assert jres.obj
+    obj = jres.obj
+    assert 'resources' in obj
+    resources = obj['resources']
+    assert len(resources) > 0
+    return resources
+
+
+def get_shares(smb_cfg):
+    """Get all SMB shares."""
+    resources = _get_resources(smb_cfg, "ceph.smb.share")
+    assert all(r['resource_type'] == 'ceph.smb.share' for r in resources)
+    return resources
+
+
+def get_ug(smb_cfg):
+    """Get all users and groups resources."""
+    resources = _get_resources(smb_cfg, "ceph.smb.usersgroups")
+    assert all(r['resource_type'] == 'ceph.smb.usersgroups' for r in resources)
+    return resources
+
+
+def get_share_by_id(smb_cfg, cluster_id, share_id):
+    """Get a specific share by cluster_id and share_id."""
+    shares = _get_resources(smb_cfg, f"ceph.smb.share.{cluster_id}.{share_id}")
+    assert len(shares) == 1
+    share = shares[0]
+    assert share['cluster_id'] == cluster_id and share['share_id'] == share_id
+    return share
+
+
+def _apply(smb_cfg, resources, immediate=False, check=None, load_json=True):
+    jres = cephutil.cephadm_shell_cmd(
+        smb_cfg,
+        ['ceph', 'smb', 'apply', '-i-'],
+        input_json={'resources': resources},
+        load_json=load_json,
+    )
+    if check:
+        ret = check(jres)
+    else:
+        ret = jres
+    # sleep to ensure the settings got applied in smbd
+    # TODO: make this more dynamic somehow
+    if not immediate:
+        time.sleep(60)
+    return ret
+
+
+def _res_check(jres):
+    assert jres.returncode == 0
+    assert jres.obj and jres.obj.get('success')
+    assert 'results' in jres.obj
+    _results = jres.obj['results']
+    assert len(_results) == 1, "more than one result found"
+    _result = _results[0]
+    assert 'resource' in _result
+    resources_ret = _result['resource']
+    return resources_ret
+
+
+def apply_share_config(smb_cfg, share, immediate=False):
+    """Apply share configuration via the apply command."""
+
+    def _check(jres):
+        resources_ret = _res_check(jres)
+        assert resources_ret['resource_type'] == 'ceph.smb.share'
+        return resources_ret
+
+    rr = _apply(smb_cfg, [share], immediate=immediate, check=_check)
+    return rr
+
+
+def apply_resource(
+    smb_cfg,
+    resource,
+    immediate=False,
+):
+    """Apply a single generic resource via the apply command."""
+
+    rr = _apply(smb_cfg, [resource], immediate=immediate, check=_res_check)
+    return rr
+
+
+def _res_check_many(jres, count):
+    assert jres.returncode == 0
+    assert jres.obj and jres.obj.get('success')
+    assert 'results' in jres.obj
+    _results = jres.obj['results']
+    assert len(_results) == count
+    return jres.obj
+
+
+def apply_resources(
+    smb_cfg,
+    resources,
+    immediate=False,
+):
+    """Apply resources via the apply command."""
+
+    _check = functools.partial(_res_check_many, count=len(resources))
+    rr = _apply(smb_cfg, resources, immediate=immediate, check=_check)
+    return rr
+
+
+def apply_resources_unchecked(
+    smb_cfg,
+    resources,
+    immediate=False,
+):
+    """Apply resources via the apply command. Do not assert result is OK."""
+
+    return _apply(
+        smb_cfg,
+        resources,
+        immediate=immediate,
+        load_json=cephutil.LoadJSON.BOTH,
+    )
+
+
+@contextlib.contextmanager
+def raises_nt_error(nt_status, base_exc=None):
+    """Checks that an exception was raised and that the nt status error matches
+    a given nt_status error code (or codes).  nt_status may be an int or a
+    tuple of ints.  base_exc is the base class of the exception to catch -
+    defaults to the common base classes used by smbprotocol and smbclient
+    (part of smbprotocol).
+    """
+    info = {}
+    base_exc = (
+        (OSError, SMBResponseException) if base_exc is None else base_exc
+    )
+    try:
+        yield info
+    except base_exc as err:
+        info['exception'] = err
+        # smbprotocol is not particularly consistent where the nt status
+        # error is stored on the exception objects across the different
+        # layers. Check the clearly named one first and then the other.
+        info['ntstatus'] = getattr(err, 'ntstatus', None) or getattr(
+            err, 'status', None
+        )
+    if not info:
+        raise AssertionError('DID NOT RAISE')
+    if not isinstance(nt_status, tuple):
+        _statuses = (nt_status,)
+    else:
+        _statuses = nt_status
+    if info['ntstatus'] not in _statuses:
+        raise AssertionError(
+            f'NTSTATUS mismatch: {info["ntstatus"]} not in {_statuses}'
+        )

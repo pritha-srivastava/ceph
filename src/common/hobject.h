@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,13 +16,26 @@
 #ifndef __CEPH_OS_HOBJECT_H
 #define __CEPH_OS_HOBJECT_H
 
-#include <string.h>
-#include "include/types.h"
-#include "include/object.h"
-#include "include/cmp.h"
+#include <fmt/compile.h>
+#include <fmt/format.h>
+
+#if FMT_VERSION >= 90000
+#include <fmt/ostream.h>
+#endif
 
 #include "json_spirit/json_spirit_value.h"
-#include "include/assert.h"   // spirit clobbers it!
+#include "include/ceph_assert.h"   // spirit clobbers it!
+#include "include/encoding.h"
+#include "include/object.h" // for object_t
+#include "include/shard_id.h"
+#include "include/types.h" // for version_t
+
+#include "reverse.h"
+
+#include <cstdint>
+#include <iosfwd>
+#include <set>
+#include <string>
 
 namespace ceph {
   class Formatter;
@@ -35,6 +49,27 @@ namespace ceph {
 #endif
 
 struct hobject_t {
+public:
+  static const int64_t POOL_META = -1;
+  static const int64_t POOL_TEMP_START = -2; // and then negative
+
+  static bool is_temp_pool(int64_t pool) {
+    return pool <= POOL_TEMP_START;
+  }
+  static int64_t get_temp_pool(int64_t pool) {
+    return POOL_TEMP_START - pool;
+  }
+  static bool is_meta_pool(int64_t pool) {
+    return pool == POOL_META;
+  }
+  static int64_t get_logical_pool(int64_t pool) {
+    if (is_temp_pool(pool))
+      return get_temp_pool(pool);  // it's reversible
+    else
+      return pool;
+  }
+
+public:
   object_t oid;
   snapid_t snap;
 private:
@@ -42,31 +77,28 @@ private:
   bool max;
   uint32_t nibblewise_key_cache;
   uint32_t hash_reverse_bits;
-  static const int64_t POOL_META = -1;
-  static const int64_t POOL_TEMP_START = -2; // and then negative
-  friend class spg_t;  // for POOL_TEMP_START
 public:
   int64_t pool;
-  string nspace;
+  std::string nspace;
 
 private:
-  string key;
+  std::string key;
 
   class hobject_t_max {};
 
 public:
-  const string &get_key() const {
+  const std::string& get_key() const {
     return key;
   }
 
-  void set_key(const std::string &key_) {
+  void set_key(const std::string& key_) {
     if (key_ == oid.name)
       key.clear();
     else
       key = key_;
   }
 
-  string to_str() const;
+  std::string to_str() const;
   
   uint32_t get_hash() const { 
     return hash;
@@ -84,10 +116,13 @@ public:
   }
 
   bool is_temp() const {
-    return pool <= POOL_TEMP_START && pool != INT64_MIN;
+    return is_temp_pool(pool) && pool != INT64_MIN;
   }
   bool is_meta() const {
-    return pool == POOL_META;
+    return is_meta_pool(pool);
+  }
+  int64_t get_logical_pool() const {
+    return get_logical_pool(pool);
   }
 
   hobject_t() : snap(0), hash(0), max(false), pool(INT64_MIN) {
@@ -112,20 +147,27 @@ public:
     return hobject_t_max();
   }
 
-  hobject_t(object_t oid, const string& key, snapid_t snap, uint32_t hash,
-	    int64_t pool, string nspace)
+  hobject_t(const object_t& oid, const std::string& key, snapid_t snap,
+            uint32_t hash, int64_t pool, const std::string& nspace)
     : oid(oid), snap(snap), hash(hash), max(false),
       pool(pool), nspace(nspace),
-      key(oid.name == key ? string() : key) {
+      key(oid.name == key ? std::string() : key) {
     build_hash_cache();
   }
 
-  hobject_t(const sobject_t &soid, const string &key, uint32_t hash,
-	    int64_t pool, string nspace)
+  hobject_t(const sobject_t &soid, const std::string &key, uint32_t hash,
+	    int64_t pool, const std::string& nspace)
     : oid(soid.oid), snap(soid.snap), hash(hash), max(false),
       pool(pool), nspace(nspace),
-      key(soid.oid.name == key ? string() : key) {
+      key(soid.oid.name == key ? std::string() : key) {
     build_hash_cache();
+  }
+
+  // used by Crimson
+  hobject_t(const std::string &key, snapid_t snap, uint32_t reversed_hash,
+            int64_t pool, const std::string& nspace)
+    : oid(key), snap(snap), max(false), pool(pool), nspace(nspace) {
+    set_bitwise_key_u32(reversed_hash);
   }
 
   /// @return min hobject_t ret s.t. ret.hash == this->hash
@@ -138,12 +180,22 @@ public:
     return ret;
   }
 
+  /// @return min hobject_t ret s.t. ret.get_head() == get_head()
   hobject_t get_object_boundary() const {
     if (is_max())
       return *this;
     hobject_t ret = *this;
     ret.snap = 0;
     return ret;
+  }
+
+  /// @return max hobject_t ret s.t. ret.get_head() == get_head()
+  hobject_t get_max_object_boundary() const {
+    if (is_max())
+      return *this;
+    // CEPH_SNAPDIR happens to sort above HEAD and MAX_SNAP and is no longer used
+    // for actual objects
+    return get_snapdir();
   }
 
   /// @return head version of this hobject_t
@@ -187,7 +239,7 @@ public:
   }
 
   bool is_max() const {
-    assert(!max || (*this == hobject_t(hobject_t::get_max())));
+    ceph_assert(!max || (*this == hobject_t(hobject_t::get_max())));
     return max;
   }
   bool is_min() const {
@@ -199,44 +251,27 @@ public:
   }
 
   static uint32_t _reverse_bits(uint32_t v) {
-    if (v == 0)
-      return v;
-    // reverse bits
-    // swap odd and even bits
-    v = ((v >> 1) & 0x55555555) | ((v & 0x55555555) << 1);
-    // swap consecutive pairs
-    v = ((v >> 2) & 0x33333333) | ((v & 0x33333333) << 2);
-    // swap nibbles ...
-    v = ((v >> 4) & 0x0F0F0F0F) | ((v & 0x0F0F0F0F) << 4);
-    // swap bytes
-    v = ((v >> 8) & 0x00FF00FF) | ((v & 0x00FF00FF) << 8);
-    // swap 2-byte long pairs
-    v = ( v >> 16             ) | ( v               << 16);
-    return v;
+    return reverse_bits(v);
   }
   static uint32_t _reverse_nibbles(uint32_t retval) {
-    // reverse nibbles
-    retval = ((retval & 0x0f0f0f0f) << 4) | ((retval & 0xf0f0f0f0) >> 4);
-    retval = ((retval & 0x00ff00ff) << 8) | ((retval & 0xff00ff00) >> 8);
-    retval = ((retval & 0x0000ffff) << 16) | ((retval & 0xffff0000) >> 16);
-    return retval;
+    return reverse_nibbles(retval);
   }
 
   /**
    * Returns set S of strings such that for any object
    * h where h.match(bits, mask), there is some string
    * s \f$\in\f$ S such that s is a prefix of h.to_str().
-   * Furthermore, for any s $f\in\f$ S, s is a prefix of
+   * Furthermore, for any s \f$\in\f$ S, s is a prefix of
    * h.str() implies that h.match(bits, mask).
    */
-  static set<string> get_prefixes(
+  static std::set<std::string> get_prefixes(
     uint32_t bits,
     uint32_t mask,
     int64_t pool);
 
   // filestore nibble-based key
   uint32_t get_nibblewise_key_u32() const {
-    assert(!max);
+    ceph_assert(!max);
     return nibblewise_key_cache;
   }
   uint64_t get_nibblewise_key() const {
@@ -245,7 +280,7 @@ public:
 
   // newer bit-reversed key
   uint32_t get_bitwise_key_u32() const {
-    assert(!max);
+    ceph_assert(!max);
     return hash_reverse_bits;
   }
   uint64_t get_bitwise_key() const {
@@ -266,10 +301,17 @@ public:
     hash_reverse_bits = value;
   }
 
-  const string& get_effective_key() const {
+  const std::string& get_effective_key() const {
     if (key.length())
       return key;
     return oid.name;
+  }
+
+  hobject_t make_temp_hobject(const std::string& name) const {
+    return hobject_t(object_t(name), "", CEPH_NOSNAP,
+		     hash,
+		     get_temp_pool(pool),
+		     "");
   }
 
   void swap(hobject_t &o) {
@@ -278,48 +320,121 @@ public:
     (*this) = temp;
   }
 
-  const string &get_namespace() const {
+  const std::string &get_namespace() const {
     return nspace;
   }
 
-  bool parse(const string& s);
+  /**
+   * PG_LOCAL_NS
+   *
+   * Used exclusively by crimson at this time.
+   *
+   * Namespace for objects maintained by the local pg instantiation updated
+   * independently of the pg log.  librados IO to this namespace should fail.
+   * Listing operations related to pg objects should exclude objects in this
+   * namespace along with temp objects, ec rollback objects, and the pg
+   * meta object. Such operations include:
+   * - scrub
+   * - backfill
+   * - pgls
+   * See crimson/osd/pg_backend PGBackend::list_objects
+   */
+  static constexpr std::string_view INTERNAL_PG_LOCAL_NS = ".internal_pg_local";
+  bool is_internal_pg_local() const {
+    return nspace == INTERNAL_PG_LOCAL_NS;
+  }
 
-  void encode(bufferlist& bl) const;
-  void decode(bufferlist::iterator& bl);
+  bool parse(const std::string& s);
+
+  void encode(ceph::buffer::list& bl) const;
+  void decode(ceph::bufferlist::const_iterator& bl);
   void decode(json_spirit::Value& v);
-  void dump(Formatter *f) const;
-  static void generate_test_instances(list<hobject_t*>& o);
+  void dump(ceph::Formatter *f) const;
+  static std::list<hobject_t> generate_test_instances();
   friend int cmp(const hobject_t& l, const hobject_t& r);
-  friend bool operator>(const hobject_t& l, const hobject_t& r) {
-    return cmp(l, r) > 0;
+  constexpr auto operator<=>(const hobject_t &rhs) const noexcept {
+    auto cmp = max <=> rhs.max;
+    if (cmp != 0) return cmp;
+    cmp = pool <=> rhs.pool;
+    if (cmp != 0) return cmp;
+    cmp = get_bitwise_key() <=> rhs.get_bitwise_key();
+    if (cmp != 0) return cmp;
+    cmp = nspace <=> rhs.nspace;
+    if (cmp != 0) return cmp;
+    if (!(get_key().empty() && rhs.get_key().empty())) {
+      cmp = get_effective_key() <=> rhs.get_effective_key();
+      if (cmp != 0) return cmp;
+    }
+    cmp = oid <=> rhs.oid;
+    if (cmp != 0) return cmp;
+    return snap <=> rhs.snap;
   }
-  friend bool operator>=(const hobject_t& l, const hobject_t& r) {
-    return cmp(l, r) >= 0;
+  constexpr bool operator==(const hobject_t& rhs) const noexcept {
+    return operator<=>(rhs) == 0;
   }
-  friend bool operator<(const hobject_t& l, const hobject_t& r) {
-    return cmp(l, r) < 0;
-  }
-  friend bool operator<=(const hobject_t& l, const hobject_t& r) {
-    return cmp(l, r) <= 0;
-  }
-  friend bool operator==(const hobject_t&, const hobject_t&);
-  friend bool operator!=(const hobject_t&, const hobject_t&);
   friend struct ghobject_t;
+  friend struct test_hobject_fmt_t;
 };
 WRITE_CLASS_ENCODER(hobject_t)
 
 namespace std {
-  template<> struct hash<hobject_t> {
-    size_t operator()(const hobject_t &r) const {
-      static rjhash<uint64_t> I;
-      return r.get_hash() ^ I(r.snap);
-    }
-  };
+template<> struct hash<hobject_t> {
+  size_t operator()(const hobject_t &r) const {
+    static rjhash<uint64_t> RJ;
+    return RJ(r.get_hash() ^ r.snap);
+  }
+};
 } // namespace std
 
-ostream& operator<<(ostream& out, const hobject_t& o);
+namespace fmt {
+template <>
+struct formatter<hobject_t> {
 
-WRITE_EQ_OPERATORS_7(hobject_t, hash, oid, get_key(), snap, pool, max, nspace)
+  template <typename FormatContext>
+  static inline auto
+  append_sanitized(FormatContext& ctx, const std::string& in, int sep = 0)
+  {
+    for (const auto i : in) {
+      if (i == '%' || i == ':' || i == '/' || i < 32 || i >= 127) {
+	fmt::format_to(
+	    ctx.out(), FMT_COMPILE("%{:02x}"), static_cast<unsigned char>(i));
+      } else {
+	fmt::format_to(ctx.out(), FMT_COMPILE("{:c}"), i);
+      }
+    }
+    if (sep) {
+      fmt::format_to(
+	  ctx.out(), FMT_COMPILE("{:c}"), sep);
+    }
+    return ctx.out();
+  }
+
+  constexpr auto parse(format_parse_context& ctx) const { return ctx.begin(); }
+
+  template <typename FormatContext>
+  auto format(const hobject_t& ho, FormatContext& ctx) const
+  {
+    if (ho == hobject_t{}) {
+      return fmt::format_to(ctx.out(), "MIN");
+    }
+
+    if (ho.is_max()) {
+      return fmt::format_to(ctx.out(), "MAX");
+    }
+
+    fmt::format_to(
+	ctx.out(), FMT_COMPILE("{}:{:08x}:"), static_cast<uint64_t>(ho.pool),
+	ho.get_bitwise_key_u32());
+    append_sanitized(ctx, ho.nspace, ':');
+    append_sanitized(ctx, ho.get_key(), ':');
+    append_sanitized(ctx, ho.oid.name);
+    return fmt::format_to(ctx.out(), FMT_COMPILE(":{}"), ho.snap);
+  }
+};
+}  // namespace fmt
+
+
+std::ostream& operator<<(std::ostream& out, const hobject_t& o);
 
 template <typename T>
 struct always_false {
@@ -364,38 +479,62 @@ static inline int cmp(const T&, const hobject_t&r) {
 typedef version_t gen_t;
 
 struct ghobject_t {
-  hobject_t hobj;
-  gen_t generation;
-  shard_id_t shard_id;
-  bool max;
-
-public:
   static const gen_t NO_GEN = UINT64_MAX;
 
-  ghobject_t()
-    : generation(NO_GEN),
-      shard_id(shard_id_t::NO_SHARD),
-      max(false) {}
+  bool max = false;
+  shard_id_t shard_id = shard_id_t::NO_SHARD;
+  hobject_t hobj;
+  gen_t generation = NO_GEN;
+
+  ghobject_t() = default;
 
   explicit ghobject_t(const hobject_t &obj)
-    : hobj(obj),
-      generation(NO_GEN),
-      shard_id(shard_id_t::NO_SHARD),
-      max(false) {}
+    : hobj(obj) {}
 
   ghobject_t(const hobject_t &obj, gen_t gen, shard_id_t shard)
-    : hobj(obj),
-      generation(gen),
-      shard_id(shard),
-      max(false) {}
+    : shard_id(shard),
+      hobj(obj),
+      generation(gen) {}
+
+  // used by Crimson
+  ghobject_t(shard_id_t shard, int64_t pool, uint32_t reversed_hash,
+             const std::string& nspace, const std::string& oid,
+             snapid_t snap, gen_t gen)
+    : shard_id(shard),
+      hobj(oid, snap, reversed_hash, pool, nspace),
+      generation(gen) {}
 
   static ghobject_t make_pgmeta(int64_t pool, uint32_t hash, shard_id_t shard) {
-    hobject_t h(object_t(), string(), CEPH_NOSNAP, hash, pool, string());
+    hobject_t h(object_t(), std::string(), CEPH_NOSNAP, hash, pool, std::string());
     return ghobject_t(h, NO_GEN, shard);
   }
   bool is_pgmeta() const {
     // make sure we are distinct from hobject_t(), which has pool INT64_MIN
     return hobj.pool >= 0 && hobj.oid.name.empty();
+  }
+
+  bool is_internal_pg_local() const {
+    return hobj.is_internal_pg_local();
+  }
+
+  /**
+   * SNAPMAPPER_OID, make_snapmapper, is_snapmapper
+   *
+   * Used exclusively by crimson at this time.
+   * 
+   * Unlike classic, crimson uses a snap mapper object for each pg.
+   * The snapmapper object provides an index for efficient trimming of clones as
+   * snapshots are removed.
+   *
+   * As with the pgmeta object, we pin the hash to the pg hash.
+   */
+  static constexpr std::string_view SNAPMAPPER_OID = "snapmapper";
+  static ghobject_t make_snapmapper(
+    int64_t pool, uint32_t hash, shard_id_t shard) {
+    hobject_t h(object_t(SNAPMAPPER_OID), std::string(),
+		CEPH_NOSNAP, hash, pool,
+		std::string(hobject_t::INTERNAL_PG_LOCAL_NS));
+    return ghobject_t(h, NO_GEN, shard);
   }
 
   bool match(uint32_t bits, uint32_t match) const {
@@ -434,7 +573,7 @@ public:
     shard_id = s;
   }
 
-  bool parse(const string& s);
+  bool parse(const std::string& s);
 
   // maximum sorted value.
   static ghobject_t get_max() {
@@ -456,43 +595,36 @@ public:
     (*this) = temp;
   }
 
-  void encode(bufferlist& bl) const;
-  void decode(bufferlist::iterator& bl);
+  void encode(ceph::buffer::list& bl) const;
+  void decode(ceph::buffer::list::const_iterator& bl);
   void decode(json_spirit::Value& v);
   size_t encoded_size() const;
-  void dump(Formatter *f) const;
-  static void generate_test_instances(list<ghobject_t*>& o);
+  void dump(ceph::Formatter *f) const;
+  static std::list<ghobject_t> generate_test_instances();
   friend int cmp(const ghobject_t& l, const ghobject_t& r);
-  friend bool operator>(const ghobject_t& l, const ghobject_t& r) {
-    return cmp(l, r) > 0;
-  }
-  friend bool operator>=(const ghobject_t& l, const ghobject_t& r) {
-    return cmp(l, r) >= 0;
-  }
-  friend bool operator<(const ghobject_t& l, const ghobject_t& r) {
-    return cmp(l, r) < 0;
-  }
-  friend bool operator<=(const ghobject_t& l, const ghobject_t& r) {
-    return cmp(l, r) <= 0;
-  }
-  friend bool operator==(const ghobject_t&, const ghobject_t&);
-  friend bool operator!=(const ghobject_t&, const ghobject_t&);
-
+  constexpr auto operator<=>(const ghobject_t&) const = default;
+  bool operator==(const ghobject_t&) const = default;
 };
 WRITE_CLASS_ENCODER(ghobject_t)
 
 namespace std {
   template<> struct hash<ghobject_t> {
     size_t operator()(const ghobject_t &r) const {
-      static rjhash<uint64_t> I;
-      return r.hobj.get_hash() ^ I(r.hobj.snap);
+      static rjhash<uint64_t> RJ;
+      static hash<hobject_t> HO;
+      size_t hash = HO(r.hobj);
+      hash = RJ(hash ^ r.generation);
+      hash = hash ^ r.shard_id.id;
+      return hash;
     }
   };
 } // namespace std
 
-ostream& operator<<(ostream& out, const ghobject_t& o);
+std::ostream& operator<<(std::ostream& out, const ghobject_t& o);
 
-WRITE_EQ_OPERATORS_4(ghobject_t, max, shard_id, hobj, generation)
+#if FMT_VERSION >= 90000
+template <> struct fmt::formatter<ghobject_t> : fmt::ostream_formatter {};
+#endif
 
 extern int cmp(const ghobject_t& l, const ghobject_t& r);
 

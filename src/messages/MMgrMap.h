@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -19,36 +20,42 @@
 #include "msg/Message.h"
 #include "mon/MgrMap.h"
 
-class MMgrMap : public Message {
+class MMgrMap final : public Message {
 protected:
   MgrMap map;
 
 public:
   const MgrMap & get_map() {return map;}
 
-  MMgrMap() : 
-    Message(MSG_MGR_MAP) {}
-  MMgrMap(const MgrMap &map_) :
-    Message(MSG_MGR_MAP), map(map_)
-  {
-  }
-
 private:
-  ~MMgrMap() {}
+  MMgrMap() : 
+    Message{MSG_MGR_MAP} {}
+  MMgrMap(const MgrMap &map_) :
+    Message{MSG_MGR_MAP}, map(map_)
+  {}
+  ~MMgrMap() final {}
 
 public:
-  const char *get_type_name() const { return "mgrmap"; }
-  void print(ostream& out) const {
+  std::string_view get_type_name() const override { return "mgrmap"; }
+  void print(std::ostream& out) const override {
     out << get_type_name() << "(e " << map.epoch << ")";
   }
 
-  void decode_payload() {
-    bufferlist::iterator p = payload.begin();
-    ::decode(map, p);
+  void decode_payload() override {
+    auto p = payload.cbegin();
+    decode(map, p);
   }
-  void encode_payload(uint64_t features) {
-    ::encode(map, payload, features);
+  void encode_payload(uint64_t features) override {
+    using ceph::encode;
+    encode(map, payload, features);
   }
+private:
+  using RefCountedObject::put;
+  using RefCountedObject::get;
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
+  template<class T, typename... Args>
+  friend MURef<T> crimson::make_message(Args&&... args);
 };
 
 #endif

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -20,13 +21,13 @@
 /* Global version of the stuff in common/dout.h
  */
 
-#define dout(v) ldout((dout_context), v)
+#define dout(v) ldout((dout_context), (v))
 
-#define pdout(v, p) lpdout((dout_context), v, p)
+#define pdout(v, p) lpdout((dout_context), (v), (p))
 
-#define dlog_p(sub, v) ldlog_p1((dout_context), sub, v)
+#define dlog_p(sub, v) ldlog_p1((dout_context), (sub), (v))
 
-#define generic_dout(v) lgeneric_dout((dout_context), v)
+#define generic_dout(v) lgeneric_dout((dout_context), (v))
 
 #define derr lderr((dout_context))
 

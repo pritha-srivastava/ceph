@@ -1,0 +1,6 @@
+@use './src/styles/vendor/variables' as vv;
+
+.list-group-item {
+  background-color: transparent;
+  border-width: 0;
+}

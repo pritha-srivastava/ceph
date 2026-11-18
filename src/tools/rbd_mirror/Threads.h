@@ -1,27 +1,36 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_RBD_MIRROR_THREADS_H
 #define CEPH_RBD_MIRROR_THREADS_H
 
-#include "common/Mutex.h"
+#include "include/common_fwd.h"
+#include "include/rados/librados_fwd.hpp"
+#include "common/ceph_mutex.h"
+#include "common/Timer.h"
+#include <memory>
 
-class CephContext;
-class ContextWQ;
-class SafeTimer;
 class ThreadPool;
+
+namespace librbd {
+struct AsioEngine;
+struct ImageCtx;
+namespace asio { struct ContextWQ; }
+} // namespace librbd
 
 namespace rbd {
 namespace mirror {
 
-struct Threads {
-  ThreadPool *thread_pool = nullptr;
-  ContextWQ *work_queue = nullptr;
+template <typename ImageCtxT = librbd::ImageCtx>
+class Threads {
+public:
+  librbd::AsioEngine* asio_engine = nullptr;
+  librbd::asio::ContextWQ* work_queue = nullptr;
 
   SafeTimer *timer = nullptr;
-  Mutex timer_lock;
+  ceph::mutex timer_lock = ceph::make_mutex("Threads::timer_lock");
 
-  explicit Threads(CephContext *cct);
+  explicit Threads(std::shared_ptr<librados::Rados>& rados);
   Threads(const Threads&) = delete;
   Threads& operator=(const Threads&) = delete;
 
@@ -30,5 +39,7 @@ struct Threads {
 
 } // namespace mirror
 } // namespace rbd
+
+extern template class rbd::mirror::Threads<librbd::ImageCtx>;
 
 #endif // CEPH_RBD_MIRROR_THREADS_H

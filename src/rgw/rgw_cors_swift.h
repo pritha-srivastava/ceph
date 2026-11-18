@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,8 +13,7 @@
  *
  */
 
-#ifndef CEPH_RGW_CORS_SWIFT3_H
-#define CEPH_RGW_CORS_SWIFT3_H
+#pragma once
 
 #include <map>
 #include <string>
@@ -23,8 +23,6 @@
 
 #include "rgw_cors.h"
 
-using namespace std;
-
 class RGWCORSConfiguration_SWIFT : public RGWCORSConfiguration
 {
   public:
@@ -32,46 +30,11 @@ class RGWCORSConfiguration_SWIFT : public RGWCORSConfiguration
     ~RGWCORSConfiguration_SWIFT() {}
     int create_update(const char *allow_origins, const char *allow_headers, 
                   const char *expose_headers, const char *max_age) {
-      set<string> o, h, oc;
-      list<string> e;
-      unsigned long a = CORS_MAX_AGE_INVALID;
-      uint8_t flags = RGW_CORS_ALL;
-
-      string ao = allow_origins;
-      get_str_set(ao, oc);
-      if (oc.empty())
+      std::optional<RGWCORSRule> optional_rule;
+      if (RGWCORSRule::create_rule(allow_origins, allow_headers, expose_headers, "*", optional_rule, max_age) < 0) {
         return -EINVAL;
-      for(set<string>::iterator it = oc.begin(); it != oc.end(); ++it) {
-        string host = *it;
-        if (validate_name_string(host) != 0)
-          return -EINVAL;
-        o.insert(o.end(), host);
       }
-      if (allow_headers) {
-        string ah = allow_headers;
-        get_str_set(ah, h);
-        for(set<string>::iterator it = h.begin();
-            it != h.end(); ++it) {
-          string s = (*it);
-          if (validate_name_string(s) != 0)
-            return -EINVAL;
-        }
-      }
-
-      if (expose_headers) {
-        string eh = expose_headers;
-        get_str_list(eh, e);
-      }
-      if (max_age) {
-        char *end = NULL;
-        a = strtoul(max_age, &end, 10);
-        if (a == ULONG_MAX)
-          a = CORS_MAX_AGE_INVALID;
-      }
-
-      RGWCORSRule rule(o, h, e, flags, a);
-      stack_rule(rule);
+      stack_rule(optional_rule.value());
       return 0;
     }
 };
-#endif /*CEPH_RGW_CORS_SWIFT3_H*/

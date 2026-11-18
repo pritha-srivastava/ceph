@@ -1,0 +1,23 @@
+@if (codes.length > 1) {
+  <pre id="bigCodeBlock">
+    @for (code of codes; track code) {
+      <span
+        class="d-flex px-2 py-3 align-items-center justify-content-between text-dark">
+        <span [ngClass]="{'text-wrap': textWrap}">{{code}}</span>
+        <cd-copy-2-clipboard-button
+          [source]="code"
+        [byId]="false"></cd-copy-2-clipboard-button>
+      </span>
+    }
+  </pre>
+} @else {
+  <pre
+    class="d-flex px-2 py-3 align-items-center justify-content-between text-dark"
+    id="singleCodeBlock"
+  >
+    <span [ngClass]="{'text-wrap': textWrap}">{{codes}}</span>
+    <cd-copy-2-clipboard-button
+      [source]="codes"
+    [byId]="false"></cd-copy-2-clipboard-button>
+  </pre>
+}

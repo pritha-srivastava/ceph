@@ -1,0 +1,116 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
+
+#pragma once
+
+#include <string>
+#include <functional>
+#include <boost/optional.hpp>
+
+#include "include/common_fwd.h"
+
+namespace rgw::kafka {
+
+// the reply callback is expected to get an integer parameter
+// indicating the result, and not to return anything
+typedef std::function<void(int)> reply_callback_t;
+
+// initialize the kafka manager
+bool init(CephContext* cct);
+
+// shutdown the kafka manager
+void shutdown();
+
+// key class for the connection list
+struct connection_id_t {
+  std::string broker;
+  std::string user;
+  std::string password;
+  std::string ca_location;
+  std::string ca_cert;
+  std::string mechanism;
+  std::string ssl_certificate;
+  std::string ssl_key;
+  std::string ssl_key_password;
+  std::string kerberos_service_name;
+  std::string kerberos_principal;
+  std::string kerberos_keytab;
+  bool ssl = false;
+  bool verify_ssl = true;
+  connection_id_t() = default;
+  connection_id_t(const std::string& _broker,
+                  const std::string& _user,
+                  const std::string& _password,
+                  const boost::optional<const std::string&>& _ca_location,
+                  const boost::optional<const std::string&>& _ca_cert,
+                  const boost::optional<const std::string&>& _mechanism,
+                  bool _ssl,
+                  bool _verify_ssl,
+                  const boost::optional<const std::string&>& _ssl_certificate,
+                  const boost::optional<const std::string&>& _ssl_key,
+                  const boost::optional<const std::string&>& _ssl_key_password,
+                  const boost::optional<const std::string&>& _kerberos_service_name,
+                  const boost::optional<const std::string&>& _kerberos_principal,
+                  const boost::optional<const std::string&>& _kerberos_keytab);
+};
+
+std::string to_string(const connection_id_t& id);
+
+// connect to a kafka endpoint
+bool connect(connection_id_t& conn_id,
+             const std::string& url,
+             bool use_ssl,
+             bool verify_ssl,
+             boost::optional<const std::string&> ca_location,
+             boost::optional<const std::string&> ca_cert,
+             boost::optional<const std::string&> mechanism,
+             boost::optional<const std::string&> user_name,
+             boost::optional<const std::string&> password,
+             boost::optional<const std::string&> brokers,
+             boost::optional<const std::string&> ssl_certificate,
+             boost::optional<const std::string&> ssl_key,
+             boost::optional<const std::string&> ssl_key_password,
+             boost::optional<const std::string&> kerberos_service_name,
+             boost::optional<const std::string&> kerberos_principal,
+             boost::optional<const std::string&> kerberos_keytab);
+
+// publish a message over a connection that was already created
+int publish(const connection_id_t& conn_id,
+            const std::string& topic,
+            const std::string& message);
+
+// publish a message over a connection that was already created
+// and pass a callback that will be invoked (async) when broker confirms
+// receiving the message
+int publish_with_confirm(const connection_id_t& conn_id,
+                         const std::string& topic,
+                         const std::string& message,
+                         reply_callback_t cb);
+
+// convert the integer status returned from the "publish" function to a string
+std::string status_to_string(int s);
+
+// number of connections
+size_t get_connection_count();
+
+// return the number of messages that were sent
+// to broker, but were not yet acked/nacked/timedout
+size_t get_inflight();
+
+// running counter of successfully queued messages
+size_t get_queued();
+
+// running counter of dequeued messages
+size_t get_dequeued();
+
+// number of maximum allowed connections
+size_t get_max_connections();
+
+// number of maximum allowed inflight messages
+size_t get_max_inflight();
+
+// maximum number of messages in the queue
+size_t get_max_queue();
+
+}
+

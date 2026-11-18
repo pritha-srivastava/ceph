@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,15 +15,17 @@
 #ifndef CEPH_DNS_RESOLVE_H
 #define CEPH_DNS_RESOLVE_H
 
-#include <string>
-#include <sys/types.h>
 #include <netinet/in.h>
+#ifndef _WIN32
 #include <resolv.h>
+#endif
 
-#include "common/Mutex.h"
-#include "common/ceph_context.h"
+#include "common/ceph_mutex.h"
+#include "msg/msg_types.h"		// for entity_addr_t
 
-struct entity_addr_t;
+#include <list>
+#include <map>
+#include <string>
 
 namespace ceph {
 
@@ -81,6 +84,12 @@ class DNSResolver {
     };
 
 
+    struct Record {
+      uint16_t priority;
+      uint16_t weight;
+      entity_addr_t addr;
+    };
+
     int resolve_cname(CephContext *cct, const std::string& hostname,
         std::string *cname, bool *found);
 
@@ -106,7 +115,7 @@ class DNSResolver {
      * @returns 0 on success, negative error code on failure
      */
     int resolve_srv_hosts(CephContext *cct, const std::string& service_name,
-        const SRV_Protocol trans_protocol, std::map<std::string, entity_addr_t> *srv_hosts);
+        const SRV_Protocol trans_protocol, std::map<std::string, Record> *srv_hosts);
 
     /**
      * Returns the list of hostnames and addresses that provide a given
@@ -122,13 +131,13 @@ class DNSResolver {
      */
     int resolve_srv_hosts(CephContext *cct, const std::string& service_name,
         const SRV_Protocol trans_protocol, const std::string& domain,
-        std::map<std::string, entity_addr_t> *srv_hosts);
+        std::map<std::string, Record> *srv_hosts);
 
   private:
-    DNSResolver() : lock("DNSResolver") { resolv_h = new ResolvHWrapper(); }
+    DNSResolver() { resolv_h = new ResolvHWrapper(); }
     ~DNSResolver();
 
-    Mutex lock;
+    ceph::mutex lock = ceph::make_mutex("DNSResolver::lock");
     ResolvHWrapper *resolv_h;
 #ifdef HAVE_RES_NQUERY
     std::list<res_state> states;
@@ -137,11 +146,13 @@ class DNSResolver {
     void put_state(res_state s);
 #endif
 
+#ifndef _WIN32
     /* this private function allows to reuse the res_state structure used
      * by other function of this class
      */
     int resolve_ip_addr(CephContext *cct, res_state *res,
         const std::string& hostname, entity_addr_t *addr);
+#endif
 
     std::string srv_protocol_to_str(SRV_Protocol proto) {
       switch (proto) {

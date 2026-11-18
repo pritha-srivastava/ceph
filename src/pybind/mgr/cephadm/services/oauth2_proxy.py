@@ -1,0 +1,116 @@
+import logging
+from typing import List, Any, Tuple, Dict, cast, Optional, TYPE_CHECKING
+from copy import copy
+
+from orchestrator import DaemonDescription, DaemonDescriptionStatus
+from ceph.deployment.service_spec import OAuth2ProxySpec, MgmtGatewaySpec, ServiceSpec
+from cephadm.services.cephadmservice import CephadmService, CephadmDaemonDeploySpec, DaemonDeployContext
+from .service_registry import register_cephadm_service
+
+if TYPE_CHECKING:
+    from ..module import CephadmOrchestrator
+
+logger = logging.getLogger(__name__)
+
+
+@register_cephadm_service
+class OAuth2ProxyService(CephadmService):
+    TYPE = 'oauth2-proxy'
+    SVC_TEMPLATE_PATH = 'services/oauth2-proxy/oauth2-proxy.conf.j2'
+
+    def prepare_create(
+            self,
+            deploy_ctx: DaemonDeployContext,
+    ) -> CephadmDaemonDeploySpec:
+        daemon_spec = deploy_ctx.daemon_spec
+        assert self.TYPE == daemon_spec.daemon_type
+        super().prepare_create(deploy_ctx)
+        daemon_spec.final_config, daemon_spec.deps = self.generate_config(deploy_ctx)
+        return daemon_spec
+
+    @classmethod
+    def _get_service_dependencies(
+        cls,
+        mgr: "CephadmOrchestrator",
+        spec: Optional[ServiceSpec] = None,
+        daemon_type: Optional[str] = None,
+    ) -> List[str]:
+        # adding dependency as redirect_url calculation depends on the mgmt-gateway
+        deps = [
+            f'{d.name()}:{d.ports[0]}' if d.ports else d.name()
+            for service in ['mgmt-gateway']
+            for d in mgr.cache.get_daemons_by_service(service)
+        ]
+        return sorted(deps)
+
+    def get_service_ips_and_hosts(self, service_name: str) -> List[str]:
+        entries = set()
+        if 'mgmt-gateway' in self.mgr.spec_store:
+            mgmt_gw_spec = cast(MgmtGatewaySpec, self.mgr.spec_store['mgmt-gateway'].spec)
+            if mgmt_gw_spec.virtual_ip is not None:
+                entries.add(mgmt_gw_spec.virtual_ip)
+        for dd in self.mgr.cache.get_daemons_by_service(service_name):
+            assert dd.hostname is not None
+            addr = dd.ip if dd.ip else self.mgr.inventory.get_addr(dd.hostname)
+            entries.add(dd.hostname)
+            entries.add(addr)
+        return sorted(list(entries))
+
+    def get_redirect_url(self) -> Optional[str]:
+        external_endpoint = self.mgr.get_mgmt_gw_external_endpoint()
+        return f"{external_endpoint}/oauth2/callback" if external_endpoint else None
+
+    def get_active_daemon(self, daemon_descrs: List[DaemonDescription]) -> DaemonDescription:
+        if daemon_descrs:
+            return daemon_descrs[0]
+        # if empty list provided, return empty Daemon Desc
+        return DaemonDescription()
+
+    def generate_config(
+            self,
+            deploy_ctx: DaemonDeployContext,
+    ) -> Tuple[Dict[str, Any], List[str]]:
+        daemon_spec = deploy_ctx.daemon_spec
+        assert self.TYPE == daemon_spec.daemon_type
+        svc_spec = cast(OAuth2ProxySpec, self.mgr.spec_store[daemon_spec.service_name].spec)
+        allowlist_domains = copy(svc_spec.allowlist_domains) or []
+        allowlist_domains += self.get_service_ips_and_hosts('mgmt-gateway')
+        email_domains = copy(svc_spec.email_domains) or []
+        context = {
+            'spec': svc_spec,
+            'cookie_secret': svc_spec.cookie_secret,
+            'allowlist_domains': allowlist_domains,
+            'email_domains': email_domains,
+            'redirect_url': svc_spec.redirect_url or self.get_redirect_url()
+        }
+
+        tls_pair = self.get_certificates(daemon_spec)
+        daemon_config = {
+            "files": {
+                "oauth2-proxy.conf": self.mgr.template.render(self.SVC_TEMPLATE_PATH, context),
+                "oauth2-proxy.crt": tls_pair.cert,
+                "oauth2-proxy.key": tls_pair.key,
+            }
+        }
+
+        return daemon_config, self.get_dependencies(self.mgr, svc_spec, daemon_spec.daemon_type)
+
+    def post_remove(self, daemon: DaemonDescription, is_failed_deploy: bool) -> None:
+        """
+        Called after an oauth2-proxy daemon is removed.
+        Disables Dashboard OAuth2 SSO if no other oauth2-proxy daemons remain running.
+        """
+        remaining_running = any(
+            dd.status == DaemonDescriptionStatus.running and dd.name() != daemon.name()
+            for dd in self.mgr.cache.get_daemons_by_service('oauth2-proxy')
+        )
+        if not remaining_running:
+            try:
+                if 'dashboard' in self.mgr.get('mgr_map')['modules'] \
+                        and self.mgr.get_module_option_ex('dashboard', 'sso_oauth2'):
+                    logger.warning('Last oauth2-proxy daemon removed, disabling Dashboard OAuth2 SSO')
+                    self.mgr.remote('dashboard', 'disable_oauth2_sso')
+            except Exception as e:
+                logger.warning('Failed to disable OAuth2 SSO after oauth2-proxy removal: %s', e)
+
+        super().post_remove(daemon, is_failed_deploy=is_failed_deploy)

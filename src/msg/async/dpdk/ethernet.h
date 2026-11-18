@@ -1,4 +1,4 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
 /*
  * This file is open source software, licensed to you under the terms
  * of the Apache License, Version 2.0 (the "License").  See the NOTICE file
@@ -26,7 +26,7 @@
 #include <array>
 #include <sstream>
 
-#include "include/assert.h"
+#include "include/ceph_assert.h"
 #include "byteorder.h"
 
 struct ethernet_address {
@@ -37,7 +37,7 @@ struct ethernet_address {
   }
 
   ethernet_address(std::initializer_list<uint8_t> eaddr) {
-    assert(eaddr.size() == mac.size());
+    ceph_assert(eaddr.size() == mac.size());
     std::copy(eaddr.begin(), eaddr.end(), mac.begin());
   }
 
@@ -53,12 +53,12 @@ struct ethernet_address {
 inline bool operator==(const ethernet_address& a, const ethernet_address& b) {
   return a.mac == b.mac;
 }
-std::ostream& operator<<(std::ostream& os, ethernet_address ea);
+std::ostream& operator<<(std::ostream& os, const ethernet_address& ea);
 
 struct ethernet {
   using address = ethernet_address;
   static address broadcast_address() {
-      return  {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+      return {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
   }
   static constexpr uint16_t arp_hardware_type() { return 1; }
 };

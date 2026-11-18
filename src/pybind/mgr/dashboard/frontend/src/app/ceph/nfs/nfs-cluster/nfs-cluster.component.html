@@ -1,0 +1,17 @@
+@if (orchStatus?.available && clusters$ | async; as clusters) {
+  <cd-table
+    headerTitle="Service clusters"
+    [autoReload]="true"
+    [data]="clusters"
+    columnMode="flex"
+    [columns]="columns"
+    selectionType="single"
+    emptyStateTitle="No service clusters created."
+    i18n-emptyStateTitle
+    emptyStateMessage="Create a service cluster to host and manage your file shares."
+    i18n-emptyStateMessage
+    (fetchData)="loadData()"
+    (updateSelection)="updateSelection($event)"
+  >
+  </cd-table>
+}

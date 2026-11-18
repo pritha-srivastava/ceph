@@ -2,119 +2,182 @@
  Troubleshooting OSDs
 ======================
 
-Before troubleshooting your OSDs, check your monitors and network first. If
-you execute ``ceph health`` or ``ceph -s`` on the command line and Ceph returns
-a health status, it means that the monitors have a quorum.
-If you don't have a monitor quorum or if there are errors with the monitor
-status, `address the monitor issues first <../troubleshooting-mon>`_.
-Check your networks to ensure they
-are running properly, because networks may have a significant impact on OSD
-operation and performance.
+Before troubleshooting the cluster's OSDs, check the Monitors
+and the network. 
 
+First, determine whether the Monitors have a quorum. Run the ``ceph health``
+command or the ``ceph -s`` command, and if Ceph shows ``HEALTH_OK``, then there
+is a Monitor quorum. 
+
+If the Monitors don't have a quorum or if there are errors with the Monitor
+status, address the Monitor issues before proceeding by consulting the material
+in :ref:`rados-troubleshooting-mon`.
+
+Next, check your networks to make sure that they are running properly. Networks
+can have a significant impact on OSD operation and performance. Look for
+dropped packets on the host side and CRC errors on the switch side.
 
 
 Obtaining Data About OSDs
 =========================
 
-A good first step in troubleshooting your OSDs is to obtain information in
-addition to the information you collected while `monitoring your OSDs`_
-(e.g., ``ceph osd tree``).
+When troubleshooting OSDs, it is useful to collect different kinds of
+information about the OSDs. Some information comes from the practice of
+`monitoring OSDs`_ (for example, by running the ``ceph osd tree`` command).
+Additional information concerns the topology of your cluster, and is discussed
+in the following sections.
 
 
 Ceph Logs
 ---------
 
-If you haven't changed the default path, you can find Ceph log files at
-``/var/log/ceph``::
+Ceph log files are stored under ``/var/log/ceph``. Unless the path has been
+changed (or you are in a containerized environment that stores logs in a
+different location), the log files can be listed by running the following
+command:
 
-	ls /var/log/ceph
+.. prompt:: bash
 
-If you don't get enough log detail, you can change your logging level.  See
-`Logging and Debugging`_ for details to ensure that Ceph performs adequately
-under high logging volume.
+   ls /var/log/ceph
+
+If there is not enough log detail, change the logging level. To ensure that
+Ceph performs adequately under high logging volume, see `Logging and
+Debugging`_.
+
 
 
 Admin Socket
 ------------
 
-Use the admin socket tool to retrieve runtime information. For details, list
-the sockets for your Ceph processes::
+Use the admin socket tool to retrieve runtime information. First, list the
+sockets of Ceph's daemons by running the following command:
 
-	ls /var/run/ceph
+.. prompt:: bash
 
-Then, execute the following, replacing ``{daemon-name}`` with an actual
-daemon (e.g., ``osd.0``)::
+   ls /var/run/ceph
 
-  ceph daemon osd.0 help
+Next, run a command of the following form (replacing ``{daemon-name}`` with the
+name of a specific daemon: for example, ``osd.0``):
 
-Alternatively, you can specify a ``{socket-file}`` (e.g., something in ``/var/run/ceph``)::
+.. prompt:: bash
 
-  ceph daemon {socket-file} help
+   ceph daemon {daemon-name} help
 
+Alternatively, run the command with a ``{socket-file}`` specified (a "socket
+file" is a specific file in ``/var/run/ceph``):
 
-The admin socket, among other things, allows you to:
+.. prompt:: bash
 
-- List your configuration at runtime
-- Dump historic operations
-- Dump the operation priority queue state
-- Dump operations in flight
-- Dump perfcounters
+   ceph daemon {socket-file} help
 
+The admin socket makes many tasks possible, including:
 
-Display Freespace
------------------
+- Listing Ceph configuration at runtime
+- Dumping historic operations
+- Dumping the operation priority queue state
+- Dumping operations in flight
+- Dumping perfcounters
 
-Filesystem issues may arise. To display your filesystem's free space, execute
-``df``. ::
+Display Free Space
+------------------
 
-	df -h
+Filesystem issues may arise. To display your filesystems' free space, run the
+following command:
 
-Execute ``df --help`` for additional usage.
+.. prompt:: bash
 
+   df -h
+
+To see this command's supported syntax and options, run ``df --help``.
 
 I/O Statistics
 --------------
 
-Use `iostat`_ to identify I/O-related issues. ::
+The `iostat`_ tool can be used to identify I/O-related issues. Run the
+following command:
 
-	iostat -x
+.. prompt:: bash
+
+   iostat -x
 
 
 Diagnostic Messages
 -------------------
 
-To retrieve diagnostic messages, use ``dmesg`` with ``less``, ``more``, ``grep``
-or ``tail``.  For example::
+To retrieve diagnostic messages from the kernel, run the ``dmesg`` command and
+specify the output with ``less``, ``more``, ``grep``, or ``tail``. For
+example: 
 
-	dmesg | grep scsi
+.. prompt:: bash
 
+    dmesg | grep scsi
 
-Stopping w/out Rebalancing
-==========================
+Stopping without Rebalancing
+============================
 
-Periodically, you may need to perform maintenance on a subset of your cluster,
-or resolve a problem that affects a failure domain (e.g., a rack). If you do not
-want CRUSH to automatically rebalance the cluster as you stop OSDs for
-maintenance, set the cluster to ``noout`` first::
+It might be occasionally necessary to perform maintenance on a subset of your
+cluster or to resolve a problem that affects a failure domain (for example, a
+rack).  However, when you stop OSDs for maintenance, you might want to prevent
+CRUSH from automatically rebalancing the cluster. To avert this rebalancing
+behavior, set the cluster to ``noout`` by running the following command:
 
-	ceph osd set noout
+.. prompt:: bash
 
-Once the cluster is set to ``noout``, you can begin stopping the OSDs within the
-failure domain that requires maintenance work. ::
+   ceph osd set noout
 
-	stop ceph-osd id={num}
+.. warning:: This is more a thought exercise offered for the purpose of giving
+   the reader a sense of failure domains and CRUSH behavior than a suggestion
+   that anyone in the post-Luminous world run ``ceph osd set noout``. When the
+   OSDs return to an ``up`` state, rebalancing will resume and the change
+   introduced by the ``ceph osd set noout`` command will be reverted.
 
-.. note:: Placement groups within the OSDs you stop will become ``degraded``
-   while you are addressing issues with within the failure domain.
+In Luminous and later releases, however, it is a safer approach to flag only
+affected OSDs.  To add or remove a ``noout`` flag to a specific OSD, run a
+command like the following:
 
-Once you have completed your maintenance, restart the OSDs. ::
+.. prompt:: bash
 
-	start ceph-osd id={num}
+   ceph osd add-noout osd.0
+   ceph osd rm-noout  osd.0
 
-Finally, you must unset the cluster from ``noout``. ::
+It is also possible to flag an entire CRUSH bucket. For example, if you plan to
+take down ``prod-ceph-data1701`` in order to add RAM, you might run the
+following command:
 
-	ceph osd unset noout
+.. prompt:: bash
 
+   ceph osd set-group noout prod-ceph-data1701
+
+After the flag is set, stop the OSDs and any other colocated
+Ceph services within the failure domain that requires maintenance work::
+
+   systemctl stop ceph\*.service ceph\*.target
+
+.. note:: When an OSD is stopped, any placement groups within the OSD are
+   marked as ``degraded``.
+
+After the maintenance is complete, it will be necessary to restart the OSDs
+and any other daemons that have stopped. However, if the host was rebooted as
+part of the maintenance, they do not need to be restarted and will come back up
+automatically. To restart OSDs or other daemons, use a command of the following
+form:
+
+.. prompt:: bash
+
+   sudo systemctl start ceph.target
+
+Finally, unset the ``noout`` flag as needed by running commands like the
+following:
+
+.. prompt:: bash
+
+   ceph osd unset noout
+   ceph osd unset-group noout prod-ceph-data1701
+
+Many contemporary Linux distributions employ ``systemd`` for service
+management.  However, for certain operating systems (especially older ones) it
+might be necessary to issue equivalent ``service`` or ``start``/``stop``
+commands.
 
 
 .. _osd-not-running:
@@ -122,358 +185,1010 @@ Finally, you must unset the cluster from ``noout``. ::
 OSD Not Running
 ===============
 
-Under normal circumstances, simply restarting the ``ceph-osd`` daemon will
-allow it to rejoin the cluster and recover.
+Under normal conditions, restarting a ``ceph-osd`` daemon will allow it to
+rejoin the cluster and recover.
+
 
 An OSD Won't Start
 ------------------
 
-If you start your cluster and an OSD won't start, check the following:
+If the cluster has started but an OSD isn't starting, check the following:
 
-- **Configuration File:** If you were not able to get OSDs running from
-  a new installation, check your configuration file to ensure it conforms
-  (e.g., ``host`` not ``hostname``, etc.).
+- **Configuration File:** If you were not able to get OSDs running from a new
+  installation, check your configuration file to ensure it conforms to the
+  standard (for example, make sure that it says ``host`` and not ``hostname``,
+  etc.).
 
-- **Check Paths:** Check the paths in your configuration, and the actual
-  paths themselves for data and journals. If you separate the OSD data from
-  the journal data and there are errors in your configuration file or in the
-  actual mounts, you may have trouble starting OSDs. If you want to store the
-  journal on a block device, you should partition your journal disk and assign
-  one partition per OSD.
+- **Check Paths:** Ensure that the paths specified in the configuration
+  correspond to the paths for data and metadata that actually exist (for
+  example, the paths to the journals, the WAL, and the DB). Separate the OSD
+  data from the metadata in order to see whether there are errors in the
+  configuration file and in the actual mounts. If so, these errors might
+  explain why OSDs are not starting. To store the metadata on a separate block
+  device, partition or LVM the drive and assign one partition per OSD.
 
-- **Check Max Threadcount:** If you have a node with a lot of OSDs, you may be
-  hitting the default maximum number of threads (e.g., usually 32k), especially
-  during recovery. You can increase the number of threads using ``sysctl`` to
-  see if increasing the maximum number of threads to the maximum possible
-  number of threads allowed (i.e.,  4194303) will help. For example::
+- **Check Max Threadcount:** If the cluster has a node with an especially high
+  number of OSDs, it might be hitting the default maximum number of threads
+  (usually 32,000).  This is especially likely to happen during recovery.
+  Increasing the maximum number of threads to the maximum possible number of
+  threads allowed (4194303) might help with the problem. To increase the number
+  of threads to the maximum, run the following command:
 
-	sysctl -w kernel.pid_max=4194303
+  .. prompt:: bash
 
-  If increasing the maximum thread count resolves the issue, you can make it
-  permanent by including a ``kernel.pid_max`` setting in the
-  ``/etc/sysctl.conf`` file. For example::
+     sysctl -w kernel.pid_max=4194303
 
-	kernel.pid_max = 4194303
+  If this increase resolves the issue, you must make the increase permanent by
+  including a ``kernel.pid_max`` setting either in a file under
+  ``/etc/sysctl.d`` or within the master ``/etc/sysctl.conf`` file. For
+  example::
 
-- **Kernel Version:** Identify the kernel version and distribution you
-  are using. Ceph uses some third party tools by default, which may be
-  buggy or may conflict with certain distributions and/or kernel
-  versions (e.g., Google perftools). Check the `OS recommendations`_
-  to ensure you have addressed any issues related to your kernel.
+     kernel.pid_max = 4194303
 
-- **Segment Fault:** If there is a segment fault, turn your logging up
-  (if it isn't already), and try again. If it segment faults again,
-  contact the ceph-devel email list and provide your Ceph configuration
-  file, your monitor output and the contents of your log file(s).
+- **Check nf_conntrack:** This connection-tracking and connection-limiting
+  system causes problems for many production Ceph clusters. The problems often
+  emerge slowly and subtly. As cluster topology and client workload grow,
+  mysterious and intermittent connection failures and performance glitches
+  occur more and more, especially at certain times of the day. To begin taking
+  the measure of your problem, check the ``syslog`` history for "table full"
+  events. One way to address this kind of problem is as follows: First, use the
+  ``sysctl`` utility to assign ``nf_conntrack_max`` a much higher value. Next,
+  raise the value of ``nf_conntrack_buckets`` so that ``nf_conntrack_buckets``
+  × 8 = ``nf_conntrack_max``; this action might require running commands
+  outside of ``sysctl`` (for example, ``"echo 131072 >
+  /sys/module/nf_conntrack/parameters/hashsize``). Another way to address the
+  problem is to blacklist the associated kernel modules in order to disable
+  processing altogether. This approach is powerful, but fragile. The modules
+  and the order in which the modules must be listed can vary among kernel
+  versions. Even when blacklisted, ``iptables`` and ``docker`` might sometimes
+  activate connection tracking anyway, so we advise a "set and forget" strategy
+  for the tunables. On modern systems, this approach will not consume
+  appreciable resources.
 
+- **Kernel Version:** Identify the kernel version and distribution that are in
+  use. By default, Ceph uses third-party tools that might be buggy or come into
+  conflict with certain distributions or kernel versions (for example, Google's
+  ``gperftools`` and ``TCMalloc``). Check the `OS recommendations`_ and the
+  release notes for each Ceph version in order to make sure that you have
+  addressed any issues related to your kernel.
+
+- **Segmentation Fault:** If there is a segmentation fault, increase log levels and
+  restart the problematic daemon(s). If segmentation faults recur, search the Ceph
+  bug tracker `https://tracker.ceph.com/projects/ceph
+  <https://tracker.ceph.com/projects/ceph/>`_ and the ``dev`` and
+  ``ceph-users`` mailing list archives `https://ceph.io/resources
+  <https://ceph.io/resources>`_ to see if others have experienced and reported
+  these issues. If this truly is a new and unique failure, post to the ``dev``
+  email list and provide the following information: the specific Ceph release
+  being run, ``ceph.conf`` (with secrets XXX'd out), your Monitor status
+  output, and excerpts from your log file(s).
 
 
 An OSD Failed
 -------------
 
-When a ``ceph-osd`` process dies, the monitor will learn about the failure
-from surviving ``ceph-osd`` daemons and report it via the ``ceph health``
-command::
+When an OSD fails, this means that a ``ceph-osd`` process is unresponsive or
+has died and that the corresponding OSD has been marked ``down``. Surviving
+``ceph-osd`` daemons will report to the Monitors that the OSD appears to be
+down, and a new status will be visible in the output of the ``ceph health``
+command, as in the following example:
 
-	ceph health
-	HEALTH_WARN 1/3 in osds are down
+.. prompt:: bash
 
-Specifically, you will get a warning whenever there are ``ceph-osd``
-processes that are marked ``in`` and ``down``.  You can identify which
-``ceph-osds`` are ``down`` with::
+   ceph health
 
-	ceph health detail
-	HEALTH_WARN 1/3 in osds are down
-	osd.0 is down since epoch 23, last address 192.168.106.220:6800/11080
+::
 
-If there is a disk
-failure or other fault preventing ``ceph-osd`` from functioning or
-restarting, an error message should be present in its log file in
-``/var/log/ceph``.
+   HEALTH_WARN 1/3 in osds are down
 
-If the daemon stopped because of a heartbeat failure, the underlying
-kernel file system may be unresponsive. Check ``dmesg`` output for disk
-or other kernel errors.
+This health alert is raised whenever there are one or more OSDs marked ``in``
+and ``down``. To see which OSDs are ``down``, add ``detail`` to the command as in
+the following example:
 
-If the problem is a software error (failed assertion or other
-unexpected error), it should be reported to the `ceph-devel`_ email list.
+.. prompt:: bash
 
+   ceph health detail
+
+::
+
+   HEALTH_WARN 1/3 in osds are down
+   osd.0 is down since epoch 23, last address 192.168.106.220:6800/11080
+
+Alternatively, run the following command:
+
+.. prompt:: bash
+
+    ceph osd tree down
+
+If there is a drive failure or another fault that is preventing a given
+``ceph-osd`` daemon from functioning or restarting, then there should be an
+error message present in its log file under ``/var/log/ceph``.
+
+If the ``ceph-osd`` daemon stopped because of a heartbeat failure or a
+``suicide timeout`` error, then the underlying drive or filesystem might be
+unresponsive. Check ``dmesg`` output and `syslog`  output for drive errors or
+kernel errors. It might be necessary to specify certain flags (for example,
+``dmesg -T`` to see human-readable timestamps) in order to avoid mistaking old
+errors for new errors.
+
+If an entire host's OSDs are ``down``, check to see if there is a network
+error or a hardware issue with the host.
+
+If the OSD problem is the result of a software error (for example, a failed
+assertion or another unexpected error), search for reports of the issue in the
+`bug tracker <https://tracker.ceph.com/projects/ceph>`_, the `dev mailing list
+archives <https://lists.ceph.io/hyperkitty/list/dev@ceph.io/>`_, and the
+`ceph-users mailing list archives
+<https://lists.ceph.io/hyperkitty/list/ceph-users@ceph.io/>`_.  If there is no
+clear fix or existing bug, then :ref:`report the problem to the ceph-devel
+email list <get-involved>`.
+
+
+.. _no-free-drive-space:
 
 No Free Drive Space
 -------------------
 
-Ceph prevents you from writing to a full OSD so that you don't lose data.
-In an operational cluster, you should receive a warning when your cluster
-is getting near its full ratio. The ``mon osd full ratio`` defaults to
-``0.95``, or 95% of capacity before it stops clients from writing data.
-The ``mon osd nearfull ratio`` defaults to ``0.85``, or 85% of capacity
-when it generates a health warning.
+If an OSD is full, Ceph prevents data loss by ensuring that no new data is
+written to the OSD. In a properly running cluster, health checks are raised
+when the cluster's OSDs and pools approach certain "fullness" ratios. The
+``mon_osd_full_ratio`` threshold defaults to ``0.95`` (or 95% of capacity):
+this is the point above which clients are prevented from writing data. The
+``mon_osd_backfillfull_ratio`` threshold defaults to ``0.90`` (or 90% of
+capacity): this is the point above which backfills will not start. The
+``mon_osd_nearfull_ratio`` threshold defaults to ``0.85`` (or 85% of capacity):
+this is the point at which it raises the ``OSD_NEARFULL`` health check.
 
-Full cluster issues usually arise when testing how Ceph handles an OSD
-failure on a small cluster. When one node has a high percentage of the
-cluster's data, the cluster can easily eclipse its nearfull and full ratio
-immediately. If you are testing how Ceph reacts to OSD failures on a small
-cluster, you should leave ample free disk space and consider temporarily
-lowering the ``mon osd full ratio`` and ``mon osd nearfull ratio``.
+OSDs within a cluster will vary in how much data is allocated to them by Ceph.
+To check "fullness" by displaying data utilization for every OSD, run the
+following command:
 
-Full ``ceph-osds`` will be reported by ``ceph health``::
+.. prompt:: bash
 
-	ceph health
-	HEALTH_WARN 1 nearfull osds
-	osd.2 is near full at 85%
+   ceph osd df
 
-Or::
+To check "fullness" by displaying a cluster’s overall data usage and data
+distribution among pools, run the following command:
 
-	ceph health
-	HEALTH_ERR 1 nearfull osds, 1 full osds
-	osd.2 is near full at 85%
-	osd.3 is full at 97%
+.. prompt:: bash
 
-The best way to deal with a full cluster is to add new ``ceph-osds``, allowing
-the cluster to redistribute data to the newly available storage.
+   ceph df 
 
-If you cannot start an OSD because it is full, you may delete some data by deleting
-some placement group directories in the full OSD.
+When examining the output of the ``ceph df`` command, pay special attention to
+the **most full** OSDs, as opposed to the percentage of raw space used. If a
+single outlier OSD becomes full, all writes to this OSD's pool might fail as a
+result. When ``ceph df`` reports the space available to a pool, it considers
+the ratio settings relative to the *most full* OSD that is part of the pool. To
+flatten the distribution, two approaches are available: (1) Using the
+``reweight-by-utilization`` command to progressively move data from excessively
+full OSDs or move data to insufficiently full OSDs, and (2) in later revisions
+of Luminous and subsequent releases, exploiting the ``ceph-mgr`` ``balancer``
+module to perform the same task automatically.
 
-.. important:: If you choose to delete a placement group directory on a full OSD,
-   **DO NOT** delete the same placement group directory on another full OSD, or
-   **YOU MAY LOSE DATA**. You **MUST** maintain at least one copy of your data on
-   at least one OSD.
+To adjust the "fullness" ratios, run a command or commands of the following
+form:
 
-See `Monitor Config Reference`_ for additional details.
+.. prompt:: bash
+
+   ceph osd set-nearfull-ratio <float[0.0-1.0]>
+   ceph osd set-full-ratio <float[0.0-1.0]>
+   ceph osd set-backfillfull-ratio <float[0.0-1.0]>
+
+Sometimes full cluster issues arise because an OSD has failed. This can happen
+either because of a test or because the cluster is small, very full, or
+unbalanced. When an OSD or node holds an excessive percentage of the cluster's
+data, component failures or natural growth can result in the ``nearfull`` and
+``full`` ratios being exceeded.  When testing Ceph's resilience to OSD failures
+on a small cluster, it is advised to leave ample free disk space and to
+consider temporarily lowering the OSD ``full ratio``, OSD ``backfillfull
+ratio``, and OSD ``nearfull ratio``.
+
+The "fullness" status of OSDs is visible in the output of the ``ceph health``
+command, as in the following example:
+
+.. prompt:: bash
+
+   ceph health
+
+::
+
+  HEALTH_WARN 1 nearfull osd(s)
+
+For details, add the ``detail`` command as in the following example:
+
+.. prompt:: bash
+
+    ceph health detail
+
+::
+
+    HEALTH_ERR 1 full osd(s); 1 backfillfull osd(s); 1 nearfull osd(s)
+    osd.3 is full at 97%
+    osd.4 is backfill full at 91%
+    osd.2 is near full at 87%
+
+To address full cluster issues, it is recommended to add capacity by adding
+OSDs. Adding new OSDs allows the cluster to redistribute data to newly
+available storage. Search for ``rados bench`` orphans that are wasting space.
+
+If a legacy Filestore OSD cannot be started because it is full, it is possible
+to reclaim space by deleting a small number of placement group directories in
+the full OSD.
+
+.. important:: If you choose to delete a placement group directory on a full
+   OSD, **DO NOT** delete the same placement group directory on another full
+   OSD. **OTHERWISE YOU WILL LOSE DATA**. You **MUST** maintain at least one
+   copy of your data on at least one OSD. Deleting placement group directories
+   is a rare and extreme intervention. It is not to be undertaken lightly.
+
+See :ref:`monitor-config-reference` for more information.
 
 
 OSDs are Slow/Unresponsive
 ==========================
 
-A commonly recurring issue involves slow or unresponsive OSDs. Ensure that you
-have eliminated other troubleshooting possibilities before delving into OSD
-performance issues. For example, ensure that your network(s) is working properly
-and your OSDs are running. Check to see if OSDs are throttling recovery traffic.
+OSDs are sometimes slow or unresponsive. When troubleshooting this common
+problem, it is advised to eliminate other possibilities before investigating
+OSD performance issues. For example, be sure to confirm that your network(s)
+are working properly, to verify that your OSDs are running, and to check
+whether OSDs are throttling recovery traffic.
 
-.. tip:: Newer versions of Ceph provide better recovery handling by preventing
-   recovering OSDs from using up system resources so that ``up`` and ``in``
-   OSDs aren't available or are otherwise slow.
+.. tip:: In pre-Luminous releases of Ceph, ``up`` and ``in`` OSDs were
+   sometimes not available or were otherwise slow because recovering OSDs were
+   consuming system resources. Newer releases provide better recovery handling
+   by preventing this phenomenon.
 
 
 Networking Issues
 -----------------
 
-Ceph is a distributed storage system, so it  depends upon networks to peer with
-OSDs, replicate objects, recover from faults and check heartbeats. Networking
-issues can cause OSD latency and flapping OSDs. See `Flapping OSDs`_ for
-details.
+As a distributed storage system, Ceph relies upon networks for OSD peering and
+replication, recovery from faults, and periodic heartbeats. Networking issues
+can cause OSD latency and flapping OSDs. For more information, see `Flapping
+OSDs`_.
 
-Ensure that Ceph processes and Ceph-dependent processes are connected and/or
-listening. ::
+To make sure that Ceph processes and Ceph-dependent processes are connected and
+listening, run the following commands:
 
-	netstat -a | grep ceph
-	netstat -l | grep ceph
-	sudo netstat -p | grep ceph
+.. prompt:: bash
 
-Check network statistics. ::
+   netstat -a | grep ceph
+   netstat -l | grep ceph
+   sudo netstat -p | grep ceph
 
-	netstat -s
+To check network statistics, run the following command:
 
+.. prompt:: bash
+
+   netstat -s
+
+Link State and Error Counters
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To check the link state, speed, and duplex mode of an interface, run a command
+of the following form:
+
+.. prompt:: bash
+
+   ethtool <interface>
+
+A link that has negotiated a lower speed than expected, or half-duplex mode,
+limits every OSD on the host.
+
+To check the error and drop counters of an interface, run a command of the
+following form:
+
+.. prompt:: bash
+
+   ethtool -S <interface>
+
+Counter names vary by driver. Look for non-zero counters with names that
+contain ``err``, ``drop``, ``crc``, ``discard``, ``miss``, or ``no_buf``. Run
+the command twice, a few seconds apart, to distinguish counters that are
+increasing now from those that reflect old events. ``ip -s link show <interface>``
+shows the kernel's error and drop totals in a form that does not depend on the
+driver. CRC errors are counted at the receiving end, so check the switch port
+as well: a bad cable or transceiver might show errors only on the switch.
+
+Bonded Interfaces
+~~~~~~~~~~~~~~~~~
+
+A bond that has lost a member keeps working at reduced capacity, so the
+failure is easy to miss. The kernel logs link and bond member changes, so
+``dmesg -T`` or ``journalctl -k`` shows when a member went down. To check a
+bond, run a command of the following form:
+
+.. prompt:: bash
+
+   cat /proc/net/bonding/<bond>
+
+Check the following:
+
+- Every member interface shows ``MII Status: up``.
+- ``Bonding Mode`` matches the switch configuration. For example, ``IEEE
+  802.3ad Dynamic link aggregation`` on the host requires an LACP port channel
+  on the switch. If the switch ports are not in an LACP port channel, the bond
+  might use only one link or might drop traffic.
+- In 802.3ad mode, the ``Active Aggregator Info`` section shows a ``Number of
+  ports`` equal to the number of members and a ``Partner Mac Address`` other
+  than ``00:00:00:00:00:00``, and every member shows the same ``Aggregator
+  ID`` as that section. A member with a different aggregator ID is not
+  carrying traffic.
+- ``Transmit Hash Policy``. Bonds sometimes default to ``layer2``, which
+  sends all traffic between two hosts over the same link, when ``layer2+3`` or
+  ``layer3+4`` would spread traffic across the links. Ask your network team
+  which policy is appropriate for your network. The switch has its own hash
+  setting for traffic toward the host.
+
+MTU
+~~~
+
+Every host and switch port on a Ceph network must use the same MTU. When they
+differ, small messages such as heartbeats get through but large packets are
+dropped, which shows up as slow requests and flapping OSDs rather than as a
+clear network failure. To check the MTU of an interface, run a command of the
+following form:
+
+.. prompt:: bash
+
+   ip link show <interface>
+
+To test the path end to end, send packets of the full MTU size with
+fragmentation disabled to every other host, on both the public and the cluster
+network. For an MTU of 9000, run a command of the following form:
+
+.. prompt:: bash
+
+   ping -M do -s 8972 -c 3 <peer-ip>
+
+The payload size is the MTU minus 28 bytes of IP and ICMP headers. If this
+fails while a plain ``ping`` succeeds, a host or switch port on the path uses a
+smaller MTU.
+
+Link Saturation
+~~~~~~~~~~~~~~~
+
+A link that is running at or near its capacity delays every request that
+crosses it. Recovery and backfill can saturate the cluster network, and
+clients can saturate the public network. To watch the throughput of each
+interface, run the following command, which is in the ``sysstat`` package:
+
+.. prompt:: bash
+
+   sar -n DEV 1
+
+``sar`` reports ``rxkB/s`` and ``txkB/s`` in kilobytes per second: multiply by
+8 to compare them with the link speed that ``ethtool`` reports in bits per
+second. To see saturation over time and across hosts, see `Network Metrics in
+Prometheus`_. Check switch uplinks as well as host ports.
+
+Network Metrics in Prometheus
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``node-exporter`` daemons that cephadm deploys collect interface, bond, and
+link metrics on every host, and the Prometheus that cephadm deploys scrapes
+them. The following queries check every host at once. Some virtual interfaces,
+such as the USB network interface of a BMC, report half-duplex mode or no
+speed. Exclude them with a ``device`` label matcher.
+
+Interfaces with errors or drops in the last five minutes:
+
+.. code-block:: promql
+
+   rate(node_network_receive_errs_total[5m]) > 0
+   rate(node_network_transmit_errs_total[5m]) > 0
+   rate(node_network_receive_drop_total[5m]) > 0
+   rate(node_network_transmit_drop_total[5m]) > 0
+
+The kernel also counts frames that it discards on purpose as receive drops,
+for example frames for protocols that the host does not run and duplicate
+frames that a bond discards. A low, steady rate of receive drops is often
+harmless. Look for drops that rise with load or that appear on only some
+hosts.
+
+Interfaces whose link went down or came up in the last hour:
+
+.. code-block:: promql
+
+   increase(node_network_carrier_changes_total[1h]) > 0
+
+Bonds with fewer active members than configured members:
+
+.. code-block:: promql
+
+   node_bonding_active < node_bonding_slaves
+
+Interfaces in half-duplex mode, and the speed of each interface in Gb/s:
+
+.. code-block:: promql
+
+   node_network_info{duplex="half"}
+   node_network_speed_bytes * 8 / 1e9
+
+The number of hosts with each MTU on one interface, here ``bond0``. More than
+one result means that the MTU differs between hosts:
+
+.. code-block:: promql
+
+   count_values("mtu", node_network_mtu_bytes{device="bond0"})
+
+Interfaces receiving or transmitting at more than 80% of their link speed:
+
+.. code-block:: promql
+
+   rate(node_network_receive_bytes_total[1m]) / node_network_speed_bytes > 0.8
+   rate(node_network_transmit_bytes_total[1m]) / node_network_speed_bytes > 0.8
 
 Drive Configuration
 -------------------
 
-A storage drive should only support one OSD. Sequential read and sequential
-write throughput can bottleneck if other processes share the drive, including
-journals, operating systems, monitors, other OSDs and non-Ceph processes.
+An SAS or SATA storage drive should house only one OSD, but an NVMe drive can
+easily house two or more. However, it is possible for read and write throughput
+to bottleneck if other processes share the drive. Such processes include:
+journals / metadata, operating systems, Ceph Monitors, ``syslog`` logs, other
+OSDs, and non-Ceph processes.
 
-Ceph acknowledges writes *after* journaling, so fast SSDs are an attractive
-option to accelerate the response time--particularly when using the ``XFS`` or
-``ext4`` filesystems. By contrast, the ``btrfs`` filesystem can write and journal
-simultaneously.
+Because Ceph acknowledges writes *after* journaling, fast SSDs are an
+attractive option for accelerating response time -- particularly when using the
+``XFS`` or ``ext4`` filesystems for legacy FileStore OSDs.  By contrast, the
+``Btrfs`` file system can write and journal simultaneously. (However, use of
+``Btrfs`` is not recommended for production deployments.)
 
 .. note:: Partitioning a drive does not change its total throughput or
-   sequential read/write limits. Running a journal in a separate partition
-   may help, but you should prefer a separate physical drive.
+   sequential read/write limits. Throughput might be improved somewhat by
+   running a journal in a separate partition, but it is better still to run
+   such a journal in a separate physical drive.
+   
+.. warning:: Reef does not support FileStore. Releases after Reef do not
+   support FileStore. Any information that mentions FileStore is pertinent only
+   to the Quincy release of Ceph and to releases prior to Quincy.
 
 
 Bad Sectors / Fragmented Disk
 -----------------------------
 
-Check your disks for bad sectors and fragmentation. This can cause total throughput
-to drop substantially.
+Check your drives for bad blocks, fragmentation, and other errors that can
+cause significantly degraded performance. Tools that are useful in checking for
+drive errors include ``dmesg``, ``syslog`` logs, and ``smartctl`` (found in the
+``smartmontools`` package).
+
+.. note:: ``smartmontools`` 7.0 and later provides NVMe stat passthrough and
+   JSON output.
 
 
 Co-resident Monitors/OSDs
 -------------------------
 
-Monitors are generally light-weight processes, but they do lots of ``fsync()``,
-which can interfere with other workloads, particularly if monitors run on the
-same drive as your OSDs. Additionally, if you run monitors on the same host as
-the OSDs, you may incur performance issues related to:
-
-- Running an older kernel (pre-3.0)
-- Running Argonaut with an old ``glibc``
-- Running a kernel with no syncfs(2) syscall.
-
-In these cases, multiple OSDs running on the same host can drag each other down
-by doing lots of commits. That often leads to the bursty writes.
+Although Monitors are relatively lightweight processes, performance issues can
+result when Monitors are run on the same host machine as an OSD. Monitors issue
+many ``fsync()`` calls and this can interfere with other workloads. The danger
+of performance issues is especially acute when the Monitors are co-resident on
+the same storage drive as an OSD. In addition, if the Monitors are running an
+older kernel (pre-3.0) or a kernel with no ``syncfs(2)`` syscall, then multiple
+OSDs running on the same host might make so many commits as to undermine each
+other's performance.  This problem sometimes results in what is called "the
+bursty writes".
 
 
 Co-resident Processes
 ---------------------
 
-Spinning up co-resident processes such as a cloud-based solution, virtual
-machines and other applications that write data to Ceph while operating on the
-same hardware as OSDs can introduce significant OSD latency. Generally, we
-recommend optimizing a host for use with Ceph and using other hosts for other
-processes. The practice of separating Ceph operations from other applications
-may help improve performance and may streamline troubleshooting and maintenance.
+Significant OSD latency can result from processes that write data to Ceph (for
+example, cloud-based solutions and virtual machines) while operating on the
+same hardware as OSDs. For this reason, making such processes co-resident with
+OSDs is not generally recommended. Instead, the recommended practice is to
+optimize certain hosts for use with Ceph and use other hosts for other
+processes. This practice of separating Ceph operations from other applications
+might help improve performance and might also streamline troubleshooting and
+maintenance.
+
+Running co-resident processes on the same hardware is sometimes called
+"convergence". When using Ceph, engage in convergence only with expertise and
+after consideration.
 
 
 Logging Levels
 --------------
 
-If you turned logging levels up to track an issue and then forgot to turn
-logging levels back down, the OSD may be putting a lot of logs onto the disk. If
-you intend to keep logging levels high, you may consider mounting a drive to the
-default path for logging (i.e., ``/var/log/ceph/$cluster-$name.log``).
-
+Performance issues can result from high logging levels. Operators sometimes
+raise logging levels in order to track an issue and then forget to lower them
+afterwards. In such a situation, OSDs might consume valuable system resources to
+write needlessly verbose logs onto the disk. Anyone who does want to use high logging
+levels is advised to consider mounting a drive to the default path for logging
+(for example, ``/var/log/ceph/$cluster-$name.log``).
 
 Recovery Throttling
 -------------------
 
 Depending upon your configuration, Ceph may reduce recovery rates to maintain
-performance or it may increase recovery rates to the point that recovery
-impacts OSD performance. Check to see if the OSD is recovering.
+client or OSD performance, or it may increase recovery rates to the point that
+recovery impacts client or OSD performance. Check to see if the client or OSD
+is recovering.
 
 
 Kernel Version
 --------------
 
-Check the kernel version you are running. Older kernels may not receive
-new backports that Ceph depends upon for better performance.
+Check the kernel version that you are running. Older kernels may lack updates
+that improve Ceph performance. 
 
 
 Kernel Issues with SyncFS
 -------------------------
 
-Try running one OSD per host to see if performance improves. Old kernels
-might not have a recent enough version of ``glibc`` to support ``syncfs(2)``.
+If you have kernel issues with SyncFS, try running one OSD per host to see if
+performance improves. Old kernels might not have a recent enough version of
+``glibc`` to support ``syncfs(2)``.
 
 
 Filesystem Issues
 -----------------
 
-Currently, we recommend deploying clusters with XFS. The btrfs
-filesystem has many attractive features, but bugs in the filesystem may
-lead to performance issues.  We do not recommend ext4 because xattr size
-limitations break our support for long object names (needed for RGW).
+In post-Luminous releases, we recommend deploying clusters with the BlueStore
+back end.  When running a pre-Luminous release, or if you have a specific
+reason to deploy OSDs with the previous Filestore backend, we recommend
+``XFS``.
 
-For more information, see `Filesystem Recommendations`_.
-
-.. _Filesystem Recommendations: ../configuration/filesystem-recommendations
-
+We recommend against using ``Btrfs`` or ``ext4``.  The ``Btrfs`` filesystem has
+many attractive features, but bugs may lead to performance issues and spurious
+ENOSPC errors.  We do not recommend ``ext4`` for Filestore OSDs because
+``xattr`` limitations break support for long object names, which are needed for
+RGW.
 
 Insufficient RAM
 ----------------
 
-We recommend 1GB of RAM per OSD daemon. You may notice that during normal
-operations, the OSD only uses a fraction of that amount (e.g., 100-200MB).
-Unused RAM makes it tempting to use the excess RAM for co-resident applications,
-VMs and so forth. However, when OSDs go into recovery mode, their memory
-utilization spikes. If there is no RAM available, the OSD performance will slow
-considerably.
+We recommend a *minimum* of 4GB of RAM per OSD daemon and we suggest rounding
+up from 6GB to 8GB. During normal operations, you may notice that ``ceph-osd``
+processes use only a fraction of that amount.  You might be tempted to use the
+excess RAM for co-resident applications or to skimp on each node's memory
+capacity. However, when OSDs experience recovery their memory utilization
+spikes. If there is insufficient RAM available during recovery, OSD performance
+will slow considerably and the daemons may even crash or be killed by the Linux
+``OOM Killer``.
 
 
-Old Requests or Slow Requests
------------------------------
+Blocked Requests or Slow Requests
+---------------------------------
 
-If a ``ceph-osd`` daemon is slow to respond to a request, it will generate log messages
-complaining about requests that are taking too long.  The warning threshold
-defaults to 30 seconds, and is configurable via the ``osd op complaint time``
-option.  When this happens, the cluster log will receive messages.
+When a ``ceph-osd`` daemon is slow to respond to a request, the cluster log
+receives messages reporting ops that are taking too long. The warning threshold
+defaults to 30 seconds and is configurable via the ``osd_op_complaint_time``
+setting.
 
-Legacy versions of Ceph complain about 'old requests`::
+Legacy versions of Ceph complain about ``old requests``::
 
-	osd.0 192.168.106.220:6800/18813 312 : [WRN] old request osd_op(client.5099.0:790 fatty_26485_object789 [write 0~4096] 2.5e54f643) v4 received at 2012-03-06 15:42:56.054801 currently waiting for sub ops
+    osd.0 192.168.106.220:6800/18813 312 : [WRN] old request osd_op(client.5099.0:790 fatty_26485_object789 [write 0~4096] 2.5e54f643) v4 received at 2012-03-06 15:42:56.054801 currently waiting for sub ops
 
-New versions of Ceph complain about 'slow requests`::
+Newer versions of Ceph complain about ``slow requests``::
 
-	{date} {osd.num} [WRN] 1 slow requests, 1 included below; oldest blocked for > 30.005692 secs
-	{date} {osd.num}  [WRN] slow request 30.005692 seconds old, received at {date-time}: osd_op(client.4240.0:8 benchmark_data_ceph-1_39426_object7 [write 0~4194304] 0.69848840) v4 currently waiting for subops from [610]
-
+    {date} {osd.num} [WRN] 1 slow requests, 1 included below; oldest blocked for > 30.005692 secs
+    {date} {osd.num}  [WRN] slow request 30.005692 seconds old, received at {date-time}: osd_op(client.4240.0:8 benchmark_data_ceph-1_39426_object7 [write 0~4194304] 0.69848840) v4 currently waiting for subops from [610]
 
 Possible causes include:
 
-- A bad drive (check ``dmesg`` output)
-- A bug in the kernel file system bug (check ``dmesg`` output)
+- A failing drive. Check the kernel log with ``dmesg -T`` or ``journalctl
+  -k``, check ``/var/log/messages`` or ``/var/log/syslog``, and check the
+  health of the drive with ``smartctl -a <device>`` or, for an NVMe drive,
+  ``nvme smart-log <device>``. See `Bad Sectors / Fragmented Disk`_.
+- A network problem: a failed bond member, a bonding mode or hash policy that
+  uses only one link, an MTU mismatch, interface or switch port errors, or a
+  saturated link. See `Networking Issues`_.
+- Recovery or backfill settings that are too high, for example raised values
+  of :confval:`osd_max_backfills` or :confval:`osd_recovery_max_active` and
+  its ``_hdd`` and ``_ssd`` variants. Recovery and backfill then compete with
+  client I/O for drives and network bandwidth. With the mClock scheduler,
+  these options take effect only when
+  :confval:`osd_mclock_override_recovery_settings` is ``true``, and the
+  ``high_recovery_ops`` :confval:`osd_mclock_profile` also favors recovery
+  over client I/O.
+- A bug in the kernel file system (check ``dmesg`` output)
 - An overloaded cluster (check system load, iostat, etc.)
 - A bug in the ``ceph-osd`` daemon.
+- Suboptimal OSD shard configuration (on HDD based cluster with mClock scheduler)
 
-Possible solutions
+Possible solutions:
 
-- Remove VMs Cloud Solutions from Ceph Hosts
-- Upgrade Kernel
+- Remove VMs from Ceph hosts
+- Upgrade kernel
 - Upgrade Ceph
 - Restart OSDs
+- Replace failed or failing components
+- Fix network faults and mismatched bond or MTU settings
+- Return recovery and backfill settings to their defaults
+- Override OSD shard configuration (on HDD based cluster with mClock scheduler)
+    - See :ref:`mclock-tblshoot-hdd-shard-config` for resolution
+
+.. _rados-slow-requests-debugging:
+
+.. |rarr| unicode:: U+2192 .. RIGHT ARROW
+
+Debugging Slow Requests
+-----------------------
+
+When troubleshooting slow operations, run one of three admin socket
+commands to inspect in-flight or recently completed operations. Each
+reveals different information to pinpoint bottlenecks.
+
+.. note::
+
+   Operation tracking requires :confval:`osd_enable_op_tracker` set to
+   ``true`` (the default). If disabled, all three commands return an
+   error: "op_tracker tracking is not enabled now, so no ops are
+   tracked currently, even those get stuck. Please enable
+   osd_enable_op_tracker, and the tracker will start to track new
+   ops received afterwards." To enable the tracker at runtime, run:
+
+   .. prompt:: bash
+
+      ceph config set osd osd_enable_op_tracker true
 
 
+The Three Commands
+~~~~~~~~~~~~~~~~~~~
+
+**dump_ops_in_flight**: see operations being processed right now
+
+Run a command of the following form:
+
+.. prompt:: bash
+
+   ceph daemon osd.<id> dump_ops_in_flight [filterstr]
+
+Issue this ASOK command when an OSD is reporting errors, slow requests,
+or when its latency is high. The top-level ``ops_in_flight`` object
+contains an ``ops`` array and ``num_ops`` count. Each op shows ``age``
+(seconds since initiated) and the current ``flag_point``. If passed,
+the ``filterstr`` argument filters results by client IP address.
+
+**dump_historic_ops_by_duration**: see recently completed operations sorted
+by execution time
+
+Run a command of the following form:
+
+.. prompt:: bash
+
+   ceph daemon osd.<id> dump_historic_ops_by_duration [filterstr]
+
+Use this to identify slow patterns or worst offenders. Returns an array
+of completed operations sorted longest-duration-first. The top-level
+response includes:
+
+- ``size``: maximum ops retained (= :confval:`osd_op_history_size`,
+  default 20)
+- ``duration``: retention window in seconds (=
+  :confval:`osd_op_history_duration`, default 600)
+- ``ops``: array of operation objects
+
+The OSD retains ops from the last 600 seconds or up to 20 operations,
+whichever limit is hit first. If passed, the ``filterstr`` argument
+filters results by client IP address.
+
+**dump_historic_slow_ops**: see operations exceeding the slow threshold
+
+Run a command of the following form:
+
+.. prompt:: bash
+
+   ceph daemon osd.<id> dump_historic_slow_ops [filterstr]
+
+Use this when you want to filter for operations whose ``duration``
+meets or exceeds :confval:`osd_op_history_slow_op_threshold` (default
+10.0 seconds). The OSD retains up to
+:confval:`osd_op_history_slow_op_size` (default 20) such operations.
+If passed, the ``filterstr`` argument filters results by client IP address.
+
+.. note::
+
+   Do not confuse :confval:`osd_op_history_slow_op_threshold` with
+   :confval:`osd_op_complaint_time`. The former filters completed
+   operations by actual duration; the latter triggers log warnings
+   for in-flight operations still running past the threshold.
+
+
+Output field reference
+~~~~~~~~~~~~~~~~~~~~~~
+
+Each operation object contains these fields:
+
+- ``description``: compact string encoding op type, client, PG, object,
+  and flags (see `Decoding the description field`_ below)
+- ``initiated_at``: ISO 8601 UTC timestamp when op was received
+- ``age``: seconds since ``initiated_at`` (in-flight ops only)
+- ``duration``: seconds from initiation to completion (completed ops
+  only)
+- ``type_data.flag_point``: current or last state reached by the op
+- ``type_data.client_info.client``: entity name, format ``client.NUM``
+- ``type_data.client_info.client_addr``: network address, format
+  ``IP:port/nonce`` (or ``[IPv6]:port/nonce`` for IPv6 addresses) where
+  nonce identifies the client process instance
+- ``type_data.client_info.tid``: transaction ID, client-assigned
+  sequential integer unique per session
+- ``type_data.events``: array of state transitions in chronological
+  order
+
+
+Decoding the description field
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``description`` field is a compact summary. Here is a real example:
+
+.. code-block:: text
+
+   osd_op(client.2035306.0:1369555462 7.97 7:e9516884:::.dir.f5083a78-5c53-45e6-a2b7-1e68b9ea0ef2.23165.2.4:head [call rgw.guard_bucket_resharding in=26b,call rgw.bucket_prepare_op in=20b] snapc 0=[] ondisk+write+known_if_redirected e271143)
+
+Components of the description field:
+
+- ``osd_op``: message type (MOSDOp)
+- ``client.2035306``: client entity type and monitor-assigned number
+- ``.0``: client incarnation counter (increments on reconnect)
+- ``:1369555462``: transaction ID (tid)
+- ``7.97``: pool ID (decimal) dot PG seed (hexadecimal)
+- ``7:e9516884``: pool ID colon bitwise hash of object key
+- ``:::``: separators for namespace, key, object (all empty here)
+- ``.dir.f5083a78-...:head``: object name and snapshot (``:head`` =
+  live version, no snapshot)
+- ``[call rgw.METHOD in=Nb]``: OSD class method calls. ``call`` = type,
+  class name, method name, ``in=Nb`` = input data size
+- ``snapc 0=[]``: snap context (0 = no snapshots, empty list)
+- ``ondisk+write+...``: request flags joined by ``+``
+- ``e271143``: OSDMap epoch at time of request
+
+
+Event reference
+~~~~~~~~~~~~~~~
+
+The ``type_data.events`` array records state transitions in order.
+Walk it to find the longest-duration event and diagnose bottleneck
+(see `Identifying the bottleneck`_ below).
+
+**Phase 1: Messenger (message arrival)**
+
+- ``header_read``: first bytes of message read from network
+- ``throttled``: messenger acquiring memory throttle. Duration often
+  shows approximately 4,294,967,295 seconds (unsigned arithmetic wrap). Ignore the
+  duration value for this event.
+- ``all_read``: all message bytes received from network
+- ``dispatched``: message handed to OSD for processing
+
+**Phase 2: OSD core (queuing)**
+
+- ``initiated``: op registered in tracking system (``STATE_LIVE``)
+- ``queued_for_pg``: op enqueued to PG work queue
+- ``reached_pg``: op dequeued, PG lock acquired, entering ``do_request()``.
+  May repeat if op is requeued.
+
+**Phase 3: Blocking conditions (may appear, may repeat)**
+
+- ``waiting for rw locks``: blocked on per-object read/write locks. Long
+  duration = object contention.
+- ``waiting for missing object``: object not yet recovered
+- ``waiting for degraded object``: object in degraded state
+- ``waiting for readable``: PG not yet readable; peering incomplete
+- ``waiting for scrub``: scrub operation locking this object
+- ``waiting for peered``: PG not yet in peered state
+- ``waiting for active``: PG not yet active
+- ``waiting for ondisk``: waiting for prior op to commit to journal
+
+**Phase 4: Execution**
+
+- ``started``: all locks acquired, ``execute_ctx()`` beginning. Long
+  duration = slow backend I/O.
+
+**Phase 5: Replication (replicated pools only)**
+
+- ``waiting for subops from [X,Y]``: sub-ops sent to replica OSDs X and
+  Y. Waiting for commit ACKs. Long duration = slow replicas.
+- ``sub_op_commit_rec``: commit acknowledgment received from one replica.
+  Appears once per replica.
+- ``op_commit``: all replicas committed. Op is durable but client not yet
+  notified.
+
+**Phase 6: Completion**
+
+- ``commit_sent``: reply sent to client with durability guarantee
+  (``CEPH_OSD_FLAG_ONDISK``). Client now knows op is durable.
+- ``done``: op released from tracking. Resources freed.
+
+.. note::
+
+   The ``throttled`` event duration is unreliable. When ``throttle_stamp``
+   is uninitialized (zero) and the previous event has a real timestamp,
+   unsigned subtraction wraps: ``0 - 1718984486 ~= 2^32 - 1``.
+   This does **not** mean the op was throttled for 136 years. Ignore the
+   ``throttled`` event duration. Focus on other events when diagnosing.
+
+
+Identifying the bottleneck
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To find where time is spent in an operation:
+
+#. Run one of the three commands above.
+#. In the ``type_data.events`` array for each op of interest, find the
+   event with the largest ``duration`` value.
+#. That event indicates where time was spent. Interpret by event name:
+
+   - Large duration on ``waiting for rw locks`` |rarr| per-object lock
+     contention. Another op holds the lock on the same object. Reduce
+     concurrent writes to the same object.
+   - Large duration on ``waiting for subops from [X,Y]`` |rarr| replica X or Y
+     is slow. Check replica OSD health, disk I/O, and the network: see
+     `Networking Issues`_.
+   - Large duration on ``started`` (before ``op_commit``) |rarr| slow backend
+     I/O on the primary. Check disk iostat.
+   - Large duration on ``queued_for_pg`` |rarr| PG queue backlog; high
+     concurrent load.
+   - Repeated ``reached_pg`` |rarr| ``waiting for rw locks`` cycles |rarr| lock
+     contention retry loop. Reduce concurrent writes to same object.
+
+
+Related configuration
+~~~~~~~~~~~~~~~~~~~~~
+
+Control op tracking and history retention with these six options. Set
+them in ``ceph.conf`` or via ``ceph config set osd <option> <value>``.
+
+- :confval:`osd_enable_op_tracker`: Enable operation tracking (type:
+  bool, default: true). Must be true for all three commands to work.
+- :confval:`osd_op_history_size`: Max completed ops retained (type: uint,
+  default: 20). Controls ``dump_historic_ops_by_duration``.
+- :confval:`osd_op_history_duration`: Retention window in seconds (type:
+  uint, default: 600). Controls ``dump_historic_ops_by_duration``.
+- :confval:`osd_op_history_slow_op_size`: Max slow ops retained (type:
+  uint, default: 20). Controls ``dump_historic_slow_ops``.
+- :confval:`osd_op_history_slow_op_threshold`: Slow op threshold in
+  seconds (type: float, default: 10.0). Controls
+  ``dump_historic_slow_ops``.
+- :confval:`osd_op_complaint_time`: In-flight complaint threshold in
+  seconds (type: float, default: 30.0). Used for logging and
+  ``dump_blocked_ops``.
+
+To change a setting at runtime, run:
+
+.. prompt:: bash
+
+   ceph config set osd osd_op_history_size 50
+
+
+.. _mclock-tblshoot-hdd-shard-config:
+
+Slow Requests or Slow Recovery With mClock Scheduler
+----------------------------------------------------
+
+.. note:: This troubleshooting is applicable only for HDD based clusters running
+   mClock scheduler and with the following OSD shard configuration:
+   ``osd_op_num_shards_hdd`` = 5 and ``osd_op_num_threads_per_shard_hdd`` = 1.
+   Also, see :ref:`mclock-hdd-cfg` for details around the reason for the change
+   made to the default OSD HDD shard configuration for mClock.
+
+On scaled HDD based clusters with mClock scheduler enabled and under multiple
+OSD node failure condition, the following could be reported or observed:
+
+- slow requests: This also manifests into degraded client I/O performance.
+- slow background recoveries: Lower than expected recovery throughput.
+
+**Troubleshooting Steps:**
+
+#. Verify from OSD events that the slow requests are predominantly of type
+   ``queued_for_pg``.
+#. Verify if the reported recovery rate is significantly lower than the expected
+   rate considering the QoS allocations for background recovery service.
+
+If either of the above steps are true, then the following resolution may be
+applied. Note that this is disruptive as it involves OSD restarts. Run the
+following commands to change the default OSD shard configuration for HDDs:
+
+.. prompt:: bash
+
+   ceph config set osd osd_op_num_shards_hdd 1
+   ceph config set osd osd_op_num_threads_per_shard_hdd 5
+
+The above configuration won't take effect immediately and would require a
+restart of the OSDs in the environment. For this process to be least disruptive,
+the OSDs may be restarted in a carefully staggered manner.
+
+.. _rados_tshooting_flapping_osd:
 
 Flapping OSDs
 =============
 
-We recommend using both a public (front-end) network and a cluster (back-end)
-network so that you can better meet the capacity requirements of object
-replication. Another advantage is that you can run a cluster network such that
-it isn't connected to the internet, thereby preventing some denial of service
-attacks. When OSDs peer and check heartbeats, they use the cluster (back-end)
-network when it's available. See `Monitor/OSD Interaction`_ for details.
+"Flapping" is the term for the phenomenon of an OSD being repeatedly marked
+``up`` and then ``down`` in rapid succession.  This section explains how to
+recognize flapping, and how to mitigate it.
 
-However, if the cluster (back-end) network fails or develops significant latency
-while the public (front-end) network operates optimally, OSDs currently do not
-handle this situation well. What happens is that OSDs mark each other ``down``
-on the monitor, while marking themselves ``up``. We call this scenario
-'flapping`.
+When OSDs peer and check heartbeats, they use the cluster (back-end) network
+when it is available. See `Monitor/OSD Interaction`_ for details.
 
-If something is causing OSDs to 'flap' (repeatedly getting marked ``down`` and
-then ``up`` again), you can force the monitors to stop the flapping with::
+The upstream Ceph community has traditionally recommended separate *public*
+(front-end) and *private* (cluster / back-end / replication) networks. This
+provides the following benefits:
 
-	ceph osd set noup      # prevent OSDs from getting marked up
-	ceph osd set nodown    # prevent OSDs from getting marked down
+#. Segregation of (1) heartbeat traffic and replication/recovery traffic
+   (private) from (2) traffic from clients and between OSDs and Monitors
+   (public). This helps keep one stream of traffic from DoS-ing the other,
+   which could in turn result in a cascading failure.
 
-These flags are recorded in the osdmap structure::
+#. Additional throughput for both public and private traffic.
 
-	ceph osd dump | grep flags
-	flags no-up,no-down
+In the past, when common networking technologies were measured in a range
+encompassing 100Mb/s and 1Gb/s, this separation was often critical. But with
+today's 10Gb/s, 40Gb/s, and 25/50/100Gb/s networks, the above capacity concerns
+are often diminished or even obviated.  For example, if your OSD nodes have two
+network ports, dedicating one to the public and the other to the private
+network means that you have no path redundancy.  This degrades your ability to
+endure network maintenance and network failures without significant cluster or
+client impact. In situations like this, consider instead using both links for
+only a public network: with bonding (LACP) or equal-cost routing (for example,
+FRR) you reap the benefits of increased throughput headroom, fault tolerance,
+and reduced OSD flapping.
 
-You can clear the flags with::
+When a private network (or even a single host link) fails or degrades while the
+public network continues operating normally, OSDs may not handle this situation
+well. In such situations, OSDs use the public network to report each other
+``down`` to the Monitors, while marking themselves ``up``. The Monitors then
+send out-- again on the public network--an updated cluster map with the
+affected OSDs marked `down`. These OSDs reply to the Monitors "I'm not dead
+yet!", and the cycle repeats. We call this scenario 'flapping', and it can be
+difficult to isolate and remediate. Without a private network, this irksome
+dynamic is avoided: OSDs are generally either ``up`` or ``down`` without
+flapping.
 
-	ceph osd unset noup
-	ceph osd unset nodown
+If something does cause OSDs to 'flap' (repeatedly being marked ``down`` and
+then ``up`` again), you can force the Monitors to halt the flapping by
+temporarily freezing their states:
 
-Two other flags are supported, ``noin`` and ``noout``, which prevent
-booting OSDs from being marked ``in`` (allocated data) or protect OSDs
-from eventually being marked ``out`` (regardless of what the current value for
-``mon osd down out interval`` is).
+.. prompt:: bash
 
-.. note:: ``noup``, ``noout``, and ``nodown`` are temporary in the
-   sense that once the flags are cleared, the action they were blocking
-   should occur shortly after.  The ``noin`` flag, on the other hand,
-   prevents OSDs from being marked ``in`` on boot, and any daemons that
-   started while the flag was set will remain that way.
+   ceph osd set noup      # prevent OSDs from getting marked up
+   ceph osd set nodown    # prevent OSDs from getting marked down
+
+These flags are recorded in the osdmap:
+
+.. prompt:: bash
+
+   ceph osd dump | grep flags
+
+::
+
+   flags no-up,no-down
+
+You can clear these flags with:
+
+.. prompt:: bash
+
+   ceph osd unset noup
+   ceph osd unset nodown
+
+Two other flags are available, ``noin`` and ``noout``, which prevent booting
+OSDs from being marked ``in`` (allocated data) or protect OSDs from eventually
+being marked ``out`` (regardless of the current value of
+``mon_osd_down_out_interval``).
+
+.. note:: ``noup``, ``noout``, and ``nodown`` are temporary in the sense that
+   after the flags are cleared, the action that they were blocking should be
+   possible shortly thereafter. But the ``noin`` flag prevents OSDs from being
+   marked ``in`` on boot, and any daemons that started while the flag was set
+   will remain that way.
+
+.. note:: The causes and effects of flapping can be mitigated somewhat by
+   making careful adjustments to ``mon_osd_down_out_subtree_limit``,
+   ``mon_osd_reporter_subtree_level``, and ``mon_osd_min_down_reporters``.
+   Derivation of optimal settings depends on cluster size, topology, and the
+   Ceph release in use. The interaction of all of these factors is subtle and
+   is beyond the scope of this document.
 
 
-
-
-
-
-.. _iostat: http://en.wikipedia.org/wiki/Iostat
-.. _Ceph Logging and Debugging: ../../configuration/ceph-conf#ceph-logging-and-debugging
+.. _iostat: https://en.wikipedia.org/wiki/Iostat
 .. _Logging and Debugging: ../log-and-debug
-.. _Debugging and Logging: ../debug
 .. _Monitor/OSD Interaction: ../../configuration/mon-osd-interaction
-.. _Monitor Config Reference: ../../configuration/mon-config-ref
 .. _monitoring your OSDs: ../../operations/monitoring-osd-pg
+
+.. _monitoring OSDs: ../../operations/monitoring-osd-pg/#monitoring-osds
+
 .. _subscribe to the ceph-devel email list: mailto:majordomo@vger.kernel.org?body=subscribe+ceph-devel
 .. _unsubscribe from the ceph-devel email list: mailto:majordomo@vger.kernel.org?body=unsubscribe+ceph-devel
-.. _subscribe to the ceph-users email list: mailto:ceph-users-join@lists.ceph.com
-.. _unsubscribe from the ceph-users email list: mailto:ceph-users-leave@lists.ceph.com
+.. _subscribe to the ceph-users email list: mailto:ceph-users-join@ceph.io
+.. _unsubscribe from the ceph-users email list: mailto:ceph-users-leave@ceph.io
 .. _OS recommendations: ../../../start/os-recommendations
 .. _ceph-devel: ceph-devel@vger.kernel.org

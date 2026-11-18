@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,13 +13,20 @@
 
 #include "gtest/gtest.h"
 #include "osd/HitSet.h"
+#include "osd/BloomHitSet.h"
+#include "osd/ExplicitHashHitSet.h"
+#include "osd/ExplicitObjectHitSet.h"
 #include <iostream>
 
 class HitSetTestStrap {
-public:
+protected:
   HitSet *hitset;
 
+public:
   explicit HitSetTestStrap(HitSet *h) : hitset(h) {}
+  ~HitSetTestStrap() {
+    delete hitset;
+  }
 
   void fill(unsigned count) {
     char buf[50];
@@ -66,7 +74,7 @@ TEST_F(BloomHitSetTest, Params) {
   bufferlist bl;
   params.encode(bl);
   BloomHitSet::Params p2;
-  bufferlist::iterator iter = bl.begin();
+  auto iter = bl.cbegin();
   p2.decode(iter);
   EXPECT_EQ(0.1, p2.get_fpp());
   EXPECT_EQ((unsigned)100, p2.target_size);

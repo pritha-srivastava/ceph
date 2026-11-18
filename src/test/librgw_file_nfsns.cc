@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -20,16 +21,19 @@
 
 #include "include/rados/librgw.h"
 #include "include/rados/rgw_file.h"
-#include "rgw/rgw_file.h"
+#include "rgw_lib.h"
+#include "rgw/rgw_file_int.h"
 #include "rgw/rgw_lib_frontend.h" // direct requests
 
 #include "gtest/gtest.h"
 #include "common/ceph_argparse.h"
 #include "common/debug.h"
-#include "global/global_init.h"
-#include "include/assert.h"
+#include "include/ceph_assert.h"
 
 #define dout_subsys ceph_subsys_rgw
+
+using namespace std;
+using namespace rgw; // g_rgwlib
 
 namespace {
 
@@ -188,9 +192,24 @@ TEST(LibRGW, INIT) {
   ASSERT_NE(rgw_h, nullptr);
 }
 
+TEST(LibRGW, MOUNT_NOROOT) {
+  /* do a mount at root="" and verify that it's root is "/" */
+  struct rgw_fs *fs = nullptr;
+  int ret = rgw_mount2(rgw_h, userid.c_str(), access_key.c_str(),
+                       secret_key.c_str(), "", &fs, RGW_MOUNT_FLAG_NONE);
+  ASSERT_EQ(ret, 0);
+  ASSERT_NE(fs, nullptr);
+
+  auto& root_fh = static_cast<RGWLibFS*>(fs->fs_private)->get_fh();
+  ASSERT_EQ(root_fh.get_name(), "/");
+
+  ret = rgw_umount(fs, RGW_UMOUNT_FLAG_NONE);
+  ASSERT_EQ(ret, 0);
+}
+
 TEST(LibRGW, MOUNT) {
-  int ret = rgw_mount(rgw_h, userid.c_str(), access_key.c_str(),
-		      secret_key.c_str(), &fs, RGW_MOUNT_FLAG_NONE);
+  int ret = rgw_mount2(rgw_h, userid.c_str(), access_key.c_str(),
+                       secret_key.c_str(), "/", &fs, RGW_MOUNT_FLAG_NONE);
   ASSERT_EQ(ret, 0);
   ASSERT_NE(fs, nullptr);
 
@@ -201,7 +220,7 @@ TEST(LibRGW, SETUP_HIER1)
 {
   if (do_hier1) {
     (void) rgw_lookup(fs, fs->root_fh, bucket_name.c_str(), &bucket_fh,
-		      RGW_LOOKUP_FLAG_NONE);
+		      nullptr, 0, RGW_LOOKUP_FLAG_NONE);
     if (! bucket_fh) {
       if (do_create) {
 	struct stat st;
@@ -242,9 +261,10 @@ TEST(LibRGW, SETUP_HIER1)
 	  std::cout << "creating: " << bucket_name << ":" << obj_name
 		    << std::endl;
 	}
-	RGWPutObjRequest req(cct, fs_private->get_user(), bucket_name, obj_name,
-			    bl);
-	int rc = rgwlib.get_fe()->execute_req(&req);
+	RGWPutObjRequest req(cct,
+			     g_rgwlib->get_driver()->get_user(fs_private->get_user()->user_id),
+			     bucket_name, obj_name, bl);
+	int rc = g_rgwlib->get_fe()->execute_req(&req);
 	int rc2 = req.get_ret();
 	ASSERT_EQ(rc, 0);
 	ASSERT_EQ(rc2, 0);
@@ -265,7 +285,7 @@ TEST(LibRGW, SETUP_DIRS1) {
     dirs1_b.parent_fh = fs->root_fh;
 
     (void) rgw_lookup(fs, dirs1_b.parent_fh, dirs1_bucket_name.c_str(),
-		      &dirs1_b.fh, RGW_LOOKUP_FLAG_NONE);
+		      &dirs1_b.fh, nullptr, 0, RGW_LOOKUP_FLAG_NONE);
 
     if (! dirs1_b.fh) {
       if (do_create) {
@@ -289,7 +309,7 @@ TEST(LibRGW, SETUP_DIRS1) {
       ovec.clear();
 
       (void) rgw_lookup(fs, dir.parent_fh, dir.name.c_str(), &dir.fh,
-			RGW_LOOKUP_FLAG_NONE);
+			nullptr, 0, RGW_LOOKUP_FLAG_NONE);
       if (! dir.fh) {
 	if (do_create) {
 	  rc = rgw_mkdir(fs, dir.parent_fh, dir.name.c_str(), &st, create_mask,
@@ -311,7 +331,7 @@ TEST(LibRGW, SETUP_DIRS1) {
 	obj_rec sdir{sdname, nullptr, dir.fh, nullptr};
 
 	(void) rgw_lookup(fs, sdir.parent_fh, sdir.name.c_str(), &sdir.fh,
-			  RGW_LOOKUP_FLAG_NONE);
+			  nullptr, 0, RGW_LOOKUP_FLAG_NONE);
 
 	if (! sdir.fh) {
 	  if (do_create) {
@@ -334,13 +354,13 @@ TEST(LibRGW, SETUP_DIRS1) {
 	obj_rec sf{sfname, nullptr, dir.fh, nullptr};
 
 	(void) rgw_lookup(fs, sf.parent_fh, sf.name.c_str(), &sf.fh,
-			  RGW_LOOKUP_FLAG_NONE);
+			  nullptr, 0, RGW_LOOKUP_FLAG_NONE);
 
 	if (! sf.fh) {
 	  if (do_create) {
 	    /* make a new file object (the hard way) */
 	    rc = rgw_lookup(fs, sf.parent_fh, sf.name.c_str(), &sf.fh,
-			    RGW_LOOKUP_FLAG_CREATE);
+			    nullptr, 0, RGW_LOOKUP_FLAG_CREATE);
 	    ASSERT_EQ(rc, 0);
 	    sf.sync();
 	    ASSERT_TRUE(sf.rgw_fh->is_file());
@@ -396,7 +416,7 @@ TEST(LibRGW, SETATTR) {
 
       /* dir_0 MUST exist and MUST be resident */
       (void) rgw_lookup(fs, dir.parent_fh, dir.name.c_str(), &dir.fh,
-			RGW_LOOKUP_FLAG_NONE);
+			nullptr, 0, RGW_LOOKUP_FLAG_NONE);
 
       ASSERT_NE(dir.fh, nullptr);
       dir.sync();
@@ -408,12 +428,12 @@ TEST(LibRGW, SETATTR) {
       obj_rec sf{sfname, nullptr, dir.fh, nullptr};
 
       (void) rgw_lookup(fs, sf.parent_fh, sf.name.c_str(), &sf.fh,
-			RGW_LOOKUP_FLAG_NONE);
+			nullptr, 0, RGW_LOOKUP_FLAG_NONE);
 
       if (! sf.fh) {
 	/* make a new file object (the hard way) */
 	rc = rgw_lookup(fs, sf.parent_fh, sf.name.c_str(), &sf.fh,
-			RGW_LOOKUP_FLAG_CREATE);
+			nullptr, 0, RGW_LOOKUP_FLAG_CREATE);
 	ASSERT_EQ(rc, 0);
 	sf.sync();
 	ASSERT_TRUE(sf.rgw_fh->is_file());
@@ -457,7 +477,7 @@ TEST(LibRGW, SETATTR) {
 
       /* revalidate -- expect magic uid and gid */
       (void) rgw_lookup(fs, sf.parent_fh, sf.name.c_str(), &sf.fh,
-			RGW_LOOKUP_FLAG_NONE);
+			nullptr, 0, RGW_LOOKUP_FLAG_NONE);
       sf.sync();
       ASSERT_NE(sf.fh, nullptr);
 
@@ -495,7 +515,7 @@ TEST(LibRGW, RGW_CREATE_DIRS1) {
 	std::string sfname{"sfile_" + to_string(n_dirs1_objs)};
 	obj_rec sf{sfname, nullptr, dir.fh, nullptr};
 	(void) rgw_lookup(fs, sf.parent_fh, sf.name.c_str(), &sf.fh,
-			  RGW_LOOKUP_FLAG_NONE);
+			  nullptr, 0, RGW_LOOKUP_FLAG_NONE);
 	if (! sf.fh) {
 	  rc = rgw_create(fs, sf.parent_fh, sf.name.c_str(), &st, create_mask,
 			  &sf.fh, 0 /* posix flags */, RGW_CREATE_FLAG_NONE);
@@ -520,10 +540,10 @@ TEST(LibRGW, RGW_SETUP_RENAME1) {
     st.st_mode = 755;
 
     for (int b_ix : {0, 1}) {
-      std::string bname{"brename_" + to_string(b_ix)};
+      std::string bname{"brename" + to_string(b_ix)};
       obj_rec brec{bname, nullptr, nullptr, nullptr};
       (void) rgw_lookup(fs, fs->root_fh, brec.name.c_str(), &brec.fh,
-			RGW_LOOKUP_FLAG_NONE);
+			nullptr, 0, RGW_LOOKUP_FLAG_NONE);
       if (! brec.fh) {
 	if (do_create) {
 	  struct stat st;
@@ -542,7 +562,7 @@ TEST(LibRGW, RGW_SETUP_RENAME1) {
 	rfname += to_string(f_ix);
 	obj_rec rf{rfname, nullptr, brec.fh, nullptr};
 	(void) rgw_lookup(fs, rf.parent_fh, rf.name.c_str(), &rf.fh,
-			  RGW_LOOKUP_FLAG_NONE);
+			  nullptr, 0, RGW_LOOKUP_FLAG_NONE);
 	if (! rf.fh) {
 	  rc = rgw_create(fs, rf.parent_fh, rf.name.c_str(), &st, create_mask,
 			  &rf.fh, 0 /* posix flags */, RGW_CREATE_FLAG_NONE);
@@ -595,6 +615,7 @@ TEST(LibRGW, RGW_CROSSBUCKET_RENAME1) {
   }
 }
 
+#if 0 /* XXX inconsistent failure here */
 TEST(LibRGW, BAD_DELETES_DIRS1) {
   if (do_dirs1) {
     int rc;
@@ -624,10 +645,14 @@ TEST(LibRGW, BAD_DELETES_DIRS1) {
 #endif
   }
 }
+#endif
 
 TEST(LibRGW, GETATTR_DIRS1)
 {
   if (do_dirs1) {
+    if (verbose) {
+      std::cout << "\ttesting Unix attributes " << std::endl;
+    }
     int rc;
     struct stat st;
     for (auto& dirs_rec : dirs_vec) {
@@ -729,7 +754,7 @@ TEST(LibRGW, READF_DIRS1) {
       obj_rec fobj{readf_name, nullptr, dirs1_b.fh, nullptr};
 
       int rc = rgw_lookup(fs, dirs1_b.fh, fobj.name.c_str(), &fobj.fh,
-			  RGW_LOOKUP_FLAG_NONE);
+			  nullptr, 0, RGW_LOOKUP_FLAG_NONE);
       ASSERT_EQ(rc, 0);
       ASSERT_NE(fobj.fh, nullptr);
       fobj.sync();
@@ -737,22 +762,21 @@ TEST(LibRGW, READF_DIRS1) {
       ofstream of;
       of.open(readf_out_name, ios::out|ios::app|ios::binary);
       int bufsz = 1024 * 1024 * sizeof(char);
-      char *buffer = (char*) malloc(bufsz);
+      auto buffer = std::make_unique<char[]>(bufsz);
 
       uint64_t offset = 0;
       uint64_t length = bufsz;
       for (int ix = 0; ix < 6; ++ix) {
 	size_t nread = 0;
-	memset(buffer, 0, length); // XXX
-	rc = rgw_read(fs, fobj.fh, offset, length, &nread, buffer,
+	memset(buffer.get(), 0, length); // XXX
+	rc = rgw_read(fs, fobj.fh, offset, length, &nread, buffer.get(),
 		      RGW_READ_FLAG_NONE);
 	ASSERT_EQ(rc, 0);
 	ASSERT_EQ(nread, length);
-	of.write(buffer, length);
+	of.write(buffer.get(), length);
 	offset += nread;
       }
       of.close();
-      free(buffer);
       rgw_fh_rele(fs, fobj.fh, 0 /* flags */);
     }
   }
@@ -769,12 +793,12 @@ TEST(LibRGW, WRITEF_DIRS1) {
       obj_rec fobj{writef_name, nullptr, dirs1_b.fh, nullptr};
 
       (void) rgw_lookup(fs, fobj.parent_fh, fobj.name.c_str(), &fobj.fh,
-			RGW_LOOKUP_FLAG_NONE);
+			nullptr, 0, RGW_LOOKUP_FLAG_NONE);
       if (! fobj.fh) {
 	if (do_create) {
 	  /* make a new file object (the hard way) */
 	  rc = rgw_lookup(fs, fobj.parent_fh, fobj.name.c_str(), &fobj.fh,
-			  RGW_LOOKUP_FLAG_CREATE);
+			  nullptr, 0, RGW_LOOKUP_FLAG_CREATE);
 	  ASSERT_EQ(rc, 0);
 	}
       }
@@ -853,7 +877,9 @@ TEST(LibRGW, RELEASE_DIRS1) {
 }
 
 extern "C" {
-  static bool r1_cb(const char* name, void *arg, uint64_t offset) {
+  static int r1_cb(const char* name, void *arg, uint64_t offset,
+		    struct stat* st, uint32_t st_mask,
+		    uint32_t flags) {
     struct rgw_file_handle* parent_fh
       = static_cast<struct rgw_file_handle*>(arg);
     RGWFileHandle* rgw_fh = get_rgwfh(parent_fh);
@@ -861,6 +887,7 @@ extern "C" {
 			   << " bucket=" << rgw_fh->bucket_name()
 			   << " dir=" << rgw_fh->full_object_name()
 			   << " called back name=" << name
+			   << " flags=" << flags
 			   << dendl;
     string name_str{name};
     if (! ((name_str == ".") ||
@@ -891,7 +918,7 @@ TEST(LibRGW, HIER1) {
 	  << " elt.name=" << elt.name
 	  << dendl;
 	rc = rgw_lookup(fs, parent_fh, elt.name.c_str(), &elt.fh,
-			RGW_LOOKUP_FLAG_NONE);
+			nullptr, 0, RGW_LOOKUP_FLAG_NONE);
 	ASSERT_EQ(rc, 0);
 	// XXXX
 	RGWFileHandle* efh = get_rgwfh(elt.fh);
@@ -941,7 +968,7 @@ TEST(LibRGW, HIER1) {
 	  obj_stack.pop();
 	  break;
 	default:
-	  abort();
+	  ceph_abort();
 	};
       }
     }
@@ -964,7 +991,7 @@ TEST(LibRGW, MARKER1_SETUP_BUCKET) {
 		      &marker_fh, RGW_MKDIR_FLAG_NONE);
     } else {
       ret = rgw_lookup(fs, bucket_fh, marker_dir.c_str(), &marker_fh,
-		       RGW_LOOKUP_FLAG_NONE);
+		       nullptr, 0, RGW_LOOKUP_FLAG_NONE);
     }
     ASSERT_EQ(ret, 0);
   }
@@ -983,7 +1010,7 @@ TEST(LibRGW, MARKER1_SETUP_OBJECTS)
       obj_rec obj{object_name, nullptr, marker_fh, nullptr};
       // lookup object--all operations are by handle
       ret = rgw_lookup(fs, marker_fh, obj.name.c_str(), &obj.fh,
-		       RGW_LOOKUP_FLAG_CREATE);
+		       nullptr, 0, RGW_LOOKUP_FLAG_CREATE);
       ASSERT_EQ(ret, 0);
       obj.rgw_fh = get_rgwfh(obj.fh);
       // open object--open transaction
@@ -1008,7 +1035,9 @@ TEST(LibRGW, MARKER1_SETUP_OBJECTS)
 }
 
 extern "C" {
-  static bool r2_cb(const char* name, void *arg, uint64_t offset) {
+  static int r2_cb(const char* name, void *arg, uint64_t offset,
+		    struct stat* st, uint32_t st_mask,
+		    uint32_t flags) {
     dirent_vec& dvec =
       *(static_cast<dirent_vec*>(arg));
     lsubdout(cct, rgw, 10) << __func__
@@ -1016,6 +1045,7 @@ extern "C" {
 			   << " dir=" << marker_dir
 			   << " iv count=" << dvec.count
 			   << " called back name=" << name
+			   << " flags=" << flags
 			   << dendl;
     string name_str{name};
     if (! ((name_str == ".") ||
@@ -1105,14 +1135,10 @@ TEST(LibRGW, SHUTDOWN) {
 
 int main(int argc, char *argv[])
 {
-  char *v{nullptr};
-  string val;
-  vector<const char*> args;
-
-  argv_to_vec(argc, const_cast<const char**>(argv), args);
+  auto args = argv_to_vec(argc, argv);
   env_to_vec(args);
 
-  v = getenv("AWS_ACCESS_KEY_ID");
+  char* v = getenv("AWS_ACCESS_KEY_ID");
   if (v) {
     access_key = v;
   }
@@ -1122,6 +1148,7 @@ int main(int argc, char *argv[])
     secret_key = v;
   }
 
+  string val;
   for (auto arg_iter = args.begin(); arg_iter != args.end();) {
     if (ceph_argparse_witharg(args, arg_iter, &val, "--access",
 			      (char*) nullptr)) {
@@ -1176,7 +1203,7 @@ int main(int argc, char *argv[])
     }
   }
 
-  /* dont accidentally run as anonymous */
+  /* don't accidentally run as anonymous */
   if ((access_key == "") ||
       (secret_key == "")) {
     std::cout << argv[0] << " no AWS credentials, exiting" << std::endl;

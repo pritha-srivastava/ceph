@@ -1,0 +1,239 @@
+import ipaddress
+import posixpath
+import socket
+from typing import Tuple, Optional, Any, List
+from urllib.parse import urlparse
+from ceph.deployment.hostspec import SpecValidationError
+from ceph.utils import with_units_to_int
+from numbers import Number
+
+
+def unwrap_ipv6(address):
+    # type: (str) -> str
+    if address.startswith('[') and address.endswith(']'):
+        return address[1:-1]
+    return address
+
+
+def wrap_ipv6(address):
+    # type: (str) -> str
+
+    # We cannot assume it's already wrapped or even an IPv6 address if
+    # it's already wrapped it'll not pass (like if it's a hostname) and trigger
+    # the ValueError
+    try:
+        if ipaddress.ip_address(address).version == 6:
+            return f"[{address}]"
+    except ValueError:
+        pass
+
+    return address
+
+
+def is_ipv6(address):
+    # type: (str) -> bool
+    address = unwrap_ipv6(address)
+    try:
+        return ipaddress.ip_address(address).version == 6
+    except ValueError:
+        return False
+
+
+def valid_addr(addr: str) -> Tuple[bool, str]:
+    """check that an address string is valid
+    Valid in this case means that a name is resolvable, or the
+    IP address string is a correctly formed IPv4 or IPv6 address,
+    with or without a port
+
+    Args:
+        addr (str): address
+
+    Returns:
+        Tuple[bool, str]: Validity of the address, either
+                          True, address type (IPv4[:Port], IPv6[:Port], Name[:Port])
+                          False, <error description>
+    """
+
+    def _dns_lookup(addr: str, port: Optional[int]) -> Tuple[bool, str]:
+        try:
+            socket.getaddrinfo(addr, None)
+        except socket.gaierror:
+            # not resolvable
+            return False, 'DNS lookup failed'
+        return True, 'Name:Port' if port else 'Name'
+
+    def _ip_lookup(addr: str, port: Optional[int]) -> Tuple[bool, str]:
+        unwrapped = unwrap_ipv6(addr)
+        try:
+            ip_addr = ipaddress.ip_address(unwrapped)
+        except ValueError:
+            return False, 'Invalid IP v4 or v6 address format'
+        return True, f'IPv{ip_addr.version}:Port' if port else f'IPv{ip_addr.version}'
+
+    dots = addr.count('.')
+    colons = addr.count(':')
+    addr_as_url = f'http://{addr}'
+
+    if addr.startswith('[') and dots:
+        return False, "IPv4 address wrapped in brackets is invalid"
+
+    try:
+        res = urlparse(addr_as_url)
+    except ValueError as e:
+        if str(e) == 'Invalid IPv6 URL':
+            return False, 'Address has incorrect/incomplete use of enclosing brackets'
+        return False, f'Unknown urlparse error {str(e)} for {addr_as_url}'
+
+    addr = res.netloc
+    port = None
+    try:
+        port = res.port
+        if port:
+            addr = addr[:-len(f':{port}')]
+    except ValueError:
+        if colons == 1:
+            return False, 'Port must be numeric'
+        elif ']:' in addr:
+            return False, 'Port must be numeric'
+
+    # catch partial address like 10.8 which would be valid IPaddress schemes
+    # but are classed as invalid here since they're not usable
+    if dots and addr[0].isdigit() and dots != 3:
+        return False, 'Invalid partial IPv4 address'
+
+    if addr[0].isalpha() and '.' in addr:
+        return _dns_lookup(addr, port)
+    return _ip_lookup(addr, port)
+
+
+def verify_numeric(field: Any, field_name: str) -> None:
+    if field is not None:
+        if not isinstance(field, Number) or isinstance(field, bool):
+            raise SpecValidationError(f"{field_name} must be a number")
+
+
+def verify_int(field: Any, field_name: str) -> None:
+    verify_numeric(field, field_name)
+    if field is not None:
+        if not isinstance(field, int) or isinstance(field, bool):
+            raise SpecValidationError(f"{field_name} must be an integer")
+
+
+def verify_non_negative_int(field: Any, field_name: str) -> None:
+    verify_numeric(field, field_name)
+    if field is not None:
+        verify_int(field, field_name)
+        if field < 0:
+            raise SpecValidationError(f"{field_name} can't be negative")
+
+
+def verify_size_with_units(field: Any, field_name: str) -> Optional[int]:
+    """Validate a size value that may be an int (bytes) or a size string.
+
+    Accepts None, an int (bytes), or a size string such as ``512KiB``,
+    ``100MB``, or ``1GiB``. Returns the size in bytes, or None when
+    ``field`` is None.
+    """
+    if field is None:
+        return None
+    try:
+        size = with_units_to_int(str(field))
+    except (ValueError, TypeError):
+        raise SpecValidationError(f'{field_name}: invalid size {field!r}')
+    if size < 0:
+        raise SpecValidationError(f"{field_name} can't be negative")
+    return size
+
+
+def verify_positive_int(field: Any, field_name: str) -> None:
+    verify_non_negative_int(field, field_name)
+    if field is not None:
+        verify_int(field, field_name)
+        if field <= 0:
+            raise SpecValidationError(f"{field_name} must be greater than zero")
+
+
+def verify_non_negative_number(field: Any, field_name: str) -> None:
+    verify_numeric(field, field_name)
+    if field is not None:
+        if field < 0.0:
+            raise SpecValidationError(f"{field_name} can't be negative")
+
+
+def verify_boolean(field: Any, field_name: str) -> None:
+    if field is not None:
+        if not isinstance(field, bool):
+            raise SpecValidationError(f"{field_name} must be a boolean")
+
+
+def verify_enum(field: Any, field_name: str, allowed: list) -> None:
+    if field:
+        allowed_lower = []
+        if not isinstance(field, str):
+            raise SpecValidationError(f"{field_name} must be a string")
+        for val in allowed:
+            assert isinstance(val, str)
+            allowed_lower.append(val.lower())
+        if field.lower() not in allowed_lower:
+            raise SpecValidationError(
+                           f'Invalid {field_name}. Valid values are: {", ".join(allowed)}')
+
+
+def validate_port(port: Optional[int], field_name: str = 'port') -> None:
+    if port is not None and not (1 <= port <= 65535):
+        raise SpecValidationError(
+            f'Invalid {field_name}: {port}. Must be between 1 and 65535.'
+        )
+
+
+def validate_unique_ports(ports: List[int]) -> None:
+    """Raise SpecValidationError if any port is used more than once"""
+    if len(ports) != len(set(ports)):
+        raise SpecValidationError(
+            'Invalid port: Duplicate ports are not allowed'
+        )
+
+
+def verify_non_empty_string(field: Any, field_name: str) -> None:
+    # isinstance first so we never call .strip() on None or non-str
+    if not isinstance(field, str) or not field.strip():
+        raise SpecValidationError(f"Invalid {field_name}: Must be a non-empty string.")
+
+
+def validate_ip(ip_addr: Optional[str]) -> None:
+    if ip_addr is None:
+        return
+    try:
+        ipaddress.ip_address(unwrap_ipv6(ip_addr))
+    except ValueError:
+        raise SpecValidationError(
+            f"Invalid virtual_ip: {ip_addr}. Must be a valid IP address."
+        )
+
+
+def verify_dir_path(field: Any, field_name: str) -> None:
+    """
+    Validate an absolute filesystem path string
+    """
+    if field is None:
+        return
+    verify_non_empty_string(field, field_name)
+    if not field.startswith('/'):
+        raise SpecValidationError(
+            f'{field_name} must be an absolute path starting with /, got {field!r}')
+    if '..' in field.split('/'):
+        raise SpecValidationError(
+            f"{field_name} must not contain '..' path components, got {field!r}")
+    normalized = '/' + posixpath.normpath(field).lstrip('/')
+    if normalized == '/':
+        raise SpecValidationError(
+            f'{field_name} must not be the filesystem root (/), got {field!r}')
+    protected_dirs = frozenset([
+        '/bin', '/boot', '/dev', '/etc', '/home', '/lib', '/lib32', '/lib64',
+        '/libx32', '/log', '/media', '/mnt', '/opt', '/proc', '/root', '/run',
+        '/sbin', '/srv', '/sys', '/tmp', '/usr', '/var',
+    ])
+    if normalized in protected_dirs:
+        raise SpecValidationError(
+            f'{field_name} must not be a protected system directory, '
+            f'got {field!r}. Use a subdirectory of it instead.')

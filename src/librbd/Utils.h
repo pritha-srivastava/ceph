@@ -1,20 +1,29 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_UTILS_H
 #define CEPH_LIBRBD_UTILS_H
 
 #include "include/rados/librados.hpp"
 #include "include/rbd_types.h"
+#include "include/ceph_assert.h"
 #include "include/Context.h"
+#include "common/snap_types.h"
+#include "common/zipkin_trace.h"
+#include "common/RefCountedObj.h"
+
+#include <atomic>
+#include <optional>
 #include <type_traits>
+#include <utility>
+#include <vector>
+#include <stdio.h>
 
 namespace librbd {
 
 class ImageCtx;
 
 namespace util {
-
 namespace detail {
 
 template <typename T>
@@ -50,8 +59,25 @@ public:
   }
 
 protected:
-  virtual void finish(int r) {
+  void finish(int r) override {
     (obj->*MF)(r);
+  }
+};
+
+template <typename T, void (T::*MF)(int)>
+class C_RefCallbackAdapter : public Context {
+  RefCountedPtr refptr;
+  Context *on_finish;
+
+public:
+  C_RefCallbackAdapter(T *obj, RefCountedPtr refptr)
+    : refptr(std::move(refptr)),
+      on_finish(new C_CallbackAdapter<T, MF>(obj)) {
+  }
+
+protected:
+  void finish(int r) override {
+    on_finish->complete(r);
   }
 };
 
@@ -63,7 +89,7 @@ public:
   }
 
 protected:
-  virtual void complete(int r) override {
+  void complete(int r) override {
     Context *on_finish = (obj->*MF)(&r);
     if (on_finish != nullptr) {
       on_finish->complete(r);
@@ -73,7 +99,24 @@ protected:
     }
     Context::complete(r);
   }
-  virtual void finish(int r) override {
+  void finish(int r) override {
+  }
+};
+
+template <typename T, Context*(T::*MF)(int*)>
+class C_RefStateCallbackAdapter : public Context {
+  RefCountedPtr refptr;
+  Context *on_finish;
+
+public:
+  C_RefStateCallbackAdapter(T *obj, RefCountedPtr refptr)
+    : refptr(std::move(refptr)),
+      on_finish(new C_StateCallbackAdapter<T, MF, true>(obj)) {
+  }
+
+protected:
+  void finish(int r) override {
+    on_finish->complete(r);
   }
 };
 
@@ -85,8 +128,12 @@ struct C_AsyncCallback : public Context {
   C_AsyncCallback(WQ *op_work_queue, Context *on_finish)
     : op_work_queue(op_work_queue), on_finish(on_finish) {
   }
-  virtual void finish(int r) {
+  ~C_AsyncCallback() override {
+    delete on_finish;
+  }
+  void finish(int r) override {
     op_work_queue->queue(on_finish, r);
+    on_finish = nullptr;
   }
 };
 
@@ -94,48 +141,48 @@ struct C_AsyncCallback : public Context {
 
 std::string generate_image_id(librados::IoCtx &ioctx);
 
+template <typename T>
+inline std::string generate_image_id(librados::IoCtx &ioctx) {
+  return generate_image_id(ioctx);
+}
+
 const std::string group_header_name(const std::string &group_id);
 const std::string id_obj_name(const std::string &name);
 const std::string header_name(const std::string &image_id);
 const std::string old_header_name(const std::string &image_name);
 std::string unique_lock_name(const std::string &name, void *address);
 
-librados::AioCompletion *create_rados_ack_callback(Context *on_finish);
+template <typename I>
+std::string data_object_name(I* image_ctx, uint64_t object_no) {
+  char buf[RBD_MAX_OBJ_NAME_SIZE];
+  size_t length = snprintf(buf, RBD_MAX_OBJ_NAME_SIZE,
+                           image_ctx->format_string, object_no);
+  ceph_assert(length < RBD_MAX_OBJ_NAME_SIZE);
+
+  std::string oid;
+  oid.reserve(RBD_MAX_OBJ_NAME_SIZE);
+  oid.append(buf, length);
+  return oid;
+}
+
+librados::AioCompletion *create_rados_callback(Context *on_finish);
 
 template <typename T>
-librados::AioCompletion *create_rados_ack_callback(T *obj) {
+librados::AioCompletion *create_rados_callback(T *obj) {
   return librados::Rados::aio_create_completion(
-    obj, &detail::rados_callback<T>, nullptr);
+    obj, &detail::rados_callback<T>);
 }
 
 template <typename T, void(T::*MF)(int)>
-librados::AioCompletion *create_rados_ack_callback(T *obj) {
+librados::AioCompletion *create_rados_callback(T *obj) {
   return librados::Rados::aio_create_completion(
-    obj, &detail::rados_callback<T, MF>, nullptr);
+    obj, &detail::rados_callback<T, MF>);
 }
 
 template <typename T, Context*(T::*MF)(int*), bool destroy=true>
-librados::AioCompletion *create_rados_ack_callback(T *obj) {
+librados::AioCompletion *create_rados_callback(T *obj) {
   return librados::Rados::aio_create_completion(
-    obj, &detail::rados_state_callback<T, MF, destroy>, nullptr);
-}
-
-template <typename T>
-librados::AioCompletion *create_rados_safe_callback(T *obj) {
-  return librados::Rados::aio_create_completion(
-    obj, nullptr, &detail::rados_callback<T>);
-}
-
-template <typename T, void(T::*MF)(int)>
-librados::AioCompletion *create_rados_safe_callback(T *obj) {
-  return librados::Rados::aio_create_completion(
-    obj, nullptr, &detail::rados_callback<T, MF>);
-}
-
-template <typename T, Context*(T::*MF)(int*), bool destroy=true>
-librados::AioCompletion *create_rados_safe_callback(T *obj) {
-  return librados::Rados::aio_create_completion(
-    obj, nullptr, &detail::rados_state_callback<T, MF, destroy>);
+    obj, &detail::rados_state_callback<T, MF, destroy>);
 }
 
 template <typename T, void(T::*MF)(int) = &T::complete>
@@ -145,6 +192,30 @@ Context *create_context_callback(T *obj) {
 
 template <typename T, Context*(T::*MF)(int*), bool destroy=true>
 Context *create_context_callback(T *obj) {
+  return new detail::C_StateCallbackAdapter<T, MF, destroy>(obj);
+}
+
+//for reference counting objects
+template <typename T, void(T::*MF)(int) = &T::complete>
+Context *create_context_callback(T *obj, RefCountedPtr refptr) {
+  return new detail::C_RefCallbackAdapter<T, MF>(obj, refptr);
+}
+
+template <typename T, Context*(T::*MF)(int*)>
+Context *create_context_callback(T *obj, RefCountedPtr refptr) {
+  return new detail::C_RefStateCallbackAdapter<T, MF>(obj, refptr);
+}
+
+//for objects that don't inherit from RefCountedObj, to handle unit tests
+template <typename T, void(T::*MF)(int) = &T::complete, typename R>
+typename std::enable_if<not std::is_base_of<RefCountedPtr, R>::value, Context*>::type
+create_context_callback(T *obj, R *refptr) {
+  return new detail::C_CallbackAdapter<T, MF>(obj);
+}
+
+template <typename T, Context*(T::*MF)(int*), typename R, bool destroy=true>
+typename std::enable_if<not std::is_base_of<RefCountedPtr, R>::value, Context*>::type
+create_context_callback(T *obj, R *refptr) {
   return new detail::C_StateCallbackAdapter<T, MF, destroy>(obj);
 }
 
@@ -167,46 +238,50 @@ inline ImageCtx *get_image_ctx(ImageCtx *image_ctx) {
   return image_ctx;
 }
 
-/// helper for tracking in-flight async ops when coordinating
-/// a shut down of the invoking class instance
-class AsyncOpTracker {
-public:
-  AsyncOpTracker() : m_refs(0) {
-  }
-
-  void start_op() {
-    m_refs.inc();
-  }
-
-  void finish_op() {
-    if (m_refs.dec() == 0 && m_on_finish != nullptr) {
-      Context *on_finish = nullptr;
-      std::swap(on_finish, m_on_finish);
-      on_finish->complete(0);
-    }
-  }
-
-  template <typename I>
-  void wait(I &image_ctx, Context *on_finish) {
-    assert(m_on_finish == nullptr);
-
-    on_finish = create_async_context_callback(image_ctx, on_finish);
-    if (m_refs.read() == 0) {
-      on_finish->complete(0);
-      return;
-    }
-    m_on_finish = on_finish;
-  }
-
-private:
-  atomic_t m_refs;
-  Context *m_on_finish = nullptr;
-};
-
 uint64_t get_rbd_default_features(CephContext* cct);
 
-} // namespace util
+bool calc_sparse_extent(const bufferptr &bp,
+                        size_t sparse_size,
+                        uint64_t length,
+                        size_t *write_offset,
+                        size_t *write_length,
+                        size_t *offset);
 
+template <typename I>
+inline ZTracer::Trace create_trace(const I &image_ctx, const char *trace_name,
+				   const ZTracer::Trace &parent_trace) {
+  if (parent_trace.valid()) {
+    return ZTracer::Trace(trace_name, &image_ctx.trace_endpoint, &parent_trace);
+  }
+  return ZTracer::Trace();
+}
+
+bool is_metadata_config_override(const std::string& metadata_key,
+                                 std::string* config_key);
+
+int create_ioctx(librados::IoCtx& src_io_ctx, const std::string& pool_desc,
+                 int64_t pool_id,
+                 const std::optional<std::string>& pool_namespace,
+                 librados::IoCtx* dst_io_ctx);
+
+int snap_create_flags_api_to_internal(CephContext *cct, uint32_t api_flags,
+                                      uint64_t *internal_flags);
+
+uint32_t get_default_snap_create_flags(ImageCtx *ictx);
+uint32_t get_default_snap_create_flags(librados::IoCtx& group_ioctx);
+
+SnapContext get_snap_context(
+    const std::optional<
+      std::pair<std::uint64_t,
+                std::vector<std::uint64_t>>>& write_snap_context);
+
+uint64_t reserve_async_request_id();
+
+bool is_config_key_uri(const std::string& uri);
+int get_config_key(librados::Rados& rados, const std::string& uri,
+                   std::string* value);
+
+} // namespace util
 } // namespace librbd
 
 #endif // CEPH_LIBRBD_UTILS_H

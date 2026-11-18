@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,49 +15,70 @@
 
 #include "Mutation.h"
 #include "ScatterLock.h"
+#include "SimpleLock.h"
+#include "BatchOp.h"
+#include "CDentry.h"
+#include "CInode.h"
 #include "CDir.h"
-
 #include "messages/MClientRequest.h"
-#include "messages/MMDSSlaveRequest.h"
+#include "messages/MMDSPeerRequest.h"
 
+using namespace std;
 
 // MutationImpl
 
 void MutationImpl::pin(MDSCacheObject *o)
 {
-  if (pins.count(o) == 0) {
+  auto& stat = object_states[o];
+  if (!stat.pinned) {
     o->get(MDSCacheObject::PIN_REQUEST);
-    pins.insert(o);
+    stat.pinned = true;
+    ++num_pins;
   }      
 }
 
 void MutationImpl::unpin(MDSCacheObject *o)
 {
-  assert(pins.count(o));
+  auto& stat = object_states[o];
+  ceph_assert(stat.pinned);
   o->put(MDSCacheObject::PIN_REQUEST);
-  pins.erase(o);
+  stat.pinned = false;
+  --num_pins;
 }
 
 void MutationImpl::set_stickydirs(CInode *in)
 {
-  if (stickydirs.count(in) == 0) {
+  if (!stickydiri || stickydiri != in) {
     in->get_stickydirs();
-    stickydirs.insert(in);
+    if (stickydiri)
+      stickydiri->put_stickydirs();
+    stickydiri = in;
+  }
+}
+
+void MutationImpl::put_stickydirs()
+{
+  if (stickydiri) {
+    stickydiri->put_stickydirs();
+    stickydiri = nullptr;
+
   }
 }
 
 void MutationImpl::drop_pins()
 {
-  for (set<MDSCacheObject*>::iterator it = pins.begin();
-       it != pins.end();
-       ++it) 
-    (*it)->put(MDSCacheObject::PIN_REQUEST);
-  pins.clear();
+  for (auto& p : object_states) {
+    if (p.second.pinned) {
+      p.first->put(MDSCacheObject::PIN_REQUEST);
+      p.second.pinned = false;
+      --num_pins;
+    }
+  }
 }
 
 void MutationImpl::start_locking(SimpleLock *lock, int target)
 {
-  assert(locking == NULL);
+  ceph_assert(locking == NULL);
   pin(lock->get_parent());
   locking = lock;
   locking_target_mds = target;
@@ -64,70 +86,152 @@ void MutationImpl::start_locking(SimpleLock *lock, int target)
 
 void MutationImpl::finish_locking(SimpleLock *lock)
 {
-  assert(locking == lock);
+  ceph_assert(locking == lock);
   locking = NULL;
   locking_target_mds = -1;
 }
 
+bool MutationImpl::is_rdlocked(SimpleLock *lock) const {
+  auto it = locks.find(lock);
+  if (it != locks.end() && it->is_rdlock())
+    return true;
+  if (lock_cache)
+    return static_cast<const MutationImpl*>(lock_cache)->is_rdlocked(lock);
+  return false;
+}
+
+bool MutationImpl::is_wrlocked(SimpleLock *lock) const {
+  auto it = locks.find(lock);
+  if (it != locks.end() && it->is_wrlock())
+    return true;
+  if (lock_cache)
+    return static_cast<const MutationImpl*>(lock_cache)->is_wrlocked(lock);
+  return false;
+}
+
+void MutationImpl::LockOp::print(std::ostream& out) const {
+  CachedStackStringStream css;
+  *css << "0x" << std::hex << flags;
+  out << "LockOp(l=" << *lock << ",f=" << css->strv();
+  if (wrlock_target != MDS_RANK_NONE) {
+    out << ",wt=" << wrlock_target;
+  }
+  out << ")";
+}
+
+void MutationImpl::LockOpVec::erase_rdlock(SimpleLock* lock)
+{
+  for (int i = size() - 1; i >= 0; --i) {
+    auto& op = (*this)[i];
+    if (op.lock == lock && op.is_rdlock()) {
+      erase(begin() + i);
+      return;
+    }
+  }
+}
+void MutationImpl::LockOpVec::sort_and_merge()
+{
+  // sort locks on the same object
+  auto cmp = [](const LockOp &l, const LockOp &r) {
+    ceph_assert(l.lock->get_parent() == r.lock->get_parent());
+    return l.lock->type->type < r.lock->type->type;
+  };
+  for (auto i = begin(), j = i; ; ++i) {
+    if (i == end()) {
+      std::sort(j, i, cmp);
+      break;
+    }
+    if (j->lock->get_parent() != i->lock->get_parent()) {
+      std::sort(j, i, cmp);
+      j = i;
+    }
+  }
+  // merge ops on the same lock
+  for (auto i = end() - 1; i > begin(); ) {
+    auto j = i;
+    while (--j >= begin()) {
+      if (i->lock != j->lock)
+	break;
+    }
+    if (i - j == 1) {
+      i = j;
+      continue;
+    }
+    // merge
+    ++j;
+    for (auto k = i; k > j; --k) {
+      if (k->is_remote_wrlock()) {
+	ceph_assert(!j->is_remote_wrlock());
+	j->wrlock_target = k->wrlock_target;
+      }
+      j->flags |= k->flags;
+    }
+    if (j->is_xlock()) {
+      // xlock overwrites other types
+      ceph_assert(!j->is_remote_wrlock());
+      j->flags = LockOp::XLOCK;
+    }
+    erase(j + 1, i + 1);
+    i = j - 1;
+  }
+}
 
 // auth pins
 bool MutationImpl::is_auth_pinned(MDSCacheObject *object) const
 { 
-  return auth_pins.count(object) || remote_auth_pins.count(object); 
+  auto stat_p = find_object_state(object);
+  if (!stat_p)
+    return false;
+  return stat_p->auth_pinned || stat_p->remote_auth_pinned != MDS_RANK_NONE;
 }
 
 void MutationImpl::auth_pin(MDSCacheObject *object)
 {
-  if (!is_auth_pinned(object)) {
+  auto &stat = object_states[object];
+  if (!stat.auth_pinned) {
     object->auth_pin(this);
-    auth_pins.insert(object);
+    stat.auth_pinned = true;
+    ++num_auth_pins;
   }
 }
 
 void MutationImpl::auth_unpin(MDSCacheObject *object)
 {
-  assert(auth_pins.count(object));
+  auto &stat = object_states[object];
+  ceph_assert(stat.auth_pinned);
   object->auth_unpin(this);
-  auth_pins.erase(object);
+  stat.auth_pinned = false;
+  --num_auth_pins;
 }
 
 void MutationImpl::drop_local_auth_pins()
 {
-  for (set<MDSCacheObject*>::iterator it = auth_pins.begin();
-       it != auth_pins.end();
-       ++it) {
-    assert((*it)->is_auth());
-    (*it)->auth_unpin(this);
-  }
-  auth_pins.clear();
-}
-
-void MutationImpl::add_projected_inode(CInode *in)
-{
-  projected_inodes.push_back(in);
-}
-
-void MutationImpl::pop_and_dirty_projected_inodes()
-{
-  while (!projected_inodes.empty()) {
-    CInode *in = projected_inodes.front();
-    projected_inodes.pop_front();
-    in->pop_and_dirty_projected_inode(ls);
+  for (auto& p : object_states) {
+    if (p.second.auth_pinned) {
+      ceph_assert(p.first->is_auth());
+      p.first->auth_unpin(this);
+      p.second.auth_pinned = false;
+      --num_auth_pins;
+    }
   }
 }
 
-void MutationImpl::add_projected_fnode(CDir *dir)
+void MutationImpl::set_remote_auth_pinned(MDSCacheObject *object, mds_rank_t from)
 {
-  projected_fnodes.push_back(dir);
+  auto &stat = object_states[object];
+  if (stat.remote_auth_pinned == MDS_RANK_NONE) {
+    stat.remote_auth_pinned = from;
+    ++num_remote_auth_pins;
+  } else {
+    ceph_assert(stat.remote_auth_pinned == from);
+  }
 }
 
-void MutationImpl::pop_and_dirty_projected_fnodes()
+void MutationImpl::_clear_remote_auth_pinned(ObjectState &stat)
 {
-  while (!projected_fnodes.empty()) {
-    CDir *dir = projected_fnodes.front();
-    projected_fnodes.pop_front();
-    dir->pop_and_dirty_projected_fnode(ls);
-  }
+  ceph_assert(stat.remote_auth_pinned != MDS_RANK_NONE);
+  stat.remote_auth_pinned = MDS_RANK_NONE;
+  --num_remote_auth_pins;
 }
 
 void MutationImpl::add_updated_lock(ScatterLock *lock)
@@ -144,27 +248,34 @@ void MutationImpl::add_cow_inode(CInode *in)
 void MutationImpl::add_cow_dentry(CDentry *dn)
 {
   pin(dn);
-  dirty_cow_dentries.push_back(pair<CDentry*,version_t>(dn, dn->get_projected_version()));
+  dirty_cow_dentries.emplace_back(dn, dn->get_projected_version());
 }
 
 void MutationImpl::apply()
 {
-  pop_and_dirty_projected_inodes();
-  pop_and_dirty_projected_fnodes();
-  
-  for (list<CInode*>::iterator p = dirty_cow_inodes.begin();
-       p != dirty_cow_inodes.end();
-       ++p) 
-    (*p)->_mark_dirty(ls);
-  for (list<pair<CDentry*,version_t> >::iterator p = dirty_cow_dentries.begin();
-       p != dirty_cow_dentries.end();
-       ++p)
-    p->first->mark_dirty(p->second, ls);
-  
-  for (list<ScatterLock*>::iterator p = updated_locks.begin();
-       p != updated_locks.end();
-       ++p)
-    (*p)->mark_dirty();
+  for (auto& obj : projected_nodes) {
+    if (CInode *in = dynamic_cast<CInode*>(obj))
+      in->pop_and_dirty_projected_inode(ls, nullptr);
+  }
+
+  for (const auto& in : dirty_cow_inodes) {
+    in->_mark_dirty(ls);
+  }
+
+  for (const auto& [dn, v] : dirty_cow_dentries) {
+    dn->mark_dirty(v, ls);
+  }
+
+  for (auto& obj : projected_nodes) {
+    if (CDir *dir = dynamic_cast<CDir*>(obj))
+      dir->pop_and_dirty_projected_fnode(ls, nullptr);
+  }
+
+  for (const auto& lock : updated_locks) {
+    lock->mark_dirty();
+  }
+
+  projected_nodes.clear();
 }
 
 void MutationImpl::cleanup()
@@ -173,19 +284,24 @@ void MutationImpl::cleanup()
   drop_pins();
 }
 
-void MutationImpl::_dump_op_descriptor_unlocked(ostream& stream) const
+void MutationImpl::_dump_op_descriptor(ostream& stream) const
 {
   stream << "Mutation";
 }
 
 // MDRequestImpl
 
+MDRequestImpl::Params::Params() = default;
+MDRequestImpl::Params::~Params() noexcept = default;
+
+MDRequestImpl::MDRequestImpl(const Params* params, OpTracker *tracker) :
+  MutationImpl(tracker, params->initiated,
+	       params->reqid, params->attempt, params->peer_to),
+  item_session_request(this), client_request(params->client_req),
+  internal_op(params->internal_op) {}
+
 MDRequestImpl::~MDRequestImpl()
 {
-  if (client_request)
-    client_request->put();
-  if (slave_request)
-    slave_request->put();
   delete _more;
 }
 
@@ -193,6 +309,12 @@ MDRequestImpl::More* MDRequestImpl::more()
 { 
   if (!_more)
     _more = new More();
+  return _more;
+}
+
+MDRequestImpl::More const* MDRequestImpl::more() const
+{
+  ceph_assert(_more);
   return _more;
 }
 
@@ -206,19 +328,19 @@ bool MDRequestImpl::has_witnesses()
   return (_more != nullptr) && (!_more->witnessed.empty());
 }
 
-bool MDRequestImpl::slave_did_prepare()
+bool MDRequestImpl::peer_did_prepare()
 {
-  return has_more() && more()->slave_commit;
+  return has_more() && more()->peer_commit;
 }
 
-bool MDRequestImpl::did_ino_allocation() const
+bool MDRequestImpl::peer_rolling_back()
 {
-  return alloc_ino || used_prealloc_ino || prealloc_inos.size();
-}      
+  return has_more() && more()->peer_rolling_back;
+}
 
 bool MDRequestImpl::freeze_auth_pin(CInode *inode)
 {
-  assert(!more()->rename_inode || more()->rename_inode == inode);
+  ceph_assert(!more()->rename_inode || more()->rename_inode == inode);
   more()->rename_inode = inode;
   more()->is_freeze_authpin = true;
   auth_pin(inode);
@@ -232,7 +354,7 @@ bool MDRequestImpl::freeze_auth_pin(CInode *inode)
 
 void MDRequestImpl::unfreeze_auth_pin(bool clear_inode)
 {
-  assert(more()->is_freeze_authpin);
+  ceph_assert(more()->is_freeze_authpin);
   CInode *inode = more()->rename_inode;
   if (inode->is_frozen_auth_pin())
     inode->unfreeze_auth_pin();
@@ -251,8 +373,8 @@ void MDRequestImpl::set_remote_frozen_auth_pin(CInode *inode)
 
 void MDRequestImpl::set_ambiguous_auth(CInode *inode)
 {
-  assert(!more()->rename_inode || more()->rename_inode == inode);
-  assert(!more()->is_ambiguous_auth);
+  ceph_assert(!more()->rename_inode || more()->rename_inode == inode);
+  ceph_assert(!more()->is_ambiguous_auth);
 
   inode->set_ambiguous_auth();
   more()->rename_inode = inode;
@@ -262,14 +384,14 @@ void MDRequestImpl::set_ambiguous_auth(CInode *inode)
 void MDRequestImpl::clear_ambiguous_auth()
 {
   CInode *inode = more()->rename_inode;
-  assert(inode && more()->is_ambiguous_auth);
+  ceph_assert(inode && more()->is_ambiguous_auth);
   inode->clear_ambiguous_auth();
   more()->is_ambiguous_auth = false;
 }
 
 bool MDRequestImpl::can_auth_pin(MDSCacheObject *object)
 {
-  return object->can_auth_pin() ||
+  return object->can_auth_pin(nullptr) ||
          (is_auth_pinned(object) && has_more() &&
 	  more()->is_freeze_authpin &&
 	  more()->rename_inode == object);
@@ -282,14 +404,14 @@ void MDRequestImpl::drop_local_auth_pins()
   MutationImpl::drop_local_auth_pins();
 }
 
-const filepath& MDRequestImpl::get_filepath()
+const filepath& MDRequestImpl::get_filepath() const
 {
   if (client_request)
     return client_request->get_filepath();
   return more()->filepath1;
 }
 
-const filepath& MDRequestImpl::get_filepath2()
+const filepath& MDRequestImpl::get_filepath2() const
 {
   if (client_request)
     return client_request->get_filepath2();
@@ -298,94 +420,269 @@ const filepath& MDRequestImpl::get_filepath2()
 
 void MDRequestImpl::set_filepath(const filepath& fp)
 {
-  assert(!client_request);
+  ceph_assert(!client_request);
   more()->filepath1 = fp;
 }
+
 void MDRequestImpl::set_filepath2(const filepath& fp)
 {
-  assert(!client_request);
+  ceph_assert(!client_request);
   more()->filepath2 = fp;
+}
+
+bool MDRequestImpl::is_queued_for_replay() const
+{
+  return client_request ? client_request->is_queued_for_replay() : false;
+}
+
+bool MDRequestImpl::can_batch()
+{
+  if (num_auth_pins || num_remote_auth_pins || lock_cache || !locks.empty())
+    return false;
+
+  auto op = client_request->get_op();
+  auto& path = client_request->get_filepath();
+  if (op == CEPH_MDS_OP_GETATTR) {
+    if (path.depth() == 0)
+      return true;
+  } else if (op == CEPH_MDS_OP_LOOKUP) {
+    if (path.depth() == 1 && !path.is_last_snap())
+      return true;
+  }
+
+  return false;
+}
+
+std::unique_ptr<BatchOp> MDRequestImpl::release_batch_op()
+{
+  int mask = client_request->head.args.getattr.mask;
+  auto it = batch_op_map->find(mask);
+  ceph_assert(it != batch_op_map->end());
+  std::unique_ptr<BatchOp> bop = std::move(it->second);
+  batch_op_map->erase(it);
+  /* we do not own an entry in that map anymore; leaving the pointer set
+   * would make is_batch_head() lie and the next find() would return end()
+   */
+  batch_op_map = nullptr;
+  return bop;
+}
+
+int MDRequestImpl::compare_paths()
+{
+  if (dir_root[0] < dir_root[1])
+    return -1;
+  if (dir_root[0] > dir_root[1])
+    return 1;
+  if (dir_depth[0] < dir_depth[1])
+    return -1;
+  if (dir_depth[0] > dir_depth[1])
+    return 1;
+  return 0;
+}
+
+cref_t<MClientRequest> MDRequestImpl::release_client_request()
+{
+  std::lock_guard l(lock);
+  cref_t<MClientRequest> req;
+  req.swap(client_request);
+  client_request = req;
+  return req;
+}
+
+void MDRequestImpl::reset_peer_request(const cref_t<MMDSPeerRequest>& req)
+{
+  std::lock_guard l(lock);
+  peer_request = req;
 }
 
 void MDRequestImpl::print(ostream &out) const
 {
-  out << "request(" << reqid;
+  out << "request(" << reqid << " nref=" << nref;
   //if (request) out << " " << *request;
-  if (is_slave()) out << " slave_to mds." << slave_to_mds;
+  if (is_peer()) out << " peer_to mds." << peer_to_mds;
   if (client_request) out << " cr=" << client_request;
-  if (slave_request) out << " sr=" << slave_request;
+  if (peer_request) out << " sr=" << peer_request;
   out << ")";
 }
 
-void MDRequestImpl::dump(Formatter *f) const
+void MDRequestImpl::_dump(Formatter *f, bool has_mds_lock) const
 {
-  _dump(f);
-}
+  std::lock_guard l(lock);
+  if (result) {
+    f->dump_int("result", *result);
+  } else {
+    f->dump_null("result");
+  }
+  f->dump_string("flag_point", _get_state_string());
+  f->dump_object("reqid", reqid);
+  if (client_request) {
+    f->dump_string("op_type", "client_request");
+  } else if (is_peer()) { // replies go to an existing mdr
+    f->dump_string("op_type", "peer_request");
+    f->open_object_section("leader_info");
+    f->dump_stream("leader") << peer_to_mds;
+    f->close_section(); // leader_info
 
-void MDRequestImpl::_dump(Formatter *f) const
-{
-  f->dump_string("flag_point", state_string());
-  f->dump_stream("reqid") << reqid;
-  {
-    if (client_request) {
-      f->dump_string("op_type", "client_request");
-      f->open_object_section("client_info");
-      f->dump_stream("client") << client_request->get_orig_source();
-      f->dump_int("tid", client_request->get_tid());
-      f->close_section(); // client_info
-    } else if (is_slave() && slave_request) { // replies go to an existing mdr
-      f->dump_string("op_type", "slave_request");
-      f->open_object_section("master_info");
-      f->dump_stream("master") << slave_request->get_orig_source();
-      f->close_section(); // master_info
-
+    if (peer_request) {
       f->open_object_section("request_info");
-      f->dump_int("attempt", slave_request->get_attempt());
+      f->dump_int("attempt", peer_request->get_attempt());
       f->dump_string("op_type",
-                     slave_request->get_opname(slave_request->get_op()));
-      f->dump_int("lock_type", slave_request->get_lock_type());
-      f->dump_stream("object_info") << slave_request->get_object_info();
-      f->dump_stream("srcdnpath") << slave_request->srcdnpath;
-      f->dump_stream("destdnpath") << slave_request->destdnpath;
-      f->dump_stream("witnesses") << slave_request->witnesses;
+         MMDSPeerRequest::get_opname(peer_request->get_op()));
+      f->dump_int("lock_type", peer_request->get_lock_type());
+      f->dump_stream("object_info") << peer_request->get_object_info();
+      f->dump_stream("srcdnpath") << peer_request->srcdnpath;
+      f->dump_stream("destdnpath") << peer_request->destdnpath;
+      f->dump_stream("witnesses") << peer_request->witnesses;
       f->dump_bool("has_inode_export",
-                   slave_request->inode_export.length() != 0);
-      f->dump_int("inode_export_v", slave_request->inode_export_v);
-      f->dump_bool("has_srci_replica",
-                   slave_request->srci_replica.length() != 0);
-      f->dump_stream("op_stamp") << slave_request->op_stamp;
+         peer_request->inode_export_v != 0);
+      f->dump_int("inode_export_v", peer_request->inode_export_v);
+      f->dump_stream("op_stamp") << peer_request->op_stamp;
       f->close_section(); // request_info
     }
-    else if (internal_op != -1) { // internal request
-      f->dump_string("op_type", "internal_op");
-      f->dump_int("internal_op", internal_op);
-      f->dump_string("op_name", ceph_mds_op_name(internal_op));
-    }
-    else {
-      f->dump_string("op_type", "no_available_op_found");
-    }
   }
+  else if (internal_op != -1) { // internal request
+    f->dump_string("op_type", "internal_op");
+    f->dump_int("internal_op", internal_op);
+    f->dump_string("op_name", ceph_mds_op_name(internal_op));
+  }
+  else {
+    f->dump_string("op_type", "no_available_op_found");
+  }
+
   {
     f->open_array_section("events");
-    Mutex::Locker l(lock);
     for (auto& i : events) {
       f->dump_object("event", i);
     }
     f->close_section(); // events
   }
+
+  if (has_mds_lock) {
+    f->open_array_section("locks");
+    for (auto& l : locks) {
+      f->open_object_section("lock");
+      {
+        auto* mdsco = l.lock->get_parent();
+        f->dump_object("object", *mdsco);
+        CachedStackStringStream css;
+        *css << *mdsco;
+        f->dump_string("object_string", css->strv());
+        f->dump_object("lock", *l.lock);
+        f->dump_int("flags", l.flags);
+        f->dump_int("wrlock_target", l.wrlock_target);
+      }
+      f->close_section();
+    }
+    f->close_section();
+  } else {
+    f->dump_null("locks");
+  }
 }
 
-void MDRequestImpl::_dump_op_descriptor_unlocked(ostream& stream) const
+void MDRequestImpl::_dump_op_descriptor(ostream& os) const
 {
   if (client_request) {
-    client_request->print(stream);
-  } else if (slave_request) {
-    slave_request->print(stream);
+    client_request->print(os);
+  } else if (peer_request) {
+    peer_request->print(os);
+  } else if (is_peer()) {
+    os << "peer_request:" << reqid;
   } else if (internal_op >= 0) {
-    stream << "internal op " << ceph_mds_op_name(internal_op) << ":" << reqid;
+    os << "internal op " << ceph_mds_op_name(internal_op) << ":" << reqid;
+    if (has_more()) {
+      auto& fp = get_filepath();
+      if (!fp.empty()) {
+        os << " fp=" << fp;
+      }
+      auto& fp2 = get_filepath2();
+      if (!fp2.empty()) {
+        os << " fp2=" << fp2;
+      }
+    }
   } else {
-    // drat, it's triggered by a slave request, but we don't have a message
+    // drat, it's triggered by a peer request, but we don't have a message
     // FIXME
-    stream << "rejoin:" << reqid;
+    os << "rejoin:" << reqid;
+  }
+}
+
+void MDLockCache::attach_locks()
+{
+  ceph_assert(!items_lock);
+  items_lock.reset(new LockItem[locks.size()]);
+  int i = 0;
+  for (auto& p : locks) {
+    items_lock[i].parent = this;
+    p.lock->add_cache(items_lock[i]);
+    ++i;
+  }
+}
+
+void MDLockCache::attach_dirfrags(std::vector<CDir*>&& dfv)
+{
+  std::sort(dfv.begin(), dfv.end());
+  auto last = std::unique(dfv.begin(), dfv.end());
+  dfv.erase(last, dfv.end());
+  auth_pinned_dirfrags = std::move(dfv);
+
+  ceph_assert(!items_dir);
+  items_dir.reset(new DirItem[auth_pinned_dirfrags.size()]);
+  int i = 0;
+  for (auto dir : auth_pinned_dirfrags) {
+    items_dir[i].parent = this;
+    dir->lock_caches_with_auth_pins.push_back(&items_dir[i].item_dir);
+    ++i;
+  }
+}
+
+void MDLockCache::detach_locks()
+{
+  ceph_assert(items_lock);
+  int i = 0;
+  for (auto& p : locks) {
+    auto& item = items_lock[i];
+    p.lock->remove_cache(item);
+    ++i;
+  }
+  items_lock.reset();
+}
+
+void MDLockCache::detach_dirfrags()
+{
+  ceph_assert(items_dir);
+  int i = 0;
+  for (auto dir : auth_pinned_dirfrags) {
+    (void)dir;
+    items_dir[i].item_dir.remove_myself();
+    ++i;
+  }
+  items_dir.reset();
+}
+
+void MDLockCache::print(std::ostream& out) const {
+  out << "MDLockCache(o=" << ceph_mds_op_name(opcode)
+      << " diri=" << diri->ino();
+  if (client_cap) {
+    out << " c=" << client_cap->get_client();
+  } else {
+    out << " c=(nil)";
+  }
+  out << " r=" << ref;
+  if (invalidating) {
+    out << " invalidating";
+  }
+  out << ")";
+}
+
+int MDLockCache::get_cap_bit_for_lock_cache(int opcode)
+{
+  switch(opcode) {
+    case CEPH_MDS_OP_CREATE:
+      return CEPH_CAP_DIR_CREATE;
+    case CEPH_MDS_OP_UNLINK:
+      return CEPH_CAP_DIR_UNLINK;
+    default:
+      ceph_abort("unsupported opcode");
+      return 0;
   }
 }

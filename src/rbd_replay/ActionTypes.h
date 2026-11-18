@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_RBD_REPLAY_ACTION_TYPES_H
 #define CEPH_RBD_REPLAY_ACTION_TYPES_H
@@ -11,7 +11,7 @@
 #include <list>
 #include <string>
 #include <vector>
-#include <boost/variant/variant.hpp>
+#include <variant>
 
 namespace ceph { class Formatter; }
 
@@ -50,18 +50,18 @@ struct Dependency {
   }
 
   void encode(bufferlist &bl) const;
-  void decode(bufferlist::iterator &it);
-  void decode(__u8 version, bufferlist::iterator &it);
+  void decode(bufferlist::const_iterator &it);
+  void decode(__u8 version, bufferlist::const_iterator &it);
   void dump(Formatter *f) const;
 
-  static void generate_test_instances(std::list<Dependency *> &o);
+  static std::list<Dependency> generate_test_instances();
 };
 
 WRITE_CLASS_ENCODER(Dependency);
 
 typedef std::vector<Dependency> Dependencies;
 
-enum ActionType {
+enum ActionType : uint8_t {
   ACTION_TYPE_START_THREAD    = 0,
   ACTION_TYPE_STOP_THREAD     = 1,
   ACTION_TYPE_READ            = 2,
@@ -89,7 +89,7 @@ struct ActionBase {
   }
 
   void encode(bufferlist &bl) const;
-  void decode(__u8 version, bufferlist::iterator &it);
+  void decode(__u8 version, bufferlist::const_iterator &it);
   void dump(Formatter *f) const;
 };
 
@@ -126,7 +126,7 @@ struct ImageActionBase : public ActionBase {
   }
 
   void encode(bufferlist &bl) const;
-  void decode(__u8 version, bufferlist::iterator &it);
+  void decode(__u8 version, bufferlist::const_iterator &it);
   void dump(Formatter *f) const;
 };
 
@@ -144,7 +144,7 @@ struct IoActionBase : public ImageActionBase {
   }
 
   void encode(bufferlist &bl) const;
-  void decode(__u8 version, bufferlist::iterator &it);
+  void decode(__u8 version, bufferlist::const_iterator &it);
   void dump(Formatter *f) const;
 };
 
@@ -238,7 +238,7 @@ struct OpenImageAction : public ImageActionBase {
   }
 
   void encode(bufferlist &bl) const;
-  void decode(__u8 version, bufferlist::iterator &it);
+  void decode(__u8 version, bufferlist::const_iterator &it);
   void dump(Formatter *f) const;
 };
 
@@ -271,7 +271,7 @@ struct AioOpenImageAction : public ImageActionBase {
   }
 
   void encode(bufferlist &bl) const;
-  void decode(__u8 version, bufferlist::iterator &it);
+  void decode(__u8 version, bufferlist::const_iterator &it);
   void dump(Formatter *f) const;
 };
 
@@ -290,23 +290,23 @@ struct UnknownAction {
   static const ActionType ACTION_TYPE = static_cast<ActionType>(-1);
 
   void encode(bufferlist &bl) const;
-  void decode(__u8 version, bufferlist::iterator &it);
+  void decode(__u8 version, bufferlist::const_iterator &it);
   void dump(Formatter *f) const;
 };
 
-typedef boost::variant<StartThreadAction,
-                       StopThreadAction,
-                       ReadAction,
-                       WriteAction,
-                       DiscardAction,
-                       AioReadAction,
-                       AioWriteAction,
-                       AioDiscardAction,
-                       OpenImageAction,
-                       CloseImageAction,
-                       AioOpenImageAction,
-                       AioCloseImageAction,
-                       UnknownAction> Action;
+typedef std::variant<StartThreadAction,
+		     StopThreadAction,
+		     ReadAction,
+		     WriteAction,
+		     DiscardAction,
+		     AioReadAction,
+		     AioWriteAction,
+		     AioDiscardAction,
+		     OpenImageAction,
+		     CloseImageAction,
+		     AioOpenImageAction,
+		     AioCloseImageAction,
+		     UnknownAction> Action;
 
 class ActionEntry {
 public:
@@ -318,25 +318,22 @@ public:
   }
 
   void encode(bufferlist &bl) const;
-  void decode(bufferlist::iterator &it);
-  void decode_unversioned(bufferlist::iterator &it);
+  void decode(bufferlist::const_iterator &it);
+  void decode_unversioned(bufferlist::const_iterator &it);
   void dump(Formatter *f) const;
 
-  static void generate_test_instances(std::list<ActionEntry *> &o);
+  static std::list<ActionEntry> generate_test_instances();
 
 private:
-  void decode(__u8 version, bufferlist::iterator &it);
+  void decode_versioned(__u8 version, bufferlist::const_iterator &it);
 };
 
 WRITE_CLASS_ENCODER(ActionEntry);
 
-} // namespace action
-} // namespace rbd_replay
-
 std::ostream &operator<<(std::ostream &out,
                          const rbd_replay::action::ActionType &type);
 
-using rbd_replay::action::decode;
-using rbd_replay::action::encode;
+} // namespace action
+} // namespace rbd_replay
 
 #endif // CEPH_RBD_REPLAY_ACTION_TYPES_H

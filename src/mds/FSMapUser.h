@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,30 +15,32 @@
 #ifndef CEPH_FSMAPCOMPACT_H
 #define CEPH_FSMAPCOMPACT_H
 
-#include "mds/mdstypes.h"
 #include <map>
+#include <iosfwd>
 #include <string>
+#include <string_view>
+
+#include "include/encoding.h"
+#include "include/cephfs/types.h" // for fs_cluster_id_t
+#include "include/types.h" // for epoch_t
+
+namespace ceph { class Formatter; }
 
 class FSMapUser {
 public:
   struct fs_info_t {
-    fs_cluster_id_t cid;
+    fs_info_t() {}
+    void encode(ceph::buffer::list& bl, uint64_t features) const;
+    void decode(ceph::buffer::list::const_iterator &bl);
     std::string name;
-    fs_info_t() : cid(FS_CLUSTER_ID_NONE) {}
-    void encode(bufferlist& bl, uint64_t features) const;
-    void decode(bufferlist::iterator &bl);
+    fs_cluster_id_t cid = FS_CLUSTER_ID_NONE;
   };
 
-  epoch_t epoch;
-  fs_cluster_id_t legacy_client_fscid;
-  std::map<fs_cluster_id_t, fs_info_t> filesystems;
-
-  FSMapUser()
-    : epoch(0), legacy_client_fscid(FS_CLUSTER_ID_NONE) { }
+  FSMapUser() {}
 
   epoch_t get_epoch() const { return epoch; }
 
-  fs_cluster_id_t get_fs_cid(const std::string &name) const {
+  fs_cluster_id_t get_fs_cid(std::string_view name) const {
     for (auto &p : filesystems) {
       if (p.second.name == name)
 	return p.first;
@@ -45,18 +48,22 @@ public:
     return FS_CLUSTER_ID_NONE;
   }
 
-  void encode(bufferlist& bl, uint64_t features) const;
-  void decode(bufferlist::iterator& bl);
+  void encode(ceph::buffer::list& bl, uint64_t features) const;
+  void decode(ceph::buffer::list::const_iterator& bl);
 
-  void print(ostream& out) const;
-  void print_summary(Formatter *f, ostream *out);
+  void print(std::ostream& out) const;
+  void print_summary(ceph::Formatter *f, std::ostream *out) const;
 
-  static void generate_test_instances(list<FSMapUser*>& ls);
+  static std::list<FSMapUser> generate_test_instances();
+
+  std::map<fs_cluster_id_t, fs_info_t> filesystems;
+  fs_cluster_id_t legacy_client_fscid = FS_CLUSTER_ID_NONE;
+  epoch_t epoch = 0;
 };
 WRITE_CLASS_ENCODER_FEATURES(FSMapUser::fs_info_t)
 WRITE_CLASS_ENCODER_FEATURES(FSMapUser)
 
-inline ostream& operator<<(ostream& out, FSMapUser& m) {
+inline std::ostream& operator<<(std::ostream& out, const FSMapUser& m) {
   m.print_summary(NULL, &out);
   return out;
 }

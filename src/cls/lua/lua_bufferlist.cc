@@ -35,7 +35,7 @@ bufferlist *clslua_checkbufferlist(lua_State *L, int pos)
  */
 bufferlist *clslua_pushbufferlist(lua_State *L, bufferlist *set)
 {
-  bufferlist_wrap *blw = (bufferlist_wrap *)lua_newuserdata(L, sizeof(*blw));
+  bufferlist_wrap *blw = static_cast<bufferlist_wrap *>(lua_newuserdata(L, sizeof(*blw)));
   blw->bl = set ? set : new bufferlist();
   blw->gc = set ? 0 : 1;
   luaL_getmetatable(L, LUA_BUFFERLIST);
@@ -139,8 +139,8 @@ static int bl_concat(lua_State *L)
 static int bl_gc(lua_State *L)
 {
   struct bufferlist_wrap *blw = to_blwrap(L);
-  assert(blw);
-  assert(blw->bl);
+  ceph_assert(blw);
+  ceph_assert(blw->bl);
   if (blw->gc)
     delete blw->bl;
   return 0;
@@ -163,7 +163,7 @@ static const struct luaL_Reg bllib_f[] = {
   {NULL, NULL}
 };
 
-LUALIB_API int luaopen_bufferlist(lua_State *L)
+int luaopen_bufferlist(lua_State *L)
 {
   /* Setup bufferlist user-data type */
   luaL_newmetatable(L, LUA_BUFFERLIST);

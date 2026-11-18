@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_OBJECT_MAP_RESIZE_REQUEST_H
 #define CEPH_LIBRBD_OBJECT_MAP_RESIZE_REQUEST_H
@@ -18,10 +18,12 @@ namespace object_map {
 
 class ResizeRequest : public Request {
 public:
-  ResizeRequest(ImageCtx &image_ctx, ceph::BitVector<2> *object_map,
-                uint64_t snap_id, uint64_t new_size,
-      	  uint8_t default_object_state, Context *on_finish)
-    : Request(image_ctx, snap_id, on_finish), m_object_map(object_map),
+  ResizeRequest(ImageCtx &image_ctx, ceph::shared_mutex *object_map_lock,
+                ceph::BitVector<2> *object_map, uint64_t snap_id,
+                uint64_t new_size, uint8_t default_object_state,
+                Context *on_finish)
+    : Request(image_ctx, snap_id, on_finish),
+      m_object_map_lock(object_map_lock), m_object_map(object_map),
       m_num_objs(0), m_new_size(new_size),
       m_default_object_state(default_object_state)
   {
@@ -30,12 +32,13 @@ public:
   static void resize(ceph::BitVector<2> *object_map, uint64_t num_objs,
                      uint8_t default_state);
 
-  virtual void send();
+  void send() override;
 
 protected:
-  virtual void finish_request() override;
+  void finish_request() override;
 
 private:
+  ceph::shared_mutex* m_object_map_lock;
   ceph::BitVector<2> *m_object_map;
   uint64_t m_num_objs;
   uint64_t m_new_size;

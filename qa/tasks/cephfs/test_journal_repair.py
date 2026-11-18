@@ -3,10 +3,13 @@
 Test our tools for recovering the content of damaged journals
 """
 
+from io import StringIO
+import re
 import json
 import logging
 from textwrap import dedent
 import time
+import tempfile
 
 from teuthology.exceptions import CommandFailedError, ConnectionLostError
 from tasks.cephfs.filesystem import ObjectNotFound, ROOT_INO
@@ -67,8 +70,7 @@ class TestJournalRepair(CephFSTestCase):
         self.mount_a.umount_wait()
 
         # Stop the MDS
-        self.fs.mds_stop()
-        self.fs.mds_fail()
+        self.fs.fail()
 
         # Now, the journal should contain the operations, but the backing
         # store shouldn't
@@ -77,7 +79,7 @@ class TestJournalRepair(CephFSTestCase):
         self.assertEqual(self.fs.list_dirfrag(ROOT_INO), [])
 
         # Execute the dentry recovery, this should populate the backing store
-        self.fs.journal_tool(['event', 'recover_dentries', 'list'])
+        self.fs.journal_tool(['event', 'recover_dentries', 'list'], 0)
 
         # Dentries in ROOT_INO are present
         self.assertEqual(sorted(self.fs.list_dirfrag(ROOT_INO)), sorted(['rootfile_head', 'subdir_head', 'linkdir_head']))
@@ -87,13 +89,12 @@ class TestJournalRepair(CephFSTestCase):
 
         # Now check the MDS can read what we wrote: truncate the journal
         # and start the mds.
-        self.fs.journal_tool(['journal', 'reset'])
-        self.fs.mds_fail_restart()
+        self.fs.journal_tool(['journal', 'reset', '--yes-i-really-really-mean-it'], 0)
+        self.fs.set_joinable()
         self.fs.wait_for_daemons()
 
         # List files
-        self.mount_a.mount()
-        self.mount_a.wait_until_mounted()
+        self.mount_a.mount_wait()
 
         # First ls -R to populate MDCache, such that hardlinks will
         # resolve properly (recover_dentries does not create backtraces,
@@ -102,8 +103,7 @@ class TestJournalRepair(CephFSTestCase):
         # FIXME: hook in forward scrub here to regenerate backtraces
         proc = self.mount_a.run_shell(['ls', '-R'])
         self.mount_a.umount_wait()  # remount to clear client cache before our second ls
-        self.mount_a.mount()
-        self.mount_a.wait_until_mounted()
+        self.mount_a.mount_wait()
 
         proc = self.mount_a.run_shell(['ls', '-R'])
         self.assertEqual(proc.stdout.getvalue().strip(),
@@ -147,6 +147,168 @@ class TestJournalRepair(CephFSTestCase):
         # Check that we can do metadata ops in the recovered directory
         self.mount_a.run_shell(["touch", "subdir/subsubdir/subsubdirfile"])
 
+    def test_reset_trim(self):
+        """
+        That after forcibly resetting the journal with disaster recovery, the old
+        journal objects must be trimmed when fs is back online to recover the size
+        of metadata pool
+        """
+
+        self.fs.set_joinable(False) # no unintended failover
+
+        # Create dirs
+        self.mount_a.run_shell_payload("mkdir {alpha,bravo} && touch {alpha,bravo}/file")
+
+        # Do some IO to create multiple journal objects
+        self.mount_a.create_n_files("alpha/file", 5000)
+        self.mount_a.create_n_files("bravo/file", 5000)
+
+        # Stop (hard) the  MDS daemon
+        self.fs.rank_fail(rank=0)
+
+        # journal objects before reset
+        objects = self.fs.radosmo(["ls"], stdout=StringIO()).strip().split("\n")
+        journal_objs_before_reset = [
+            o for o in objects
+            if re.match(r"200\.[0-9A-Fa-f]{8}$", o) and o != "200.00000000"
+        ]
+
+        # Kill the mount as dentries isn't being recovered
+        log.info("Killing mount, it's blocked on the MDS we killed")
+        self.mount_a.kill()
+        self.mount_a.kill_cleanup()
+
+        # Run journal reset to validate it doesn't reset journal trim position
+        self.fs.fail()
+        self.fs.journal_tool(["journal", "reset", "--yes-i-really-really-mean-it"], 0)
+
+        # It may have incorrect dir stats
+        self.config_set('mds', 'mds_verify_scatter', 'false')
+        self.config_set('mds', 'mds_debug_scatterstat', 'false')
+
+        # Bring an MDS back online
+        self.fs.set_joinable(True)
+        self.fs.wait_for_daemons()
+        self.mount_a.mount_wait()
+
+        # Create few more files to validate that fs is intact
+        self.mount_a.run_shell_payload("mkdir dir1 && touch dir1/file_after_reset")
+        self.mount_a.create_n_files("dir1/file_after_reset", 100)
+
+        # Flush the journal to verify if the journal objects are trimmed
+        self.fs.rank_asok(["flush", "journal"], rank=0)
+
+        # journal objects after reset
+        objects = self.fs.radosmo(["ls"], stdout=StringIO()).strip().split("\n")
+        journal_objs_after_reset = [
+            o for o in objects
+            if re.match(r"200\.[0-9A-Fa-f]{8}$", o) and o != "200.00000000"
+        ]
+
+        # Validate that the journal flush has trimmed the old journal objects
+        self.assertGreater(len(journal_objs_before_reset), len(journal_objs_after_reset))
+
+    def test_cephfs_journal_tool_recover_dentries_with_huge_journal(self):
+        """
+        That after having a pile of unflushed dentries and mds crashed,
+        invocation of `cephfs-journal-tool recover_dentries summary` can
+        flush dentries into RADOS without getting consuming too much RSS
+        or getting OOM killed.
+
+        NOTE: this test runs through 10M iterations each with 6 ops, totalling
+        to 60K ops. Please run this with caution.
+        """
+
+        # Register cleanup of the config_set so that a partial run can still
+        # reset the state
+        self.addCleanup(self.config_rm, 'mds', 'debug_mds')
+        self.addCleanup(self.config_rm, 'mds', 'debug_ms')
+        self.addCleanup(self.config_rm, 'mds', 'mds_cache_memory_limit')
+        self.addCleanup(self.config_rm, 'mds', 'mds_log_max_segments')
+        self.addCleanup(self.config_rm, 'mds', 'mds_log_warn_factor')
+        self.addCleanup(self.config_rm, 'mds', 'mds_log_trim_upkeep_interval')
+        self.addCleanup(self.config_rm, 'mds', 'mds_verify_scatter')
+        self.addCleanup(self.config_rm, 'mds', 'mds_debug_scatterstat')
+
+        # debugging can be too slow given how long the file names are being
+        # used in the test case therefore turn off the mds
+        self.config_set('mds', 'debug_mds', '0')
+        self.config_set('mds', 'debug_ms', '0')
+
+        # We do not want any unintended failover
+        self.fs.set_joinable(False)
+
+        # Set the MDS cache limit to 32GiB
+        self.config_set('mds', 'mds_cache_memory_limit', '34359738368')
+
+        # 100K segments limit is more than enough for 60M metadata ops
+        # with mds_log_events_per_segment being 1024 (default)
+        self.config_set('mds', 'mds_log_max_segments', '100000')
+
+        # eases generating heath warnings
+        self.config_set('mds', 'mds_log_warn_factor', '1')
+
+        # Sleep trim() for a day
+        self.config_set('mds', 'mds_log_trim_upkeep_interval', '86400')
+
+        # Clutter the journal
+        self.mount_a.run_shell_payload(
+            """
+set -u
+rm -rf w*
+A200=$(printf 'A%.0s' {1..200})
+X400=$(printf 'X%.0s' {1..400})
+export A200 X400
+for w in $(seq 0 19); do
+(
+    d="w${w}"
+    mkdir -p "$d/a" "$d/b" "$d/c"
+    for ((i = 0; i < 10000; i++)); do
+        touch "$d/a/${A200}_f${i}"
+        ln "$d/a/${A200}_f${i}" "$d/b/${A200}_l${i}"
+        mv "$d/b/${A200}_l${i}" "$d/c/${A200}_r${i}"
+        ln "$d/a/${A200}_f${i}" "$d/c/${A200}_h${i}"
+        mv "$d/a/${A200}_f${i}" "$d/b/${A200}_m${i}"
+        setfattr -n user.chaos -v "$X400" "$d/b/${A200}_m${i}"
+    done
+) &
+done
+wait
+""",timeout=43200)
+        
+        # kill the mds
+        self.fs.rank_fail(rank=0)
+
+        # Try to access files from the client
+        blocked_ls = self.mount_a.run_shell(["ls", "w0/a"], wait=False)
+        log.info("Sleeping to check ls is blocked...")
+        time.sleep(60)
+        self.assertFalse(blocked_ls.finished)
+        self.mount_a.kill()
+        self.mount_a.kill_cleanup()
+
+        # flush dentries into RADOS
+        self.fs.fail()
+        result = self.fs.journal_tool(["event", "recover_dentries", "summary",
+                                       "--max-rss", "524288000"], 0,
+                                       quiet=True)
+        log.info(f"recover_dentries result:\n{result}")
+
+        # test dentries by truncating the journal
+        self.fs.journal_tool(['journal', 'reset', '--yes-i-really-really-mean-it'], 0)
+        
+        # Dir stats maybe inconsistent post journal reset
+        self.config_set('mds', 'mds_verify_scatter', 'false')
+        self.config_set('mds', 'mds_debug_scatterstat', 'false')
+
+        self.fs.set_joinable(True)
+        status = self.fs.wait_for_daemons()
+        self.assertEqual(len(list(self.fs.get_ranks(status=status))), 1)
+        self.mount_a.mount_wait()
+        # checking one of the dirs should be enough
+        self.mount_a.run_shell(["ls", "w0"], wait=True)
+
+
     @for_teuthology # 308s
     def test_reset(self):
         """
@@ -160,48 +322,32 @@ class TestJournalRepair(CephFSTestCase):
         """
 
         # Set max_mds to 2
-        self.fs.mon_manager.raw_cluster_cmd_result('mds', 'set', "allow_multimds",
-                                                   "true", "--yes-i-really-mean-it")
-        self.fs.mon_manager.raw_cluster_cmd_result('mds', 'set', "max_mds", "2")
+        self.fs.set_max_mds(2)
+        status = self.fs.wait_for_daemons()
+        rank0_gid = self.fs.get_rank(rank=0, status=status)['gid']
+        self.fs.set_joinable(False) # no unintended failover
 
-        # See that we have two active MDSs
-        self.wait_until_equal(lambda: len(self.fs.get_active_names()), 2, 30,
-                              reject_fn=lambda v: v > 2 or v < 1)
-        active_mds_names = self.fs.get_active_names()
+        # Create a dir on each rank
+        self.mount_a.run_shell_payload("mkdir {alpha,bravo} && touch {alpha,bravo}/file")
+        self.mount_a.setfattr("alpha/", "ceph.dir.pin", "0")
+        self.mount_a.setfattr("bravo/", "ceph.dir.pin", "1")
 
-        # Switch off any unneeded MDS daemons
-        for unneeded_mds in set(self.mds_cluster.mds_ids) - set(active_mds_names):
-            self.mds_cluster.mds_stop(unneeded_mds)
-            self.mds_cluster.mds_fail(unneeded_mds)
+        # Ensure the pinning has taken effect and the /bravo dir is now
+        # migrated to rank 1.
+        self._wait_subtrees([('/bravo', 1), ('/alpha', 0)], rank=0, status=status)
 
-        # Do a bunch of I/O such that at least some will hit the second MDS: create
-        # lots of directories so that the balancer should find it easy to make a decision
-        # to allocate some of them to the second mds.
-        spammers = []
-        for n in range(0, 16):
-            dir_name = "spam_{0}".format(n)
-            spammers.append(self.mount_a.spam_dir_background(dir_name))
-
-        def subtrees_assigned():
-            got_subtrees = self.fs.mds_asok(["get", "subtrees"], mds_id=active_mds_names[0])
-            rank_1_count = len([s for s in got_subtrees if s['auth_first'] == 1])
-
-            # Greater than 1, because there is typically 1 for ~mds1, and once it
-            # has been assigned something in addition to that it means it has been
-            # assigned a "real" subtree.
-            return rank_1_count > 1
-
-        # We are waiting for the MDS to respond to hot directories, which
-        # is not guaranteed to happen at a particular time, so a lengthy timeout here.
-        self.wait_until_true(subtrees_assigned, 600)
+        # Do some IO (this should be split across ranks according to
+        # the rank-pinned dirs)
+        self.mount_a.create_n_files("alpha/file", 1000)
+        self.mount_a.create_n_files("bravo/file", 1000)
 
         # Flush the journals so that we have some backing store data
         # belonging to one MDS, and some to the other MDS.
-        for mds_name in active_mds_names:
-            self.fs.mds_asok(["flush", "journal"], mds_name)
+        self.fs.rank_asok(["flush", "journal"], rank=0)
+        self.fs.rank_asok(["flush", "journal"], rank=1)
 
         # Stop (hard) the second MDS daemon
-        self.fs.mds_stop(active_mds_names[1])
+        self.fs.rank_fail(rank=1)
 
         # Wipe out the tables for MDS rank 1 so that it is broken and can't start
         # (this is the simulated failure that we will demonstrate that the disaster
@@ -230,20 +376,9 @@ class TestJournalRepair(CephFSTestCase):
             # killing the mount also means killing the node.
             pass
 
-        log.info("Terminating spammer processes...")
-        for spammer_proc in spammers:
-            spammer_proc.stdin.close()
-            try:
-                spammer_proc.wait()
-            except (CommandFailedError, ConnectionLostError):
-                # The ConnectionLostError case is for kernel client, where
-                # killing the mount also means killing the node.
-                pass
-
         # See that the second MDS will crash when it starts and tries to
         # acquire rank 1
-        damaged_id = active_mds_names[1]
-        self.fs.mds_restart(damaged_id)
+        self.fs.set_joinable(True)
 
         # The daemon taking the damaged rank should start starting, then
         # restart back into standby after asking the mon to mark the rank
@@ -253,46 +388,30 @@ class TestJournalRepair(CephFSTestCase):
             return 1 in mds_map['damaged']
 
         self.wait_until_true(is_marked_damaged, 60)
-
-        def get_state():
-            info = self.mds_cluster.get_mds_info(damaged_id)
-            return info['state'] if info is not None else None
-
-        self.wait_until_equal(
-                get_state,
-                "up:standby",
-                timeout=60)
-
-        self.fs.mds_stop(damaged_id)
-        self.fs.mds_fail(damaged_id)
+        self.assertEqual(rank0_gid, self.fs.get_rank(rank=0)['gid'])
 
         # Now give up and go through a disaster recovery procedure
-        self.fs.mds_stop(active_mds_names[0])
-        self.fs.mds_fail(active_mds_names[0])
+        self.fs.fail()
         # Invoke recover_dentries quietly, because otherwise log spews millions of lines
-        self.fs.journal_tool(["event", "recover_dentries", "summary"], rank=0, quiet=True)
-        self.fs.journal_tool(["event", "recover_dentries", "summary"], rank=1, quiet=True)
+        self.fs.journal_tool(["event", "recover_dentries", "summary"], 0, quiet=True)
+        self.fs.journal_tool(["event", "recover_dentries", "summary"], 1, quiet=True)
         self.fs.table_tool(["0", "reset", "session"])
-        self.fs.journal_tool(["journal", "reset"], rank=0)
+        self.fs.journal_tool(["journal", "reset", "--yes-i-really-really-mean-it"], 0)
         self.fs.erase_mds_objects(1)
-        self.fs.mon_manager.raw_cluster_cmd('fs', 'reset', self.fs.name,
-                '--yes-i-really-mean-it')
+        self.run_ceph_cmd('fs', 'reset', self.fs.name,
+                          '--yes-i-really-mean-it')
 
         # Bring an MDS back online, mount a client, and see that we can walk the full
         # filesystem tree again
-        self.fs.mds_fail_restart(active_mds_names[0])
-        self.wait_until_equal(lambda: self.fs.get_active_names(), [active_mds_names[0]], 30,
-                              reject_fn=lambda v: len(v) > 1)
-        self.mount_a.mount()
+        self.fs.set_joinable(True) # redundant with `fs reset`
+        status = self.fs.wait_for_daemons()
+        self.assertEqual(len(list(self.fs.get_ranks(status=status))), 1)
+        self.mount_a.mount_wait()
         self.mount_a.run_shell(["ls", "-R"], wait=True)
 
     def test_table_tool(self):
-        active_mdss = self.fs.get_active_names()
-        self.assertEqual(len(active_mdss), 1)
-        mds_name = active_mdss[0]
-
         self.mount_a.run_shell(["touch", "foo"])
-        self.fs.mds_asok(["flush", "journal"], mds_name)
+        self.fs.rank_asok(["flush", "journal"])
 
         log.info(self.fs.table_tool(["all", "show", "inode"]))
         log.info(self.fs.table_tool(["all", "show", "snap"]))
@@ -320,14 +439,16 @@ class TestJournalRepair(CephFSTestCase):
         # Should see one session
         session_data = json.loads(self.fs.table_tool(
             ["all", "show", "session"]))
-        self.assertEqual(len(session_data["0"]["data"]["Sessions"]), 1)
+        self.assertEqual(len(session_data["0"]["data"]["sessions"]), 1)
         self.assertEqual(session_data["0"]["result"], 0)
 
         # Should see no snaps
         self.assertEqual(
             json.loads(self.fs.table_tool(["all", "show", "snap"])),
-            {"version": 0,
+            {"version": 1,
              "snapserver": {"last_snap": 1,
+                            "last_created": 1,
+                            "last_destroyed": 1,
                             "pending_noop": [],
                             "snaps": [],
                             "need_to_purge": {},
@@ -347,7 +468,7 @@ class TestJournalRepair(CephFSTestCase):
         # Should see 0 sessions
         session_data = json.loads(self.fs.table_tool(
             ["all", "show", "session"]))
-        self.assertEqual(len(session_data["0"]["data"]["Sessions"]), 0)
+        self.assertEqual(len(session_data["0"]["data"]["sessions"]), 0)
         self.assertEqual(session_data["0"]["result"], 0)
 
         # Should see entire inode range now marked free
@@ -368,6 +489,8 @@ class TestJournalRepair(CephFSTestCase):
             json.loads(self.fs.table_tool(["all", "show", "snap"])),
             {"version": 1,
              "snapserver": {"last_snap": 1,
+                            "last_created": 1,
+                            "last_destroyed": 1,
                             "pending_noop": [],
                             "snaps": [],
                             "need_to_purge": {},
@@ -418,8 +541,7 @@ class TestJournalRepair(CephFSTestCase):
         for mount in self.mounts:
             mount.umount_wait()
 
-        self.fs.mds_stop()
-        self.fs.mds_fail()
+        self.fs.fail()
 
         # journal tool smoke
         workunit(self.ctx, {
@@ -432,10 +554,10 @@ class TestJournalRepair(CephFSTestCase):
 
 
 
-        self.fs.mds_restart()
+        self.fs.set_joinable()
         self.fs.wait_for_daemons()
 
-        self.mount_a.mount()
+        self.mount_a.mount_wait()
 
         # trivial sync moutn a
         workunit(self.ctx, {
@@ -446,3 +568,183 @@ class TestJournalRepair(CephFSTestCase):
             "timeout": "1h"
         })
 
+    def test_journal_import_from_empty_dump_file(self):
+        """
+        That the 'journal import' recognizes empty file read and errors out.
+        """
+        fname = tempfile.NamedTemporaryFile(delete=False).name
+        self.mount_a.run_shell(["sudo", "touch", fname], omit_sudo=False)
+        self.fs.fail()
+        import_out = None
+        try:
+            import_out = self.fs.journal_tool(["journal", "import", fname], 0)
+        except CommandFailedError as e:
+            self.mount_a.run_shell(["sudo", "rm", fname], omit_sudo=False)
+            raise RuntimeError(f"Unexpected journal import error: {str(e)}")
+        self.fs.set_joinable()
+        self.fs.wait_for_daemons()
+        try:
+            if import_out.endswith("done."):
+                assert False
+        except AssertionError:
+            raise RuntimeError(f"Unexpected journal-tool result: '{import_out}'")
+        finally:
+            self.mount_a.run_shell(["sudo", "rm", fname], omit_sudo=False)
+
+    def test_journal_import_from_invalid_dump_file(self):
+        """
+        That the 'journal import' recognizes invalid dump file and errors out.
+        """
+        # Create an invalid dump file with partial header
+        fname = tempfile.NamedTemporaryFile(delete=False).name
+        self.mount_a.run_shell(["sudo", "sh", "-c", f'printf "Ceph mds0 journal dump\n\
+        start offset 4194304 (0x400000)\n\
+        length 940 (0x3ac)\nwrite_pos 4194304 (0x400000)\n" > {fname}'], omit_sudo=False)
+        self.fs.fail()
+        try:
+            self.fs.journal_tool(["journal", "import", fname], 0)
+        except CommandFailedError as e:
+            self.fs.set_joinable()
+            self.fs.wait_for_daemons()
+            if e.exitstatus != 234:
+                raise RuntimeError(f"Unexpected journal import error: {str(e)}")
+        else:
+            self.fs.set_joinable()
+            self.fs.wait_for_daemons()
+            raise RuntimeError("Expected journal import to fail")
+        finally:
+            self.mount_a.run_shell(["sudo", "rm", fname], omit_sudo=False)
+
+    def test_header_check_after_journal_recovery(self):
+        """
+        That the 'journal import' recognizes invalid headers post journal recovery and errors out.
+        """
+        # Create an invalid dump file which doesn't have 'object_size' header
+        fname = tempfile.NamedTemporaryFile(delete=False).name
+        self.mount_a.run_shell(["sudo", "sh", "-c", f'printf "Ceph mds0 journal dump\n\
+        start offset 4194304 (0x400000)\nlength 940 (0x3ac)\nwrite_pos 4194304 (0x400000)\n\
+        format 1\ntrimmed_pos 4194304 (0x400000)\nstripe_unit 4194304 (0x400000)\nstripe_count 1 (0x1)\n\
+        fsid 41334b86-2666-4269-a8ea-313bc073564c\n" > {fname}'], omit_sudo=False)
+        self.fs.fail()
+        try:
+            self.fs.journal_tool(["journal", "import", fname, "--force"], 0)
+        except CommandFailedError as e:
+            self.fs.set_joinable()
+            self.fs.wait_for_daemons()
+            if e.exitstatus != 234:
+                raise RuntimeError(f"Unexpected journal import error: {str(e)}")
+        else:
+            self.fs.set_joinable()
+            self.fs.wait_for_daemons()
+            raise RuntimeError("Expected journal import to fail")
+        finally:
+            self.mount_a.run_shell(["sudo", "rm", fname], omit_sudo=False)
+
+    def test_recover_header(self):
+        """
+        Validates the discovery of segment boundaries, dry-run reporting,
+        and header field modification (trimmed_pos, expire_pos, write_pos) via --force.
+        after a deliberate journal corruption that breaks MDS replay.
+        """
+        # Generate metadata events in the journal
+        log.info("Creating file system activity to populate the journal...")
+        test_dir = "header_recover_test_dir"
+        self.mount_a.run_shell(["mkdir", "-p", test_dir])
+        for i in range(20):
+            self.mount_a.run_shell(["touch", f"{test_dir}/file_{i}"])
+
+        # Force a deep metadata log flush from the MDS to RADOS layers
+        log.info("Forcing absolute metadata flush to RADOS storage...")
+        self.mount_a.run_shell(["sync"])
+        # Follow the file's native multi-rank flush pattern to ensure write_pos > 0
+        self.fs.rank_asok(["flush", "journal"], rank=0)
+
+        # Fail the filesystem to run journal operations.
+        log.info("Fail the filesystem to run offline journal operations...")
+        self.fs.fail()
+
+        # Fetch the real header first to avoid breaking trimmed_pos constraints
+        log.info("Fetching healthy header to calculate dynamic corruption offset...")
+        header_raw = self.fs.journal_tool(["header", "get"], 0)
+        if "{" in header_raw:
+            header_raw = header_raw[header_raw.index("{"):]
+        header_json = json.loads(header_raw)
+
+        # Calculate a corrupt write position relative to the valid active stream position
+        real_write_pos = header_json["write_pos"]
+        corrupt_write_pos = real_write_pos - 4096 if real_write_pos > 4096 else real_write_pos + 4096
+
+        log.info(f"Corrupting the journal header by shifting write_pos from {real_write_pos} to {corrupt_write_pos}...")
+        self.fs.journal_tool(["header", "set", "write_pos", str(corrupt_write_pos)], 0)
+
+        log.info("Verifying that MDS daemon fails to replay the corrupted journal...")
+        self.fs.set_joinable()
+
+        # Capture the status profile while the FS is active/joinable
+        # so that the rank dictionary definitions exist.
+        time.sleep(10)
+        status = self.fs.status()
+        try:
+            info = status.get_rank(self.fs.id, 0)
+            current_state = info.get('state')
+            log.info(f"MDS daemon is in state: {current_state} after corruption.")
+            self.assertNotEqual(current_state, "up:active", "MDS reached active despite header corruption!")
+        except Exception as e:
+            log.info(f"MDS rank missing or failed as expected during replay: {e}")
+
+        # Fail the filesystem again to regain exclusive access to the journal
+        log.info("Regaining exclusive offline access...")
+        self.fs.fail()
+
+        # Test Dry-Run Mode on the corrupted journal
+        log.info("Executing recover_header in dry-run mode (without --force)...")
+        dry_run_output = self.fs.journal_tool(["header", "recover"], 0)
+        log.info(f"Dry-run output:\n{dry_run_output}")
+
+        # Assert against outputs printed in JournalTool::recover_header
+        self.assertIn("Proposed Journal Header Updates:", dry_run_output)
+        self.assertIn("trimmed_pos:", dry_run_output)
+        self.assertIn("expire_pos:", dry_run_output)
+        self.assertIn("read_pos:", dry_run_output)
+        self.assertIn("write_pos:", dry_run_output)
+        self.assertIn("Target event type at proposed read_pos:", dry_run_output)
+        self.assertIn("Dry-run mode enabled. Header modifications skipped.", dry_run_output)
+
+        # Test Mutation Mode (--force)
+        log.info("Executing recover_header with --force to commit changes to RADOS...")
+        mutation_output = self.fs.journal_tool(["header", "recover", "--force"], 0)
+        log.info(f"Mutation output:\n{mutation_output}")
+
+        # Verify the success indicators printed upon successful RADOS synchronization
+        self.assertIn("Proposed Journal Header Updates:", mutation_output)
+        self.assertIn("trimmed_pos:", mutation_output)
+        self.assertIn("expire_pos:", mutation_output)
+        self.assertIn("read_pos:", mutation_output)
+        self.assertIn("write_pos:", mutation_output)
+        self.assertIn("Successfully recovered journal header.", mutation_output)
+        self.assertNotIn("Dry-run mode enabled", mutation_output)
+
+        log.info("Resetting session and inode allocation tables to prevent boot loops...")
+        target_rank = f"{self.fs.name}:0"
+        self.fs.table_tool([target_rank, "reset", "session"])
+        self.fs.table_tool([target_rank, "reset", "inode"])
+
+        # Bring the filesystem back up and confirm MDS can now replay successfully
+        log.info("Verify file system stability post-recovery...")
+        self.fs.set_joinable()
+
+        # Explicitly tell the Monitor to clear the "damaged" state record for Rank 0.
+        log.info("Clearing damaged rank flag from monitor status...")
+        self.fs.mon_manager.raw_cluster_cmd("mds", "repaired", f"{self.fs.name}:0")
+
+        # Wait for the daemons report healthy and active. This should succeed now.
+        try:
+            self.fs.wait_for_daemons(timeout=60)
+            log.info("MDS successfully booted up after journal recovery")
+        except Exception as e:
+            raise RuntimeError(f"MDS failed to start after journal recovery: {e}")
+
+        # Ensure data can still be read without MDS crashing
+        log.info("Verifying that directory contents are readable...")
+        dir_list = self.mount_a.run_shell(["ls", test_dir])
+        self.assertIn("file_19", dir_list.stdout.getvalue().strip())

@@ -1,10 +1,11 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/librbd/test_fixture.h"
 #include "test/librbd/test_support.h"
 #include "include/rbd_types.h"
 #include "librbd/MirroringWatcher.h"
+#include "common/Cond.h"
 #include "gtest/gtest.h"
 #include "gmock/gmock.h"
 #include <list>
@@ -23,16 +24,16 @@ struct MockMirroringWatcher : public MirroringWatcher<> {
     : MirroringWatcher<>(image_ctx.md_ctx, image_ctx.op_work_queue) {
   }
 
-  MOCK_METHOD2(handle_mode_updated, void(cls::rbd::MirrorMode, Context*));
-  MOCK_METHOD4(handle_image_updated, void(cls::rbd::MirrorImageState,
+  MOCK_METHOD1(handle_mode_updated, void(cls::rbd::MirrorMode));
+  MOCK_METHOD3(handle_image_updated, void(cls::rbd::MirrorImageState,
                                           const std::string &,
-                                          const std::string &,
-                                          Context*));
+                                          const std::string &));
 };
 
 } // anonymous namespace
 
 using ::testing::_;
+using ::testing::AtLeast;
 using ::testing::Invoke;
 using ::testing::StrEq;
 using ::testing::WithArg;
@@ -73,23 +74,27 @@ public:
 };
 
 TEST_F(TestMirroringWatcher, ModeUpdated) {
-  EXPECT_CALL(*m_image_watcher, handle_mode_updated(cls::rbd::MIRROR_MODE_DISABLED, _));
+  EXPECT_CALL(*m_image_watcher,
+              handle_mode_updated(cls::rbd::MIRROR_MODE_DISABLED))
+    .Times(AtLeast(1));
 
   C_SaferCond ctx;
-  MockMirroringWatcher::notify_mode_updated(m_ioctx, cls::rbd::MIRROR_MODE_DISABLED, &ctx);
+  MockMirroringWatcher::notify_mode_updated(
+    m_ioctx, cls::rbd::MIRROR_MODE_DISABLED, &ctx);
   ASSERT_EQ(0, ctx.wait());
 }
 
 TEST_F(TestMirroringWatcher, ImageStatusUpdated) {
   EXPECT_CALL(*m_image_watcher,
               handle_image_updated(cls::rbd::MIRROR_IMAGE_STATE_ENABLED,
-                                   StrEq("image id"), StrEq("global image id"),
-                                   _));
+                                   StrEq("image id"),
+                                   StrEq("global image id")))
+    .Times(AtLeast(1));
 
   C_SaferCond ctx;
-  MockMirroringWatcher::notify_image_updated(m_ioctx,
-                                             cls::rbd::MIRROR_IMAGE_STATE_ENABLED,
-                                             "image id", "global image id", &ctx);
+  MockMirroringWatcher::notify_image_updated(
+    m_ioctx, cls::rbd::MIRROR_IMAGE_STATE_ENABLED, "image id",
+    "global image id", &ctx);
   ASSERT_EQ(0, ctx.wait());
 }
 

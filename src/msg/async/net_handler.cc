@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -22,33 +23,58 @@
 #include <arpa/inet.h>
 
 #include "net_handler.h"
-#include "common/errno.h"
 #include "common/debug.h"
+#include "common/errno.h"
+#include "include/compat.h"
+#include "include/sock_compat.h"
 
 #define dout_subsys ceph_subsys_ms
 #undef dout_prefix
 #define dout_prefix *_dout << "NetHandler "
 
+#ifndef SMCPROTO_SMC
+  #define SMCPROTO_SMC           0       /* SMC protocol, IPv4 */
+  #define SMCPROTO_SMC6          1       /* SMC protocol, IPv6 */
+#endif
+
 namespace ceph{
 
 int NetHandler::create_socket(int domain, bool reuse_addr)
 {
-  int s, on = 1;
+  int s;
+  int r = 0;
+  int protocol = IPPROTO_TCP;
 
-  if ((s = ::socket(domain, SOCK_STREAM, 0)) == -1) {
-    lderr(cct) << __func__ << " couldn't create socket " << cpp_strerror(errno) << dendl;
-    return -errno;
+#if defined(AF_SMC)
+  if (this->try_smc) {
+    /* check if socket is eligible for AF_SMC */
+    if (domain == AF_INET || domain == AF_INET6) {
+      if (domain == AF_INET)
+        protocol = SMCPROTO_SMC;
+      else /* AF_INET6 */
+        protocol = SMCPROTO_SMC6;
+      domain = AF_SMC;
+    }
+  }
+#endif
+
+  if ((s = socket_cloexec(domain, SOCK_STREAM, protocol)) == -1) {
+    r = ceph_sock_errno();
+    lderr(cct) << __func__ << " couldn't create socket " << cpp_strerror(r) << dendl;
+    return -r;
   }
 
 #if !defined(__FreeBSD__)
   /* Make sure connection-intensive things like the benchmark
    * will be able to close/open sockets a zillion of times */
   if (reuse_addr) {
-    if (::setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) == -1) {
+    int on = 1;
+    if (::setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (SOCKOPT_VAL_TYPE)&on, sizeof(on)) == -1) {
+      r = ceph_sock_errno();
       lderr(cct) << __func__ << " setsockopt SO_REUSEADDR failed: "
-                 << strerror(errno) << dendl;
-      close(s);
-      return -errno;
+                 << strerror(r) << dendl;
+      compat_closesocket(s);
+      return -r;
     }
   }
 #endif
@@ -58,37 +84,34 @@ int NetHandler::create_socket(int domain, bool reuse_addr)
 
 int NetHandler::set_nonblock(int sd)
 {
+  int r = 0;
+#ifdef _WIN32
+  ULONG mode = 1;
+  r = ioctlsocket(sd, FIONBIO, &mode);
+  if (r) {
+    lderr(cct) << __func__ << " ioctlsocket(FIONBIO) failed: " << r
+                           << " " << WSAGetLastError() << dendl;
+    return -r;
+  }
+#else
   int flags;
 
   /* Set the socket nonblocking.
    * Note that fcntl(2) for F_GETFL and F_SETFL can't be
    * interrupted by a signal. */
   if ((flags = fcntl(sd, F_GETFL)) < 0 ) {
-    lderr(cct) << __func__ << " fcntl(F_GETFL) failed: " << strerror(errno) << dendl;
-    return -errno;
+    r = ceph_sock_errno();
+    lderr(cct) << __func__ << " fcntl(F_GETFL) failed: " << cpp_strerror(r) << dendl;
+    return -r;
   }
   if (fcntl(sd, F_SETFL, flags | O_NONBLOCK) < 0) {
-    lderr(cct) << __func__ << " fcntl(F_SETFL,O_NONBLOCK): " << strerror(errno) << dendl;
-    return -errno;
+    r = ceph_sock_errno();
+    lderr(cct) << __func__ << " fcntl(F_SETFL,O_NONBLOCK): " << cpp_strerror(r) << dendl;
+    return -r;
   }
+#endif
 
   return 0;
-}
-
-void NetHandler::set_close_on_exec(int sd)
-{
-  int flags = fcntl(sd, F_GETFD, 0);
-  if (flags < 0) {
-    int r = errno;
-    lderr(cct) << __func__ << " fcntl(F_GETFD): "
-	       << cpp_strerror(r) << dendl;
-    return;
-  }
-  if (fcntl(sd, F_SETFD, flags | FD_CLOEXEC)) {
-    int r = errno;
-    lderr(cct) << __func__ << " fcntl(F_SETFD): "
-	       << cpp_strerror(r) << dendl;
-  }
 }
 
 int NetHandler::set_socket_options(int sd, bool nodelay, int size)
@@ -97,57 +120,72 @@ int NetHandler::set_socket_options(int sd, bool nodelay, int size)
   // disable Nagle algorithm?
   if (nodelay) {
     int flag = 1;
-    r = ::setsockopt(sd, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+    r = ::setsockopt(sd, IPPROTO_TCP, TCP_NODELAY, (SOCKOPT_VAL_TYPE)&flag, sizeof(flag));
     if (r < 0) {
-      r = -errno;
+      r = ceph_sock_errno();
       ldout(cct, 0) << "couldn't set TCP_NODELAY: " << cpp_strerror(r) << dendl;
     }
   }
   if (size) {
-    r = ::setsockopt(sd, SOL_SOCKET, SO_RCVBUF, (void*)&size, sizeof(size));
+    r = ::setsockopt(sd, SOL_SOCKET, SO_RCVBUF, (SOCKOPT_VAL_TYPE)&size, sizeof(size));
     if (r < 0)  {
-      r = -errno;
+      r = ceph_sock_errno();
       ldout(cct, 0) << "couldn't set SO_RCVBUF to " << size << ": " << cpp_strerror(r) << dendl;
     }
   }
 
   // block ESIGPIPE
-#ifdef SO_NOSIGPIPE
+#ifdef CEPH_USE_SO_NOSIGPIPE
   int val = 1;
-  r = ::setsockopt(sd, SOL_SOCKET, SO_NOSIGPIPE, (void*)&val, sizeof(val));
+  r = ::setsockopt(sd, SOL_SOCKET, SO_NOSIGPIPE, (SOCKOPT_VAL_TYPE)&val, sizeof(val));
   if (r) {
-    r = -errno;
+    r = ceph_sock_errno();
     ldout(cct,0) << "couldn't set SO_NOSIGPIPE: " << cpp_strerror(r) << dendl;
   }
 #endif
-  return r;
+  return -r;
 }
 
-void NetHandler::set_priority(int sd, int prio)
+void NetHandler::set_priority(int sd, int prio, int domain)
 {
-  if (prio >= 0) {
-    int r = -1;
-#ifdef IPTOS_CLASS_CS6
-    int iptos = IPTOS_CLASS_CS6;
-    r = ::setsockopt(sd, IPPROTO_IP, IP_TOS, &iptos, sizeof(iptos));
-    if (r < 0) {
-      ldout(cct, 0) << __func__ << " couldn't set IP_TOS to " << iptos
-                    << ": " << cpp_strerror(errno) << dendl;
-    }
-#endif
-#if defined(SO_PRIORITY) 
-    // setsockopt(IPTOS_CLASS_CS6) sets the priority of the socket as 0.
-    // See http://goo.gl/QWhvsD and http://goo.gl/laTbjT
-    // We need to call setsockopt(SO_PRIORITY) after it.
-#if defined(__linux__)
-    r = ::setsockopt(sd, SOL_SOCKET, SO_PRIORITY, &prio, sizeof(prio));
-#endif
-    if (r < 0) {
-      ldout(cct, 0) << __func__ << " couldn't set SO_PRIORITY to " << prio
-                    << ": " << cpp_strerror(errno) << dendl;
-    }
-#endif
+#ifdef SO_PRIORITY
+  if (prio < 0) {
+    return;
   }
+  int r = -1;
+#ifdef IPTOS_CLASS_CS6
+  int iptos = IPTOS_CLASS_CS6;
+  switch (domain) {
+  case AF_INET:
+    r = ::setsockopt(sd, IPPROTO_IP, IP_TOS, (SOCKOPT_VAL_TYPE)&iptos, sizeof(iptos));
+    break;
+  case AF_INET6:
+    r = ::setsockopt(sd, IPPROTO_IPV6, IPV6_TCLASS, (SOCKOPT_VAL_TYPE)&iptos, sizeof(iptos));
+    break;
+  default:
+    lderr(cct) << "couldn't set ToS of unknown family (" << domain << ")"
+	       << " to " << iptos << dendl;
+    return;
+  }
+  if (r < 0) {
+    r = ceph_sock_errno();
+    ldout(cct,0) << "couldn't set TOS to " << iptos
+		 << ": " << cpp_strerror(r) << dendl;
+  }
+
+#endif	// IPTOS_CLASS_CS6
+  // setsockopt(IPTOS_CLASS_CS6) sets the priority of the socket as 0.
+  // See http://goo.gl/QWhvsD and http://goo.gl/laTbjT
+  // We need to call setsockopt(SO_PRIORITY) after it.
+  r = ::setsockopt(sd, SOL_SOCKET, SO_PRIORITY, (SOCKOPT_VAL_TYPE)&prio, sizeof(prio));
+  if (r < 0) {
+    r = ceph_sock_errno();
+    ldout(cct, 0) << __func__ << " couldn't set SO_PRIORITY to " << prio
+		  << ": " << cpp_strerror(r) << dendl;
+  }
+#else
+  return;
+#endif	// SO_PRIORITY
 }
 
 int NetHandler::generic_connect(const entity_addr_t& addr, const entity_addr_t &bind_addr, bool nonblock)
@@ -160,7 +198,7 @@ int NetHandler::generic_connect(const entity_addr_t& addr, const entity_addr_t &
   if (nonblock) {
     ret = set_nonblock(s);
     if (ret < 0) {
-      close(s);
+      compat_closesocket(s);
       return ret;
     }
   }
@@ -173,22 +211,24 @@ int NetHandler::generic_connect(const entity_addr_t& addr, const entity_addr_t &
       addr.set_port(0);
       ret = ::bind(s, addr.get_sockaddr(), addr.get_sockaddr_len());
       if (ret < 0) {
-        ret = -errno;
+        ret = ceph_sock_errno();
         ldout(cct, 2) << __func__ << " client bind error " << ", " << cpp_strerror(ret) << dendl;
-        close(s);
-        return ret;
+        compat_closesocket(s);
+        return -ret;
       }
     }
   }
 
   ret = ::connect(s, addr.get_sockaddr(), addr.get_sockaddr_len());
   if (ret < 0) {
-    if (errno == EINPROGRESS && nonblock)
+    ret = ceph_sock_errno();
+    // Windows can return WSAEWOULDBLOCK (converted to EAGAIN).
+    if ((ret == EINPROGRESS || ret == EAGAIN) && nonblock)
       return s;
 
-    ldout(cct, 10) << __func__ << " connect: " << strerror(errno) << dendl;
-    close(s);
-    return -errno;
+    ldout(cct, 10) << __func__ << " connect: " << cpp_strerror(ret) << dendl;
+    compat_closesocket(s);
+    return -ret;
   }
 
   return s;
@@ -196,13 +236,16 @@ int NetHandler::generic_connect(const entity_addr_t& addr, const entity_addr_t &
 
 int NetHandler::reconnect(const entity_addr_t &addr, int sd)
 {
+  int r = 0;
   int ret = ::connect(sd, addr.get_sockaddr(), addr.get_sockaddr_len());
 
-  if (ret < 0 && errno != EISCONN) {
-    ldout(cct, 10) << __func__ << " reconnect: " << strerror(errno) << dendl;
-    if (errno == EINPROGRESS || errno == EALREADY)
+  if (ret < 0 && ceph_sock_errno() != EISCONN) {
+    r = ceph_sock_errno();
+    ldout(cct, 10) << __func__ << " reconnect: " << r
+                   << " " << strerror(r) << dendl;
+    if (r == EINPROGRESS || r == EALREADY || r == EAGAIN)
       return 1;
-    return -errno;
+    return -r;
   }
 
   return 0;

@@ -1,18 +1,31 @@
-For the general process of submitting patches to ceph, read the below
+Project governance is defined by the `Technical Charter`_ and, under it, by
+
+`Governance`_
+
+which is part of this CONTRIBUTING file for the purposes of the Charter.
+
+For the general process of submitting changes to Ceph, read the below
 
 `Submitting Patches`_
 
-For documentation patches the the following guide will help you get started
+You should not hit *merge* on a pull request without being familiar with the
+
+`Merge Requirements`_
+
+For documentation changes the following guide will help you get started
 
 `Documenting Ceph`_
 
 Performance enhancements must come with test data and detailed
 explanations.
 
-Code cleanup is appreciated along with a patch that fixes a bug or
-implements a feature. Except on rare occasions, code cleanup that only
-involve coding style or whitespace modifications are discouraged,
-primarily because they cause problems when rebasing and backporting.
+Code cleanup is appreciated, as are contributions that fix bugs or
+implement features. Except on rare occasions, code cleanup that only
+relates to coding style or modifies whitespace is discouraged,
+primarily because it can cause problems when rebasing and backporting.
 
 .. _Submitting Patches: SubmittingPatches.rst
+.. _Merge Requirements:  MergeRequirements.rst
 .. _Documenting Ceph:  doc/start/documenting-ceph.rst
+.. _Governance:  doc/governance.rst
+.. _Technical Charter:  doc/technical-charter.rst

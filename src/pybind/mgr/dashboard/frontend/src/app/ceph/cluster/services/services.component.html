@@ -1,0 +1,120 @@
+@if (showDocPanel) {
+  <cd-orchestrator-doc-panel></cd-orchestrator-doc-panel>
+}
+@if (orchStatus?.available) {
+  <cd-table
+    [data]="services"
+    [columns]="columns"
+    identifier="service_name"
+    forceIdentifier="true"
+    columnMode="flex"
+    selectionType="single"
+    [autoReload]="5000"
+    [autoSave]="false"
+    (fetchData)="getServices($event)"
+    [hasDetails]="false"
+    [serverSide]="true"
+    [count]="count"
+    updateExpandedOnRefresh="always"
+    (updateSelection)="updateSelection($event)"
+  >
+    <cd-table-actions
+      class="table-actions"
+      [permission]="permissions.hosts"
+      [selection]="selection"
+      [tableActions]="tableActions"
+    >
+    </cd-table-actions>
+  </cd-table>
+}
+<router-outlet name="modal"></router-outlet>
+
+<ng-template
+  #runningTpl
+  let-value="data.value"
+>
+  <span ngbTooltip="Service instances running out of the total number of services requested.">
+    {{ value.running }} / {{ value.size }}
+  </span>
+  @if (value.running == 0 || value.size == 0) {
+    <svg
+      [cdsIcon]="icons.warning"
+      [size]="icons.size16"
+      class="cds-warning-color"
+    ></svg>
+  }
+</ng-template>
+
+<ng-template
+  #urlTpl
+  let-row="data.row"
+>
+  <div class="d-flex align-items-center gap-1">
+    <a
+      cdsLink
+      [routerLink]="[viewUrl, row.service_name | encodeUri, 'overview']"
+      (click)="onServiceLinkClick($event)"
+    >
+      {{ row.service_name }}
+    </a>
+
+    @if (serviceUrls[row.service_type]) {
+      @if (!isMgmtGateway) {
+        <a
+          target="_blank"
+          [href]="serviceUrls[row.service_type]"
+          (click)="$event.stopPropagation()"
+        >
+          <svg
+            [cdsIcon]="icons.launch"
+            [size]="icons.size16"
+            class="cds-info-color"
+          ></svg>
+        </a>
+      } @else {
+        <a
+          target="_blank"
+          [href]="row.service_type"
+          (click)="$event.stopPropagation()"
+        >
+          <svg
+            [cdsIcon]="icons.launch"
+            [size]="icons.size16"
+            class="cds-info-color"
+          ></svg>
+        </a>
+      }
+      <ng-template #mgmtGateway>
+        <a
+          target="_blank"
+          [href]="row.service_type"
+          (click)="$event.stopPropagation()"
+        >
+          <svg
+            [cdsIcon]="icons.launch"
+            [size]="icons.size16"
+            class="cds-info-color"
+          ></svg>
+        </a>
+      </ng-template>
+    }
+  </div>
+</ng-template>
+
+<ng-template
+  #certificateStatusTpl
+  let-row="data.row"
+>
+  @if (
+    row.certificate?.requires_certificate &&
+    row.certificate?.status &&
+    row.certificate?.status !== 'not_configured'
+  ) {
+    <span class="d-flex align-items-center gap-1">
+      <cd-icon [type]="statusIconMap[row.certificate.status] || statusIconMap['default']"></cd-icon>
+      {{ row.certificate | serviceCertificateStatus }}
+    </span>
+  } @else {
+    -
+  }
+</ng-template>

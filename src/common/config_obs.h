@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,30 +17,40 @@
 #define CEPH_CONFIG_OBS_H
 
 #include <set>
+#include <vector>
 #include <string>
 
-struct md_config_t;
+#include "common/config_fwd.h"
 
+namespace ceph {
 /** @brief Base class for configuration observers.
  * Use this as a base class for your object if it has to respond to configuration changes,
  * for example by updating some values or modifying its behavior.
  * Subscribe for configuration changes by calling the md_config_t::add_observer() method
  * and unsubscribe using md_config_t::remove_observer().
  */
-class md_config_obs_t {
+template<class ConfigProxy>
+class md_config_obs_impl {
 public:
-  virtual ~md_config_obs_t() {}
-  /** @brief Get a table of strings specifying the configuration keys in which the object is interested.
-   * This is called when the object is subscribed to configuration changes with add_observer().
-   * The returned table should not be freed until the observer is removed with remove_observer().
-   * Note that it is not possible to change the set of tracked keys without re-subscribing. */
-  virtual const char** get_tracked_conf_keys() const = 0;
+  virtual ~md_config_obs_impl() {}
+
+  /**
+   * Returns a vector of strings specifying the configuration keys in which
+   * the object is interested. This is called when the object is subscribed to
+   * configuration changes with add_observer().
+   *
+   * Note - the strings in the returned vector are 'moveable'. The caller
+   * (ostensibly the observer manager) is expected to move them into its
+   * map.
+   */
+  virtual std::vector<std::string> get_tracked_keys() const noexcept = 0;
+
   /// React to a configuration change.
-  virtual void handle_conf_change(const struct md_config_t *conf,
+  virtual void handle_conf_change(const ConfigProxy& conf,
 				  const std::set <std::string> &changed) = 0;
-  /// Unused for now
-  virtual void handle_subsys_change(const struct md_config_t *conf,
-				    const std::set<int>& changed) { }
 };
+}
+
+using md_config_obs_t = ceph::md_config_obs_impl<ConfigProxy>;
 
 #endif

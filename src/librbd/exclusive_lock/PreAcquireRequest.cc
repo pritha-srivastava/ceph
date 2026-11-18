@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/exclusive_lock/PreAcquireRequest.h"
 #include "librbd/Utils.h"
@@ -8,6 +8,7 @@
 #include "librbd/ImageCtx.h"
 #include "librbd/ImageWatcher.h"
 #include "librbd/ImageState.h"
+#include "librbd/asio/ContextWQ.h"
 
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
@@ -19,9 +20,7 @@ namespace exclusive_lock {
 
 using util::create_async_context_callback;
 using util::create_context_callback;
-using util::create_rados_ack_callback;
-using util::create_rados_safe_callback;
-
+using util::create_rados_callback;
 
 template <typename I>
 PreAcquireRequest<I>* PreAcquireRequest<I>::create(I &image_ctx,
@@ -80,7 +79,7 @@ void PreAcquireRequest<I>::handle_flush_notifies(int r) {
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 10) << dendl;
 
-  assert(r == 0);
+  ceph_assert(r == 0);
   finish();
 }
 

@@ -1,0 +1,94 @@
+@if (showHeading) {
+  <legend i18n>
+    {{ type === 'user' ? 'User Rate Limit' : 'Bucket Rate Limit' }}
+  </legend>
+}
+<table class="cds--data-table--sort cds--data-table--no-border cds--data-table cds--data-table--md">
+  <tbody>
+    <tr>
+      <td
+        i18n
+        class="bold w-25"
+      >
+        Enabled
+      </td>
+      <td class="w-75">{{ rateLimitConfig.enabled | booleanText }}</td>
+    </tr>
+    <tr>
+      <td
+        i18n
+        class="bold"
+      >
+        Maximum Read Ops
+      </td>
+      @if (!rateLimitConfig.enabled) {
+        <td>-</td>
+      }
+      @if (rateLimitConfig.enabled && rateLimitConfig.max_read_ops <= 0) {
+        <td i18n>Unlimited</td>
+      }
+      @if (rateLimitConfig.enabled && rateLimitConfig.max_read_ops > 0) {
+        <td>
+          {{ rateLimitConfig.max_read_ops }}
+        </td>
+      }
+    </tr>
+    <tr>
+      <td
+        i18n
+        class="bold"
+      >
+        Maximum Write Ops
+      </td>
+      @if (!rateLimitConfig.enabled) {
+        <td>-</td>
+      }
+      @if (rateLimitConfig.enabled && rateLimitConfig.max_write_ops <= 0) {
+        <td i18n>Unlimited</td>
+      }
+      @if (rateLimitConfig.enabled && rateLimitConfig.max_write_ops > 0) {
+        <td>
+          {{ rateLimitConfig.max_write_ops }}
+        </td>
+      }
+    </tr>
+    <tr>
+      <td
+        i18n
+        class="bold"
+      >
+        Maximum Read Bytes
+      </td>
+      @if (!rateLimitConfig.enabled) {
+        <td>-</td>
+      }
+      @if (rateLimitConfig.enabled && rateLimitConfig.max_read_bytes <= 0) {
+        <td i18n>Unlimited</td>
+      }
+      @if (rateLimitConfig.enabled && rateLimitConfig.max_read_bytes > 0) {
+        <td>
+          {{ rateLimitConfig.max_read_bytes | dimlessBinaryPerMinute }}
+        </td>
+      }
+    </tr>
+    <tr>
+      <td
+        i18n
+        class="bold"
+      >
+        Maximum Write Bytes
+      </td>
+      @if (!rateLimitConfig.enabled) {
+        <td>-</td>
+      }
+      @if (rateLimitConfig.enabled && rateLimitConfig.max_write_bytes <= 0) {
+        <td i18n>Unlimited</td>
+      }
+      @if (rateLimitConfig.enabled && rateLimitConfig.max_write_bytes > 0) {
+        <td>
+          {{ rateLimitConfig.max_write_bytes | dimlessBinaryPerMinute }}
+        </td>
+      }
+    </tr>
+  </tbody>
+</table>

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -31,18 +32,18 @@ struct ETableClient : public LogEvent {
     LogEvent(EVENT_TABLECLIENT),
     table(t), op(o), tid(ti) { }
 
-  void encode(bufferlist& bl, uint64_t features) const;
-  void decode(bufferlist::iterator& bl);
-  void dump(Formatter *f) const;
-  static void generate_test_instances(list<ETableClient*>& ls);
+  void encode(bufferlist& bl, uint64_t features) const override;
+  void decode(bufferlist::const_iterator& bl) override;
+  void dump(Formatter *f) const override;
+  static std::list<ETableClient> generate_test_instances();
 
-  void print(ostream& out) const {
+  void print(std::ostream& out) const override {
     out << "ETableClient " << get_mdstable_name(table) << " " << get_mdstableserver_opname(op);
     if (tid) out << " tid " << tid;
   }  
 
   //void update_segment();
-  void replay(MDSRank *mds);  
+  void replay(MDSRank *mds) override;  
 };
 WRITE_CLASS_ENCODER_FEATURES(ETableClient)
 

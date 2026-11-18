@@ -1,7 +1,8 @@
 roles:
-- - mon.0
-  - mon.1
-  - mon.2
+- - mon.a
+  - mon.b
+  - mon.c
+  - mgr.x
   - osd.0
   - osd.1
   - osd.2
@@ -13,8 +14,20 @@ openstack:
 tasks:
 - install:
 - ceph:
-    log-whitelist:
-    - no reply from
+    pre-mgr-commands:
+      - sudo ceph config set mgr mgr_pool false --force
+    log-ignorelist:
+      - no reply from
+      - overall HEALTH_
+      - \(MON_DOWN\)
+      - \(MGR_DOWN\)
+      - \(OSDMAP_FLAGS\)
+      - \(OSD_
+      - \(PG_
+      - \(POOL_APP_NOT_ENABLED\)
+    conf:
+      mon:
+        debug auth: 30
 - full_sequential:
   - radosbench:
       clients: [client.0]

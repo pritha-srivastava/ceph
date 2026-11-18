@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,35 +17,30 @@
 #ifndef CEPH_Sem_Posix__H
 #define CEPH_Sem_Posix__H
 
+#include "common/ceph_mutex.h"
+
 class Semaphore
 {
-  Mutex m;
-  Cond c;
-  int count;
+  ceph::mutex m = ceph::make_mutex("Semaphore::m");
+  ceph::condition_variable c;
+  int count = 0;
 
   public:
 
-  Semaphore() : m("Semaphore::m")
-  {
-    count = 0;
-  }
-
   void Put()
   { 
-    m.Lock();
+    std::lock_guard l(m);
     count++;
-    c.Signal();
-    m.Unlock();
+    c.notify_all();
   }
 
   void Get() 
-  { 
-    m.Lock();
+  {
+    std::unique_lock l(m);
     while(count <= 0) {
-      c.Wait(m);
+      c.wait(l);
     }
     count--;
-    m.Unlock();
   }
 };
 

@@ -1,4 +1,4 @@
-#!/bin/bash -e
+#!/usr/bin/env bash
 
 # Copyright (C) 2013 Inktank Storage, Inc.
 #
@@ -26,7 +26,7 @@
 # the background.
 #
 # An iteration of the test consists of performing some number of
-# passes, initating each pass as a background job, and finally
+# passes, initiating each pass as a background job, and finally
 # sleeping for a variable delay.  The delay is initially a specified
 # value, but each iteration shortens that proportionally, such that
 # the last iteration will not delay at all.
@@ -47,7 +47,7 @@
 
 ################################################################
 
-set -x
+set -ex
 
 # Default flag values; RBD_CONCURRENT_ITER names are intended
 # to be used in yaml scripts to pass in alternate values, e.g.:

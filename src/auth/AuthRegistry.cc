@@ -1,0 +1,379 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
+#include "AuthRegistry.h"
+
+#include "cephx/CephxAuthorizeHandler.h"
+#ifdef HAVE_GSSAPI
+#include "krb/KrbAuthorizeHandler.hpp"
+#endif
+#include "none/AuthNoneAuthorizeHandler.h"
+#include "common/ceph_context.h"
+#include "common/StackStringStream.h"
+#include "common/debug.h"
+#include "include/container_ios.h"
+#include "auth/KeyRing.h"
+
+#define dout_subsys ceph_subsys_auth
+#undef dout_prefix
+#define dout_prefix *_dout << "AuthRegistry(" << this << ") "
+
+using std::string;
+using namespace std::literals;
+
+AuthRegistry::AuthRegistry(CephContext *cct)
+  : cct(cct)
+{
+  cct->_conf.add_observer(this);
+  _refresh_config();
+}
+
+AuthRegistry::~AuthRegistry()
+{
+  cct->_conf.remove_observer(this);
+  for (auto i : authorize_handlers) {
+    delete i.second;
+  }
+}
+
+std::vector<std::string> AuthRegistry::get_tracked_keys() const noexcept
+{
+  return {
+    "auth_client_required"s,
+    "auth_cluster_required"s,
+    "auth_service_required"s,
+    "ms_mon_cluster_mode"s,
+    "ms_mon_service_mode"s,
+    "ms_mon_client_mode"s,
+    "ms_cluster_mode"s,
+    "ms_service_mode"s,
+    "ms_client_mode"s,
+    "keyring"s
+  };
+}
+
+void AuthRegistry::handle_conf_change(
+  const ConfigProxy& conf,
+  const std::set<std::string>& changed)
+{
+  ldout(cct, 20) << __func__ << ": changed: " << changed << dendl;
+  std::scoped_lock l(lock);
+  _refresh_config();
+}
+
+
+void AuthRegistry::_parse_method_list(const string& s,
+				      std::vector<uint32_t> *v)
+{
+  std::list<std::string> sup_list;
+  get_str_list(s, sup_list);
+  if (sup_list.empty()) {
+    lderr(cct) << "WARNING: empty auth protocol list" << dendl;
+  }
+  v->clear();
+  for (auto& i : sup_list) {
+    ldout(cct, 5) << "adding auth protocol: " << i << dendl;
+    if (i == "cephx") {
+      v->push_back(CEPH_AUTH_CEPHX);
+    } else if (i == "none") {
+      v->push_back(CEPH_AUTH_NONE);
+    } else if (i == "gss") {
+      v->push_back(CEPH_AUTH_GSS);
+    } else {
+      lderr(cct) << "WARNING: unknown auth protocol defined: " << i << dendl;
+    }
+  }
+  if (v->empty()) {
+    lderr(cct) << "WARNING: no auth protocol defined" << dendl;
+  }
+  ldout(cct,20) << __func__ << " " << s << " -> " << *v << dendl;
+}
+
+void AuthRegistry::_parse_mode_list(const string& s,
+				    std::vector<uint32_t> *v)
+{
+  std::list<std::string> sup_list;
+  get_str_list(s, sup_list);
+  if (sup_list.empty()) {
+    lderr(cct) << "WARNING: empty auth protocol list" << dendl;
+  }
+  v->clear();
+  for (auto& i : sup_list) {
+    ldout(cct, 5) << "adding con mode: " << i << dendl;
+    if (i == "crc") {
+      v->push_back(CEPH_CON_MODE_CRC);
+    } else if (i == "secure") {
+      v->push_back(CEPH_CON_MODE_SECURE);
+    } else {
+      lderr(cct) << "WARNING: unknown connection mode " << i << dendl;
+    }
+  }
+  if (v->empty()) {
+    lderr(cct) << "WARNING: no connection modes defined" << dendl;
+  }
+  ldout(cct,20) << __func__ << " " << s << " -> " << *v << dendl;
+}
+
+void AuthRegistry::_refresh_config()
+{
+  auto cluster_required = cct->_conf.get_val<std::string>("auth_cluster_required");
+  auto service_required = cct->_conf.get_val<std::string>("auth_service_required");
+  auto client_required = cct->_conf.get_val<std::string>("auth_client_required");
+
+  ldout(cct,10) << __func__ << ": conf values "
+                << " cluster_required=" << cluster_required
+                << " service_required=" << service_required
+                << " client_required=" << client_required
+                << dendl;
+
+  _parse_method_list(cluster_required, &cluster_methods);
+  _parse_method_list(service_required, &service_methods);
+  _parse_method_list(client_required, &client_methods);
+
+  _parse_mode_list(cct->_conf.get_val<string>("ms_mon_cluster_mode"),
+		   &mon_cluster_modes);
+  _parse_mode_list(cct->_conf.get_val<string>("ms_mon_service_mode"),
+		   &mon_service_modes);
+  _parse_mode_list(cct->_conf.get_val<string>("ms_mon_client_mode"),
+		   &mon_client_modes);
+  _parse_mode_list(cct->_conf.get_val<string>("ms_cluster_mode"),
+		   &cluster_modes);
+  _parse_mode_list(cct->_conf.get_val<string>("ms_service_mode"),
+		   &service_modes);
+  _parse_mode_list(cct->_conf.get_val<string>("ms_client_mode"),
+		   &client_modes);
+
+  ldout(cct,10) << __func__ << " cluster_methods " << cluster_methods
+		<< " service_methods " << service_methods
+		<< " client_methods " << client_methods
+		<< dendl;
+  ldout(cct,10) << __func__ << " mon_cluster_modes " << mon_cluster_modes
+		<< " mon_service_modes " << mon_service_modes
+		<< " mon_client_modes " << mon_client_modes
+		<< "; cluster_modes " << cluster_modes
+		<< " service_modes " << service_modes
+		<< " client_modes " << client_modes
+		<< dendl;
+
+  // if we have no keyring, filter out cephx
+  _no_keyring_disabled_cephx = false;
+  bool any_cephx = false;
+  for (auto *p : {&cluster_methods, &service_methods, &client_methods}) {
+    auto q = std::find(p->begin(), p->end(), CEPH_AUTH_CEPHX);
+    if (q != p->end()) {
+      any_cephx = true;
+      break;
+    }
+  }
+  if (any_cephx) {
+    ldout(cct, 20) << "attempting to load cephx key" << dendl;
+    KeyRing k;
+    CachedStackStringStream css;
+    int r = k.from_ceph_context(cct, css.get());
+    if (r < 0) {
+      ldout(cct, 5) << "removing any cephx auth method as loading cephx key failed: " << css->strv() << dendl;
+      for (auto *p : {&cluster_methods, &service_methods, &client_methods}) {
+	auto q = std::find(p->begin(), p->end(), CEPH_AUTH_CEPHX);
+	if (q != p->end()) {
+	  p->erase(q);
+	  _no_keyring_disabled_cephx = true;
+	}
+      }
+    }
+  }
+}
+
+void AuthRegistry::get_supported_methods(
+  int peer_type,
+  std::vector<uint32_t> *methods,
+  std::vector<uint32_t> *modes) const
+{
+  if (methods) {
+    methods->clear();
+  }
+  if (modes) {
+    modes->clear();
+  }
+  std::scoped_lock l(lock);
+  switch (cct->get_module_type()) {
+  case CEPH_ENTITY_TYPE_CLIENT:
+    // i am client
+    if (methods) {
+      *methods = client_methods;
+    }
+    if (modes) {
+      switch (peer_type) {
+      case CEPH_ENTITY_TYPE_MON:
+      case CEPH_ENTITY_TYPE_MGR:
+	*modes = mon_client_modes;
+	break;
+      default:
+	*modes = client_modes;
+      }
+    }
+    return;
+  case CEPH_ENTITY_TYPE_MON:
+  case CEPH_ENTITY_TYPE_MGR:
+    // i am mon/mgr
+    switch (peer_type) {
+    case CEPH_ENTITY_TYPE_MON:
+    case CEPH_ENTITY_TYPE_MGR:
+      // they are mon/mgr
+      if (methods) {
+	*methods = cluster_methods;
+      }
+      if (modes) {
+	*modes = mon_cluster_modes;
+      }
+      break;
+    default:
+      // they are anything but mons
+      if (methods) {
+	*methods = service_methods;
+      }
+      if (modes) {
+	*modes = mon_service_modes;
+      }
+    }
+    return;
+  default:
+    // i am a non-mon daemon
+    switch (peer_type) {
+    case CEPH_ENTITY_TYPE_MON:
+    case CEPH_ENTITY_TYPE_MGR:
+      // they are a mon daemon
+      if (methods) {
+	*methods = cluster_methods;
+      }
+      if (modes) {
+	*modes = mon_cluster_modes;
+      }
+      break;
+    case CEPH_ENTITY_TYPE_MDS:
+    case CEPH_ENTITY_TYPE_OSD:
+      // they are another daemon
+      if (methods) {
+	*methods = cluster_methods;
+      }
+      if (modes) {
+	*modes = cluster_modes;
+      }
+      break;
+    default:
+      // they are a client
+      if (methods) {
+	*methods = service_methods;
+      }
+      if (modes) {
+	*modes = service_modes;
+      }
+      break;
+    }
+  }
+}
+
+bool AuthRegistry::is_supported_method(int peer_type, int method) const
+{
+  std::vector<uint32_t> s;
+  get_supported_methods(peer_type, &s);
+  return std::find(s.begin(), s.end(), method) != s.end();
+}
+
+bool AuthRegistry::any_supported_methods(int peer_type) const
+{
+  std::vector<uint32_t> s;
+  get_supported_methods(peer_type, &s);
+  return !s.empty();
+}
+
+void AuthRegistry::get_supported_modes(
+  int peer_type,
+  uint32_t auth_method,
+  std::vector<uint32_t> *modes) const
+{
+  std::vector<uint32_t> s;
+  get_supported_methods(peer_type, nullptr, &s);
+  if (auth_method == CEPH_AUTH_NONE) {
+    // filter out all but crc for AUTH_NONE
+    modes->clear();
+    for (auto mode : s) {
+      if (mode == CEPH_CON_MODE_CRC) {
+	modes->push_back(mode);
+      }
+    }
+  } else {
+    *modes = s;
+  }
+}
+
+uint32_t AuthRegistry::pick_mode(
+  int peer_type,
+  uint32_t auth_method,
+  const std::vector<uint32_t>& preferred_modes)
+{
+  std::vector<uint32_t> allowed_modes;
+  get_supported_modes(peer_type, auth_method, &allowed_modes);
+  for (auto mode : preferred_modes) {
+    if (std::find(allowed_modes.begin(), allowed_modes.end(), mode)
+	!= allowed_modes.end()) {
+      return mode;
+    }
+  }
+  ldout(cct,1) << "failed to pick con mode from client's " << preferred_modes
+	       << " and our " << allowed_modes << dendl;
+  return CEPH_CON_MODE_UNKNOWN;
+}
+
+AuthAuthorizeHandler *AuthRegistry::get_handler(int peer_type, int method)
+{
+  std::scoped_lock l{lock};
+  ldout(cct,20) << __func__ << " peer_type " << peer_type << " method " << method
+		<< " cluster_methods " << cluster_methods
+		<< " service_methods " << service_methods
+		<< " client_methods " << client_methods
+		<< dendl;
+  if (cct->get_module_type() == CEPH_ENTITY_TYPE_CLIENT) {
+    return nullptr;
+  }
+  switch (peer_type) {
+  case CEPH_ENTITY_TYPE_MON:
+  case CEPH_ENTITY_TYPE_MGR:
+  case CEPH_ENTITY_TYPE_MDS:
+  case CEPH_ENTITY_TYPE_OSD:
+    if (std::find(cluster_methods.begin(), cluster_methods.end(), method) ==
+	cluster_methods.end()) {
+      return nullptr;
+    }
+    break;
+  default:
+    if (std::find(service_methods.begin(), service_methods.end(), method) ==
+	service_methods.end()) {
+      return nullptr;
+    }
+    break;
+  }
+
+  auto iter = authorize_handlers.find(method);
+  if (iter != authorize_handlers.end()) {
+    return iter->second;
+  }
+  AuthAuthorizeHandler *ah = nullptr;
+  switch (method) {
+  case CEPH_AUTH_NONE:
+    ah = new AuthNoneAuthorizeHandler();
+    break;
+  case CEPH_AUTH_CEPHX:
+    ah = new CephxAuthorizeHandler();
+    break;
+#ifdef HAVE_GSSAPI
+  case CEPH_AUTH_GSS:
+    ah = new KrbAuthorizeHandler();
+    break;
+#endif
+  }
+  if (ah) {
+    authorize_handlers[method] = ah;
+  }
+  return ah;
+}
+

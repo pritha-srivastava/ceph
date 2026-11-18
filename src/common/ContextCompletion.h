@@ -1,9 +1,9 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #ifndef CEPH_ASYNC_COMPLETION_H
 #define CEPH_ASYNC_COMPLETION_H
 
-#include "include/int_types.h"
 #include "include/Context.h"
 
 namespace ceph {
@@ -18,7 +18,7 @@ public:
   void finish_op(int r);
 
 private:
-  Mutex m_lock;
+  ceph::mutex m_lock = ceph::make_mutex("ContextCompletion::m_lock");
   Context *m_ctx;
   bool m_ignore_enoent;
   int m_ret;
@@ -34,7 +34,7 @@ public:
     m_context_completion.start_op();
   }
 
-  virtual void finish(int r) {
+  void finish(int r) override {
     m_context_completion.finish_op(r);
   }
 

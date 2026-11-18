@@ -1,0 +1,175 @@
+<cd-productive-card class="overview-storage-card">
+  <!-- STORAGE CARD HEADER -->
+  <ng-template #header>
+    <h2
+      class="cds--type-heading-compact-02"
+      i18n
+    >
+      Storage overview
+    </h2>
+  </ng-template>
+
+  <!-- CAPACITY USAGE TEXT -->
+  @if (!storageEmptyState) {
+    <div class="overview-storage-card-usage-text">
+      @if (usedRaw !== null && totalRaw !== null && usedRawUnit && totalRawUnit) {
+        <h5>
+          <span
+            class="cds--type-heading-05"
+            i18n
+            >{{ usedRaw }}&nbsp;</span
+          >
+          <span
+            class="cds--type-body-02"
+            i18n
+            >{{ usedRawUnit }} of {{ totalRaw }} {{ totalRawUnit }} used</span
+          >
+          <cds-tooltip
+            class="cds-ml-3 cds-mr-3"
+            [caret]="true"
+            description="Shows raw used and total capacity. Raw capacity includes all physical storage before replication or overhead."
+            i18n-description
+          >
+            <cd-icon type="help"></cd-icon>
+          </cds-tooltip>
+          @if (threshold === 'high') {
+            <cds-tag size="md">
+              <div cdsTagIcon>
+                <cd-icon
+                  type="warningAltFilled"
+                  useDefault="true"
+                ></cd-icon>
+              </div>
+              <span i18n>High storage usage</span>
+            </cds-tag>
+          } @else if (threshold === 'critical') {
+            <cds-tag
+              type="red"
+              size="md"
+            >
+              <div cdsTagIcon>
+                <cd-icon
+                  type="warningAltFilled"
+                  useDefault="true"
+                ></cd-icon>
+              </div>
+              <span i18n>Capacity critically low</span>
+            </cds-tag>
+          }
+        </h5>
+      } @else {
+        <cds-skeleton-text
+          [lines]="1"
+          [minLineWidth]="400"
+          [maxLineWidth]="400"
+        >
+        </cds-skeleton-text>
+      }
+    </div>
+  } @else {
+    <cd-empty-state
+      text="You can view capacity usage and related metrics here once you add storage."
+      title="Storage is not configured yet"
+      i18n-title
+      i18n-text
+    >
+      @if (canAddStorage) {
+        <button
+          cdsButton="primary"
+          i18n
+          size="sm"
+          [routerLink]="['/add-storage']"
+          type="button"
+        >
+          Add storage
+          <cd-icon
+            type="add"
+            class="cds--btn__icon"
+          ></cd-icon>
+        </button>
+      }
+    </cd-empty-state>
+  }
+
+  <!-- CAPACITY BREAKDOWN CHART -->
+  @if (!prometheusEmptyState && !storageEmptyState) {
+    @if (isBreakdownLoaded) {
+      <ibm-meter-chart
+        [options]="options"
+        [data]="breakdownData"
+        class="overview-storage-card-chart cds-mb-5"
+      ></ibm-meter-chart>
+    } @else {
+      <cds-skeleton-text
+        [lines]="1"
+        [minLineWidth]="1200"
+        [maxLineWidth]="1200"
+      >
+      </cds-skeleton-text>
+    }
+  }
+
+  @if (!isSavingsLoaded()) {
+    <ng-container *ngTemplateOutlet="skeletonTabs"></ng-container>
+  } @else if (!prometheusEmptyState && !storageEmptyState) {
+    @if (!consumptionTrendData.length) {
+      <ng-container *ngTemplateOutlet="skeletonTabs"></ng-container>
+    } @else if (savings(); as savingsVm) {
+      <cds-tabs type="line">
+        <cds-tab
+          heading="Savings"
+          i18n-heading
+          [active]="true"
+        >
+          <cd-overview-storage-savings [savings]="savingsVm"></cd-overview-storage-savings>
+        </cds-tab>
+        <cds-tab
+          heading="Consumption"
+          i18n-heading
+        >
+          <ng-container *ngTemplateOutlet="consumptionTrend"></ng-container>
+        </cds-tab>
+      </cds-tabs>
+    } @else {
+      <div class="cds-mt-6">
+        <ng-container *ngTemplateOutlet="consumptionTrend"></ng-container>
+      </div>
+    }
+  }
+
+  <ng-template #skeletonTabs>
+    <cds-tabs-skeleton [numOftabs]="2"></cds-tabs-skeleton>
+  </ng-template>
+
+  <!-- Consumption trend template -->
+  <ng-template #consumptionTrend>
+    <div
+      cdsRow
+      class="align-items-center cds-ml-2 cds-mt-4"
+    >
+      <div
+        cdsCol
+        [columnNumbers]="{ lg: 14, md: 10, sm: 16 }"
+      >
+        <cd-area-chart
+          chartTitle="Consumption trend"
+          [chartKey]="'Consumption trend'"
+          [dataUnit]="'B'"
+          [legendEnabled]="false"
+          [rawData]="consumptionTrendData"
+          [subHeading]="'Shows last 7 days of storage consumption trends based on recent usage'"
+          [height]="'200px'"
+          [decimals]="2"
+          [chartType]="'area'"
+        >
+        </cd-area-chart>
+      </div>
+      <div
+        cdsCol
+        [columnNumbers]="{ lg: 2, md: 8, sm: 8 }"
+      >
+        <cd-overview-stats [stats]="consumptionStats()"></cd-overview-stats>
+      </div>
+    </div>
+  </ng-template>
+</cd-productive-card>

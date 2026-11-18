@@ -1,6 +1,9 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
+#include <iostream> // for std::cout
+
+#include "include/container_ios.h"
 #include "include/types.h"
 #include "common/Thread.h"
 #include "common/debug.h"
@@ -8,8 +11,11 @@
 #include "common/config.h"
 #include "common/ceph_argparse.h"
 #include "global/global_init.h"
+#include "log/Log.h"
 
 #define dout_context g_ceph_context
+
+using namespace std;
 
 struct T : public Thread {
   int num;
@@ -30,19 +36,29 @@ struct T : public Thread {
   }
 };
 
+void usage(const char *name) {
+  cout << name << " <threads> <lines>\n"
+       << "\t threads: the number of threads for this test.\n"
+       << "\t lines: the number of log entries per thread.\n";
+}
+
 int main(int argc, const char **argv)
 {
+  if (argc < 3) {
+    usage(argv[0]);
+    return EXIT_FAILURE;
+  }
+
   int threads = atoi(argv[1]);
   int num = atoi(argv[2]);
 
   cout << threads << " threads, " << num << " lines per thread" << std::endl;
 
-  vector<const char*> args;
-  argv_to_vec(argc, argv, args);
-  env_to_vec(args);
+  auto args = argv_to_vec(argc, argv);
 
   auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_OSD,
-			 CODE_ENVIRONMENT_UTILITY, 0);
+			 CODE_ENVIRONMENT_UTILITY,
+			 CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
 
   utime_t start = ceph_clock_now();
 

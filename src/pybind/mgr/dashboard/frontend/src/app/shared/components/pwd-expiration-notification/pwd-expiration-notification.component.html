@@ -1,0 +1,33 @@
+@if (displayNotification) {
+  <cd-alert-panel
+    class="no-margin-bottom"
+    [type]="alertType"
+    [showTitle]="false"
+    size="slim"
+    [dismissible]="alertType !== 'danger'"
+    (dismissed)="onDismissed()"
+  >
+    @if (expirationDays === 0) {
+      <div i18n>
+        Your password will expire in <strong>less than 1</strong> day. Click
+        <a
+          routerLink="/user-profile/edit"
+          class="alert-link"
+          >here</a
+        >
+        to change it now.
+      </div>
+    }
+    @if (expirationDays > 0) {
+      <div i18n>
+        Your password will expire in <strong>{{ expirationDays }}</strong> day(s). Click
+        <a
+          routerLink="/user-profile/edit"
+          class="alert-link"
+          >here</a
+        >
+        to change it now.
+      </div>
+    }
+  </cd-alert-panel>
+}
