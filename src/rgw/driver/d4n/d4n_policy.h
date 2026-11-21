@@ -1,13 +1,30 @@
+/*
+ * Ceph - scalable distributed file system
+ *
+ * Copyright (C) 2026 International Business Machines Corp. (IBM)
+ *
+ * This is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License version 2.1, as published by the Free Software
+ * Foundation. See file COPYING.
+ */
+
 #pragma once
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
-#include <boost/heap/fibonacci_heap.hpp>
-#include <boost/system/detail/errc.hpp>
 #include <boost/asio/thread_pool.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/post.hpp>
+
+#include <boost/heap/fibonacci_heap.hpp>
+#include <boost/system/detail/errc.hpp>
+
+#include <expected>
+#include <memory>
+#include <future>
+#include <map>
 
 #include "d4n_directory.h"
 #include "rgw_sal_d4n.h"
@@ -21,20 +38,17 @@ namespace rgw::sal {
 }
 
 namespace rgw::d4n {
-class DirectoryConnection;
 class Directory;
 class BucketDirectory;
 class ObjectDirectory;
 class BlockDirectory;
 class CacheBlock;
 
-class DirectoryConnection;
 class BucketDirectory;
 class ObjectDirectory;
 class BlockDirectory;
 class CacheBlock;
 
-class DirectoryConnection;
 class BucketDirectory;
 class ObjectDirectory;
 class BlockDirectory;
@@ -74,15 +88,10 @@ class CachePolicy {
       uint64_t refcount{0};
       rgw_user user;
       std::string bucketName;
+
       Entry(const std::string& key, uint64_t offset, uint64_t len, const std::string& version, bool dirty, uint64_t refcount, rgw_user user, std::string bucketName) : key(key), offset(offset), 
-											        len(len), version(version), dirty(dirty), refcount(refcount), user(user), bucketName(bucketName) {}
-      };
-   
-    //The disposer object function
-    struct Entry_delete_disposer {
-      void operator()(Entry* e) {
-        delete e;
-      }
+                    len(len), version(version), dirty(dirty), refcount(refcount), user(user), bucketName(bucketName)
+      {}
     };
 
     struct ObjEntry {
@@ -170,9 +179,13 @@ class LFUDAPolicy : public CachePolicy {
       void set_handle(handle_type handle_) { handle = handle_; }
     };
 
+    struct LFUDAObjEntry;
+    using ObjectVersions = std::multimap<ceph::real_time, LFUDAObjEntry*>;
+
     struct LFUDAObjEntry : public ObjEntry {
       using handle_type = boost::heap::fibonacci_heap<LFUDAObjEntry*, boost::heap::compare<ObjectComparator<LFUDAObjEntry>>>::handle_type;
       handle_type handle;
+      ObjectVersions::iterator version_position;
       int retry_count = 0;  // Initialize to 0 to track retry attempts
       ceph::real_time next_retry_time;  // Earliest time to retry after transient error (preserves creationTime for version ordering)
 
@@ -187,13 +200,12 @@ class LFUDAPolicy : public CachePolicy {
 
     using Heap = boost::heap::fibonacci_heap<LFUDAEntry*, boost::heap::compare<EntryComparator<LFUDAEntry>>>;
     using Object_Heap = boost::heap::fibonacci_heap<LFUDAObjEntry*, boost::heap::compare<ObjectComparator<LFUDAObjEntry>>>;
-    using handle_type = boost::heap::fibonacci_heap<LFUDAObjEntry*, boost::heap::compare<ObjectComparator<LFUDAObjEntry>>>::handle_type;
     Heap entries_heap;
     Object_Heap object_heap; //This heap contains dirty objects ordered by their creation time, used for cleaning method
     std::unordered_map<std::string, LFUDAEntry*> entries_map;
     std::unordered_map<std::string, std::pair<LFUDAObjEntry*, State> > o_entries_map; //Contains only dirty objects, used for look-up
-    //contains obj_name -> map of versions ordered by their creation time
-    std::unordered_map<std::string, std::map<ceph::real_time, LFUDAObjEntry*>> per_obj_versions;
+    // Bucket-qualified object -> all pending versions, including the one queued or in progress.
+    std::unordered_map<std::string, ObjectVersions> per_obj_versions;
     std::mutex lfuda_lock;
     std::mutex lfuda_cleaning_lock;
     std::optional<ceph::async::async_cond<>> cond;
@@ -269,7 +281,10 @@ class LFUDAPolicy : public CachePolicy {
     virtual void background_eviction_worker(const DoutPrefixProvider* dpp, optional_yield y);
     int do_delete(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, int interval, optional_yield y);
     int do_writeback(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, optional_yield y);
-    //helper method to create LFUDAObjEntry, add it to o_entries_map and per_obj_versions
+    static std::string object_key(const LFUDAObjEntry& entry);
+    // Call with lfuda_cleaning_lock held and no version of this object queued or in progress.
+    void queue_oldest(const ObjectVersions& versions);
+    // Add a dirty version to both maps; return nullptr if it is already tracked.
     LFUDAObjEntry* create_obj_entry(const DoutPrefixProvider* dpp, const std::string& dirty_obj_key, const std::string& version,
                                               bool deleteMarker, uint64_t size, ceph::real_time creationTime,
                                               const rgw_user& user, const std::string& etag,
@@ -285,7 +300,6 @@ class LFUDAPolicy : public CachePolicy {
              ObjectDirectory& objDir,
              BucketDirectory& bucketDir,
              Lease* lease,
-	     std::string_view dir_type,
 	     rgw::cache::CacheDriver* cacheDriver,
 	     optional_yield y) :
 				 CachePolicy(cacheDriver),
@@ -311,6 +325,7 @@ class LFUDAPolicy : public CachePolicy {
     virtual void update_dirty_object(const DoutPrefixProvider* dpp, const std::string& key, const std::string& version, bool deleteMarker, uint64_t size,
 			    ceph::real_time creationTime, const rgw_user& user, const std::string& etag, const std::string& bucket_name, const std::string& bucket_id,
 			    const rgw_obj_key& obj_key, uint8_t op, optional_yield y, std::string& restore_val=empty) override;
+    // Retire an entry popped by cleaning(), then promote the next version of the same object.
     virtual bool erase_dirty_object(const DoutPrefixProvider* dpp, const std::string& key, optional_yield y) override;
     virtual bool invalidate_dirty_object(const DoutPrefixProvider* dpp, const std::string& key) override;
     virtual void cleaning(const DoutPrefixProvider* dpp, optional_yield y) override;
@@ -326,8 +341,11 @@ class LFUDAPolicy : public CachePolicy {
     int get_age() { return age; }
 
   private:
+    // True requests deletion of the backend object after confirmed completion.
+    std::expected<bool, int> stage_writeback_directory(const DoutPrefixProvider *dpp,
+        LFUDAObjEntry& entry, rgw::sal::Object& object, Transaction& txn, optional_yield y);
     int mark_data_blocks_dir_clean(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, optional_yield y,
-                                   std::optional<std::reference_wrapper<Transaction>> txn);
+                                   std::optional<Transaction> txn);
     int mark_local_blocks_clean(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, optional_yield y);
 };
 
@@ -370,7 +388,6 @@ class PolicyDriver {
              ObjectDirectory& objDir,
              BucketDirectory& bucketDir,
              Lease* lease,
-	     std::string directory_type,
 	     rgw::cache::CacheDriver* cacheDriver,
 	     const std::string& _policyName,
 	     optional_yield y) : policyName(_policyName)
@@ -381,7 +398,6 @@ class PolicyDriver {
              objDir,
              bucketDir,
              lease,
-	     directory_type,
 	     cacheDriver, y);
       } else if (policyName == "lru") {
 	cachePolicy = std::make_unique<LRUPolicy>(cacheDriver);
