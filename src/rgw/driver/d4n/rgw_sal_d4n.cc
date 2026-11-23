@@ -1027,7 +1027,7 @@ int D4NFilterBucket::process_remove_objects(const DoutPrefixProvider* dpp,
 
       rgw::d4n::CacheObj object = rgw::d4n::CacheObj{
         .objName = c_obj->get_name(),
-        .bucketName = bucket_id,
+        .bucketName = this->get_bucket_id(),
       };
 
       rgw::d4n::CacheBlock block = rgw::d4n::CacheBlock{
@@ -1134,7 +1134,7 @@ int D4NFilterBucket::process_remove_objects(const DoutPrefixProvider* dpp,
         blocks.clear();
       }
       /* Batch deletes aren't used for objects because all versions belonging to an object,
-       * as well as the object itself, must all be deleted with one transaction, regardless
+       * as well as the object itself, must all be deleted with one transaction, irregardless
        * of optimal batch sizes. */
       if (auto it = bkt_remove_objects.find(object.objName); it != bkt_remove_objects.end()) {
         /* If the results are truncated, there is a possibility that

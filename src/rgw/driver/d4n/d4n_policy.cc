@@ -1071,7 +1071,7 @@ int LFUDAPolicy::do_delete(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, int 
   auto delete_head_blocks = [&](rgw::d4n::Transaction& txn) -> int {
     rgw::d4n::CacheBlock head_block {
       .cacheObj = {
-        .objName = e->obj_key.get_oid(),
+        .objName = e->obj_key.name,
         .bucketName = e->bucket_id,
       },
       .blockID = 0,

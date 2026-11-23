@@ -115,6 +115,21 @@ target_link_libraries(ceph_test_rgw_ssd_driver PRIVATE
   ${EXTRALIBS}
   )
 install(TARGETS ceph_test_rgw_ssd_driver DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+add_executable(test_d4n_bucket_remove_race
+  test_d4n_bucket_remove_race.cc
+  )
+target_include_directories(test_d4n_bucket_remove_race
+  SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw/driver/d4n"
+  SYSTEM PRIVATE "${CMAKE_BINARY_DIR}/_deps/zpp_bits-src/")
+target_link_libraries(test_d4n_bucket_remove_race PRIVATE
+  rgw_common
+  librados
+  ceph-common
+  ${rgw_libs}
+  ${EXTRALIBS}
+  )
+install(TARGETS test_d4n_bucket_remove_race DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
 #unittest_rgw_bencode
