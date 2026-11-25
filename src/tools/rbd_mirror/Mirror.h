@@ -1,27 +1,34 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_RBD_MIRROR_H
 #define CEPH_RBD_MIRROR_H
 
+#include "common/ceph_context.h"
+#include "common/ceph_mutex.h"
+#include "include/rados/librados.hpp"
+#include "include/utime.h"
+#include "ClusterWatcher.h"
+#include "PoolReplayer.h"
+#include "tools/rbd_mirror/Types.h"
+
+#include <set>
 #include <map>
 #include <memory>
-#include <set>
+#include <atomic>
 
-#include "common/ceph_context.h"
-#include "common/Mutex.h"
-#include "include/atomic.h"
-#include "include/rados/librados.hpp"
-#include "ClusterWatcher.h"
-#include "Replayer.h"
-#include "ImageDeleter.h"
-#include "types.h"
+namespace journal { class CacheManagerHandler; }
+
+namespace librbd { struct ImageCtx; }
 
 namespace rbd {
 namespace mirror {
 
-struct Threads;
+template <typename> struct ServiceDaemon;
+template <typename> struct Threads;
+class CacheManagerHandler;
 class MirrorAdminSocketHook;
+class PoolMetaCache;
 
 /**
  * Contains the main loop and overall state for rbd-mirror.
@@ -40,7 +47,7 @@ public:
   void run();
   void handle_signal(int signum);
 
-  void print_status(Formatter *f, stringstream *ss);
+  void print_status(Formatter *f);
   void start();
   void stop();
   void restart();
@@ -49,25 +56,31 @@ public:
 
 private:
   typedef ClusterWatcher::PoolPeers PoolPeers;
-  typedef std::pair<int64_t, peer_t> PoolPeer;
+  typedef std::pair<int64_t, PeerSpec> PoolPeer;
 
-  void update_replayers(const PoolPeers &pool_peers);
+  void update_pool_replayers(const PoolPeers &pool_peers,
+                             const std::string& site_name);
+
+  void create_cache_manager();
+  void run_cache_manager(utime_t *next_run_interval);
 
   CephContext *m_cct;
   std::vector<const char*> m_args;
-  Threads *m_threads = nullptr;
-  Mutex m_lock;
-  Cond m_cond;
+  Threads<librbd::ImageCtx> *m_threads = nullptr;
+  ceph::mutex m_lock = ceph::make_mutex("rbd::mirror::Mirror");
+  ceph::condition_variable m_cond;
   RadosRef m_local;
+  std::unique_ptr<ServiceDaemon<librbd::ImageCtx>> m_service_daemon;
 
   // monitor local cluster for config changes in peers
   std::unique_ptr<ClusterWatcher> m_local_cluster_watcher;
-  std::shared_ptr<ImageDeleter> m_image_deleter;
-  ImageSyncThrottlerRef<> m_image_sync_throttler;
-  std::map<PoolPeer, std::unique_ptr<Replayer> > m_replayers;
-  atomic_t m_stopping;
+  std::unique_ptr<CacheManagerHandler> m_cache_manager_handler;
+  std::unique_ptr<PoolMetaCache> m_pool_meta_cache;
+  std::map<PoolPeer, std::unique_ptr<PoolReplayer<>>> m_pool_replayers;
+  std::atomic<bool> m_stopping = { false };
   bool m_manual_stop = false;
   MirrorAdminSocketHook *m_asok_hook;
+  std::string m_site_name;
 };
 
 } // namespace mirror

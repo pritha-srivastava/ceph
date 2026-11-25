@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -60,7 +61,7 @@ class KqueueDriver : public EventDriver {
   int add_event(int fd, int cur_mask, int add_mask) override;
   int del_event(int fd, int cur_mask, int del_mask) override;
   int resize_events(int newsize) override;
-  int event_wait(vector<FiredFileEvent> &fired_events,
+  int event_wait(std::vector<FiredFileEvent> &fired_events,
 		 struct timeval *tp) override;
 };
 

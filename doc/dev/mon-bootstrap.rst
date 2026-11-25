@@ -1,3 +1,5 @@
+.. _dev-monitor-bootstrap:
+
 ===================
  Monitor bootstrap
 ===================
@@ -10,7 +12,7 @@ Terminology:
 In order to initialize a new monitor, it must always be fed:
 
 #. a logical name
-#. secret keys
+#. The ``mon.`` secret key. Note this is not qualified with an id since all Monitors share the same secret.
 #. a cluster fsid (uuid)
 
 In addition, a monitor needs to know two things:
@@ -29,7 +31,7 @@ cluster.  For example, if the logical id is ``foo``, the monitor's
 name will be ``mon.foo``.
 
 For most users, there is no more than one monitor per host, which
-makes the short hostname logical choice.
+makes the short hostname a logical choice.
 
 Secret keys
 ===========
@@ -42,9 +44,14 @@ with a command like::
 When creating a new monitor cluster, the keyring should also contain a ``client.admin`` key that can be used
 to administer the system::
 
-        ceph-authtool /path/to/keyring --gen-key -n client.admin --set-uid=0 --cap mon 'allow *' --cap osd 'allow *' --cap mds 'allow'
+        ceph-authtool /path/to/keyring --gen-key -n client.admin --cap mon 'allow *' --cap osd 'allow *' --cap mds 'allow'
 
 The resulting keyring is fed to ``ceph-mon --mkfs`` with the ``--keyring <keyring>`` command-line argument.
+
+.. note:: The Monitor keyring file is a fallback store for the KeyServer used
+          to store keys via the usual `ceph auth` command suite. For this
+          reason, the ``client.admin`` key may be placed in this keyring but a future
+          rotation or update to the ``client.admin`` credential may obviate it.
 
 Cluster fsid
 ============
@@ -72,7 +79,7 @@ The monitor peers are provided in several ways:
 
 #. via the initial monmap, provided via ``--monmap <filename>``
 #. via the bootstrap monmap generated from ``--mon-host <list>``
-#. via the bootstrap monmap generated from ``[mon.*]`` sections with ``mon addr`` in the config file
+#. via the bootstrap monmap generated from ``[mon.*]`` sections with the deprecated ``mon addr`` options in the config file (note that this method is *not* recommended and does not support binding to both v1 and v2 protocol addresses)
 #. dynamically via the admin socket
 
 However, these methods are not completely interchangeable because of
@@ -138,7 +145,7 @@ the cluster::
      mon initial members = foo, bar, baz
 
 The monitors can then be initialized by providing the other pieces of
-information (they keyring, cluster fsid, and a way of determining
+information (the keyring, cluster fsid, and a way of determining
 their own address).  For example::
 
      ceph-mon --mkfs -i <name> --mon-initial-hosts 'foo,bar,baz' --keyring <initial_keyring> --public-addr <ip>
@@ -167,17 +174,30 @@ New nodes can be forced to join an existing cluster in two ways:
 Initially peerless expansion
 ----------------------------
 
-Create a new monitor and give it no peer addresses other than it's own.  For
+Create a new monitor and give it no peer addresses other than its own.  For
 example::
 
      ceph-mon --mkfs -i <myid> --fsid <fsid> --keyring <mon secret key> --public-addr <ip>
 
-Once the daemon starts, you can give it one or more peer addresses to join with::
+Once the daemon starts, you can give it one or more peer addresses (preferably a bare IP address with no port; the mon will set the addr types and ports for you) to join with::
 
      ceph daemon mon.<id> add_bootstrap_peer_hint <peer ip>
 
-This monitor will never participate in cluster creation; it can only join an existing
-cluster.
+Alternatively, you can explicitly specify the addrvec_t with::
+
+     ceph daemon mon.<id> add_bootstrap_peer_hintv <peer addrvec>
+
+For example,::
+
+     ceph daemon mon.new add_bootstrap_peer_hintv v2:1.2.3.4:3300,v1:1.2.3.4:6789
+
+This monitor will never participate in cluster creation; it can only
+join an existing cluster.
+
+Note that the address(es) specified should match exactly the addresses
+the new monitor is binding too.  If, for example, the new mon binds to
+only a v2 address but a v2 and v1 address are provided, there is some
+possibility of confusion in the mons.
 
 Expanding with initial members
 ------------------------------
@@ -192,8 +212,3 @@ When the daemon is started, ``mon initial members`` must be set via the command 
      ceph-mon -i <myid> --mon-initial-members foo,bar,baz
 
 to prevent any risk of split-brain.
-  
-
-
-
-

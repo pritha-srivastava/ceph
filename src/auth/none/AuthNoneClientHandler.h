@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -19,23 +20,29 @@
 #include "AuthNoneProtocol.h"
 #include "common/ceph_context.h"
 #include "common/config.h"
- 
+
 class AuthNoneClientHandler : public AuthClientHandler {
+
 public:
-  AuthNoneClientHandler(CephContext *cct_, RotatingKeyRing *rkeys) 
+  AuthNoneClientHandler(CephContext *cct_)
     : AuthClientHandler(cct_) {}
 
-  void reset() { }
+  AuthNoneClientHandler* clone() const override {
+    return new AuthNoneClientHandler(*this);
+  }
 
-  void prepare_build_request() {}
-  int build_request(bufferlist& bl) const { return 0; }
-  int handle_response(int ret, bufferlist::iterator& iter) { return 0; }
-  bool build_rotating_request(bufferlist& bl) const { return false; }
+  void reset() override { }
 
-  int get_protocol() const { return CEPH_AUTH_NONE; }
+  void prepare_build_request() override {}
+  int build_request(ceph::buffer::list& bl) const override { return 0; }
+  int handle_response(int ret, ceph::buffer::list::const_iterator& iter,
+		      CryptoKey *session_key,
+		      std::string *connection_secret) override { return 0; }
+  bool build_rotating_request(ceph::buffer::list& bl) const override { return false; }
+
+  int get_protocol() const override { return CEPH_AUTH_NONE; }
   
-  AuthAuthorizer *build_authorizer(uint32_t service_id) const {
-    RWLock::RLocker l(lock);
+  AuthAuthorizer *build_authorizer(uint32_t service_id) const override {
     AuthNoneAuthorizer *auth = new AuthNoneAuthorizer();
     if (auth) {
       auth->build_authorizer(cct->_conf->name, global_id);
@@ -43,14 +50,13 @@ public:
     return auth;
   }
 
-  bool need_tickets() { return false; }
+  bool need_tickets() override { return false; }
 
-  void set_global_id(uint64_t id) {
-    RWLock::WLocker l(lock);
+  void set_global_id(uint64_t id) override {
     global_id = id;
   }
 private:
-  void validate_tickets() {}
+  void validate_tickets() override {}
 };
 
 #endif

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,54 +15,99 @@
 #ifndef CEPH_HEALTH_MONITOR_H
 #define CEPH_HEALTH_MONITOR_H
 
-#include "mon/QuorumService.h"
+#include <map>
+#include <set>
+#include <string>
 
-//forward declaration
-namespace ceph { class Formatter; }
-class HealthService;
+#include "mon/PaxosService.h"
+#include "mon/PaxosMap.h"
+#include "mon/health_check.h"
 
-class HealthMonitor : public QuorumService
+class MonMap;
+
+namespace health_monitor_detail {
+void rebuild_health_checks(
+  health_check_map_t& pending_health,
+  const std::map<int, health_check_map_t>& quorum_checks,
+  const health_check_map_t& leader_checks,
+  const MonMap& monmap);
+bool health_checks_are_current(
+  const health_check_map_t& current_health,
+  const std::map<int, health_check_map_t>& quorum_checks,
+  const health_check_map_t& leader_checks,
+  const MonMap& monmap);
+}
+
+class HealthMonitor : public PaxosService
 {
-  map<int,HealthService*> services;
-
-protected:
-  void service_shutdown() override;
+  version_t version = 0;
+  PaxosMap<Monitor, HealthMonitor, std::map<int,health_check_map_t> > quorum_checks;  // for each quorum member
+  PaxosMap<Monitor, HealthMonitor, health_check_map_t> leader_checks;           // leader only
+  std::map<std::string,health_mute_t> mutes;
+  // location level netsplit pairs to elasped time
+  std::map<std::pair<std::string, std::string>, ceph::coarse_mono_clock::time_point> pending_location_netsplits;
+  // individual level netsplit pairs to elasped time
+  std::map<std::pair<std::string, std::string>, ceph::coarse_mono_clock::time_point> pending_mon_netsplits;
+  // currently active location netsplits with their elapsed time
+  std::map<std::pair<std::string, std::string>, ceph::coarse_mono_clock::time_point> current_location_netsplits;
+  // currently active monitor netsplits with their elapsed time
+  std::map<std::pair<std::string, std::string>, ceph::coarse_mono_clock::time_point> current_mon_netsplits;
+  std::map<std::string,health_mute_t> pending_mutes;
 
 public:
-  HealthMonitor(Monitor *m) : QuorumService(m) { }
-  virtual ~HealthMonitor() {
-    assert(services.empty());
-  }
-
+  HealthMonitor(Monitor &m, Paxos &p, const std::string& service_name);
 
   /**
    * @defgroup HealthMonitor_Inherited_h Inherited abstract methods
    * @{
    */
   void init() override;
-  void get_health(Formatter *f,
-		  list<pair<health_status_t,string> >& summary,
-		  list<pair<health_status_t,string> > *detail) override;
-  bool service_dispatch(MonOpRequestRef op) override;
 
-  void start_epoch() override;
+  bool preprocess_query(MonOpRequestRef op) override;
+  bool prepare_update(MonOpRequestRef op) override;
 
-  void finish_epoch() override;
+  void create_initial() override;
+  void update_from_paxos(bool *need_bootstrap) override;
+  void create_pending() override;
+  void encode_pending(MonitorDBStore::TransactionRef t) override;
+  version_t get_trim_to() const override;
 
-  void cleanup() override { }
-  void service_tick() override { }
+  void encode_full(MonitorDBStore::TransactionRef t) override { }
 
-  int get_type() override {
-    return QuorumService::SERVICE_HEALTH;
-  }
+  void tick() override;
 
-  string get_name() const override {
-    return "health";
-  }
+  void gather_all_health_checks(health_check_map_t *all);
+  health_status_t get_health_status(
+    bool want_detail,
+    ceph::Formatter *f,
+    std::string *plain,
+    const char *sep1 = " ",
+    const char *sep2 = "; ");
 
   /**
    * @} // HealthMonitor_Inherited_h
    */
+private:
+  bool preprocess_command(MonOpRequestRef op);
+
+  bool prepare_command(MonOpRequestRef op);
+  bool prepare_health_checks(MonOpRequestRef op);
+  void check_for_colocated_monitors(health_check_map_t *checks);
+  void check_for_older_version(health_check_map_t *checks);
+  void check_for_mon_down(health_check_map_t *checks, std::set<std::string> &mons_down);
+  void check_for_clock_skew(health_check_map_t *checks);
+  void check_mon_crush_loc_stretch_mode(health_check_map_t *checks);
+  void check_if_msgr2_enabled(health_check_map_t *checks);
+  void check_erasure_code_profiles(health_check_map_t *checks);
+  void check_netsplit(health_check_map_t *checks, std::set<std::string> &mons_down);
+  bool check_leader_health();
+  bool check_member_health();
+  bool check_mutes();
+
+public:
+  bool is_muted(const std::string& code) const {
+    return mutes.count(code) > 0;
+  }
 };
 
 #endif // CEPH_HEALTH_MONITOR_H

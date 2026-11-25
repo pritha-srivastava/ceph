@@ -1,289 +1,215 @@
+.. _rados-cephx-config-ref:
+
 ========================
- Cephx Config Reference
+ CephX Config Reference
 ========================
 
-The ``cephx`` protocol is enabled by default. Cryptographic authentication has
-some computational costs, though they should generally be quite low.  If the
-network environment connecting your client and server hosts is very safe and 
-you cannot afford authentication, you can turn it off. **This is not generally
-recommended**.
+The CephX protocol is enabled by default. The cryptographic authentication that
+CephX provides has some computational costs, though they should generally be
+quite low. If the network environment connecting your client and server hosts
+is very safe and you cannot afford authentication, you can disable it.
 
-.. note:: If you disable authentication, you are at risk of a man-in-the-middle
-   attack altering your client/server messages, which could lead to disastrous 
-   security effects.
+.. warning:: Disabling authentication is usually a very bad choice. If you
+             disable authentication, any access to the cluster will be
+             permitted no matter the origin or identity of the client.
 
-For creating users, see `User Management`_. For details on the architecture
-of Cephx, see `Architecture - High Availability Authentication`_.
+For information about creating users, see :ref:`user-management`. For details on
+the architecture of CephX, see :ref:`arch_high_availability_authentication`.
 
 
 Deployment Scenarios
 ====================
 
-There are two main scenarios for deploying a Ceph cluster, which impact 
-how you initially configure Cephx. Most first time Ceph users use 
-``ceph-deploy`` to create a cluster (easiest). For clusters using
-other deployment tools (e.g., Chef, Juju, Puppet, etc.), you will need
-to use the manual procedures or configure your deployment tool to 
+How you initially configure CephX depends on your scenario. There are two
+common strategies for deploying a Ceph cluster.  If you are a first-time Ceph
+user, you should probably take the easiest approach: using ``cephadm`` to
+deploy a cluster. But if your cluster uses other deployment tools (for example,
+Ansible, Chef, Juju, or Puppet), you will need either to use the manual
+deployment procedures or to configure your deployment tool so that it will
 bootstrap your monitor(s).
-
-ceph-deploy
------------
-
-When you deploy a cluster with ``ceph-deploy``, you do not have to bootstrap the
-monitor manually or create the ``client.admin`` user or keyring. The steps you
-execute in the `Storage Cluster Quick Start`_ will invoke ``ceph-deploy`` to do
-that for you.
-
-When you execute ``ceph-deploy new {initial-monitor(s)}``, Ceph will create a
-monitor keyring for you (only used to bootstrap monitors), and it will generate
-an  initial Ceph configuration file for you, which contains the following
-authentication settings, indicating that Ceph enables authentication by
-default::
-
-	auth_cluster_required = cephx
-	auth_service_required = cephx
-	auth_client_required = cephx
-
-When you execute ``ceph-deploy mon create-initial``, Ceph will bootstrap the
-initial monitor(s), retrieve a ``ceph.client.admin.keyring`` file containing the
-key for the  ``client.admin`` user. Additionally, it will also retrieve keyrings
-that give ``ceph-deploy`` and ``ceph-disk`` utilities the ability to prepare and
-activate OSDs and metadata servers.
-
-When you execute ``ceph-deploy admin {node-name}`` (**note:** Ceph must be 
-installed first), you are pushing a Ceph configuration file and the
-``ceph.client.admin.keyring`` to the ``/etc/ceph``  directory of the node. You
-will be able to execute Ceph administrative functions as ``root`` on the command 
-line of that node.
-
 
 Manual Deployment
 -----------------
 
-When you deploy a cluster manually, you have to bootstrap the monitor manually
-and create the ``client.admin`` user and keyring. To bootstrap monitors, follow
-the steps in `Monitor Bootstrapping`_. The steps for monitor bootstrapping are
-the logical steps you must perform when using third party deployment tools like
-Chef, Puppet,  Juju, etc.
+When you deploy a cluster manually, it is necessary to bootstrap the Monitors
+manually and to create the ``client.admin`` user and keyring. To bootstrap
+Monitors, follow the steps in `Monitor Bootstrapping`_. Follow these steps when
+using third-party deployment tools (for example, Chef, Puppet, and Juju).
 
 
-Enabling/Disabling Cephx
+Enabling/Disabling CephX
 ========================
 
-Enabling Cephx requires that you have deployed keys for your monitors,
-OSDs and metadata servers. If you are simply toggling Cephx on / off, 
-you do not have to repeat the bootstrapping procedures.
+Enabling CephX is possible only if the keys for your Monitors, OSD, and MDS
+have already been deployed. If you are simply toggling CephX on or off, it is
+not necessary to repeat the bootstrapping procedures.
+
+Authentication is explicitly enabled or disabled for all entities via the
+``global`` section of Ceph configuration. The following configurations affect
+this.
+
+.. confval::  auth_cluster_required
+.. confval::  auth_service_required
+.. confval::  auth_client_required
 
 
-Enabling Cephx
+Enabling CephX
 --------------
 
-When ``cephx`` is enabled, Ceph will look for the keyring in the default search
-path, which includes ``/etc/ceph/$cluster.$name.keyring``. You can override 
-this location by adding a ``keyring`` option in the ``[global]`` section of 
-your `Ceph configuration`_ file, but this is not recommended.
+When CephX is enabled, Ceph will look for the keyring in the default search
+path: this path includes ``/etc/ceph/$cluster.$name.keyring``. It is possible
+to override this search path location by adding a ``keyring`` option in the
+``[global]`` section of your :ref:`Ceph configuration <configuring-ceph>`
+file, but this is not recommended.
 
-Execute the following procedures to enable ``cephx`` on a cluster with
-authentication disabled. If you (or your deployment utility) have already
+To enable CephX on a cluster for which authentication has been disabled, carry
+out the following procedure.  If you (or your deployment utility) have already
 generated the keys, you may skip the steps related to generating keys.
 
-#. Create a ``client.admin`` key, and save a copy of the key for your client 
-   host::
+#. Create a ``client.admin`` key, and save a copy of the key for your client
+   host:
 
-	ceph auth get-or-create client.admin mon 'allow *' mds 'allow *' osd 'allow *' -o /etc/ceph/ceph.client.admin.keyring
+.. prompt:: bash $
 
-   **Warning:** This will clobber any existing 
-   ``/etc/ceph/client.admin.keyring`` file. Do not perform this step if a 
-   deployment tool has already done it for you. Be careful!
+    ceph auth get-or-create client.admin mon 'allow *' mds 'allow *' mgr 'allow *' osd 'allow *' -o /etc/ceph/ceph.client.admin.keyring
 
-#. Create a keyring for your monitor cluster and generate a monitor 
-   secret key. ::
+.. warning:: This step will clobber any existing ``/etc/ceph/client.admin.keyring`` file. Do not perform this step if a deployment tool has already generated a keyring file for you. Be careful!
 
-	ceph-authtool --create-keyring /tmp/ceph.mon.keyring --gen-key -n mon. --cap mon 'allow *'
+#. Create a monitor keyring and generate a monitor secret key:
 
-#. Copy the monitor keyring into a ``ceph.mon.keyring`` file in every monitor's 
-   ``mon data`` directory. For example, to copy it to ``mon.a`` in cluster ``ceph``, 
-   use the following::
+   .. prompt:: bash $
 
-    cp /tmp/ceph.mon.keyring /var/lib/ceph/mon/ceph-a/keyring
+     ceph-authtool --create-keyring /tmp/ceph.mon.keyring --gen-key -n mon. --cap mon 'allow *'
 
-#. Generate a secret key for every OSD, where ``{$id}`` is the OSD number::
+#. For each monitor, copy the monitor keyring into a ``ceph.mon.keyring`` file
+   in the monitor's ``mon data`` directory. For example, to copy the monitor
+   keyring to ``mon.a`` in a cluster called ``ceph``, run the following
+   command:
 
-    ceph auth get-or-create osd.{$id} mon 'allow rwx' osd 'allow *' -o /var/lib/ceph/osd/ceph-{$id}/keyring
+   .. prompt:: bash $
 
-#. Generate a secret key for every MDS, where ``{$id}`` is the MDS letter::
+     cp /tmp/ceph.mon.keyring /var/lib/ceph/mon/ceph-a/keyring
 
-    ceph auth get-or-create mds.{$id} mon 'allow rwx' osd 'allow *' mds 'allow *' -o /var/lib/ceph/mds/ceph-{$id}/keyring
+#. Generate a secret key for every MGR, where ``{$id}`` is the MGR letter:
 
-#. Enable ``cephx`` authentication by setting the following options in the 
-   ``[global]`` section of your `Ceph configuration`_ file::
+   .. prompt:: bash $
 
-    auth cluster required = cephx
-    auth service required = cephx
-    auth client required = cephx
+      ceph auth get-or-create mgr.{$id} mon 'allow profile mgr' mds 'allow *' osd 'allow *' -o /var/lib/ceph/mgr/ceph-{$id}/keyring
 
+#. Generate a secret key for every OSD, where ``{$id}`` is the OSD number:
 
-#. Start or restart the Ceph cluster. See `Operating a Cluster`_ for details. 
+   .. prompt:: bash $
+
+      ceph auth get-or-create osd.{$id} mon 'allow rwx' osd 'allow *' -o /var/lib/ceph/osd/ceph-{$id}/keyring
+
+#. Generate a secret key for every MDS, where ``{$id}`` is the MDS letter:
+
+   .. prompt:: bash $
+
+      ceph auth get-or-create mds.{$id} mon 'allow rwx' osd 'allow *' mds 'allow *' mgr 'allow profile mds' -o /var/lib/ceph/mds/ceph-{$id}/keyring
+
+#. Enable CephX authentication by setting the following options in the
+   ``[global]`` section of your :ref:`Ceph configuration <configuring-ceph>`
+   file:
+
+   .. code-block:: ini
+
+      [global]
+      auth_cluster_required = cephx
+      auth_service_required = cephx
+      auth_client_required = cephx
+
+#. Start or restart the Ceph cluster. For details, see `Operating a Cluster`_.
 
 For details on bootstrapping a monitor manually, see `Manual Deployment`_.
 
 
 
-Disabling Cephx
+Disabling CephX
 ---------------
 
-The following procedure describes how to disable Cephx. If your cluster
-environment is relatively safe, you can offset the computation expense of
-running authentication. **We do not recommend it.** However, it may be easier
-during setup and/or troubleshooting to temporarily disable authentication.
+The following procedure describes how to disable CephX. If your cluster
+environment is safe, you might want to disable CephX in order to offset the
+computational expense of running authentication. **We do not recommend doing
+so.** However, setup and troubleshooting might be easier if authentication is
+temporarily disabled and subsequently re-enabled.
 
-#. Disable ``cephx`` authentication by setting the following options in the 
-   ``[global]`` section of your `Ceph configuration`_ file::
+#. Disable CephX authentication by setting the following options in the
+   ``[global]`` section of your :ref:`Ceph configuration <configuring-ceph>`
+   file:
 
-    auth cluster required = none
-    auth service required = none
-    auth client required = none
+   .. code-block:: ini
 
+      [global]
+      auth_cluster_required = none
+      auth_service_required = none
+      auth_client_required = none
 
-#. Start or restart the Ceph cluster. See `Operating a Cluster`_ for details.
+#. Start or restart the Ceph cluster. For details, see `Operating a Cluster`_.
 
 
 Configuration Settings
 ======================
-
-Enablement
-----------
-
-
-``auth cluster required``
-
-:Description: If enabled, the Ceph Storage Cluster daemons (i.e., ``ceph-mon``,
-              ``ceph-osd``, and ``ceph-mds``) must authenticate with 
-              each other. Valid settings are ``cephx`` or ``none``.
-
-:Type: String
-:Required: No
-:Default: ``cephx``.
-
-    
-``auth service required``
-
-:Description: If enabled, the Ceph Storage Cluster daemons require Ceph Clients
-              to authenticate with the Ceph Storage Cluster in order to access 
-              Ceph services. Valid settings are ``cephx`` or ``none``.
-
-:Type: String
-:Required: No
-:Default: ``cephx``.
-
-
-``auth client required``
-
-:Description: If enabled, the Ceph Client requires the Ceph Storage Cluster to 
-              authenticate with the Ceph Client. Valid settings are ``cephx`` 
-              or ``none``.
-
-:Type: String
-:Required: No
-:Default: ``cephx``.
-
 
 .. index:: keys; keyring
 
 Keys
 ----
 
-When you run Ceph with authentication enabled, ``ceph`` administrative commands
-and Ceph Clients require authentication keys to access the Ceph Storage Cluster.
+When Ceph is run with authentication enabled, ``ceph`` administrative commands
+and Ceph clients can access the Ceph Storage Cluster only if they use
+authentication keys.
 
-The most common way to provide these keys to the ``ceph`` administrative
-commands and clients is to include a Ceph keyring under the ``/etc/ceph``
-directory. For Cuttlefish and later releases using ``ceph-deploy``, the filename
-is usually ``ceph.client.admin.keyring`` (or ``$cluster.client.admin.keyring``).
-If you include the keyring under the ``/etc/ceph`` directory, you don't need to
-specify a ``keyring`` entry in your Ceph configuration file.
+The most common way to make these keys available to ``ceph`` administrative
+commands and Ceph clients is to include a Ceph keyring under the ``/etc/ceph``
+directory. For Octopus and later releases that use ``cephadm``, the filename is
+usually ``ceph.client.admin.keyring``.  If the keyring is included in the
+``/etc/ceph`` directory, then it is unnecessary to specify a ``keyring`` entry
+in the :ref:`Ceph configuration <configuring-ceph>` file.
 
-We recommend copying the Ceph Storage Cluster's keyring file to nodes where you
-will run administrative commands, because it contains the ``client.admin`` key.
+Because the Ceph Storage Cluster's keyring file contains the ``client.admin``
+key, we recommend copying the keyring file to nodes from which you run
+administrative commands.
 
-You may use ``ceph-deploy admin`` to perform this task. See `Create an Admin
-Host`_ for details. To perform this step manually, execute the following::
+To perform this step manually, run the following command:
 
-	sudo scp {user}@{ceph-cluster-host}:/etc/ceph/ceph.client.admin.keyring /etc/ceph/ceph.client.admin.keyring
+.. prompt:: bash $
 
-.. tip:: Ensure the ``ceph.keyring`` file has appropriate permissions set 
-   (e.g., ``chmod 644``) on your client machine.
+   sudo scp {user}@{ceph-cluster-host}:/etc/ceph/ceph.client.admin.keyring /etc/ceph/ceph.client.admin.keyring
 
-You may specify the key itself in the Ceph configuration file using the ``key``
-setting (not recommended), or a path to a keyfile using the ``keyfile`` setting.
+.. tip:: Make sure that the ``ceph.keyring`` file has appropriate permissions
+   (for example, ``chmod 644``) set on your client machine.
 
+You can specify the key itself by using the ``key`` setting in the Ceph
+configuration file (this approach is not recommended), or instead specify a
+path to a keyfile by using the ``keyfile`` setting in the Ceph configuration
+file.
 
-``keyring``
-
-:Description: The path to the keyring file. 
-:Type: String
-:Required: No
-:Default: ``/etc/ceph/$cluster.$name.keyring,/etc/ceph/$cluster.keyring,/etc/ceph/keyring,/etc/ceph/keyring.bin``
-
-
-``keyfile``
-
-:Description: The path to a key file (i.e,. a file containing only the key).
-:Type: String
-:Required: No
-:Default: None
-
-
-``key``
-
-:Description: The key (i.e., the text string of the key itself). Not recommended.
-:Type: String
-:Required: No
-:Default: None
+.. confval::  keyring
+.. confval::  keyfile
+.. confval::  key
 
 
 Daemon Keyrings
 ---------------
 
-Administrative users or deployment tools  (e.g., ``ceph-deploy``) may generate
-daemon keyrings in the same way as generating user keyrings.  By default, Ceph
-stores daemons keyrings inside their data directory. The default keyring
-locations, and the capabilities necessary for the daemon to function, are shown
-below.
+Administrative users or deployment tools (for example, ``cephadm``) generate
+daemon keyrings in the same way that they generate user keyrings. By default,
+Ceph stores the keyring of a daemon inside that daemon's data directory.
+Consult each components documentation for capabilities expected for the
+service.
 
-``ceph-mon``
+To bootstrap a cluster, consult the :ref:`manual-deployment` documentation.
 
-:Location: ``$mon_data/keyring``
-:Capabilities: ``mon 'allow *'``
-
-``ceph-osd``
-
-:Location: ``$osd_data/keyring``
-:Capabilities: ``mon 'allow profile osd' osd 'allow *'``
-
-``ceph-mds``
-
-:Location: ``$mds_data/keyring``
-:Capabilities: ``mds 'allow' mon 'allow profile mds' osd 'allow rwx'``
-
-``radosgw``
-
-:Location: ``$rgw_data/keyring``
-:Capabilities: ``mon 'allow rwx' osd 'allow rwx'``
-
-
-.. note:: The monitor keyring (i.e., ``mon.``) contains a key but no 
-   capabilities, and is not part of the cluster ``auth`` database.
-
-The daemon data directory locations default to directories of the form::
+Each daemon's data-directory locations defaults to a path of the form::
 
   /var/lib/ceph/$type/$cluster-$id
 
-For example, ``osd.12`` would be::
+For example, ``osd.12`` would have the following data directory::
 
   /var/lib/ceph/osd/ceph-12
 
-You can override these locations, but it is not recommended.
+It is possible to override these locations, but it is not recommended.
 
 
 .. index:: signatures
@@ -291,142 +217,628 @@ You can override these locations, but it is not recommended.
 Signatures
 ----------
 
-In Ceph Bobtail and subsequent versions, we prefer that Ceph authenticate all
-ongoing messages between the entities using the session key set up for that
-initial authentication. However, Argonaut and earlier Ceph daemons do not know
-how to perform ongoing message authentication. To maintain backward
-compatibility (e.g., running both Botbail and Argonaut daemons in the same
-cluster), message signing is **off** by default. If you are running Bobtail or
-later daemons exclusively, configure Ceph to require signatures.
+Ceph performs a signature check that provides some limited protection against
+messages being tampered with in flight (for example, by a "man in the middle"
+attack).
 
-Like other parts of Ceph authentication, Ceph provides fine-grained control so
-you can enable/disable signatures for service messages between the client and
-Ceph, and you can enable/disable signatures for messages between Ceph daemons.
+As with other parts of Ceph authentication, signatures admit of fine-grained
+control.  You can enable or disable signatures for service messages between
+clients and Ceph, and for messages between Ceph daemons.
 
+Note that even when signatures are enabled, data is not encrypted in flight.
 
-``cephx require signatures``
+.. confval:: cephx_require_signatures
 
-:Description: If set to ``true``, Ceph requires signatures on all message 
-              traffic between the Ceph Client and the Ceph Storage Cluster, and 
-              between daemons comprising the Ceph Storage Cluster. 
+.. confval:: cephx_cluster_require_signatures
 
-:Type: Boolean
-:Required: No
-:Default: ``false``
+.. confval:: cephx_service_require_signatures
 
-
-``cephx cluster require signatures``
-
-:Description: If set to ``true``, Ceph requires signatures on all message
-              traffic between Ceph daemons comprising the Ceph Storage Cluster. 
-
-:Type: Boolean
-:Required: No
-:Default: ``false``
-
-
-``cephx service require signatures``
-
-:Description: If set to ``true``, Ceph requires signatures on all message
-              traffic between Ceph Clients and the Ceph Storage Cluster.
-
-:Type: Boolean
-:Required: No
-:Default: ``false``
-
-
-``cephx sign messages``
-
-:Description: If the Ceph version supports message signing, Ceph will sign
-              all messages so they cannot be spoofed.
-
-:Type: Boolean
-:Default: ``true``
+.. confval:: cephx_sign_messages
 
 
 Time to Live
 ------------
 
-``auth service ticket ttl``
+.. confval:: auth_mon_ticket_ttl
+.. confval:: auth_service_ticket_ttl
 
-:Description: When the Ceph Storage Cluster sends a Ceph Client a ticket for 
-              authentication, the Ceph Storage Cluster assigns the ticket a 
-              time to live.
+After decrypting a service ticket, the server checks its fields for signs
+of corruption. It rejects unexpected auid values, allow_all, malformed
+capability data, and invalid timestamps.
 
-:Type: Double
-:Default: ``60*60``
-
-
-Backward Compatibility
-======================
-
-For Cuttlefish and earlier releases, see `Cephx`_.
-
-In Ceph Argonaut v0.48 and earlier versions, if you enable ``cephx``
-authentication, Ceph only authenticates the initial communication between the
-client and daemon; Ceph does not authenticate the subsequent messages they send
-to each other, which has security implications. In Ceph Bobtail and subsequent
-versions, Ceph authenticates all ongoing messages between the entities using the
-session key set up for that initial authentication.
-
-We identified a backward compatibility issue between Argonaut v0.48 (and prior
-versions) and Bobtail (and subsequent versions). During testing, if you
-attempted  to use Argonaut (and earlier) daemons with Bobtail (and later)
-daemons, the Argonaut daemons did not know how to perform ongoing message
-authentication, while the Bobtail versions of the daemons insist on
-authenticating message traffic subsequent to the initial
-request/response--making it impossible for Argonaut (and prior) daemons to
-interoperate with Bobtail (and subsequent) daemons.
-
-We have addressed this potential problem by providing a means for Argonaut (and
-prior) systems to interact with Bobtail (and subsequent) systems. Here's how it
-works: by default, the newer systems will not insist on seeing signatures from
-older systems that do not know how to perform them, but will simply accept such
-messages without authenticating them. This new default behavior provides the
-advantage of allowing two different releases to interact. **We do not recommend
-this as a long term solution**. Allowing newer daemons to forgo ongoing
-authentication has the unfortunate security effect that an attacker with control
-of some of your machines or some access to your network can disable session
-security simply by claiming to be unable to sign messages.  
-
-.. note:: Even if you don't actually run any old versions of Ceph, 
-   the attacker may be able to force some messages to be accepted unsigned in the 
-   default scenario. While running Cephx with the default scenario, Ceph still
-   authenticates the initial communication, but you lose desirable session security.
-
-If you know that you are not running older versions of Ceph, or you are willing
-to accept that old servers and new servers will not be able to interoperate, you
-can eliminate this security risk.  If you do so, any Ceph system that is new
-enough to support session authentication and that has Cephx enabled will reject
-unsigned messages.  To preclude new servers from interacting with old servers,
-include the following in the ``[global]`` section of your `Ceph
-configuration`_ file directly below the line that specifies the use of Cephx
-for authentication::
-
-	cephx require signatures = true    ; everywhere possible
-
-You can also selectively require signatures for cluster internal
-communications only, separate from client-facing service::
-
-	cephx cluster require signatures = true    ; for cluster-internal communication
-	cephx service require signatures = true    ; for client-facing service
-
-An option to make a client require signatures from the cluster is not
-yet implemented.
-
-**We recommend migrating all daemons to the newer versions and enabling the 
-foregoing flag** at the nearest practical time so that you may avail yourself 
-of the enhanced authentication.
-
-.. note:: Ceph kernel modules do not support signatures yet.
+Ticket creation must be within five minutes of session-key creation,
+since the monitor creates both together.
 
 
-.. _Storage Cluster Quick Start: ../../../start/quick-ceph-deploy/
+.. _cephx-upgrade:
+
+Upgrading and Rotating CephX Keys
+=================================
+
+In 2026, it became necessary to upgrade the cipher key type for all CephX keys
+due to the potential vulnerabilities in the older encryption schemes. To effect
+this upgrade, it's necessary to do the upgrade in several steps.
+
+.. note:: cephadm and Rook automate this process for you. cephadm however does not handle the client key changes.
+
+
+#. **Allow the newer key types for authentication.** For upgraded clusters, this should be done automatically by the Monitors.
+
+   Confirm the upgrade:
+
+   .. code:: bash
+
+       ceph --format=json mon dump | jq -r '.auth_allowed_ciphers | map(.name) | join (",")'
+
+   should output something like:
+
+   ::
+
+       aes,aes256k
+
+   where ``aes256k`` is the new more secure cipher type.
+
+   If not included, you can explicitly enable it:
+
+   .. code:: bash
+
+       ceph mon set auth_allowed_ciphers aes,aes256k
+
+   Then confirm the change:
+
+   .. code:: bash
+
+       ceph --format=json mon dump | jq -r '.auth_allowed_ciphers | map(.name) | join (",")'
+
+
+#. **Set the preferred default cipher type for new keys.** You may choose **not** to do this if you want new keys, by default, to use the older cipher type until your client applications can be upgraded.
+
+   Check the current value:
+
+   .. code:: bash
+
+       ceph --format=json mon dump | jq -r '.auth_preferred_cipher.name'
+
+   might output:
+
+   ::
+
+       aes
+
+   To upgrade to ``aes256k`` as the new default cipher type, execute:
+
+   .. code:: bash
+
+       ceph mon set auth_preferred_cipher aes256k
+
+   Confirm the change:
+
+   .. code:: bash
+
+       ceph --format=json mon dump | jq -r '.auth_preferred_cipher.name'
+
+   should output:
+
+   ::
+
+       aes256k
+
+
+#. **Rotate the keys for all service daemon credentials.** These include **mon**, **mgr**, **osd**, and **mds**.
+
+   .. warning:: Changing the key will make the existing daemon unable to reauthenticate.
+
+   .. note:: The ``mon.`` historically has not been managed by the Monitor auth database; it exists soley in each Monitor's keyring inside its data directory. This suggested rotation procedure now puts the authoritative copy in the auth database alongside other keys. The Monitor keyring persists as a fallback or emergency key.
+
+   Begin with the ``mon.`` key:
+
+   .. code:: bash
+
+       ceph auth rotate --key-type=aes256k mon. | tee mon.keyring
+
+   Save the ``mon.keyring`` file in a safe place. It should **not** be necessary to update the keyring files for each Monitor.
+
+   Restart each Monitor:
+
+   .. code:: bash
+
+       systemctl restart ceph-mon@$ID
+
+   .. warning:: If a Monitor was out-of-quorum during the Monitor key rotation, it will not have the new key. You must put the saved ``mon.keyring`` in its keyring file so it can authenticate.
+
+
+   Now, for each other service daemon type (**mgr**, **osd**, and **mds**):
+
+   Stop the daemon:
+
+   .. code:: bash
+
+       systemctl stop ceph-$TYPE@$ID
+
+   If it is an OSD:
+
+   .. code:: bash
+
+       ceph osd down $ID
+
+   Rotate the entity's key:
+
+   .. code:: bash
+
+       ceph auth rotate --key-type=aes256k $TYPE.$ID | tee keyring
+
+   .. note:: If you have updated ``auth_preferred_cipher`` then you can omit ``--key-type``.
+
+   Copy the ``keyring`` file to the machine running the daemon, then execute:
+
+   .. code:: bash
+
+       ceph-authtool --import-keyring $COPIED_KEYRING /var/lib/ceph/$TYPE/ceph-$ID/keyring
+
+   Adjust the above script based on where the data directory for your daemons are located.
+
+   If the daemon is an OSD created using ceph-volume the ``osd_key`` bluestore label may also
+   need to be updated. To find the device that must be passed to the bluestore tool:
+
+   .. code:: bash
+
+       ceph-volume lvm list $OSD_ID --format json
+
+   and find the ``lv_path`` field. Or, for a raw OSD:
+
+   .. code:: bash
+
+       ceph-volume raw list --format json
+
+   and find the ``device`` field for the OSD who's key you wish to rotate.
+
+   Once the device path is acquired the bluestore label can be rotated by executing:
+
+   .. code:: bash
+
+       ceph-bluestore-tool --dev $DEV_PATH set-label-key --key osd_key -v $COPIED_KEYRING
+
+   Finally, restart the daemon:
+
+   .. code:: bash
+
+       systemctl restart ceph-$TYPE@$ID
+
+#. **Confirm the** :ref:`auth-insecure-service-key-type` **is cleared.**
+
+   .. code:: bash
+
+       ceph --format=json health detail | jq '.checks | has("AUTH_INSECURE_SERVICE_KEY_TYPE")'
+
+   output gives ``false``.
+
+   If it outputs ``true``, there is another daemon that needs to be upgraded.
+   Check the output of ``ceph health detail``.
+
+#. **Upgrade the cipher for rotating service keys.**
+
+   .. code:: bash
+
+       ceph mon set auth_service_cipher aes256k
+
+   Confirm the change:
+
+   .. code:: bash
+
+       ceph --format=json mon dump | jq -r '.auth_service_cipher.name'
+
+   should output
+
+   ::
+
+       aes256k
+
+   Verify the :ref:`auth-insecure-service-tickets` is resolved:
+
+   .. code:: bash
+
+       ceph --format=json health detail | jq '.checks | has("AUTH_INSECURE_SERVICE_TICKETS") | not'
+
+#. **Wipe the rotating service keys.**
+
+   .. warning:: This **is not recommended** for most deployments. It is best to let your rotating service keys expire after a few hours (using default TTL).
+
+   .. warning:: **Only perform this step if all service daemons have upgraded binaries that understand the new cipher type.**
+
+   If you want to immediately clear the :ref:`auth-insecure-rotating-service-key-type` warning, you can wipe the existing rotating service key database on the Monitors:
+
+   .. code::
+
+       ceph auth wipe-rotating-service-keys
+
+   should output:
+
+   ::
+
+       wiped rotating service keys!
+
+   This will cause all service daemons to refresh the rotating service keys. Upgraded clients will similarly refresh their tickets with the Monitors.
+
+   .. note:: This operation has no effect on the existing sessions the Clients have established with service daemons.
+
+#. **Prevent creation of new insecure keys.**
+
+   When the Monitor setting ``auth_allowed_ciphers`` setting includes an
+   insecure key type, the **default value** of the Monitor config
+   ``mon_auth_allow_insecure_key`` will be altered at runtime to ``true``. For an upgraded
+   cluster, you should therefore expect see the
+   :ref:`auth-insecure-keys-creatable` health warning.
+
+   You can disable this configuration manually to prevent new insecure keys
+   from being created. Alternatively, once the ``auth_allowed_ciphers`` omits
+   insecure key types (in a future step of this process), this configuration
+   will have its default value changed and that should also clear
+   ``AUTH_INSECURE_KEYS_CREATABLE``.
+
+   To manually disable the creation of insecure keys:
+
+   .. code:: bash
+
+       ceph config set mon 'mon auth allow insecure key' false
+
+   Verify the ``AUTH_INSECURE_KEYS_CREATABLE`` is resolved:
+
+   .. code:: bash
+
+       ceph --format=json health detail | jq '.checks | has("AUTH_INSECURE_KEYS_CREATABLE") | not'
+
+   output gives ``false``.
+
+   For more information, see :ref:`auth_allow_insecure_keys`.
+
+#. **Rotate the admin key.**
+
+   .. warning:: Rotating the admin key requires special care as recovering from a mistake is complicated. Be careful.
+
+   .. note:: It is common for the ``client.admin`` credential's key to be copied to several nodes that may need to execute administrative commands. The new key will need to be copied to each node.
+
+   Create a backup emergency admin key in case of mistakes:
+
+   .. code:: bash
+
+        ceph auth get-or-create client.admin-backup mon "allow *" | tee ./client.admin-backup.keyring
+
+   Confirm the backup key works:
+
+   .. code:: bash
+
+        ceph -n client.admin-backup -k ./client.admin-backup.keyring auth ls
+
+   Now, rotate the ``client.admin`` key:
+
+   .. code:: bash
+
+       ceph auth rotate --key-type=aes256k client.admin | tee ./client.admin.keyring
+
+   .. note:: If you have updated ``auth_preferred_cipher`` then you can omit ``--key-type``.
+
+   .. warning:: The client.admin key is now changed. You cannot execute new Ceph commands as ``client.admin`` until you import the new key into your keyring.
+
+   Import the new ``client.admin`` key into your system's keyring file:
+
+   .. code:: bash
+
+       ceph-authtool --import-keyring ./client.admin.keyring /etc/ceph/ceph.client.admin.keyring
+
+   .. warning:: Your system's keyring file may be in a different location! Check ``/etc/ceph`` and your local Ceph configuration.
+
+   Verify the key works:
+
+   .. code:: bash
+
+       ceph -n client.admin -k /etc/ceph/ceph.client.admin.keyring ceph auth ls
+
+   If everything looks good, remove the backup key:
+
+   .. code:: bash
+
+       ceph auth rm client.admin-backup
+
+#. **Rotate other client keys.**
+
+   The process to rotate other client keys is similar to the admin key.
+
+   To view ``client`` credentials with insecure keys:
+
+   .. code:: bash
+
+       ceph health detail
+
+   should include output with :ref:`auth-insecure-client-key-type`:
+
+   ::
+
+       [WRN] AUTH_INSECURE_CLIENT_KEY_TYPE: 2 auth client entities with insecure key types
+        entity client.fs using insecure key type: aes
+        entity client.fs_a using insecure key type: aes
+
+   which tells you that two keys need to be updated.
+
+   If the client's software (e.g. ``ceph-fuse`` or the Linux kernel driver) is
+   up-to-date on all machines using the key, you may rotate the key and
+   distribute it. Kernel clients need Linux 7.0 for ``aes256k`` keys; see
+   :ref:`cephx-older-kernel-clients`.
+
+   .. code:: bash
+
+       ceph auth rotate --key-type=aes256k client.$ID | tee ./client.$ID.keyring
+
+   .. note:: If you have updated ``auth_preferred_cipher`` then you can omit ``--key-type``.
+
+   Then copy and import the key to each machine using that ``client.$ID`` credential.
+
+   Once all client credentials have been upgraded, you should see the ``AUTH_INSECURE_CLIENT_KEY_TYPE`` health warning clear.
+
+   .. code:: bash
+
+       ceph --format=json health detail | jq '.checks | has("AUTH_INSECURE_CLIENT_KEY_TYPE") | not'
+
+   output gives ``false``.
+
+   If you cannot rotate a particular client key yet, you may prefer to mute the
+   health warning until you can complete upgrading all of the client keys. We
+   expect this to be typical situation for some clusters.
+
+   .. code::
+
+       ceph health mute AUTH_INSECURE_CLIENT_KEY_TYPE 8w
+
+   to mute the warning for 8 weeks. Alternatively, use ``--sticky`` to make it permanent.
+
+
+#. **Disallow insecure keys for authentication.**
+
+   Now that all serivce daemon and client keys have been rotated, you can remove the insecure cipher key type
+   from the list of types allowed for authentication.
+
+   .. code:: bash
+
+       ceph mon set auth_allowed_ciphers aes256k
+
+   .. note:: This will now disable the default value for ``mon_auth_allow_insecure_key`` and clear the ``AUTH_INSECURE_KEYS_CREATABLE`` warning.
+
+   .. warning:: If you remove the key type for the ``client.admin`` key or for service daemon keys, you may break authentication in your cluster. That situation will require rescue via :ref:`auth_emergency_allowed_ciphers`. Ensure that ``AUTH_INSECURE_CLIENT_KEY_TYPE`` and ``AUTH_INSECURE_SERVICE_KEY_TYPE`` health warnings are clear!
+
+   Once changed, you should see the :ref:`auth-insecure-keys-allowed` health warning clear.
+
+   .. code:: bash
+
+       ceph --format=json health detail | jq '.checks | has("AUTH_INSECURE_KEYS_ALLOWED") | not'
+
+   output gives ``false``.
+
+At this point, your CephX ciphers and keys should be upgraded.
+   
+
+.. _auth_rotate:
+
+Rotating CephX Keys
+-------------------
+
+The Monitors provide a mechanism to only update the key for an entity via the
+``auth rotate`` command.
+
+.. code:: bash
+
+    ceph auth rotate $TYPE.$ID
+
+For example:
+
+.. code:: bash
+
+    ceph auth rotate client.fs | tee ./client.fs.keyring
+
+The output of the command is the new key:
+
+::
+
+    [client.fs]
+            key = <redacted>
+            caps mds = "allow rwp"
+            caps mon = "allow r"
+            caps osd = "allow rw tag cephfs data=*"
+
+This can be imported into a new keyring using ``ceph-authtool``:
+
+.. code:: bash
+
+   ceph-authtool --import-keyring ./client.fs.keyring /etc/ceph/client.fs.keyring
+
+
+.. note:: The key must be distributed to all locations where the key is in use.
+
+
+.. _cephx-older-kernel-clients:
+
+Older Kernel Clients
+--------------------
+
+The Linux kernel client (CephFS and RBD) supports ``aes256k`` keys since
+Linux 7.0. For older kernels, allow ``aes`` and give those clients an
+``aes`` key:
+
+.. code:: bash
+
+    ceph mon set auth_allowed_ciphers aes,aes256k
+    ceph auth get-or-create client.foo --key-type aes ...
+
+For a few seconds after the ``mon set``, creating the key may fail with
+``creating key with insecure key type ("aes") not allowed``; retry.
+
+``ceph-fuse`` and ``rbd-nbd`` do not use the kernel client.
+
+.. _auth_emergency_allowed_ciphers:
+
+Emergency Allowed Ciphers
+-------------------------
+
+The Monitors maintain the set of allowed ciphers for credential keys in the ``MonMap``. This is normally set live on the cluster using:
+
+.. code:: bash
+
+   ceph mon set auth_allowed_ciphers <cipher1,cipher2,...>
+
+It's possible to set a cipher for which no key exists to authenticate during
+key upgrades. To work around this, the Monitors may be rescued using the local
+startup configuration:
+
+.. confval:: mon_auth_emergency_allowed_ciphers
+
+Setting this config to include ``aes,aes256k`` or whatever the missing ciphers
+are will allow your existing ``client.admin`` or other administrative keys to
+authenticate as normal.
+
+When this configuration is set, the Monitors will raise the
+:ref:`auth-emergency-ciphers-set` health warning. It should only be set on a
+temporary basis to rescue the cluster.
+
+
+.. _auth_allow_insecure_keys:
+
+Allow Creation of Insecure Keys
+-------------------------------
+
+By default, the Monitors will allow creation of keys with a cipher type known
+to be insecure so long as the Monitors also allow that cipher to authenticate.
+When that cipher type is removed from the authentication list, the Monitors
+will also disable the default value of the ``mon_auth_allow_insecure_key``
+configuration.
+
+.. confval:: mon_auth_allow_insecure_key
+
+When disabled, ceph commands can no longer create keys with an insecure cipher
+type.
+
+When this configuration is enabled by default or otherwise, the Monitors will
+raise the :ref:`auth-insecure-keys-creatable` health warning.
+
+
+.. _auth_dump_keys:
+
+Dump Existing Keys
+------------------
+
+The Monitors provide a command to dump all CephX credentials and key metadata
+as well as all rotating service key metadata.
+
+.. code:: bash
+
+   ceph --format=json-pretty auth dump-keys
+
+produces truncated output like:
+
+::
+
+    {
+        "data": {
+            "version": 15,
+            "rotating_version": 1,
+            "secrets": [
+                {
+                    "entity": {
+                        "type": 2,
+                        "type_str": "mds",
+                        "id": "a"
+                    },
+                    "auth": {
+                        "key": {
+                            "type": 1,
+                            "type_str": "aes",
+                            "created": "2025-07-29T21:53:30.978646-0400"
+                        },
+                        "pending_key": {
+                            "type": 0,
+                            "type_str": "none",
+                            "created": "0.000000"
+                        },
+                        "caps": [
+                            {
+                                "service_name": "mds",
+                                "access_spec": "\u0005\u0000\u0000\u0000allow"
+                            },
+                            {
+                                "service_name": "mgr",
+                                "access_spec": "\u0011\u0000\u0000\u0000allow profile mds"
+                            },
+                            {
+                                "service_name": "mon",
+                                "access_spec": "\u0011\u0000\u0000\u0000allow profile mds"
+                            },
+                            {
+                                "service_name": "osd",
+                                "access_spec": "\u0017\u0000\u0000\u0000allow rw tag cephfs *=*"
+                            }
+                        ]
+                    }
+                },
+                ...
+            ],
+            "rotating_secrets": [
+                {
+                    "entity": {
+                        "type": 1,
+                        "type_str": "mon",
+                        "id": "*"
+                    },
+                    "secrets": {
+                        "max_ver": 3,
+                        "keys": [
+                            {
+                                "id": 1,
+                                "expiring_key": {
+                                    "key": {
+                                        "type": 1,
+                                        "type_str": "aes",
+                                        "created": "2025-07-29T21:53:04.632712-0400"
+                                    },
+                                    "expiration": "2025-07-29T22:53:04.632703-0400"
+                                }
+                            },
+                            {
+                                "id": 2,
+                                "expiring_key": {
+                                    "key": {
+                                        "type": 1,
+                                        "type_str": "aes",
+                                        "created": "2025-07-29T21:53:04.632715-0400"
+                                    },
+                                    "expiration": "2025-07-29T23:53:04.632703-0400"
+                                }
+                            },
+                            {
+                                "id": 3,
+                                "expiring_key": {
+                                    "key": {
+                                        "type": 1,
+                                        "type_str": "aes",
+                                        "created": "2025-07-29T21:53:04.632718-0400"
+                                    },
+                                    "expiration": "2025-07-30T00:53:04.632703-0400"
+                                }
+                            }
+                        ]
+                    }
+                },
+            ]
+        }
+    }
+
+This command only works for format types ``json`` or ``json-pretty``.
+
+You may use this information to monitor the entities in the Monitor auth
+database as well as key types. For example, this information lets the operator
+check if insecure key types are in use. Consider this a low-level API. For
+example, the caps listed are in a binary format that is unsuitable for analysis.
+
+.. note:: Generally, the Monitors will warn you if there is a dangerous situation such as insecure key types are in use.
+
+
+
 .. _Monitor Bootstrapping: ../../../install/manual-deployment#monitor-bootstrapping
 .. _Operating a Cluster: ../../operations/operating
 .. _Manual Deployment: ../../../install/manual-deployment
-.. _Cephx: http://ceph.com/docs/cuttlefish/rados/configuration/auth-config-ref/
-.. _Ceph configuration: ../ceph-conf
-.. _Create an Admin Host: ../../deployment/ceph-deploy-admin
-.. _Architecture - High Availability Authentication: ../../../architecture#high-availability-authentication
-.. _User Management: ../../operations/user-management

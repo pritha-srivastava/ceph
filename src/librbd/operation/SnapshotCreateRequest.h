@@ -1,12 +1,12 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_OPERATION_SNAPSHOT_CREATE_REQUEST_H
 #define CEPH_LIBRBD_OPERATION_SNAPSHOT_CREATE_REQUEST_H
 
 #include "cls/rbd/cls_rbd_types.h"
+#include "librbd/Types.h"
 #include "librbd/operation/Request.h"
-#include "librbd/parent_types.h"
 #include <string>
 
 class Context;
@@ -14,6 +14,7 @@ class Context;
 namespace librbd {
 
 class ImageCtx;
+class ProgressContext;
 
 namespace operation {
 
@@ -28,30 +29,38 @@ public:
    *            <start>
    *               |
    *               v
-   *           STATE_SUSPEND_REQUESTS
-   *               |
-   *               v
-   *           STATE_SUSPEND_AIO * * * * * * * * * * * * *
-   *               |                                     *
-   *               v                                     *
-   *           STATE_APPEND_OP_EVENT (skip if journal    *
-   *               |                  disabled)          *
-   *   (retry)     v                                     *
-   *   . . . > STATE_ALLOCATE_SNAP_ID                    *
-   *   .           |                                     *
-   *   .           v                                     *
-   *   . . . . STATE_CREATE_SNAP * * * * * * * * * *     *
-   *               |                               *     *
-   *               v                               *     *
-   *           STATE_CREATE_OBJECT_MAP (skip if    *     *
-   *               |                    disabled)  *     *
-   *               |                               *     *
-   *               |                               v     *
-   *               |              STATE_RELEASE_SNAP_ID  *
-   *               |                     |               *
-   *               |                     v               *
-   *               \----------------> <finish> < * * * * *
-   *
+   *           STATE_NOTIFY_QUIESCE  * * * * * * * * * * * * *
+   *               |                                         *
+   *               v                                         *
+   *           STATE_SUSPEND_REQUESTS                        *
+   *               |                                         *
+   *               v                                         *
+   *           STATE_SUSPEND_AIO * * * * * * * * * * * * * * *
+   *               |                                         *
+   *               v                                         *
+   *           STATE_APPEND_OP_EVENT (skip if journal        *
+   *               |                  disabled)              *
+   *   (retry)     v                                         *
+   *   . . . > STATE_ALLOCATE_SNAP_ID                        *
+   *   .           |                                         *
+   *   .           v                                         *
+   *   . . . . STATE_CREATE_SNAP * * * * * * * * * * *       *
+   *               |                                 *       *
+   *               v                                 *       *
+   *           STATE_CREATE_OBJECT_MAP (skip if      *       *
+   *               |                    disabled)    *       *
+   *               v                                 *       *
+   *           STATE_CREATE_IMAGE_STATE (skip if     *       *
+   *               |                     not mirror  *       *
+   *               |                     snapshot)   *       *
+   *               |                                 v       *
+   *               |              STATE_RELEASE_SNAP_ID      *
+   *               |                     |                   *
+   *               |                     v                   *
+   *               \------------> STATE_NOTIFY_UNQUIESCE < * *
+   *                                     |
+   *                                     v
+   *                                  <finish>
    * @endverbatim
    *
    * The _CREATE_STATE state may repeat back to the _ALLOCATE_SNAP_ID state
@@ -60,33 +69,40 @@ public:
    * (if enabled) and bubble the originating error code back to the client.
    */
   SnapshotCreateRequest(ImageCtxT &image_ctx, Context *on_finish,
-		        const std::string &snap_name,
-			const cls::rbd::SnapshotNamespace &snap_namespace,
-			uint64_t journal_op_tid,
-                        bool skip_object_map);
+                        const cls::rbd::SnapshotNamespace &snap_namespace,
+                        const std::string &snap_name, uint64_t journal_op_tid,
+                        uint64_t flags, ProgressContext &prog_ctx);
 
 protected:
-  virtual void send_op();
-  virtual bool should_complete(int r) {
+  void send_op() override;
+  bool should_complete(int r) override {
     return true;
   }
-  virtual bool can_affect_io() const override {
+  bool can_affect_io() const override {
     return true;
   }
-  virtual journal::Event create_event(uint64_t op_tid) const {
-    return journal::SnapCreateEvent(op_tid, m_snap_name, m_snap_namespace);
+  journal::Event create_event(uint64_t op_tid) const override {
+    return journal::SnapCreateEvent(op_tid, m_snap_namespace, m_snap_name);
   }
 
 private:
-  std::string m_snap_name;
   cls::rbd::SnapshotNamespace m_snap_namespace;
+  std::string m_snap_name;
   bool m_skip_object_map;
+  bool m_skip_notify_quiesce;
+  bool m_ignore_notify_quiesce_error;
+  ProgressContext &m_prog_ctx;
 
-  int m_ret_val;
+  uint64_t m_request_id = 0;
+  int m_ret_val = 0;
+  bool m_writes_blocked = false;
 
-  uint64_t m_snap_id;
+  uint64_t m_snap_id = CEPH_NOSNAP;
   uint64_t m_size;
-  parent_info m_parent_info;
+  ParentImageInfo m_parent_info;
+
+  void send_notify_quiesce();
+  Context *handle_notify_quiesce(int *result);
 
   void send_suspend_requests();
   Context *handle_suspend_requests(int *result);
@@ -106,8 +122,14 @@ private:
   Context *send_create_object_map();
   Context *handle_create_object_map(int *result);
 
+  Context *send_create_image_state();
+  Context *handle_create_image_state(int *result);
+
   void send_release_snap_id();
   Context *handle_release_snap_id(int *result);
+
+  Context *send_notify_unquiesce();
+  Context *handle_notify_unquiesce(int *result);
 
   void update_snap_context();
 

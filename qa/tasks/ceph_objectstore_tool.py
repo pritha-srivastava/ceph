@@ -1,24 +1,43 @@
 """
 ceph_objectstore_tool - Simple test of ceph-objectstore-tool utility
 """
-from cStringIO import StringIO
+from io import BytesIO
+
 import contextlib
+import json
 import logging
-import ceph_manager
-from teuthology import misc as teuthology
-import time
 import os
-import string
-from teuthology.orchestra import run
 import sys
 import tempfile
-import json
-from util.rados import (rados, create_replicated_pool, create_ec_pool)
+import time
+from tasks import ceph_manager
+from tasks.util.rados import (rados, create_replicated_pool, create_ec_pool)
+from teuthology import misc as teuthology
+from teuthology.orchestra import run
+
+from teuthology.exceptions import CommandFailedError
+
 # from util.rados import (rados, create_ec_pool,
 #                               create_replicated_pool,
 #                               create_cache_pool)
 
 log = logging.getLogger(__name__)
+
+# Global variable to track whether we're using crimson-objectstore-tool
+CRIMSON = False
+
+def SKIP_IF_CRIMSON(reason="Not supported in crimson-objectstore-tool"):
+    """
+    Decorator to skip tests that are not supported in crimson-objectstore-tool
+    """
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            if CRIMSON:
+                log.info("SKIPPING: {} - {}".format(func.__name__, reason))
+                return 0  # Return no errors for skipped tests
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 # Should get cluster name "ceph" from somewhere
 # and normal path from osd_data and osd_journal in conf
@@ -56,7 +75,7 @@ def cod_setup_remote_data(log, ctx, remote, NUM_OBJECTS, DATADIR,
         DATA = ""
         for _ in dataline:
             DATA += data
-        teuthology.write_file(remote, DDNAME, DATA)
+        remote.write_file(DDNAME, DATA)
 
 
 def cod_setup(log, ctx, remote, NUM_OBJECTS, DATADIR,
@@ -149,6 +168,8 @@ def task(ctx, config):
         ceph_objectstore_tool:
           objects: 20 # <number of objects>
           pgnum: 12
+          crimson_objectstore_tool: true # use crimson-objectstore-tool instead of ceph-objectstore-tool
+          gc_before_restart: true # run crimson-objectstore-tool --op gc before restarting OSDs
     """
 
     if config is None:
@@ -156,7 +177,11 @@ def task(ctx, config):
     assert isinstance(config, dict), \
         'ceph_objectstore_tool task only accepts a dict for configuration'
 
-    log.info('Beginning ceph_objectstore_tool...')
+    # Set global CRIMSON flags based on configuration
+    global CRIMSON
+    global CRIMSON_DEVICE_TYPE
+    CRIMSON = config.get('crimson_objectstore_tool', False)
+    log.info('crimson_objectstore_tool is {}...'.format(CRIMSON))
 
     log.debug(config)
     log.debug(ctx)
@@ -183,6 +208,10 @@ def task(ctx, config):
     manager.raw_cluster_cmd('osd', 'set', 'noout')
     manager.raw_cluster_cmd('osd', 'set', 'nodown')
 
+    if CRIMSON:
+        CRIMSON_DEVICE_TYPE = manager.get_config('osd', 0, 'seastore_data_device_type')
+        log.info('seastore_data_device_type is {}...'.format(CRIMSON_DEVICE_TYPE))
+
     PGNUM = config.get('pgnum', 12)
     log.info("pgnum: {num}".format(num=PGNUM))
 
@@ -195,9 +224,13 @@ def task(ctx, config):
 
     EC_POOL = "ec_pool"
     EC_NAME = "ECobject"
-    create_ec_pool(cli_remote, EC_POOL, 'default', PGNUM)
-    ERRORS += test_objectstore(ctx, config, cli_remote,
-                               EC_POOL, EC_NAME, ec=True)
+    if not CRIMSON:
+        # EC pools may not be supported in crimson-objectstore-tool yet
+        create_ec_pool(cli_remote, EC_POOL, 'default', PGNUM)
+        ERRORS += test_objectstore(ctx, config, cli_remote,
+                                   EC_POOL, EC_NAME, ec=True)
+    else:
+        log.info("SKIPPING EC pool tests for crimson-objectstore-tool")
 
     if ERRORS == 0:
         log.info("TEST PASSED")
@@ -237,7 +270,7 @@ def test_objectstore(ctx, config, cli_remote, REP_POOL, REP_NAME, ec=False):
                          REP_NAME, DATALINECOUNT)
     allremote = []
     allremote.append(cli_remote)
-    allremote += osds.remotes.keys()
+    allremote += list(osds.remotes.keys())
     allremote = list(set(allremote))
     for remote in allremote:
         cod_setup_remote_data(log, ctx, remote, NUM_OBJECTS, DATADIR,
@@ -250,10 +283,10 @@ def test_objectstore(ctx, config, cli_remote, REP_POOL, REP_NAME, ec=False):
     for stats in manager.get_pg_stats():
         if stats["pgid"].find(str(REPID) + ".") != 0:
             continue
-        if pool_dump["type"] == ceph_manager.CephManager.REPLICATED_POOL:
+        if pool_dump["type"] == ceph_manager.PoolType.REPLICATED:
             for osd in stats["acting"]:
                 pgs.setdefault(osd, []).append(stats["pgid"])
-        elif pool_dump["type"] == ceph_manager.CephManager.ERASURE_CODED_POOL:
+        elif pool_dump["type"] == ceph_manager.PoolType.ERASURE_CODED:
             shard = 0
             for osd in stats["acting"]:
                 pgs.setdefault(osd, []).append("{pgid}s{shard}".
@@ -264,8 +297,8 @@ def test_objectstore(ctx, config, cli_remote, REP_POOL, REP_NAME, ec=False):
             raise Exception("{pool} has an unexpected type {type}".
                             format(pool=REP_POOL, type=pool_dump["type"]))
 
-    log.info(pgs)
-    log.info(db)
+    log.info("Expected pgs: {_pgs}".format(_pgs=pgs))
+    log.info("Expected : {_db}".format(_db=db))
 
     for osd in manager.get_osd_status()['up']:
         manager.kill_osd(osd)
@@ -276,42 +309,50 @@ def test_objectstore(ctx, config, cli_remote, REP_POOL, REP_NAME, ec=False):
 
     # Test --op list and generate json for all objects
     log.info("Test --op list by generating json for all objects")
-    prefix = ("sudo ceph-objectstore-tool "
-              "--data-path {fpath} "
-              "--journal-path {jpath} ").format(fpath=FSPATH, jpath=JPATH)
-    for remote in osds.remotes.iterkeys():
+    
+    if CRIMSON:
+        prefix = ("sudo crimson-objectstore-tool "
+                  "--data-path {fpath} "
+                  "--device-type {device_t} ").format(fpath=FSPATH, device_t=CRIMSON_DEVICE_TYPE)
+    else:
+        prefix = ("sudo ceph-objectstore-tool "
+                  "--data-path {fpath} "
+                  "--journal-path {jpath} ").format(fpath=FSPATH, jpath=JPATH)
+    for remote in osds.remotes.keys():
         log.debug(remote)
         log.debug(osds.remotes[remote])
         for role in osds.remotes[remote]:
-            if string.find(role, "osd.") != 0:
+            if not role.startswith("osd."):
                 continue
             osdid = int(role.split('.')[1])
             log.info("process osd.{id} on {remote}".
                      format(id=osdid, remote=remote))
             cmd = (prefix + "--op list").format(id=osdid)
-            proc = remote.run(args=cmd.split(), check_status=False,
-                              stdout=StringIO())
-            if proc.exitstatus != 0:
-                log.error("Bad exit status {ret} from --op list request".
-                          format(ret=proc.exitstatus))
-                ERRORS += 1
-            else:
-                for pgline in proc.stdout.getvalue().splitlines():
-                    if not pgline:
+            try:
+                lines = remote.sh(cmd, check_status=False).splitlines()
+                for pgline in lines:
+                    if not pgline or not pgline.startswith("["):
                         continue
+                    log.info("parsing {_line}".format(_line=pgline))
                     (pg, obj) = json.loads(pgline)
                     name = obj['oid']
                     if name in db:
+                        log.info("found {_name}".format(_name=name))
                         pgswithobjects.add(pg)
                         objsinpg.setdefault(pg, []).append(name)
                         db[name].setdefault("pg2json",
                                             {})[pg] = json.dumps(obj)
+            except CommandFailedError as e:
+                log.error("Bad exit status {ret} from --op list request".
+                          format(ret=e.exitstatus))
+                ERRORS += 1
 
-    log.info(db)
-    log.info(pgswithobjects)
-    log.info(objsinpg)
+    log.info("Finished --op list")
+    log.info("Found: {_db}".format(_db=db))
+    log.info("Found pgs: {_pgswithobjects}".format(_pgswithobjects=pgswithobjects))
+    log.info("Found objects by pgs: {_objsinpg}".format(_objsinpg=objsinpg))
 
-    if pool_dump["type"] == ceph_manager.CephManager.REPLICATED_POOL:
+    if pool_dump["type"] == ceph_manager.PoolType.REPLICATED:
         # Test get-bytes
         log.info("Test get-bytes and set-bytes")
         for basename in db.keys():
@@ -319,15 +360,15 @@ def test_objectstore(ctx, config, cli_remote, REP_POOL, REP_NAME, ec=False):
             GETNAME = os.path.join(DATADIR, "get")
             SETNAME = os.path.join(DATADIR, "set")
 
-            for remote in osds.remotes.iterkeys():
+            for remote in osds.remotes.keys():
                 for role in osds.remotes[remote]:
-                    if string.find(role, "osd.") != 0:
+                    if not role.startswith("osd."):
                         continue
                     osdid = int(role.split('.')[1])
                     if osdid not in pgs:
                         continue
 
-                    for pg, JSON in db[basename]["pg2json"].iteritems():
+                    for pg, JSON in db[basename]["pg2json"].items():
                         if pg in pgs[osdid]:
                             cmd = ((prefix + "--pgid {pg}").
                                    format(id=osdid, pg=pg).split())
@@ -352,12 +393,18 @@ def test_objectstore(ctx, config, cli_remote, REP_POOL, REP_NAME, ec=False):
                                 # log.debug("Expected:")
                                 # cat_file(logging.DEBUG, file)
                                 ERRORS += 1
+                            else:
+                                log.debug("Got original data from get-bytes {_basename} "
+                                          "successfully!".format(_basename=basename))
+
                             remote.run(args="rm -f {getfile}".
                                        format(getfile=GETNAME).split())
 
-                            data = ("put-bytes going into {file}\n".
+                            log.debug("Setting new data to {_basename}".format(_basename=basename))
+
+                            data = ("set-bytes going into {file}\n".
                                     format(file=file))
-                            teuthology.write_file(remote, SETNAME, data)
+                            remote.write_file(SETNAME, data)
                             cmd = ((prefix + "--pgid {pg}").
                                    format(id=osdid, pg=pg).split())
                             cmd.append(run.Raw("'{json}'".format(json=JSON)))
@@ -376,20 +423,25 @@ def test_objectstore(ctx, config, cli_remote, REP_POOL, REP_NAME, ec=False):
                                    format(id=osdid, pg=pg).split())
                             cmd.append(run.Raw("'{json}'".format(json=JSON)))
                             cmd += "get-bytes -".split()
-                            proc = remote.run(args=cmd, check_status=False,
-                                              stdout=StringIO())
-                            proc.wait()
-                            if proc.exitstatus != 0:
-                                log.error("get-bytes after "
-                                          "set-bytes ret={ret}".
-                                          format(ret=proc.exitstatus))
-                                ERRORS += 1
-                            else:
-                                if data != proc.stdout.getvalue():
+                            try:
+                                output = remote.sh(cmd, wait=True)
+                                if data != output:
                                     log.error("Data inconsistent after "
                                               "set-bytes, got:")
-                                    log.error(proc.stdout.getvalue())
+                                    log.error(output)
                                     ERRORS += 1
+                                else:
+                                    log.debug("Got data after set-bytes to {_basename} "
+                                              "successfully!".format(_basename=basename))
+
+                            except CommandFailedError as e:
+                                log.error("get-bytes after "
+                                          "set-bytes ret={ret}".
+                                          format(ret=e.exitstatus))
+                                ERRORS += 1
+
+
+                            log.debug("Retrning {_basename} to orginal data".format(_basename=basename))
 
                             cmd = ((prefix + "--pgid {pg}").
                                    format(id=osdid, pg=pg).split())
@@ -411,35 +463,34 @@ def test_objectstore(ctx, config, cli_remote, REP_POOL, REP_NAME, ec=False):
         GETNAME = os.path.join(DATADIR, "get")
         SETNAME = os.path.join(DATADIR, "set")
 
-        for remote in osds.remotes.iterkeys():
+        for remote in osds.remotes.keys():
             for role in osds.remotes[remote]:
-                if string.find(role, "osd.") != 0:
+                if not role.startswith("osd."):
                     continue
                 osdid = int(role.split('.')[1])
                 if osdid not in pgs:
                     continue
 
-                for pg, JSON in db[basename]["pg2json"].iteritems():
+                for pg, JSON in db[basename]["pg2json"].items():
                     if pg in pgs[osdid]:
                         cmd = ((prefix + "--pgid {pg}").
                                format(id=osdid, pg=pg).split())
                         cmd.append(run.Raw("'{json}'".format(json=JSON)))
                         cmd += ["list-attrs"]
-                        proc = remote.run(args=cmd, check_status=False,
-                                          stdout=StringIO(), stderr=StringIO())
-                        proc.wait()
-                        if proc.exitstatus != 0:
+                        try:
+                            keys = remote.sh(cmd, wait=True, stderr=BytesIO()).split()
+                        except CommandFailedError as e:
                             log.error("Bad exit status {ret}".
-                                      format(ret=proc.exitstatus))
+                                      format(ret=e.exitstatus))
                             ERRORS += 1
                             continue
-                        keys = proc.stdout.getvalue().split()
                         values = dict(db[basename]["xattr"])
 
                         for key in keys:
                             if (key == "_" or
                                     key == "snapset" or
-                                    key == "hinfo_key"):
+                                    key == "hinfo_key" or
+                                    key == "omap_header"):
                                 continue
                             key = key.strip("_")
                             if key not in values:
@@ -453,15 +504,13 @@ def test_objectstore(ctx, config, cli_remote, REP_POOL, REP_NAME, ec=False):
                             cmd.append(run.Raw("'{json}'".format(json=JSON)))
                             cmd += ("get-attr {key}".
                                     format(key="_" + key).split())
-                            proc = remote.run(args=cmd, check_status=False,
-                                              stdout=StringIO())
-                            proc.wait()
-                            if proc.exitstatus != 0:
+                            try:
+                                val = remote.sh(cmd, wait=True)
+                            except CommandFailedError as e:
                                 log.error("get-attr failed with {ret}".
-                                          format(ret=proc.exitstatus))
+                                          format(ret=e.exitstatus))
                                 ERRORS += 1
                                 continue
-                            val = proc.stdout.getvalue()
                             if exp != val:
                                 log.error("For key {key} got value {got} "
                                           "instead of {expected}".
@@ -483,134 +532,93 @@ def test_objectstore(ctx, config, cli_remote, REP_POOL, REP_NAME, ec=False):
                             proc = remote.run(args=['bash', '-e', '-x',
                                                     '-c', cmd],
                                               check_status=False,
-                                              stdout=StringIO(),
-                                              stderr=StringIO())
+                                              stdout=BytesIO(),
+                                              stderr=BytesIO())
                             proc.wait()
                             if proc.exitstatus != 0:
                                 log.error("failed with " +
                                           str(proc.exitstatus))
-                                log.error(proc.stdout.getvalue() + " " +
-                                          proc.stderr.getvalue())
+                                log.error(" ".join([
+                                    proc.stdout.getvalue().decode(),
+                                    proc.stderr.getvalue().decode(),
+                                    ]))
                                 ERRORS += 1
 
                         if len(values) != 0:
                             log.error("Not all keys found, remaining keys:")
                             log.error(values)
 
-    log.info("Test pg info")
-    for remote in osds.remotes.iterkeys():
-        for role in osds.remotes[remote]:
-            if string.find(role, "osd.") != 0:
-                continue
-            osdid = int(role.split('.')[1])
-            if osdid not in pgs:
-                continue
-
-            for pg in pgs[osdid]:
-                cmd = ((prefix + "--op info --pgid {pg}").
-                       format(id=osdid, pg=pg).split())
-                proc = remote.run(args=cmd, check_status=False,
-                                  stdout=StringIO())
-                proc.wait()
-                if proc.exitstatus != 0:
-                    log.error("Failure of --op info command with {ret}".
-                              format(proc.exitstatus))
-                    ERRORS += 1
-                    continue
-                info = proc.stdout.getvalue()
-                if not str(pg) in info:
-                    log.error("Bad data from info: {info}".format(info=info))
-                    ERRORS += 1
-
-    log.info("Test pg logging")
-    for remote in osds.remotes.iterkeys():
-        for role in osds.remotes[remote]:
-            if string.find(role, "osd.") != 0:
-                continue
-            osdid = int(role.split('.')[1])
-            if osdid not in pgs:
-                continue
-
-            for pg in pgs[osdid]:
-                cmd = ((prefix + "--op log --pgid {pg}").
-                       format(id=osdid, pg=pg).split())
-                proc = remote.run(args=cmd, check_status=False,
-                                  stdout=StringIO())
-                proc.wait()
-                if proc.exitstatus != 0:
-                    log.error("Getting log failed for pg {pg} "
-                              "from osd.{id} with {ret}".
-                              format(pg=pg, id=osdid, ret=proc.exitstatus))
-                    ERRORS += 1
-                    continue
-                HASOBJ = pg in pgswithobjects
-                MODOBJ = "modify" in proc.stdout.getvalue()
-                if HASOBJ != MODOBJ:
-                    log.error("Bad log for pg {pg} from osd.{id}".
-                              format(pg=pg, id=osdid))
-                    MSG = (HASOBJ and [""] or ["NOT "])[0]
-                    log.error("Log should {msg}have a modify entry".
-                              format(msg=MSG))
-                    ERRORS += 1
-
-    log.info("Test pg export")
-    EXP_ERRORS = 0
-    for remote in osds.remotes.iterkeys():
-        for role in osds.remotes[remote]:
-            if string.find(role, "osd.") != 0:
-                continue
-            osdid = int(role.split('.')[1])
-            if osdid not in pgs:
-                continue
-
-            for pg in pgs[osdid]:
-                fpath = os.path.join(DATADIR, "osd{id}.{pg}".
-                                     format(id=osdid, pg=pg))
-
-                cmd = ((prefix + "--op export --pgid {pg} --file {file}").
-                       format(id=osdid, pg=pg, file=fpath))
-                proc = remote.run(args=cmd, check_status=False,
-                                  stdout=StringIO())
-                proc.wait()
-                if proc.exitstatus != 0:
-                    log.error("Exporting failed for pg {pg} "
-                              "on osd.{id} with {ret}".
-                              format(pg=pg, id=osdid, ret=proc.exitstatus))
-                    EXP_ERRORS += 1
-
-    ERRORS += EXP_ERRORS
-
-    log.info("Test pg removal")
-    RM_ERRORS = 0
-    for remote in osds.remotes.iterkeys():
-        for role in osds.remotes[remote]:
-            if string.find(role, "osd.") != 0:
-                continue
-            osdid = int(role.split('.')[1])
-            if osdid not in pgs:
-                continue
-
-            for pg in pgs[osdid]:
-                cmd = ((prefix + "--op remove --pgid {pg}").
-                       format(pg=pg, id=osdid))
-                proc = remote.run(args=cmd, check_status=False,
-                                  stdout=StringIO())
-                proc.wait()
-                if proc.exitstatus != 0:
-                    log.error("Removing failed for pg {pg} "
-                              "on osd.{id} with {ret}".
-                              format(pg=pg, id=osdid, ret=proc.exitstatus))
-                    RM_ERRORS += 1
-
-    ERRORS += RM_ERRORS
-
-    IMP_ERRORS = 0
-    if EXP_ERRORS == 0 and RM_ERRORS == 0:
-        log.info("Test pg import")
-
-        for remote in osds.remotes.iterkeys():
+    def test_pg_info():
+        local_errors = 0
+        log.info("Test pg info")
+        for remote in osds.remotes.keys():
             for role in osds.remotes[remote]:
-                if string.find(role, "osd.") != 0:
+                if not role.startswith("osd."):
+                    continue
+                osdid = int(role.split('.')[1])
+                if osdid not in pgs:
+                    continue
+
+                for pg in pgs[osdid]:
+                    cmd = ((prefix + "--op info --pgid {pg}").
+                           format(id=osdid, pg=pg).split())
+                    try:
+                        info = remote.sh(cmd, wait=True)
+                    except CommandFailedError as e:
+                        log.error("Failure of --op info command with %s",
+                                  e.exitstatus)
+                        local_errors += 1
+                        continue
+                    if not str(pg) in info:
+                        log.error("Bad data from info: %s", info)
+                        local_errors += 1
+        return local_errors
+
+    ERRORS += test_pg_info()
+
+    @SKIP_IF_CRIMSON("PG logging not implemented")
+    def test_pg_logging():
+        local_errors = 0
+        log.info("Test pg logging")
+        for remote in osds.remotes.keys():
+            for role in osds.remotes[remote]:
+                if not role.startswith("osd."):
+                    continue
+                osdid = int(role.split('.')[1])
+                if osdid not in pgs:
+                    continue
+
+                for pg in pgs[osdid]:
+                    cmd = ((prefix + "--op log --pgid {pg}").
+                           format(id=osdid, pg=pg).split())
+                    try:
+                        output = remote.sh(cmd, wait=True)
+                    except CommandFailedError as e:
+                        log.error("Getting log failed for pg {pg} "
+                                  "from osd.{id} with {ret}".
+                                  format(pg=pg, id=osdid, ret=e.exitstatus))
+                        local_errors += 1
+                        continue
+                    HASOBJ = pg in pgswithobjects
+                    MODOBJ = "modify" in output
+                    if HASOBJ != MODOBJ:
+                        log.error("Bad log for pg {pg} from osd.{id}".
+                                  format(pg=pg, id=osdid))
+                        MSG = (HASOBJ and [""] or ["NOT "])[0]
+                        log.error("Log should {msg}have a modify entry".
+                                  format(msg=MSG))
+                        local_errors += 1
+        return local_errors
+    
+    ERRORS += test_pg_logging()
+
+    @SKIP_IF_CRIMSON("PG export not implemented")
+    def test_pg_export():
+        exp_errors = 0
+        log.info("Test pg export")
+        for remote in osds.remotes.keys():
+            for role in osds.remotes[remote]:
+                if not role.startswith("osd."):
                     continue
                 osdid = int(role.split('.')[1])
                 if osdid not in pgs:
@@ -620,21 +628,96 @@ def test_objectstore(ctx, config, cli_remote, REP_POOL, REP_NAME, ec=False):
                     fpath = os.path.join(DATADIR, "osd{id}.{pg}".
                                          format(id=osdid, pg=pg))
 
-                    cmd = ((prefix + "--op import --file {file}").
-                           format(id=osdid, file=fpath))
-                    proc = remote.run(args=cmd, check_status=False,
-                                      stdout=StringIO())
-                    proc.wait()
-                    if proc.exitstatus != 0:
-                        log.error("Import failed from {file} with {ret}".
-                                  format(file=fpath, ret=proc.exitstatus))
-                        IMP_ERRORS += 1
-    else:
-        log.warning("SKIPPING IMPORT TESTS DUE TO PREVIOUS FAILURES")
+                    cmd = ((prefix + "--op export --pgid {pg} --file {file}").
+                           format(id=osdid, pg=pg, file=fpath))
+                    try:
+                        remote.sh(cmd, wait=True)
+                    except CommandFailedError as e:
+                        log.error("Exporting failed for pg {pg} "
+                                  "on osd.{id} with {ret}".
+                                  format(pg=pg, id=osdid, ret=e.exitstatus))
+                        exp_errors += 1
+        return exp_errors
 
+    EXP_ERRORS = test_pg_export()
+    ERRORS += EXP_ERRORS
+
+    @SKIP_IF_CRIMSON("PG removal not implemented")
+    def test_pg_removal():
+        rm_errors = 0
+        log.info("Test pg removal")
+        for remote in osds.remotes.keys():
+            for role in osds.remotes[remote]:
+                if not role.startswith("osd."):
+                    continue
+                osdid = int(role.split('.')[1])
+                if osdid not in pgs:
+                    continue
+
+                for pg in pgs[osdid]:
+                    cmd = ((prefix + "--force --op remove --pgid {pg}").
+                           format(pg=pg, id=osdid))
+                    try:
+                        remote.sh(cmd, wait=True)
+                    except CommandFailedError as e:
+                        log.error("Removing failed for pg {pg} "
+                                  "on osd.{id} with {ret}".
+                                  format(pg=pg, id=osdid, ret=e.exitstatus))
+                        rm_errors += 1
+        return rm_errors
+
+    RM_ERRORS = test_pg_removal()
+    ERRORS += RM_ERRORS
+
+    @SKIP_IF_CRIMSON("PG import not implemented")
+    def test_pg_import():
+        imp_errors = 0
+        if EXP_ERRORS == 0 and RM_ERRORS == 0:
+            log.info("Test pg import")
+
+            for remote in osds.remotes.keys():
+                for role in osds.remotes[remote]:
+                    if not role.startswith("osd."):
+                        continue
+                    osdid = int(role.split('.')[1])
+                    if osdid not in pgs:
+                        continue
+
+                    for pg in pgs[osdid]:
+                        fpath = os.path.join(DATADIR, "osd{id}.{pg}".
+                                             format(id=osdid, pg=pg))
+
+                        cmd = ((prefix + "--op import --file {file}").
+                               format(id=osdid, file=fpath))
+                        try:
+                            remote.sh(cmd, wait=True)
+                        except CommandFailedError as e:
+                            log.error("Import failed from {file} with {ret}".
+                                      format(file=fpath, ret=e.exitstatus))
+                            imp_errors += 1
+        else:
+            log.warning("SKIPPING IMPORT TESTS DUE TO PREVIOUS FAILURES")
+        return imp_errors
+
+    IMP_ERRORS = test_pg_import()
     ERRORS += IMP_ERRORS
 
     if EXP_ERRORS == 0 and RM_ERRORS == 0 and IMP_ERRORS == 0:
+        if CRIMSON and config.get('gc_before_restart', False):
+            # Run GC on each OSD's seastore to reclaim segments consumed
+            # by repeated tool mount/unmount cycles before restarting.
+            gc_timeout = config.get('gc_timeout', 120)
+            log.info("Running GC on each OSD store (timeout={})...".format(
+                gc_timeout))
+            for remote in osds.remotes.keys():
+                for role in osds.remotes[remote]:
+                    if not role.startswith("osd."):
+                        continue
+                    osdid = int(role.split('.')[1])
+                    cmd = ("timeout {timeout} " + prefix + "--op gc").format(
+                        timeout=gc_timeout, id=osdid)
+                    remote.sh(cmd, wait=True)
+
         log.info("Restarting OSDs....")
         # They are still look to be up because of setting nodown
         for osd in manager.get_osd_status()['up']:

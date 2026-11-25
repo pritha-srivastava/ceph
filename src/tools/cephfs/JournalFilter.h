@@ -1,5 +1,6 @@
-// -*- mode:c++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:c++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * ceph - scalable distributed file system
  *
@@ -17,6 +18,7 @@
 
 #include "mds/mdstypes.h"
 #include "mds/LogEvent.h"
+#include "mds/PurgeQueue.h"
 
 /**
  * A set of conditions for narrowing down a search through the journal
@@ -39,6 +41,11 @@ class JournalFilter
   /* Filtering by type */
   LogEvent::EventType event_type;
 
+  std::string type;
+
+  /* Filtering by PurgeItem::Action */
+  PurgeItem::Action purge_action;
+
   /* Filtering by dirfrag */
   dirfrag_t frag;
   std::string frag_dentry;  //< optional, filter dentry name within fragment
@@ -47,14 +54,17 @@ class JournalFilter
   entity_name_t client_name;
 
   public:
-  JournalFilter() : 
+  JournalFilter(std::string t) :
     range_start(0),
     range_end(-1),
     inode(0),
-    event_type(0) {}
+    event_type(0),
+    type(t),
+    purge_action(PurgeItem::NONE) {}
 
   bool get_range(uint64_t &start, uint64_t &end) const;
   bool apply(uint64_t pos, LogEvent &le) const;
+  bool apply(uint64_t pos, PurgeItem &pi) const;
   int parse_args(
     std::vector<const char*> &argv, 
     std::vector<const char*>::iterator &arg);

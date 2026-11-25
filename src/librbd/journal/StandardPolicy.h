@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_JOURNAL_STANDARD_POLICY_H
 #define CEPH_LIBRBD_JOURNAL_STANDARD_POLICY_H
@@ -18,13 +18,13 @@ public:
   StandardPolicy(ImageCtxT *image_ctx) : m_image_ctx(image_ctx) {
   }
 
-  virtual bool append_disabled() const {
+  bool append_disabled() const override {
     return false;
   }
-  virtual bool journal_disabled() const {
+  bool journal_disabled() const override {
     return false;
   }
-  virtual void allocate_tag_on_lock(Context *on_finish);
+  void allocate_tag_on_lock(Context *on_finish) override;
 
 private:
   ImageCtxT *m_image_ctx;

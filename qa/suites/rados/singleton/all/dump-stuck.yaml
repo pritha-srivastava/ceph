@@ -1,5 +1,6 @@
 roles:
 - - mon.a
+  - mgr.x
   - osd.0
   - osd.1
 openstack:
@@ -9,6 +10,13 @@ openstack:
 tasks:
 - install:
 - ceph:
-    log-whitelist:
-    - wrongly marked me down
+    pre-mgr-commands:
+      - sudo ceph config set mgr mgr_pool false --force
+    log-ignorelist:
+      - but it is still running
+      - overall HEALTH_
+      - \(OSDMAP_FLAGS\)
+      - \(OSD_
+      - \(PG_
+      - \(POOL_APP_NOT_ENABLED\)
 - dump_stuck:

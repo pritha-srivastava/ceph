@@ -1,0 +1,955 @@
+import logging
+import os
+import json
+import time
+
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+from ..container_daemon_form import ContainerDaemonForm, daemon_to_container
+from ..container_types import CephContainer, extract_uid_gid
+from ..context_getters import (
+    fetch_configs,
+    get_config_and_keyring,
+    should_log_to_journald,
+)
+from ..daemon_form import register as register_daemon_form
+from ..daemon_identity import DaemonIdentity
+from ..constants import (
+    DEFAULT_IMAGE,
+    DATA_DIR_MODE,
+)
+from ..context import CephadmContext
+from ..deployment_utils import to_deployment_container
+from ..exceptions import Error
+from ..call_wrappers import call, call_throws, CallVerbosity
+from ..file_utils import (
+    make_run_dir,
+    pathify,
+    populate_files,
+    makedirs,
+    read_file,
+    recursive_chown,
+    write_new,
+)
+from ..data_utils import dict_get
+from ..host_facts import HostFacts
+from ..logging import Highlight
+from ..net_utils import get_hostname, get_ip_addresses
+
+
+logger = logging.getLogger()
+
+
+@register_daemon_form
+class Ceph(ContainerDaemonForm):
+    _daemons = (
+        'mon',
+        'mgr',
+        'osd',
+        'mds',
+        'rgw',
+        'rbd-mirror',
+        'crash',
+        'cephfs-mirror',
+    )
+
+    @classmethod
+    def for_daemon_type(cls, daemon_type: str) -> bool:
+        # TODO: figure out a way to un-special-case osd
+        return daemon_type in cls._daemons and daemon_type not in (
+            'osd',
+            'crash',
+        )
+
+    def __init__(self, ctx: CephadmContext, ident: DaemonIdentity) -> None:
+        self.ctx = ctx
+        self._identity = ident
+        self.user_supplied_config = False
+
+    @classmethod
+    def create(cls, ctx: CephadmContext, ident: DaemonIdentity) -> 'Ceph':
+        return cls(ctx, ident)
+
+    @property
+    def identity(self) -> DaemonIdentity:
+        return self._identity
+
+    def firewall_service_name(self) -> str:
+        if self.identity.daemon_type == 'mon':
+            return 'ceph-mon'
+        elif self.identity.daemon_type in ['mgr', 'mds']:
+            return 'ceph'
+        return ''
+
+    def container(self, ctx: CephadmContext) -> CephContainer:
+        # previous to being a ContainerDaemonForm, this call to create the
+        # var-run directory was hard coded in the deploy path. Eventually, it
+        # would be good to move this somwhere cleaner and avoid needing to know
+        # the uid/gid here.
+        uid, gid = self.uid_gid(ctx)
+        make_run_dir(ctx.fsid, uid, gid)
+
+        # mon and osd need privileged in order for libudev to query devices
+        privileged = self.identity.daemon_type in ['mon', 'osd']
+        ctr = daemon_to_container(ctx, self, privileged=privileged)
+        ctr = to_deployment_container(ctx, ctr)
+        config_json = fetch_configs(ctx)
+        if self.identity.daemon_type == 'mon' and config_json is not None:
+            if 'crush_location' in config_json:
+                c_loc = config_json['crush_location']
+                # was originally "c.args.extend(['--set-crush-location', c_loc])"
+                # but that doesn't seem to persist in the object after it's passed
+                # in further function calls
+                ctr.args = ctr.args + ['--set-crush-location', c_loc]
+        if self.identity.daemon_type == 'rgw' and config_json is not None:
+            if 'rgw_exit_timeout_secs' in config_json:
+                stop_timeout = config_json['rgw_exit_timeout_secs']
+                ctr.args = ctr.args + [f'--stop-timeout={stop_timeout}']
+        if self.identity.daemon_type == 'osd' and config_json is not None:
+            if 'objectstore' in config_json:
+                objectstore = config_json['objectstore']
+                ctr.args = ctr.args + [f'--osd-objectstore={objectstore}']
+        return ctr
+
+    _uid_gid: Optional[Tuple[int, int]] = None
+
+    def uid_gid(self, ctx: CephadmContext) -> Tuple[int, int]:
+        if self._uid_gid is None:
+            self._uid_gid = extract_uid_gid(ctx)
+        return self._uid_gid
+
+    def config_and_keyring(
+        self, ctx: CephadmContext
+    ) -> Tuple[Optional[str], Optional[str]]:
+        return get_config_and_keyring(ctx)
+
+    def get_daemon_args(self) -> List[str]:
+        if self.identity.daemon_type == 'crash':
+            return []
+        r = [
+            '--setuser',
+            'ceph',
+            '--setgroup',
+            'ceph',
+            '--default-log-to-file=false',
+        ]
+        log_to_journald = should_log_to_journald(self.ctx)
+        if log_to_journald:
+            r += [
+                '--default-log-to-journald=true',
+                '--default-log-to-stderr=false',
+            ]
+        else:
+            r += [
+                '--default-log-to-stderr=true',
+                '--default-log-stderr-prefix=debug ',
+            ]
+        if self.identity.daemon_type == 'mon':
+            r += [
+                '--default-mon-cluster-log-to-file=false',
+            ]
+            if log_to_journald:
+                r += [
+                    '--default-mon-cluster-log-to-journald=true',
+                    '--default-mon-cluster-log-to-stderr=false',
+                ]
+            else:
+                r += ['--default-mon-cluster-log-to-stderr=true']
+        return r
+
+    @staticmethod
+    def get_ceph_mounts(
+        ctx: CephadmContext,
+        ident: DaemonIdentity,
+        no_config: bool = False,
+    ) -> Dict[str, str]:
+        # Warning: This is a hack done for more expedient refactoring
+        mounts = get_ceph_mounts_for_type(ctx, ident.fsid, ident.daemon_type)
+        data_dir = ident.data_dir(ctx.data_dir)
+        if ident.daemon_type == 'rgw':
+            cdata_dir = '/var/lib/ceph/radosgw/ceph-rgw.%s' % (
+                ident.daemon_id
+            )
+        else:
+            cdata_dir = '/var/lib/ceph/%s/ceph-%s' % (
+                ident.daemon_type,
+                ident.daemon_id,
+            )
+        if ident.daemon_type != 'crash':
+            mounts[data_dir] = cdata_dir + ':z'
+        if not no_config:
+            mounts[data_dir + '/config'] = '/etc/ceph/ceph.conf:z'
+        if ident.daemon_type in [
+            'rbd-mirror',
+            'cephfs-mirror',
+            'crash',
+            'ceph-exporter',
+        ]:
+            # these do not search for their keyrings in a data directory
+            mounts[
+                data_dir + '/keyring'
+            ] = '/etc/ceph/ceph.client.%s.%s.keyring' % (
+                ident.daemon_type,
+                ident.daemon_id,
+            )
+        return mounts
+
+    def customize_container_mounts(
+        self, ctx: CephadmContext, mounts: Dict[str, str]
+    ) -> None:
+        no_config = bool(
+            getattr(ctx, 'config', None) and self.user_supplied_config
+        )
+        cm = self.get_ceph_mounts(
+            ctx,
+            self.identity,
+            no_config=no_config,
+        )
+        mounts.update(cm)
+
+        if self.identity.daemon_type == 'rgw':
+            config_json = fetch_configs(ctx) or {}
+            d3n_cache = config_json.get('d3n_cache')
+
+            if d3n_cache:
+                if not isinstance(d3n_cache, dict):
+                    raise Error(
+                        f'Invalid d3n_cache config: expected dict got {type(d3n_cache).__name__}'
+                    )
+
+                cache_path = d3n_cache.get('cache_path')
+                if cache_path and isinstance(cache_path, str):
+                    mounts[cache_path] = f'{cache_path}:z'
+
+    def setup_qat_args(self, ctx: CephadmContext, args: List[str]) -> None:
+        try:
+            out, _, _ = call_throws(ctx, ['ls', '-1', '/dev/vfio/devices'])
+            devices = [d for d in out.split('\n') if d]
+
+            args.extend(
+                [
+                    '--cap-add=SYS_ADMIN',
+                    '--cap-add=SYS_PTRACE',
+                    '--cap-add=IPC_LOCK',
+                    '--security-opt',
+                    'seccomp=unconfined',
+                    '--ulimit',
+                    'memlock=209715200:209715200',
+                    '--device=/dev/qat_adf_ctl:/dev/qat_adf_ctl',
+                    '--device=/dev/vfio/vfio:/dev/vfio/vfio',
+                    '-v',
+                    '/dev:/dev',
+                    '--volume=/etc/sysconfig/qat:/etc/sysconfig/qat:ro',
+                ]
+            )
+
+            for dev in devices:
+                args.append(
+                    f'--device=/dev/vfio/devices/{dev}:/dev/vfio/devices/{dev}'
+                )
+
+            os.makedirs('/etc/sysconfig', exist_ok=True)
+            with open('/etc/sysconfig/qat', 'w') as f:
+                f.write('ServicesEnabled=dc\nPOLICY=8\nQAT_USER=ceph\n')
+
+            logger.info(
+                f'[QAT] Successfully injected container args for {self.identity.daemon_name}'
+            )
+        except RuntimeError:
+            logger.exception('[QAT] Could not list /dev/vfio/devices')
+            devices = []
+
+    def customize_container_args(
+        self, ctx: CephadmContext, args: List[str]
+    ) -> None:
+        args.append(ctx.container_engine.unlimited_pids_option)
+        config_json = fetch_configs(ctx)
+        qat_raw: Any = config_json.get('qat', {})
+        if qat_raw is None:
+            qat_config: Dict[str, Any] = {}
+        elif isinstance(qat_raw, dict):
+            qat_config = qat_raw
+        else:
+            raise Error(
+                f'Invalid qat config: expected dict got {type(qat_raw.__name__)}'
+            )
+
+        if (
+            self.identity.daemon_type == 'rgw'
+            and qat_config.get('compression') == 'hw'
+        ):
+            self.setup_qat_args(ctx, args)
+
+    def customize_process_args(
+        self, ctx: CephadmContext, args: List[str]
+    ) -> None:
+        ident = self.identity
+        if ident.daemon_type == 'rgw':
+            name = 'client.rgw.%s' % ident.daemon_id
+        elif ident.daemon_type == 'rbd-mirror':
+            name = 'client.rbd-mirror.%s' % ident.daemon_id
+        elif ident.daemon_type == 'cephfs-mirror':
+            name = 'client.cephfs-mirror.%s' % ident.daemon_id
+        elif ident.daemon_type == 'crash':
+            name = 'client.crash.%s' % ident.daemon_id
+        elif ident.daemon_type in ['mon', 'mgr', 'mds', 'osd']:
+            name = ident.daemon_name
+        else:
+            raise ValueError(ident)
+        args.extend(['-n', name])
+        if ident.daemon_type != 'crash':
+            args.append('-f')
+        args.extend(self.get_daemon_args())
+
+    def customize_container_envs(
+        self, ctx: CephadmContext, envs: List[str]
+    ) -> None:
+        envs.append('TCMALLOC_MAX_TOTAL_THREAD_CACHE_BYTES=134217728')
+
+    def default_entrypoint(self) -> str:
+        ep = {
+            'rgw': '/usr/bin/radosgw',
+            'rbd-mirror': '/usr/bin/rbd-mirror',
+            'cephfs-mirror': '/usr/bin/cephfs-mirror',
+        }
+        daemon_type = self.identity.daemon_type
+        return ep.get(daemon_type) or f'/usr/bin/ceph-{daemon_type}'
+
+
+@register_daemon_form
+class OSD(Ceph):
+    @classmethod
+    def for_daemon_type(cls, daemon_type: str) -> bool:
+        # TODO: figure out a way to un-special-case osd
+        return daemon_type == 'osd'
+
+    def __init__(
+        self,
+        ctx: CephadmContext,
+        ident: DaemonIdentity,
+        osd_fsid: Optional[str] = None,
+        osd_dm_crypt_key: Optional[str] = None,
+    ) -> None:
+        super().__init__(ctx, ident)
+        self._osd_fsid = osd_fsid
+        self._osd_dm_crypt_key: str = osd_dm_crypt_key or ''
+
+    @classmethod
+    def create(cls, ctx: CephadmContext, ident: DaemonIdentity) -> 'OSD':
+        osd_fsid = getattr(ctx, 'osd_fsid', None)
+        if osd_fsid is None:
+            logger.info(
+                'Creating an OSD daemon form without an OSD FSID value'
+            )
+        osd_dm_crypt_key = getattr(ctx, 'osd_dm_crypt_key', None)
+        return cls(ctx, ident, osd_fsid, osd_dm_crypt_key)
+
+    @staticmethod
+    def get_sysctl_settings() -> List[str]:
+        return [
+            '# allow a large number of OSDs',
+            'fs.aio-max-nr = 2097152',
+            'kernel.pid_max = 4194304',
+        ]
+
+    def firewall_service_name(self) -> str:
+        return 'ceph'
+
+    @property
+    def osd_fsid(self) -> Optional[str]:
+        return self._osd_fsid
+
+    def default_entrypoint(self) -> str:
+        config_json = fetch_configs(self.ctx)
+        if (
+            config_json is not None
+            and config_json.get('osd_type') == 'crimson'
+        ):
+            return '/usr/bin/ceph-osd-crimson'
+        return '/usr/bin/ceph-osd'
+
+    def rotate_osd_lv_keyring(
+        self, ctx: CephadmContext, keyring_path: str
+    ) -> None:
+        keyring_content = read_file([keyring_path])
+        if not keyring_content or keyring_content == 'Unknown':
+            raise Error(
+                f'Failed to find OSD keyring content at expected path: {keyring_path}'
+            )
+        actual_keyring = keyring_content
+        # if our keyring is the full thing with sections and caps, we don't want that
+        # just the actual keyring itself
+        try:
+            actual_keyring = (
+                keyring_content.split('key =', 1)[1]
+                .split('caps', 1)[0]
+                .strip()
+            )
+        except IndexError:
+            logger.error(
+                f'Failed to parse keyring from {keyring_content} for rotation of key for osd.{self.identity.daemon_id}'
+            )
+        c_v_container = CephContainer(
+            ctx,
+            image=ctx.image,
+            privileged=True,
+            entrypoint='ceph-volume',
+            args=[
+                'lvm',
+                'list',
+                str(self.identity.daemon_id),
+                '--format',
+                'json',
+            ],
+            volume_mounts=get_ceph_mounts_for_type(
+                ctx, ctx.fsid, 'ceph-volume'
+            ),
+        )
+        out, err, ret = call(
+            ctx,
+            c_v_container.run_cmd(),
+            verbosity=CallVerbosity.QUIET_UNLESS_ERROR,
+        )
+        if ret:
+            raise Error(
+                f'Got error using ceph-volume lvm list to get lv path for osd.{self.identity.daemon_id}\n'
+                f'Out:{out}\n'
+                f'Err:{err}'
+            )
+        osd_bluestore_data = json.loads(out)
+        lv_path = ''
+        encrypted = False
+        osd_lv_data = osd_bluestore_data.get(self.identity.daemon_id, [])
+        if not osd_lv_data:
+            logger.info(
+                'No lv data found for OSD.%s, checking for raw OSD',
+                self.identity.daemon_id,
+            )
+            c_v_container = CephContainer(
+                ctx,
+                image=ctx.image,
+                privileged=True,
+                entrypoint='ceph-volume',
+                args=[
+                    'raw',
+                    'list',
+                    '--format',
+                    'json',
+                ],
+                volume_mounts=get_ceph_mounts_for_type(
+                    ctx, ctx.fsid, 'ceph-volume'
+                ),
+            )
+            out, err, ret = call(
+                ctx,
+                c_v_container.run_cmd(),
+                verbosity=CallVerbosity.QUIET_UNLESS_ERROR,
+            )
+            raw_list_data = json.loads(out)
+            for osd_data in raw_list_data.values():
+                if str(osd_data.get('osd_id', -1)) == str(
+                    self.identity.daemon_id
+                ):
+                    logger.info(
+                        'Found data for osd.%s in raw list',
+                        str(self.identity.daemon_id),
+                    )
+                    # misnomer since this isn't an LV, but it is the path
+                    # we need to pass to the bluestore tool
+                    lv_path = osd_data.get('device', None)
+        if osd_lv_data:
+            for dev in osd_lv_data:
+                if dev.get('type') == 'block':
+                    lv_path = dev.get('lv_path', '')
+                    encrypted = (
+                        dev.get('tags', {}).get('ceph.encrypted', '0') == '1'
+                    )
+        if not lv_path:
+            raise Error(
+                f'Failed to find lv path for osd with id "{self.identity.daemon_id}". Key not rotated using ceph-bluestore-tool'
+            )
+        if encrypted and not self._osd_dm_crypt_key:
+            raise Error(
+                f'Cannot rotate keyring for encrypted osd with id "{self.identity.daemon_id}" without dm-crypt key.'
+                'Key not rotated using ceph-bluestore-tool'
+            )
+        dev_path = lv_path
+
+        # OSD must be stopped to make changes to bluestore labels
+        logger.info(
+            f'Stopping osd.{self.identity.daemon_id} to update osd_key bluestore label'
+        )
+        call(
+            ctx,
+            [ctx.container_engine.path, 'stop', self.identity.container_name],
+            verbosity=CallVerbosity.QUIET_UNLESS_ERROR,
+        )
+
+        if encrypted:
+            dev_path = f'/dev/mapper/tmp_open_osd_{self._osd_fsid}'
+            cryptsetup_action = """#!/bin/bash
+DM_CRYPT_KEY=%s
+LV_PATH=%s
+DEV_NAME=%s
+
+echo "$DM_CRYPT_KEY" | cryptsetup luksOpen $LV_PATH $DEV_NAME
+""" % (
+                self._osd_dm_crypt_key,
+                lv_path,
+                dev_path.split('/')[-1],
+            )
+            helper_script_path = (
+                f'/tmp/cephadm-osd-{self.identity.daemon_id}-rotate-helper.sh'
+            )
+            with write_new(helper_script_path, perms=0o700) as f:
+                f.write(cryptsetup_action)
+            cryptsetup_open_container = CephContainer(
+                ctx,
+                image=ctx.image,
+                privileged=True,
+                entrypoint='/tmp/cryptsetup_action.sh',
+                volume_mounts={
+                    '/dev': '/dev',
+                    helper_script_path: '/tmp/cryptsetup_action.sh',
+                },
+            )
+            logger.info(
+                f'Opening osd.{self.identity.daemon_id} with crypsetup'
+            )
+            out, err, ret = call(
+                ctx,
+                cryptsetup_open_container.run_cmd(),
+                verbosity=CallVerbosity.QUIET_UNLESS_ERROR,
+            )
+            os.remove(helper_script_path)
+            if ret:
+                raise Error(
+                    'Got error rotating osd keyring while using cryptsetup tool\n'
+                    f'Out:{out}\n'
+                    f'Err:{err}'
+                )
+
+        bluestore_tool_container = CephContainer(
+            ctx,
+            image=ctx.image,
+            privileged=True,
+            entrypoint='ceph-bluestore-tool',
+            args=[
+                '--dev',
+                dev_path,
+                'set-label-key',
+                '-k',
+                'osd_key',
+                '-v',
+                actual_keyring,
+            ],
+            volume_mounts={'/dev': '/dev'},
+        )
+        logger.info(
+            f'Rotating osd.{self.identity.daemon_id} key with ceph-bluestore-tool'
+        )
+        # The OSD may take some time to shutdown fully and make the device
+        # available for the key rotation
+        for i in [2, 5, 10, 30, 0]:
+            if not i:
+                break
+            out, err, ret = call(
+                ctx,
+                bluestore_tool_container.run_cmd(),
+                verbosity=CallVerbosity.VERBOSE,
+            )
+            if ret:
+                if not i:
+                    raise Error(
+                        'Got error rotating osd keyring using ceph-bluestore-tool\n'
+                        f'Out:{out}\n'
+                        f'Err:{err}'
+                    )
+                logger.info(
+                    f'Got issue rotating osd keyring using ceph-bluestore-tool:\n{out}\n{err}\nRetrying in {i} seconds'
+                )
+                time.sleep(i)
+            else:
+                logger.info(
+                    f'Successfully rotated osd.{self.identity.daemon_id} keyring'
+                )
+                break
+
+        if encrypted:
+            cryptsetup_close_container = CephContainer(
+                ctx,
+                image=ctx.image,
+                privileged=True,
+                entrypoint='cryptsetup',
+                args=[
+                    'luksClose',
+                    dev_path,
+                ],
+                volume_mounts={
+                    '/dev': '/dev',
+                },
+            )
+            out, err, ret = call(
+                ctx,
+                cryptsetup_close_container.run_cmd(),
+                verbosity=CallVerbosity.QUIET_UNLESS_ERROR,
+            )
+            if ret:
+                raise Error(
+                    'Got error rotating osd keyring while using cryptsetup tool\n'
+                    f'Out:{out}\n'
+                    f'Err:{err}'
+                )
+
+        call(
+            ctx,
+            ['systemctl', 'reset-failed', self.identity.unit_name],
+            verbosity=CallVerbosity.QUIET_UNLESS_ERROR,
+        )
+        call(
+            ctx,
+            ['systemctl', 'start', self.identity.unit_name],
+            verbosity=CallVerbosity.QUIET_UNLESS_ERROR,
+        )
+
+
+@register_daemon_form
+class Crash(Ceph):
+    @classmethod
+    def for_daemon_type(cls, daemon_type: str) -> bool:
+        return daemon_type == 'crash'
+
+    def __init__(
+        self,
+        ctx: CephadmContext,
+        ident: DaemonIdentity,
+    ) -> None:
+        super().__init__(ctx, ident)
+
+    @classmethod
+    def create(cls, ctx: CephadmContext, ident: DaemonIdentity) -> 'Ceph':
+        (uid, gid) = extract_uid_gid(ctx)
+        data_dir_base = f'{ctx.data_dir}/{ident.fsid}'
+        makedirs(
+            os.path.join(data_dir_base, 'crash'), uid, gid, DATA_DIR_MODE
+        )
+        makedirs(
+            os.path.join(data_dir_base, 'crash', 'posted'),
+            uid,
+            gid,
+            DATA_DIR_MODE,
+        )
+        return cls(ctx, ident)
+
+
+@register_daemon_form
+class CephExporter(ContainerDaemonForm):
+    """Defines a Ceph exporter container"""
+
+    daemon_type = 'ceph-exporter'
+    entrypoint = '/usr/bin/ceph-exporter'
+    DEFAULT_PORT = 9926
+    port_map = {
+        'ceph-exporter': DEFAULT_PORT,
+    }
+
+    @classmethod
+    def for_daemon_type(cls, daemon_type: str) -> bool:
+        return cls.daemon_type == daemon_type
+
+    def __init__(
+        self,
+        ctx: CephadmContext,
+        fsid: str,
+        daemon_id: Union[int, str],
+        config_json: Dict[str, Any],
+        image: str = DEFAULT_IMAGE,
+    ) -> None:
+        self.ctx = ctx
+        self.fsid = fsid
+        self.daemon_id = daemon_id
+        self.image = image
+
+        self.sock_dir = config_json.get('sock-dir', '/var/run/ceph/')
+        _, ipv6_addrs = get_ip_addresses(get_hostname())
+        addrs = '::' if ipv6_addrs else '0.0.0.0'
+        self.addrs = config_json.get('addrs', addrs)
+        self.port = config_json.get('port', self.DEFAULT_PORT)
+        self.prio_limit = config_json.get('prio-limit', 5)
+        self.stats_period = config_json.get('stats-period', 5)
+        self.https_enabled: bool = config_json.get('https_enabled', False)
+        self.files = dict_get(config_json, 'files', {})
+
+    @classmethod
+    def init(
+        cls, ctx: CephadmContext, fsid: str, daemon_id: Union[int, str]
+    ) -> 'CephExporter':
+        return cls(ctx, fsid, daemon_id, fetch_configs(ctx), ctx.image)
+
+    @classmethod
+    def create(
+        cls, ctx: CephadmContext, ident: DaemonIdentity
+    ) -> 'CephExporter':
+        return cls.init(ctx, ident.fsid, ident.daemon_id)
+
+    @property
+    def identity(self) -> DaemonIdentity:
+        return DaemonIdentity(self.fsid, self.daemon_type, self.daemon_id)
+
+    def get_daemon_args(self) -> List[str]:
+        args = [
+            f'--sock-dir={self.sock_dir}',
+            f'--addrs={self.addrs}',
+            f'--port={self.port}',
+            f'--prio-limit={self.prio_limit}',
+            f'--stats-period={self.stats_period}',
+        ]
+        if self.https_enabled:
+            args.extend(
+                [
+                    '--cert-file',
+                    '/etc/certs/ceph-exporter.crt',
+                    '--key-file',
+                    '/etc/certs/ceph-exporter.key',
+                ]
+            )
+        return args
+
+    def container(self, ctx: CephadmContext) -> CephContainer:
+        uid, gid = self.uid_gid(ctx)
+        make_run_dir(ctx.fsid, uid, gid)
+        ctr = daemon_to_container(ctx, self)
+        return to_deployment_container(ctx, ctr)
+
+    def uid_gid(self, ctx: CephadmContext) -> Tuple[int, int]:
+        return extract_uid_gid(ctx)
+
+    def config_and_keyring(
+        self, ctx: CephadmContext
+    ) -> Tuple[Optional[str], Optional[str]]:
+        return get_config_and_keyring(ctx)
+
+    def customize_container_mounts(
+        self, ctx: CephadmContext, mounts: Dict[str, str]
+    ) -> None:
+        cm = Ceph.get_ceph_mounts(ctx, self.identity)
+        mounts.update(cm)
+        # we want to always mount /var/run/ceph/<fsid> to the sock
+        # dir within the container. See https://tracker.ceph.com/issues/69475
+        mounts.update({f'/var/run/ceph/{ctx.fsid}': self.sock_dir})
+        if self.https_enabled:
+            data_dir = self.identity.data_dir(ctx.data_dir)
+            mounts.update({os.path.join(data_dir, 'etc/certs'): '/etc/certs'})
+
+    def customize_process_args(
+        self, ctx: CephadmContext, args: List[str]
+    ) -> None:
+        name = 'client.ceph-exporter.%s' % self.identity.daemon_id
+        args.extend(['-n', name, '-f'])
+        args.extend(self.get_daemon_args())
+
+    def customize_container_args(
+        self, ctx: CephadmContext, args: List[str]
+    ) -> None:
+        args.append(ctx.container_engine.unlimited_pids_option)
+
+    def customize_container_envs(
+        self, ctx: CephadmContext, envs: List[str]
+    ) -> None:
+        envs.append('TCMALLOC_MAX_TOTAL_THREAD_CACHE_BYTES=134217728')
+
+    def default_entrypoint(self) -> str:
+        return self.entrypoint
+
+    def create_daemon_dirs(self, data_dir: str, uid: int, gid: int) -> None:
+        """Create files under the container data dir"""
+        if not os.path.isdir(data_dir):
+            raise OSError('data_dir is not a directory: %s' % (data_dir))
+        logger.info('Writing ceph-exporter config...')
+        config_dir = os.path.join(data_dir, 'etc/')
+        ssl_dir = os.path.join(data_dir, 'etc/certs')
+        for ddir in [config_dir, ssl_dir]:
+            makedirs(ddir, uid, gid, 0o755)
+            recursive_chown(ddir, uid, gid)
+        cert_files = {
+            fname: content
+            for fname, content in self.files.items()
+            if fname.endswith('.crt') or fname.endswith('.key')
+        }
+        populate_files(ssl_dir, cert_files, uid, gid)
+
+
+def update_osd_bluestore_affinity(
+    ctx: CephadmContext, daemon_name: str, service_name: str
+) -> None:
+    """Update osdspec_affinity via ceph-bluestore-tool set-label-key.
+
+    ceph-bluestore-tool only exists inside the Ceph container image, so we
+    spin up an ephemeral privileged container to run it. The block device is
+    held exclusively by the running OSD (EBUSY), so the container is stopped
+    first and restarted afterwards. The host root is mounted at /rootfs inside
+    the container, so the block symlink is prefixed accordingly.
+    """
+    osd_data_dir = os.path.join(ctx.data_dir, ctx.fsid, daemon_name)
+    block_path = os.path.join(osd_data_dir, 'block')
+
+    if not os.path.exists(block_path):
+        raise Error(
+            f'Block device not found at {block_path} for {daemon_name}'
+        )
+
+    # daemon_name is "osd.3" (type="osd", id="3")
+    daemon_type, daemon_id = daemon_name.split('.', 1)
+    ident = DaemonIdentity(ctx.fsid, daemon_type, daemon_id)
+
+    logger.info(
+        f'Stopping {ident.container_name} to update osdspec_affinity bdev label'
+    )
+    call(
+        ctx,
+        [ctx.container_engine.path, 'stop', ident.container_name],
+        verbosity=CallVerbosity.QUIET_UNLESS_ERROR,
+    )
+    try:
+        block_path_in_container = '/rootfs' + block_path
+        c = CephContainer(
+            ctx,
+            image=ctx.image,
+            privileged=True,
+            entrypoint='ceph-bluestore-tool',
+            args=[
+                '--dev',
+                block_path_in_container,
+                'set-label-key',
+                '-k',
+                'osdspec_affinity',
+                '-v',
+                service_name,
+            ],
+            volume_mounts=get_ceph_mounts_for_type(ctx, ctx.fsid, 'osd'),
+        )
+        _, err, ret = call(
+            ctx,
+            c.run_cmd(),
+            verbosity=CallVerbosity.QUIET_UNLESS_ERROR,
+        )
+        if ret:
+            raise Error(
+                f'ceph-bluestore-tool set-label-key failed for {daemon_name} '
+                f'(osdspec_affinity={service_name}): {err}'
+            )
+        logger.debug(
+            f'Updated osdspec_affinity={service_name} for {daemon_name}'
+        )
+    finally:
+        logger.info(f'Restarting {ident.unit_name}')
+        call(
+            ctx,
+            ['systemctl', 'start', ident.unit_name],
+            verbosity=CallVerbosity.QUIET_UNLESS_ERROR,
+        )
+
+
+def get_ceph_mounts_for_type(
+    ctx: CephadmContext, fsid: str, daemon_type: str
+) -> Dict[str, str]:
+    """The main implementation of get_container_mounts_for_type minus the call
+    to _update_podman_mounts so that this can be called from
+    get_container_mounts.
+    """
+    mounts = dict()
+
+    if daemon_type in ceph_daemons() or daemon_type in [
+        'ceph-volume',
+        'shell',
+    ]:
+        if fsid:
+            run_path = os.path.join('/var/run/ceph', fsid)
+            if os.path.exists(run_path):
+                mounts[run_path] = '/var/run/ceph:z'
+            log_dir = os.path.join(ctx.log_dir, fsid)
+            if not os.path.exists(log_dir):
+                os.mkdir(log_dir)
+            mounts[log_dir] = '/var/log/ceph:z'
+            crash_dir = '/var/lib/ceph/%s/crash' % fsid
+            if os.path.exists(crash_dir):
+                mounts[crash_dir] = '/var/lib/ceph/crash:z'
+            if daemon_type != 'crash' and should_log_to_journald(ctx):
+                journald_sock_dir = '/run/systemd/journal'
+                mounts[journald_sock_dir] = journald_sock_dir
+
+    if daemon_type in [
+        'mon',
+        'osd',
+        'ceph-volume',
+        'clusterless-ceph-volume',
+    ]:
+        mounts['/dev'] = '/dev'  # FIXME: narrow this down?
+        mounts['/run/udev'] = '/run/udev'
+    if daemon_type in ['osd', 'ceph-volume', 'clusterless-ceph-volume']:
+        mounts['/sys'] = '/sys'  # for numa.cc, pick_address, cgroups, ...
+        mounts['/run/lvm'] = '/run/lvm'
+        mounts['/run/lock/lvm'] = '/run/lock/lvm'
+    if daemon_type in ['osd', 'ceph-volume']:
+        # selinux-policy in the container may not match the host.
+        if HostFacts(ctx).selinux_enabled:
+            cluster_dir = f'{ctx.data_dir}/{fsid}'
+            selinux_folder = f'{cluster_dir}/selinux'
+            if os.path.exists(cluster_dir):
+                if not os.path.exists(selinux_folder):
+                    os.makedirs(selinux_folder, mode=0o755)
+                mounts[selinux_folder] = '/sys/fs/selinux:ro'
+            else:
+                logger.error(
+                    f'Cluster directory {cluster_dir} does not exist.'
+                )
+    # rslave: host umounts must propagate, else a host mount (e.g. FUSE)
+    # made before the container started stays pinned by its mount ns
+    if daemon_type in ('osd', 'ceph-volume'):
+        mounts['/'] = '/rootfs:rslave'
+
+    try:
+        if (
+            ctx.shared_ceph_folder
+        ):  # make easy manager modules/ceph-volume development
+            ceph_folder = pathify(ctx.shared_ceph_folder)
+            if os.path.exists(ceph_folder):
+                cephadm_binary = ceph_folder + '/src/cephadm/cephadm'
+                if not os.path.exists(pathify(cephadm_binary)):
+                    raise Error(
+                        "cephadm binary does not exist. Please run './build.sh cephadm' from ceph/src/cephadm/ directory."
+                    )
+                mounts[cephadm_binary] = '/usr/sbin/cephadm'
+                mounts[
+                    ceph_folder + '/src/ceph-volume/ceph_volume'
+                ] = '/usr/lib/python3.12/site-packages/ceph_volume'
+                mounts[
+                    ceph_folder + '/src/pybind/mgr'
+                ] = '/usr/share/ceph/mgr'
+                mounts[
+                    ceph_folder + '/src/python-common/ceph'
+                ] = '/usr/lib/python3.12/site-packages/ceph'
+                mounts[
+                    ceph_folder + '/monitoring/ceph-mixin/dashboards_out'
+                ] = '/etc/grafana/dashboards/ceph-dashboard'
+                mounts[
+                    ceph_folder
+                    + '/monitoring/ceph-mixin/prometheus_alerts.yml'
+                ] = '/etc/prometheus/ceph/ceph_default_alerts.yml'
+            else:
+                logger.error(
+                    'Ceph shared source folder does not exist.',
+                    extra=Highlight.FAILURE.extra(),
+                )
+    except AttributeError:
+        pass
+    return mounts
+
+
+def ceph_daemons() -> List[str]:
+    """A legacy method that returns a list of all daemon types considered ceph
+    daemons.
+    """
+    cds = list(Ceph._daemons)
+    cds.append(CephExporter.daemon_type)
+    return cds

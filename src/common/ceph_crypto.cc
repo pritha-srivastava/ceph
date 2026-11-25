@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,90 +13,103 @@
  *
  */
 
-#include "include/int_types.h"
-#include "common/config.h"
+#include <utility>
+
 #include "common/ceph_context.h"
+#include "common/config.h"
 #include "ceph_crypto.h"
-#include "auth/Crypto.h"
 
-#include <pthread.h>
-#include <stdlib.h>
+#include <openssl/evp.h>
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
-#ifdef USE_CRYPTOPP
-void ceph::crypto::init(CephContext *cct)
-{
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
+namespace TOPNSPC::crypto::ssl {
+
+void zeroize_for_security(void* const s, const size_t n) {
+  OPENSSL_cleanse(s, n);
 }
 
-void ceph::crypto::shutdown()
-{
+} // namespace TOPNSPC::crypto::openssl
+
+
+namespace TOPNSPC::crypto {
+void init() {
+  // OpenSSL >= 1.1.0 self-initializes (OPENSSL_init_crypto) and
+  // registers its own atexit cleanup; nothing to do.
 }
 
-// nothing
-ceph::crypto::HMACSHA1::~HMACSHA1()
-{
+void shutdown([[maybe_unused]] const bool shared) {
 }
 
-ceph::crypto::HMACSHA256::~HMACSHA256()
-{
+void zeroize_for_security(void* const s, const size_t n) {
+  ssl::zeroize_for_security(s, n);
 }
 
-#elif defined(USE_NSS)
+ssl::OpenSSLDigest::OpenSSLDigest(const EVP_MD * _type)
+  : mpContext(EVP_MD_CTX_create())
+  , mpType(_type) {
+  this->Restart();
+}
 
-// for SECMOD_RestartModules()
-#include <secmod.h>
-
-static pthread_mutex_t crypto_init_mutex = PTHREAD_MUTEX_INITIALIZER;
-static uint32_t crypto_refs = 0;
-static NSSInitContext *crypto_context = NULL;
-static pid_t crypto_init_pid = 0;
-
-void ceph::crypto::init(CephContext *cct)
-{
-  pid_t pid = getpid();
-  pthread_mutex_lock(&crypto_init_mutex);
-  if (crypto_init_pid != pid) {
-    if (crypto_init_pid > 0) {
-      SECMOD_RestartModules(PR_FALSE);
-    }
-    crypto_init_pid = pid;
+ssl::OpenSSLDigest::~OpenSSLDigest() {
+  EVP_MD_CTX_destroy(mpContext);
+  if (mpType_FIPS) {
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    EVP_MD_free(mpType_FIPS);
+#endif  // OPENSSL_VERSION_NUMBER >= 0x30000000L
   }
-
-  if (++crypto_refs == 1) {
-    NSSInitParameters init_params;
-    memset(&init_params, 0, sizeof(init_params));
-    init_params.length = sizeof(init_params);
-
-    uint32_t flags = NSS_INIT_READONLY;
-    if (cct->_conf->nss_db_path.empty()) {
-      flags |= (NSS_INIT_NOCERTDB | NSS_INIT_NOMODDB);
-    }
-    crypto_context = NSS_InitContext(cct->_conf->nss_db_path.c_str(), "", "",
-                                     SECMOD_DB, &init_params, flags);
-  }
-  pthread_mutex_unlock(&crypto_init_mutex);
-  assert(crypto_context != NULL);
 }
 
-void ceph::crypto::shutdown()
+ssl::OpenSSLDigest::OpenSSLDigest(OpenSSLDigest&& o) noexcept
+  : mpContext(std::exchange(o.mpContext, nullptr)),
+    mpType(std::exchange(o.mpType, nullptr)),
+    mpType_FIPS(std::exchange(o.mpType_FIPS, nullptr))
 {
-  pthread_mutex_lock(&crypto_init_mutex);
-  assert(crypto_refs > 0);
-  if (--crypto_refs == 0) {
-    NSS_ShutdownContext(crypto_context);
-    crypto_context = NULL;
-    crypto_init_pid = 0;
-  }
-  pthread_mutex_unlock(&crypto_init_mutex);
 }
 
-ceph::crypto::HMAC::~HMAC()
+ssl::OpenSSLDigest& ssl::OpenSSLDigest::operator=(OpenSSLDigest&& o) noexcept
 {
-  PK11_DestroyContext(ctx, PR_TRUE);
-  PK11_FreeSymKey(symkey);
-  PK11_FreeSlot(slot);
+  std::swap(mpContext, o.mpContext);
+  std::swap(mpType, o.mpType);
+  std::swap(mpType_FIPS, o.mpType_FIPS);
+  return *this;
 }
 
-#else
-# error "No supported crypto implementation found."
-#endif
+void ssl::OpenSSLDigest::Restart() {
+  if (mpType_FIPS) {
+    EVP_DigestInit_ex(mpContext, mpType_FIPS, NULL);
+  } else {
+    EVP_DigestInit_ex(mpContext, mpType, NULL);
+  }
+}
+
+void ssl::OpenSSLDigest::SetFlags(int flags) {
+  if (flags == EVP_MD_CTX_FLAG_NON_FIPS_ALLOW && OpenSSL_version_num() >= 0x30000000L && mpType == EVP_md5() && !mpType_FIPS) {
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    mpType_FIPS = EVP_MD_fetch(NULL, "MD5", "fips=no");
+#endif  // OPENSSL_VERSION_NUMBER >= 0x30000000L
+  } else {
+    EVP_MD_CTX_set_flags(mpContext, flags);
+  }
+  this->Restart();
+}
+
+void ssl::OpenSSLDigest::Update(const unsigned char *input, size_t length) {
+  if (length) {
+    EVP_DigestUpdate(mpContext, const_cast<void *>(reinterpret_cast<const void *>(input)), length);
+  }
+}
+
+void ssl::OpenSSLDigest::Final(unsigned char *digest) {
+  unsigned int s;
+  EVP_DigestFinal_ex(mpContext, digest, &s);
+}
+
+}
+
+#pragma clang diagnostic pop
+#pragma GCC diagnostic pop

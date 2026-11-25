@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,9 +18,8 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
-// from include/linux/falloc.h:
-#ifndef FALLOC_FL_PUNCH_HOLE
-# define FALLOC_FL_PUNCH_HOLE 0x2
+#ifdef __linux__
+#include <linux/falloc.h>
 #endif
 
 #include "FS.h"
@@ -30,7 +30,7 @@
 #include "XFS.h"
 #endif
 
-#if defined(DARWIN) || defined(__FreeBSD__)
+#if defined(__APPLE__) || defined(__FreeBSD__)
 #include <sys/mount.h>
 #else
 #include <sys/vfs.h>
@@ -114,7 +114,7 @@ int FS::copy_file_range(int to_fd, uint64_t to_offset,
 			int from_fd,
 			uint64_t from_offset, uint64_t from_len)
 {
-  assert(0 == "write me");
+  ceph_abort_msg("write me");
 }
 
 int FS::zero(int fd, uint64_t offset, uint64_t length)
@@ -151,7 +151,7 @@ int FS::zero(int fd, uint64_t offset, uint64_t length)
    So: we only do this is PUNCH_HOLE *and* KEEP_SIZE are defined.
 
   */
-#if !defined(DARWIN) && !defined(__FreeBSD__)
+#if !defined(__APPLE__) && !defined(__FreeBSD__)
 # ifdef CEPH_HAVE_FALLOCATE
 #  ifdef FALLOC_FL_KEEP_SIZE
   // first try fallocate
@@ -169,7 +169,7 @@ int FS::zero(int fd, uint64_t offset, uint64_t length)
 
   {
     // fall back to writing zeros
-    bufferlist bl;
+    ceph::bufferlist bl;
     bl.append_zero(length);
     r = ::lseek64(fd, offset, SEEK_SET);
     if (r < 0) {
@@ -185,50 +185,3 @@ int FS::zero(int fd, uint64_t offset, uint64_t length)
 
 // ---------------
 
-#if defined(HAVE_LIBAIO)
-int FS::aio_queue_t::submit(aio_t &aio, int *retries)
-{
-  // 2^16 * 125us = ~8 seconds, so max sleep is ~16 seconds
-  int attempts = 16;
-  int delay = 125;
-  iocb *piocb = &aio.iocb;
-  while (true) {
-    int r = io_submit(ctx, 1, &piocb);
-    if (r < 0) {
-      if (r == -EAGAIN && attempts-- > 0) {
-	usleep(delay);
-	delay *= 2;
-	(*retries)++;
-	continue;
-      }
-      return r;
-    }
-    assert(r == 1);
-    break;
-  }
-  return 0;
-}
-
-int FS::aio_queue_t::get_next_completed(int timeout_ms, aio_t **paio, int max)
-{
-  io_event event[max];
-  struct timespec t = {
-    timeout_ms / 1000,
-    (timeout_ms % 1000) * 1000 * 1000
-  };
-
-  int r = 0;
-  do {
-    r = io_getevents(ctx, 1, max, event, &t);
-  } while (r == -EINTR);
-  
-  if (r <= 0) {
-    return r;
-  }
-  for (int i=0; i<r; ++i) {
-    paio[i] = (aio_t *)event[i].obj;
-    paio[i]->rval = event[i].res;
-  }
-  return r;
-}
-#endif

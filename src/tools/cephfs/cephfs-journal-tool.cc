@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -23,21 +24,21 @@
 
 int main(int argc, const char **argv)
 {
-  vector<const char*> args;
-  argv_to_vec(argc, argv, args);
-  env_to_vec(args);
+  auto args = argv_to_vec(argc, argv);
+  if (args.empty()) {
+    std::cerr << argv[0] << ": -h or --help for usage" << std::endl;
+    exit(1);
+  }
+  if (ceph_argparse_need_usage(args)) {
+    JournalTool::usage();
+    exit(0);
+  }
 
   auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
 			     CODE_ENVIRONMENT_UTILITY, 0);
   common_init_finish(g_ceph_context);
 
   JournalTool jt;
-
-  // Handle --help before calling init() so we don't depend on network.
-  if (args.empty() || (args.size() == 1 && (std::string(args[0]) == "--help" || std::string(args[0]) == "-h"))) {
-    jt.usage();
-    return 0;
-  }
 
   // Connect to mon cluster, download MDS map etc
   int rc = jt.init();
@@ -51,8 +52,6 @@ int main(int argc, const char **argv)
   if (rc != 0) {
     std::cerr << "Error (" << cpp_strerror(rc) << ")" << std::endl;
   }
-
-  jt.shutdown();
 
   return rc;
 }

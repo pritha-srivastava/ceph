@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,48 +17,33 @@
 #define CEPH_TEST_RADOS_API_TEST_H
 
 #include "include/rados/librados.h"
-#include "include/rados/librados.hpp"
+#include "test/librados/test_shared.h"
 
 #include <map>
 #include <string>
 #include <unistd.h>
 
-std::string get_temp_pool_name(const std::string &prefix = "test-rados-api-");
-
-std::string create_one_pool(const std::string &pool_name, rados_t *cluster,
-    uint32_t pg_num=0);
-std::string create_one_ec_pool(const std::string &pool_name, rados_t *cluster);
-std::string create_one_pool_pp(const std::string &pool_name,
-			    librados::Rados &cluster);
-std::string create_one_pool_pp(const std::string &pool_name,
-			       librados::Rados &cluster,
-			       const std::map<std::string, std::string> &config);
-std::string create_one_ec_pool_pp(const std::string &pool_name,
-			    librados::Rados &cluster);
-std::string set_pg_num(
-    rados_t *cluster, const std::string &pool_name, uint32_t pg_num);
-
+std::string create_one_pool(const std::string &pool_name, rados_t *cluster);
+std::string create_pool(const std::string &pool_name, rados_t *cluster);
+std::string create_one_ec_pool(const std::string &pool_name, rados_t *cluster, bool fast_ec = false);
+std::string create_ec_pool(const std::string &pool_name, rados_t *cluster, bool fast_ec = false);
+std::string set_pool_flags(const std::string &pool_name, rados_t *cluster, int64_t flags, bool set_not_unset);
 std::string connect_cluster(rados_t *cluster);
-std::string connect_cluster_pp(librados::Rados &cluster);
-std::string connect_cluster_pp(librados::Rados &cluster,
-			       const std::map<std::string, std::string> &config);
 int destroy_one_pool(const std::string &pool_name, rados_t *cluster);
 int destroy_one_ec_pool(const std::string &pool_name, rados_t *cluster);
-int destroy_one_pool_pp(const std::string &pool_name, librados::Rados &cluster);
-int destroy_one_ec_pool_pp(const std::string &pool_name, librados::Rados &cluster);
-void assert_eq_sparse(bufferlist& expected,
-                      const std::map<uint64_t, uint64_t>& extents,
-                      bufferlist& actual);
+int destroy_pool(const std::string &pool_name, rados_t *cluster);
+int destroy_ec_pool(const std::string &pool_name, rados_t *cluster);
+// The following are convenient macros for defining test combinations
+// with each of the gtest suites.
+#define INSTANTIATE_TEST_SUITE_P_EC(CLASS) \
+INSTANTIATE_TEST_SUITE_P( CLASS ## ParamCombination, CLASS, \
+::testing::Combine( \
+  ::testing::Bool(),   /* fast_ec */ \
+  ::testing::Bool()))  /* split_ops */
 
-class TestAlarm
-{
-public:
-  TestAlarm() {
-    alarm(1200);
-  }
-  ~TestAlarm() {
-    alarm(0);
-  }
-};
+#define INSTANTIATE_TEST_SUITE_P_REPLICA(CLASS) \
+INSTANTIATE_TEST_SUITE_P( CLASS ## ParamCombination, CLASS, \
+::testing::Bool()) /* split_ops */
+
 
 #endif

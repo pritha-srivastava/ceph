@@ -1,7 +1,9 @@
+from io import BytesIO, StringIO
 import json
 import logging
 import errno
 import re
+import time
 from teuthology.contextutil import MaxWhileTries
 from teuthology.exceptions import CommandFailedError
 from teuthology.orchestra.run import wait
@@ -12,6 +14,7 @@ DAMAGED_ON_START = "damaged_on_start"
 DAMAGED_ON_LS = "damaged_on_ls"
 CRASHED = "server crashed"
 NO_DAMAGE = "no damage"
+READONLY = "readonly"
 FAILED_CLIENT = "client failed"
 FAILED_SERVER = "server failed"
 
@@ -48,12 +51,11 @@ class TestDamage(CephFSTestCase):
         # to avoid waiting through reconnect on every MDS start.
         self.mount_a.umount_wait()
         for mds_name in self.fs.get_active_names():
-            self.fs.mds_asok(["flush", "journal"], mds_name)
+            self.fs.mds_asok(["flush", "journal"], mds_id=mds_name)
 
-        self.fs.mds_stop()
-        self.fs.mds_fail()
+        self.fs.fail()
 
-        self.fs.rados(['export', '/tmp/metadata.bin'])
+        serialized = self.fs.radosmo(['export', '-'])
 
         def is_ignored(obj_id, dentry=None):
             """
@@ -83,13 +85,13 @@ class TestDamage(CephFSTestCase):
             # None means ls will do an "ls -R" in hope of seeing some errors
             return None
 
-        objects = self.fs.rados(["ls"]).split("\n")
+        objects = self.fs.radosmo(["ls"], stdout=StringIO()).strip().split("\n")
         objects = [o for o in objects if not is_ignored(o)]
 
         # Find all objects with an OMAP header
         omap_header_objs = []
         for o in objects:
-            header = self.fs.rados(["getomapheader", o])
+            header = self.fs.radosmo(["getomapheader", o], stdout=StringIO())
             # The rados CLI wraps the header output in a hex-printed style
             header_bytes = int(re.match("header \((.+) bytes\)", header).group(1))
             if header_bytes > 0:
@@ -98,16 +100,16 @@ class TestDamage(CephFSTestCase):
         # Find all OMAP key/vals
         omap_keys = []
         for o in objects:
-            keys_str = self.fs.rados(["listomapkeys", o])
+            keys_str = self.fs.radosmo(["listomapkeys", o], stdout=StringIO())
             if keys_str:
-                for key in keys_str.split("\n"):
+                for key in keys_str.strip().split("\n"):
                     if not is_ignored(o, key):
                         omap_keys.append((o, key))
 
         # Find objects that have data in their bodies
         data_objects = []
         for obj_id in objects:
-            stat_out = self.fs.rados(["stat", obj_id])
+            stat_out = self.fs.radosmo(["stat", obj_id], stdout=StringIO())
             size = int(re.match(".+, size (.+)$", stat_out).group(1))
             if size > 0:
                 data_objects.append(obj_id)
@@ -134,47 +136,66 @@ class TestDamage(CephFSTestCase):
         mutations = []
 
         # Removals
-        for obj_id in objects:
-            if obj_id in [
+        for o in objects:
+            if o in [
                 # JournalPointers are auto-replaced if missing (same path as upgrade)
                 "400.00000000",
                 # Missing dirfrags for non-system dirs result in empty directory
                 "10000000000.00000000",
+                # PurgeQueue is auto-created if not found on startup
+                "500.00000000",
+                # open file table is auto-created if not found on startup
+                "mds0_openfiles.0"
             ]:
                 expectation = NO_DAMAGE
             else:
                 expectation = DAMAGED_ON_START
 
             log.info("Expectation on rm '{0}' will be '{1}'".format(
-                obj_id, expectation
+                o, expectation
             ))
 
             mutations.append(MetadataMutation(
-                obj_id,
-                "Delete {0}".format(obj_id),
-                lambda o=obj_id: self.fs.rados(["rm", o]),
+                o,
+                "Delete {0}".format(o),
+                lambda o=o: self.fs.radosm(["rm", o]),
                 expectation
             ))
 
         # Blatant corruptions
-        mutations.extend([
-            MetadataMutation(
-                o,
-                "Corrupt {0}".format(o),
-                lambda o=o: self.fs.rados(["put", o, "-"], stdin_data=junk),
-                DAMAGED_ON_START
-            ) for o in data_objects
-        ])
+        for obj_id in data_objects:
+            if obj_id == "500.00000000":
+                # purge queue corruption results in read-only FS
+                mutations.append(MetadataMutation(
+                    obj_id,
+                    "Corrupt {0}".format(obj_id),
+                    lambda o=obj_id: self.fs.radosm(["put", o, "-"], stdin=StringIO(junk)),
+                    READONLY
+                ))
+            else:
+                mutations.append(MetadataMutation(
+                    obj_id,
+                    "Corrupt {0}".format(obj_id),
+                    lambda o=obj_id: self.fs.radosm(["put", o, "-"], stdin=StringIO(junk)),
+                    DAMAGED_ON_START
+                ))
 
         # Truncations
-        mutations.extend([
-            MetadataMutation(
-                o,
-                "Truncate {0}".format(o),
-                lambda o=o: self.fs.rados(["truncate", o, "0"]),
-                DAMAGED_ON_START
-            ) for o in data_objects
-        ])
+        for o in data_objects:
+            if o == "500.00000000":
+                # The PurgeQueue is allowed to be empty: Journaler interprets
+                # an empty header object as an empty journal.
+                expectation = NO_DAMAGE
+            else:
+                expectation = DAMAGED_ON_START
+
+            mutations.append(
+                MetadataMutation(
+                    o,
+                    "Truncate {0}".format(o),
+                    lambda o=o: self.fs.radosm(["truncate", o, "0"]),
+                    expectation
+            ))
 
         # OMAP value corruptions
         for o, k in omap_keys:
@@ -188,29 +209,29 @@ class TestDamage(CephFSTestCase):
                 MetadataMutation(
                     o,
                     "Corrupt omap key {0}:{1}".format(o, k),
-                    lambda o=o,k=k: self.fs.rados(["setomapval", o, k, junk]),
+                    lambda o=o,k=k: self.fs.radosm(["setomapval", o, k, junk]),
                     expectation,
                     get_path(o, k)
                 )
             )
 
         # OMAP header corruptions
-        for obj_id in omap_header_objs:
-            if re.match("60.\.00000000", obj_id) \
-                    or obj_id in ["1.00000000", "100.00000000", "mds0_sessionmap"]:
+        for o in omap_header_objs:
+            if re.match("60.\.00000000", o) \
+                    or o in ["1.00000000", "100.00000000", "mds0_sessionmap"]:
                 expectation = DAMAGED_ON_START
             else:
                 expectation = NO_DAMAGE
 
             log.info("Expectation on corrupt header '{0}' will be '{1}'".format(
-                obj_id, expectation
+                o, expectation
             ))
 
             mutations.append(
                 MetadataMutation(
-                    obj_id,
-                    "Corrupt omap header on {0}".format(obj_id),
-                    lambda o=obj_id: self.fs.rados(["setomapheader", o, junk]),
+                    o,
+                    "Corrupt omap header on {0}".format(o),
+                    lambda o=o: self.fs.radosm(["setomapheader", o, junk]),
                     expectation
                 )
             )
@@ -222,18 +243,17 @@ class TestDamage(CephFSTestCase):
 
             # Reset MDS state
             self.mount_a.umount_wait(force=True)
-            self.fs.mds_stop()
-            self.fs.mds_fail()
-            self.fs.mon_manager.raw_cluster_cmd('mds', 'repaired', '0')
+            self.fs.fail()
+            self.run_ceph_cmd('mds', 'repaired', '0')
 
             # Reset RADOS pool state
-            self.fs.rados(['import', '/tmp/metadata.bin'])
+            self.fs.radosm(['import', '-'], stdin=BytesIO(serialized))
 
             # Inject the mutation
             mutation.mutate_fn()
 
             # Try starting the MDS
-            self.fs.mds_restart()
+            self.fs.set_joinable()
 
             # How long we'll wait between starting a daemon and expecting
             # it to make it through startup, and potentially declare itself
@@ -285,8 +305,7 @@ class TestDamage(CephFSTestCase):
                 log.info("Daemons came up after mutation '{0}', proceeding to ls".format(mutation.desc))
 
             # MDS is up, should go damaged on ls or client mount
-            self.mount_a.mount()
-            self.mount_a.wait_until_mounted()
+            self.mount_a.mount_wait()
             if mutation.ls_path == ".":
                 proc = self.mount_a.run_shell(["ls", "-R", mutation.ls_path], wait=False)
             else:
@@ -305,7 +324,17 @@ class TestDamage(CephFSTestCase):
                     else:
                         log.error("Result: Failed to go damaged on mutation '{0}'".format(mutation.desc))
                         results[mutation] = FAILED_SERVER
-
+            elif mutation.expectation == READONLY:
+                proc = self.mount_a.run_shell(["mkdir", "foo"], wait=False)
+                try:
+                    proc.wait()
+                except CommandFailedError:
+                    stderr = proc.stderr.getvalue()
+                    log.info(stderr)
+                    if "Read-only file system".lower() in stderr.lower():
+                        pass
+                    else:
+                        raise
             else:
                 try:
                     wait([proc], 20)
@@ -326,8 +355,9 @@ class TestDamage(CephFSTestCase):
                 # EIOs mean something handled by DamageTable: assert that it has
                 # been populated
                 damage = json.loads(
-                    self.fs.mon_manager.raw_cluster_cmd(
-                        'tell', 'mds.{0}'.format(self.fs.get_active_names()[0]), "damage", "ls", '--format=json-pretty'))
+                    self.get_ceph_cmd_stdout(
+                        'tell', f'mds.{self.fs.get_active_names()[0]}',
+                        "damage", "ls", '--format=json-pretty'))
                 if len(damage) == 0:
                     results[mutation] = EIO_NO_DAMAGE
 
@@ -357,22 +387,20 @@ class TestDamage(CephFSTestCase):
 
         self.mount_a.umount_wait()
         for mds_name in self.fs.get_active_names():
-            self.fs.mds_asok(["flush", "journal"], mds_name)
+            self.fs.mds_asok(["flush", "journal"], mds_id=mds_name)
 
-        self.fs.mds_stop()
-        self.fs.mds_fail()
+        self.fs.fail()
 
         # Corrupt a dentry
         junk = "deadbeef" * 10
         dirfrag_obj = "{0:x}.00000000".format(subdir_ino)
-        self.fs.rados(["setomapval", dirfrag_obj, "file_to_be_damaged_head", junk])
+        self.fs.radosm(["setomapval", dirfrag_obj, "file_to_be_damaged_head", junk])
 
         # Start up and try to list it
-        self.fs.mds_restart()
+        self.fs.set_joinable()
         self.fs.wait_for_daemons()
 
-        self.mount_a.mount()
-        self.mount_a.wait_until_mounted()
+        self.mount_a.mount_wait()
         dentries = self.mount_a.ls("subdir/")
 
         # The damaged guy should have disappeared
@@ -389,8 +417,8 @@ class TestDamage(CephFSTestCase):
 
         # The fact that there is damaged should have bee recorded
         damage = json.loads(
-            self.fs.mon_manager.raw_cluster_cmd(
-                'tell', 'mds.{0}'.format(self.fs.get_active_names()[0]),
+            self.get_ceph_cmd_stdout(
+                'tell', f'mds.{self.fs.get_active_names()[0]}',
                 "damage", "ls", '--format=json-pretty'))
         self.assertEqual(len(damage), 1)
         damage_id = damage[0]['id']
@@ -412,8 +440,8 @@ class TestDamage(CephFSTestCase):
             if isinstance(self.mount_a, FuseMount):
                 self.assertEqual(e.exitstatus, errno.EIO)
             else:
-                # Kernel client handles this case differently
-                self.assertEqual(e.exitstatus, errno.ENOENT)
+                # Old kernel client handles this case differently
+                self.assertIn(e.exitstatus, [errno.ENOENT, errno.EIO])
         else:
             raise AssertionError("Expected EIO")
 
@@ -423,26 +451,25 @@ class TestDamage(CephFSTestCase):
         self.mount_a.umount_wait()
 
         # Now repair the stats
-        scrub_json = self.fs.mds_asok(["scrub_path", "/subdir", "repair"])
+        scrub_json = self.fs.run_scrub(["start", "/subdir", "repair"])
         log.info(json.dumps(scrub_json, indent=2))
 
-        self.assertEqual(scrub_json["passed_validation"], False)
-        self.assertEqual(scrub_json["raw_stats"]["checked"], True)
-        self.assertEqual(scrub_json["raw_stats"]["passed"], False)
+        self.assertNotEqual(scrub_json, None)
+        self.assertEqual(scrub_json["return_code"], 0)
+        self.assertEqual(self.fs.wait_until_scrub_complete(tag=scrub_json["scrub_tag"]), True)
 
         # Check that the file count is now correct
-        self.mount_a.mount()
-        self.mount_a.wait_until_mounted()
+        self.mount_a.mount_wait()
         nfiles = self.mount_a.getfattr("./subdir", "ceph.dir.files")
         self.assertEqual(nfiles, "1")
 
         # Clean up the omap object
-        self.fs.rados(["setomapval", dirfrag_obj, "file_to_be_damaged_head", junk])
+        self.fs.radosm(["setomapval", dirfrag_obj, "file_to_be_damaged_head", junk])
 
         # Clean up the damagetable entry
-        self.fs.mon_manager.raw_cluster_cmd(
-            'tell', 'mds.{0}'.format(self.fs.get_active_names()[0]),
-            "damage", "rm", "{did}".format(did=damage_id))
+        self.run_ceph_cmd(
+            'tell', f'mds.{self.fs.get_active_names()[0]}',
+            "damage", "rm", f"{damage_id}")
 
         # Now I should be able to create a file with the same name as the
         # damaged guy if I want.
@@ -470,12 +497,12 @@ class TestDamage(CephFSTestCase):
         self.fs.mds_asok(["flush", "journal"])
 
         # Drop everything from the MDS cache
-        self.mds_cluster.mds_stop()
-        self.fs.journal_tool(['journal', 'reset'])
-        self.mds_cluster.mds_fail_restart()
+        self.fs.fail()
+        self.fs.journal_tool(['journal', 'reset', '--yes-i-really-really-mean-it'], 0)
+        self.fs.set_joinable()
         self.fs.wait_for_daemons()
 
-        self.mount_a.mount()
+        self.mount_a.mount_wait()
 
         # Case 1: un-decodeable backtrace
 
@@ -494,21 +521,21 @@ class TestDamage(CephFSTestCase):
 
         # Check that an entry is created in the damage table
         damage = json.loads(
-            self.fs.mon_manager.raw_cluster_cmd(
+            self.get_ceph_cmd_stdout(
                 'tell', 'mds.{0}'.format(self.fs.get_active_names()[0]),
                 "damage", "ls", '--format=json-pretty'))
         self.assertEqual(len(damage), 1)
         self.assertEqual(damage[0]['damage_type'], "backtrace")
         self.assertEqual(damage[0]['ino'], file1_ino)
 
-        self.fs.mon_manager.raw_cluster_cmd(
+        self.run_ceph_cmd(
             'tell', 'mds.{0}'.format(self.fs.get_active_names()[0]),
             "damage", "rm", str(damage[0]['id']))
 
 
         # Case 2: missing dirfrag for the target inode
 
-        self.fs.rados(["rm", "{0:x}.00000000".format(dir2_ino)])
+        self.fs.radosm(["rm", "{0:x}.00000000".format(dir2_ino)])
 
         # Check that touching the hardlink gives EIO
         ran = self.mount_a.run_shell(["stat", "testdir/hardlink2"], wait=False)
@@ -519,7 +546,7 @@ class TestDamage(CephFSTestCase):
 
         # Check that an entry is created in the damage table
         damage = json.loads(
-            self.fs.mon_manager.raw_cluster_cmd(
+            self.get_ceph_cmd_stdout(
                 'tell', 'mds.{0}'.format(self.fs.get_active_names()[0]),
                 "damage", "ls", '--format=json-pretty'))
         self.assertEqual(len(damage), 2)
@@ -534,6 +561,182 @@ class TestDamage(CephFSTestCase):
             self.assertEqual(damage[1]['ino'], file2_ino)
 
         for entry in damage:
-            self.fs.mon_manager.raw_cluster_cmd(
+            self.run_ceph_cmd(
                 'tell', 'mds.{0}'.format(self.fs.get_active_names()[0]),
                 "damage", "rm", str(entry['id']))
+
+    def test_dentry_first_existing(self):
+        """
+        That the MDS won't abort when the dentry is already known to be damaged.
+        """
+
+        def verify_corrupt():
+            info = self.fs.read_cache("/a", 0)
+            log.debug('%s', info)
+            self.assertEqual(len(info), 1)
+            dirfrags = info[0]['dirfrags']
+            self.assertEqual(len(dirfrags), 1)
+            dentries = dirfrags[0]['dentries']
+            self.assertEqual([dn['path'] for dn in dentries if dn['is_primary']], ['a/c'])
+            self.assertEqual(dentries[0]['snap_first'], 18446744073709551606) # SNAP_HEAD
+
+        self.mount_a.run_shell_payload("mkdir -p a/b")
+        self.fs.flush()
+        self.config_set("mds", "mds_abort_on_newly_corrupt_dentry", False)
+        self.config_set("mds", "mds_inject_rename_corrupt_dentry_first", "1.0")
+        time.sleep(5) # for conf to percolate
+        self.mount_a.run_shell_payload("mv a/b a/c; sync .")
+        self.mount_a.umount()
+        verify_corrupt()
+        self.fs.fail()
+        self.config_rm("mds", "mds_inject_rename_corrupt_dentry_first")
+        self.config_set("mds", "mds_abort_on_newly_corrupt_dentry", False)
+        self.fs.set_joinable()
+        status = self.fs.status()
+        self.fs.flush()
+        self.assertFalse(self.fs.status().hadfailover(status))
+        verify_corrupt()
+
+    def test_dentry_first_preflush(self):
+        """
+        That the MDS won't write a dentry with new damage to CDentry::first
+        to the journal.
+        """
+
+        rank0 = self.fs.get_rank()
+        self.fs.rank_freeze(True, rank=0)
+        self.mount_a.run_shell_payload("mkdir -p a/{b,c}/d")
+        self.fs.flush()
+        self.config_set("mds", "mds_inject_rename_corrupt_dentry_first", "1.0")
+        time.sleep(5) # for conf to percolate
+        with self.assert_cluster_log("MDS abort because newly corrupt dentry"):
+            p = self.mount_a.run_shell_payload("timeout 60 mv a/b a/z", wait=False)
+            self.wait_until_true(lambda: "laggy_since" in self.fs.get_rank(), timeout=self.fs.beacon_timeout)
+        self.config_rm("mds", "mds_inject_rename_corrupt_dentry_first")
+        self.fs.rank_freeze(False, rank=0)
+        self.delete_mds_coredump(rank0['name'])
+        self.fs.mds_restart(rank0['name'])
+        self.fs.wait_for_daemons()
+        p.wait()
+        self.mount_a.run_shell_payload("stat a/ && find a/")
+        self.fs.flush()
+
+    def test_dentry_first_precommit(self):
+        """
+        That the MDS won't write a dentry with new damage to CDentry::first
+        to the directory object.
+        """
+
+        fscid = self.fs.id
+        self.mount_a.run_shell_payload("mkdir -p a/{b,c}/d; sync .")
+        self.mount_a.umount() # allow immediate scatter write back
+        self.fs.flush()
+        # now just twiddle some inode metadata on a regular file
+        self.mount_a.mount_wait()
+        self.mount_a.run_shell_payload("chmod 711 a/b/d; sync .")
+        self.mount_a.umount() # avoid journaling session related things
+        # okay, now cause the dentry to get damaged after loading from the journal
+        self.fs.fail()
+        self.config_set("mds", "mds_inject_journal_corrupt_dentry_first", "1.0")
+        time.sleep(5) # for conf to percolate
+        self.fs.set_joinable()
+        self.fs.wait_for_daemons()
+        rank0 = self.fs.get_rank()
+        self.fs.rank_freeze(True, rank=0)
+        # so now we want to trigger commit but this will crash, so:
+        with self.assert_cluster_log("MDS abort because newly corrupt dentry"):
+            c = ['--connect-timeout=60', 'tell', f"mds.{fscid}:0", "flush", "journal"]
+            p = self.run_ceph_cmd(args=c, wait=False, timeoutcmd=30)
+            self.wait_until_true(lambda: "laggy_since" in self.fs.get_rank(), timeout=self.fs.beacon_timeout)
+        self.config_rm("mds", "mds_inject_journal_corrupt_dentry_first")
+        self.fs.rank_freeze(False, rank=0)
+        self.delete_mds_coredump(rank0['name'])
+        self.fs.mds_restart(rank0['name'])
+        self.fs.wait_for_daemons()
+        try:
+            p.wait()
+        except CommandFailedError as e:
+            print(e)
+        else:
+            self.fail("flush journal should fail!")
+        self.mount_a.mount_wait()
+        self.mount_a.run_shell_payload("stat a/ && find a/")
+        self.fs.flush()
+
+    def test_missing_dirfrag_create(self):
+        """
+        That the MDS won't let you manipulate dentries in a missing dirfrag.
+        """
+
+        self.mount_a.run_shell_payload("mkdir -p dir_x/dir_xx/dir_xxx/")
+        self.mount_a.run_shell_payload("touch dir_x/dir_xx/dir_xxx/file_y")
+        self.mount_a.umount()
+        d = self.fs.read_cache("dir_x/dir_xx", depth=0)
+        self.fs.flush()
+        time.sleep(5)
+        self.fs.flush() # EUpdate scatter_writebehind
+        self.fs.fail()
+        dirfrag_obj = "{0:x}.00000000".format(d[0]['ino'])
+        self.fs.radosm(["rm", dirfrag_obj]),
+        self.fs.set_joinable()
+        self.fs.wait_for_daemons()
+        self.mount_a.mount_wait()
+        try:
+            p = self.mount_a.run_shell_payload("touch dir_x/dir_xx/file_x", wait=False)
+            # CDir.cc: 1438: FAILED ceph_assert(get_version() < pv)
+            wait([p], 20)
+            self.fs.flush()
+        except MaxWhileTries:
+            self.fail("MDS probably crashed")
+        except CommandFailedError:
+            self.assertTrue("Input/output error" in p.stderr.getvalue())
+        else:
+            self.fail("command should fail")
+
+
+class TestDamageExport(CephFSTestCase):
+    MDSS_REQUIRED = 2
+    CLIENTS_REQUIRED = 1
+
+    def test_export_missing_dirfrag(self):
+        """
+        That a subtree containing a dirfrag whose object is missing on disk
+        can be exported to another rank.
+
+        See: https://tracker.ceph.com/issues/62381
+        """
+
+        self.fs.set_max_mds(2)
+        self.fs.wait_for_daemons()
+
+        self.mount_a.run_shell_payload("mkdir -p dir_x/dir_xx/dir_xxx/")
+        self.mount_a.run_shell_payload("touch dir_x/dir_xx/dir_xxx/file_y")
+        dir_ino = self.mount_a.path_to_ino("dir_x/dir_xx")
+        self.mount_a.umount_wait()
+        self.fs.ranks_tell(["flush", "journal"])
+        time.sleep(5)
+        self.fs.ranks_tell(["flush", "journal"]) # EUpdate scatter_writebehind
+        self.fs.fail()
+        dirfrag_obj = "{0:x}.00000000".format(dir_ino)
+        self.fs.radosm(["rm", dirfrag_obj])
+        self.fs.set_joinable()
+        status = self.fs.wait_for_daemons()
+        self.mount_a.mount_wait()
+
+        # fetch the dirfrag -- it goes bad but stays in cache as complete
+        try:
+            self.mount_a.run_shell_payload("ls dir_x/dir_xx")
+        except CommandFailedError:
+            pass
+        damage = self.fs.rank_tell(["damage", "ls"], rank=0)
+        self.assertTrue(any(d['damage_type'] == "dir_frag" and d['ino'] == dir_ino
+                            for d in damage), f"no dir_frag damage entry: {damage}")
+
+        # export the subtree containing the bad dirfrag
+        rank0 = self.fs.get_rank(rank=0, status=status)
+        self.mount_a.setfattr("dir_x", "ceph.dir.pin", "1")
+        self._wait_subtrees([('/dir_x', 1)], status=status, rank=1)
+
+        # Migrator.cc: FAILED ceph_assert(dir->get_projected_version() == dir->get_version())
+        self.assertEqual(rank0['gid'], self.fs.get_rank(rank=0)['gid'],
+                         "rank 0 restarted while exporting")

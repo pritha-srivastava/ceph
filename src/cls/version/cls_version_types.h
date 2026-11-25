@@ -1,6 +1,15 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #ifndef CEPH_CLS_VERSION_TYPES_H
 #define CEPH_CLS_VERSION_TYPES_H
 
+#include <cstdint>
+#include <iostream>
+#include <list>
+#include <string>
+
+#include "common/Formatter.h"
 #include "include/encoding.h"
 #include "include/types.h"
 
@@ -8,22 +17,24 @@ class JSONObj;
 
 
 struct obj_version {
-  uint64_t ver;
-  string tag;
+  uint64_t ver = 0;
+  std::string tag;
 
-  obj_version() : ver(0) {}
+  obj_version() = default;
+  obj_version(uint64_t ver, std::string tag)
+    : ver(ver), tag(std::move(tag)) {}
 
-  void encode(bufferlist& bl) const {
+  void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
-    ::encode(ver, bl);
-    ::encode(tag, bl);
+    encode(ver, bl);
+    encode(tag, bl);
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::iterator& bl) {
+  void decode(ceph::buffer::list::const_iterator& bl) {
     DECODE_START(1, bl);
-    ::decode(ver, bl);
-    ::decode(tag, bl);
+    decode(ver, bl);
+    decode(tag, bl);
     DECODE_FINISH(bl);
   }
 
@@ -31,19 +42,38 @@ struct obj_version {
     ver++;
   }
 
-  bool empty() {
+  void clear() {
+    ver = 0;
+    tag.clear();
+  }
+
+  bool empty() const {
     return tag.empty();
   }
 
-  bool compare(struct obj_version *v) {
+  bool compare(struct obj_version *v) const {
     return (ver == v->ver &&
             tag.compare(v->tag) == 0);
   }
 
-  void dump(Formatter *f) const;
+  bool operator==(const struct obj_version& v) const {
+    return (ver == v.ver &&
+            tag.compare(v.tag) == 0);
+  }
+
+  void dump(ceph::Formatter *f) const {
+    f->dump_int("ver", ver);
+    f->dump_string("tag", tag);
+  }
+
   void decode_json(JSONObj *obj);
+  static std::list<obj_version> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(obj_version)
+
+inline std::ostream& operator <<(std::ostream& m, const obj_version& v) {
+  return m << v.tag << ":" << v.ver;
+}
 
 enum VersionCond {
   VER_COND_NONE =      0,
@@ -60,27 +90,38 @@ struct obj_version_cond {
   struct obj_version ver;
   VersionCond cond;
 
-  void encode(bufferlist& bl) const {
+  void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
-    ::encode(ver, bl);
+    encode(ver, bl);
     uint32_t c = (uint32_t)cond;
-    ::encode(c, bl);
+    encode(c, bl);
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::iterator& bl) {
+  void decode(ceph::buffer::list::const_iterator& bl) {
     DECODE_START(1, bl);
-    ::decode(ver, bl);
+    decode(ver, bl);
     uint32_t c;
-    ::decode(c, bl);
+    decode(c, bl);
     cond = (VersionCond)c;
     DECODE_FINISH(bl);
   }
 
+  void dump(ceph::Formatter *f) const {
+    f->dump_object("ver", ver);
+    f->dump_unsigned("cond", cond);
+  }
+
+  static std::list<obj_version_cond> generate_test_instances() {
+    std::list<obj_version_cond> o;
+    o.emplace_back();
+    o.emplace_back();
+    o.back().ver.ver = 1;
+    o.back().ver.tag = "foo";
+    o.back().cond = VER_COND_EQ;
+    return o;
+  }
 };
 WRITE_CLASS_ENCODER(obj_version_cond)
 
-
 #endif
-
-

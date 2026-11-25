@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #ifndef CEPH_LIBRBD_ASYNC_OBJECT_THROTTLE_H
 #define CEPH_LIBRBD_ASYNC_OBJECT_THROTTLE_H
 
@@ -33,7 +34,7 @@ public:
 protected:
   ImageCtxT &m_image_ctx;
 
-  virtual void finish(int r) {
+  void finish(int r) override {
     m_finisher.finish_op(r);
   }
 
@@ -55,10 +56,10 @@ public:
 		      uint64_t end_object_no);
 
   void start_ops(uint64_t max_concurrent);
-  virtual void finish_op(int r);
+  void finish_op(int r) override;
 
 private:
-  Mutex m_lock;
+  ceph::mutex m_lock;
   const AsyncRequest<ImageCtxT> *m_async_request;
   ImageCtxT &m_image_ctx;
   ContextFactory m_context_factory;

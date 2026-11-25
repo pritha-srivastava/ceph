@@ -1,13 +1,22 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "rgw_realm_reloader.h"
-#include "rgw_rados.h"
 
+#include "rgw_auth_registry.h"
 #include "rgw_bucket.h"
 #include "rgw_log.h"
 #include "rgw_rest.h"
-#include "rgw_user.h"
+#include "driver/rados/rgw_user.h"
+#include "rgw_process_env.h"
+#include "rgw_sal.h"
+#ifdef WITH_RADOSGW_RADOS
+#include "rgw_sal_rados.h"
+#endif
+
+#include "services/svc_zone.h"
+
+#include "common/errno.h"
 
 #define dout_subsys ceph_subsys_rgw
 
@@ -15,17 +24,24 @@
 #define dout_prefix (*_dout << "rgw realm reloader: ")
 
 
-// safe callbacks from SafeTimer are unneccessary. reload() can take a long
+// safe callbacks from SafeTimer are unnecessary. reload() can take a long
 // time, so we don't want to hold the mutex and block handle_notify() for the
 // duration
 static constexpr bool USE_SAFE_TIMER_CALLBACKS = false;
 
 
-RGWRealmReloader::RGWRealmReloader(RGWRados*& store, Pauser* frontends)
-  : store(store),
+RGWRealmReloader::RGWRealmReloader(RGWProcessEnv& env,
+                                   const rgw::auth::ImplicitTenants& implicit_tenants,
+                                   std::map<std::string, std::string>& service_map_meta,
+                                   Pauser* frontends,
+				   boost::asio::io_context& io_context)
+  : env(env),
+    implicit_tenants(implicit_tenants),
+    service_map_meta(service_map_meta),
     frontends(frontends),
-    timer(store->ctx(), mutex, USE_SAFE_TIMER_CALLBACKS),
-    mutex("RGWRealmReloader"),
+    io_context(io_context),
+    timer(env.driver->ctx(), mutex, USE_SAFE_TIMER_CALLBACKS),
+    mutex(ceph::make_mutex("RGWRealmReloader")),
     reload_scheduled(nullptr)
 {
   timer.init();
@@ -33,28 +49,28 @@ RGWRealmReloader::RGWRealmReloader(RGWRados*& store, Pauser* frontends)
 
 RGWRealmReloader::~RGWRealmReloader()
 {
-  Mutex::Locker lock(mutex);
+  std::lock_guard lock{mutex};
   timer.shutdown();
 }
 
 class RGWRealmReloader::C_Reload : public Context {
   RGWRealmReloader* reloader;
  public:
-  C_Reload(RGWRealmReloader* reloader) : reloader(reloader) {}
+  explicit C_Reload(RGWRealmReloader* reloader) : reloader(reloader) {}
   void finish(int r) override { reloader->reload(); }
 };
 
 void RGWRealmReloader::handle_notify(RGWRealmNotify type,
-                                     bufferlist::iterator& p)
+                                     bufferlist::const_iterator& p)
 {
-  if (!store) {
+  if (!env.driver) {
     /* we're in the middle of reload */
     return;
   }
 
-  CephContext *const cct = store->ctx();
+  CephContext *const cct = env.driver->ctx();
 
-  Mutex::Locker lock(mutex);
+  std::lock_guard lock{mutex};
   if (reload_scheduled) {
     ldout(cct, 4) << "Notification on realm, reconfiguration "
         "already scheduled" << dendl;
@@ -62,68 +78,81 @@ void RGWRealmReloader::handle_notify(RGWRealmNotify type,
   }
 
   reload_scheduled = new C_Reload(this);
-  cond.SignalOne(); // wake reload() if it blocked on a bad configuration
+  cond.notify_one(); // wake reload() if it blocked on a bad configuration
 
-  // schedule reload() with a delay so we can batch up changes
-  auto delay = cct->_conf->rgw_realm_reconfigure_delay;
-  timer.add_event_after(delay, reload_scheduled);
+  // schedule reload() without delay
+  timer.add_event_after(0, reload_scheduled);
 
-  ldout(cct, 4) << "Notification on realm, reconfiguration scheduled in "
-      << delay << 's' << dendl;
+  ldout(cct, 4) << "Notification on realm, reconfiguration scheduled" << dendl;
 }
 
 void RGWRealmReloader::reload()
 {
-  CephContext *const cct = store->ctx();
-  ldout(cct, 1) << "Pausing frontends for realm update..." << dendl;
+  CephContext *const cct = env.driver->ctx();
+  const DoutPrefix dp(cct, dout_subsys, "rgw realm reloader: ");
+  ldpp_dout(&dp, 1) << "Pausing frontends for realm update..." << dendl;
 
   frontends->pause();
 
-  ldout(cct, 1) << "Frontends paused" << dendl;
+  ldpp_dout(&dp, 1) << "Frontends paused" << dendl;
 
   // TODO: make RGWRados responsible for rgw_log_usage lifetime
   rgw_log_usage_finalize();
 
-  // destroy the existing store
-  RGWStoreManager::close_storage(store);
-  store = nullptr;
+  env.driver->shutdown();
+  // destroy the existing driver
+  DriverManager::close_storage(env.driver);
+  env.driver = nullptr;
 
-  ldout(cct, 1) << "Store closed" << dendl;
+  ldpp_dout(&dp, 1) << "driver closed" << dendl;
   {
     // allow a new notify to reschedule us. it's important that we do this
     // before we start loading the new realm, or we could miss some updates
-    Mutex::Locker lock(mutex);
+    std::lock_guard lock{mutex};
     reload_scheduled = nullptr;
   }
 
-  while (!store) {
-    // recreate and initialize a new store
-    store = RGWStoreManager::get_storage(cct,
-                                         cct->_conf->rgw_enable_gc_threads,
-                                         cct->_conf->rgw_enable_lc_threads,
-                                         cct->_conf->rgw_enable_quota_threads,
-                                         cct->_conf->rgw_run_sync_thread);
 
-    ldout(cct, 1) << "Creating new store" << dendl;
+  while (!env.driver) {
+    // reload the new configuration from ConfigStore
+    int r = env.site->load(&dp, null_yield, env.cfgstore);
+    if (r == 0) {
+      ldpp_dout(&dp, 1) << "Creating new driver" << dendl;
 
-    RGWRados* store_cleanup = nullptr;
+      // recreate and initialize a new driver
+      DriverManager::Config cfg = DriverManager::get_config(false, g_ceph_context);
+      cfg.filter_name = "none";
+      env.driver = DriverManager::get_storage(&dp, cct, cfg, io_context,
+	  *env.site,
+          cct->_conf->rgw_enable_gc_threads,
+          cct->_conf->rgw_enable_lc_threads,
+	  cct->_conf->rgw_enable_restore_threads,
+          cct->_conf->rgw_enable_quota_threads,
+          cct->_conf->rgw_run_sync_thread,
+          cct->_conf.get_val<bool>("rgw_dynamic_resharding"),
+          true,
+          true, // run notification thread
+          true, // run bucket logging thread
+          null_yield, env.cfgstore,
+          cct->_conf->rgw_cache_enabled);
+    }
+
+    rgw::sal::Driver* store_cleanup = nullptr;
     {
-      Mutex::Locker lock(mutex);
+      std::unique_lock lock{mutex};
 
       // failure to recreate RGWRados is not a recoverable error, but we
       // don't want to assert or abort the entire cluster.  instead, just
       // sleep until we get another notification, and retry until we get
       // a working configuration
-      if (store == nullptr) {
-        lderr(cct) << "Failed to reinitialize RGWRados after a realm "
+      if (env.driver == nullptr) {
+        ldpp_dout(&dp, -1) << "Failed to reload realm after a period "
             "configuration update. Waiting for a new update." << dendl;
 
         // sleep until another event is scheduled
-        while (!reload_scheduled)
-          cond.Wait(mutex);
-
-        ldout(cct, 1) << "Woke up with a new configuration, retrying "
-            "RGWRados initialization." << dendl;
+	cond.wait(lock, [this] { return reload_scheduled; });
+        ldpp_dout(&dp, 1) << "Woke up with a new configuration, retrying "
+            "realm reload." << dendl;
       }
 
       if (reload_scheduled) {
@@ -131,32 +160,53 @@ void RGWRealmReloader::reload()
         timer.cancel_event(reload_scheduled);
         reload_scheduled = nullptr;
 
-        // if we successfully created a store, clean it up outside of the lock,
+        // if we successfully created a driver, clean it up outside of the lock,
         // then continue to loop and recreate another
-        std::swap(store, store_cleanup);
+        std::swap(env.driver, store_cleanup);
       }
     }
 
     if (store_cleanup) {
-      ldout(cct, 4) << "Got another notification, restarting RGWRados "
-          "initialization." << dendl;
+      ldpp_dout(&dp, 4) << "Got another notification, restarting realm "
+          "reload." << dendl;
 
-      RGWStoreManager::close_storage(store_cleanup);
+      DriverManager::close_storage(store_cleanup);
     }
   }
 
-  ldout(cct, 1) << "Finishing initialization of new store" << dendl;
-  // finish initializing the new store
-  ldout(cct, 1) << " - REST subsystem init" << dendl;
-  rgw_rest_init(cct, store, store->get_zonegroup());
-  ldout(cct, 1) << " - user subsystem init" << dendl;
-  rgw_user_init(store);
-  ldout(cct, 1) << " - user subsystem init" << dendl;
-  rgw_bucket_init(store->meta_mgr);
-  ldout(cct, 1) << " - usage subsystem init" << dendl;
-  rgw_log_usage_init(cct, store);
+  int r = env.driver->register_to_service_map(&dp, "rgw", service_map_meta);
+  if (r < 0) {
+    ldpp_dout(&dp, -1) << "ERROR: failed to register to service map: " << cpp_strerror(-r) << dendl;
 
-  ldout(cct, 1) << "Resuming frontends with new realm configuration." << dendl;
+    /* ignore error */
+  }
 
-  frontends->resume(store);
+  ldpp_dout(&dp, 1) << "Finishing initialization of new driver" << dendl;
+  // finish initializing the new driver
+  ldpp_dout(&dp, 1) << " - REST subsystem init" << dendl;
+  rgw_rest_init(cct, env.driver->get_zone()->get_zonegroup());
+  ldpp_dout(&dp, 1) << " - usage subsystem init" << dendl;
+  rgw_log_usage_init(cct, env.driver);
+
+  /* Initialize the registry of auth strategies which will coordinate
+   * the dynamic reconfiguration. */
+  env.auth_registry = rgw::auth::StrategyRegistry::create(
+      cct, implicit_tenants, env.driver);
+  if (env.lua.manager.get()) {
+    env.lua.manager = env.driver->get_lua_manager(
+        env.lua.manager->luarocks_path());
+#ifdef WITH_RADOSGW_RADOS
+    if (env.driver->get_name() == "rados") {
+      static_cast<rgw::sal::RadosLuaManager*>(env.lua.manager.get())->watch_reload(&dp);
+      if (env.lua.background) {
+        env.lua.background->set_manager(env.lua.manager.get());
+        env.lua.manager.get()->set_lua_background(env.lua.background);
+      }
+    }
+#endif
+  }
+
+  ldpp_dout(&dp, 1) << "Resuming frontends with new realm configuration." << dendl;
+
+  frontends->resume(env.driver);
 }

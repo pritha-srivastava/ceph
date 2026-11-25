@@ -1,14 +1,21 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include <map>
 #include <thread>
 
 #include "rgw_period_pusher.h"
 #include "rgw_cr_rest.h"
+#include "rgw_zone.h"
+#include "rgw_sal.h"
+#include "rgw_sal_config.h"
+#include "rgw_sal_rados.h"
+
+#include "services/svc_zone.h"
+
 #include "common/errno.h"
 
-#include "rgw_boost_asio_yield.h"
+#include <boost/asio/yield.hpp>
 
 #define dout_subsys ceph_subsys_rgw
 
@@ -39,15 +46,15 @@ class PushAndRetryCR : public RGWCoroutine {
       counter(0)
   {}
 
-  int operate() override;
+  int operate(const DoutPrefixProvider *dpp) override;
 };
 
-int PushAndRetryCR::operate()
+int PushAndRetryCR::operate(const DoutPrefixProvider *dpp)
 {
   reenter(this) {
     for (;;) {
       yield {
-        ldout(cct, 10) << "pushing period " << period.get_id()
+        ldpp_dout(dpp, 10) << "pushing period " << period.get_id()
             << " to " << zone << dendl;
         // initialize the http params
         rgw_http_param_pair params[] = {
@@ -61,7 +68,7 @@ int PushAndRetryCR::operate()
 
       // stop on success
       if (get_ret_status() == 0) {
-        ldout(cct, 10) << "push to " << zone << " succeeded" << dendl;
+        ldpp_dout(dpp, 10) << "push to " << zone << " succeeded" << dendl;
         return set_cr_done();
       }
 
@@ -75,7 +82,7 @@ int PushAndRetryCR::operate()
         utime_t dur;
         dur.set_from_double(timeout);
 
-        ldout(cct, 10) << "waiting " << dur << "s for retry.." << dendl;
+        ldpp_dout(dpp, 10) << "waiting " << dur << "s for retry.." << dendl;
         wait(dur);
 
         timeout *= 2;
@@ -104,15 +111,15 @@ class PushAllCR : public RGWCoroutine {
       conns(std::move(conns))
   {}
 
-  int operate() override;
+  int operate(const DoutPrefixProvider *dpp) override;
 };
 
-int PushAllCR::operate()
+int PushAllCR::operate(const DoutPrefixProvider *dpp)
 {
   reenter(this) {
     // spawn a coroutine to push the period over each connection
     yield {
-      ldout(cct, 4) << "sending " << conns.size() << " periods" << dendl;
+      ldpp_dout(dpp, 4) << "sending " << conns.size() << " periods" << dendl;
       for (auto& c : conns)
         spawn(new PushAndRetryCR(cct, c.first, &c.second, http, period), false);
     }
@@ -124,7 +131,8 @@ int PushAllCR::operate()
 }
 
 /// A background thread to run the PushAllCR coroutine and exit.
-class RGWPeriodPusher::CRThread {
+class RGWPeriodPusher::CRThread : public DoutPrefixProvider {
+  CephContext* cct;
   RGWCoroutinesManager coroutines;
   RGWHTTPManager http;
   boost::intrusive_ptr<PushAllCR> push_all;
@@ -133,37 +141,42 @@ class RGWPeriodPusher::CRThread {
  public:
   CRThread(CephContext* cct, RGWPeriod&& period,
            std::map<std::string, RGWRESTConn>&& conns)
-    : coroutines(cct, NULL),
+    : cct(cct), coroutines(cct, NULL),
       http(cct, coroutines.get_completion_mgr()),
-      push_all(new PushAllCR(cct, &http, std::move(period), std::move(conns))),
-      thread([this] { coroutines.run(push_all.get()); })
+      push_all(new PushAllCR(cct, &http, std::move(period), std::move(conns)))
   {
-    http.set_threaded();
+    http.start();
+    // must spawn the CR thread after start
+    thread = std::thread([this]() noexcept { coroutines.run(this, push_all.get()); });
   }
   ~CRThread()
   {
-    push_all.reset();
     coroutines.stop();
     http.stop();
     if (thread.joinable())
       thread.join();
   }
+
+  CephContext *get_cct() const override { return cct; }
+  unsigned get_subsys() const override { return dout_subsys; }
+  std::ostream& gen_prefix(std::ostream& out) const override { return out << "rgw period pusher CR thread: "; }
 };
 
 
-RGWPeriodPusher::RGWPeriodPusher(RGWRados* store)
-  : cct(store->ctx()), store(store)
+RGWPeriodPusher::RGWPeriodPusher(const DoutPrefixProvider *dpp, rgw::sal::Driver* driver,
+				 rgw::sal::ConfigStore* cfgstore, optional_yield y)
+  : cct(driver->ctx()), driver(driver)
 {
-  const auto& realm = store->realm;
-  auto& realm_id = realm.get_id();
+  rgw::sal::Zone* zone = driver->get_zone();
+  auto& realm_id = zone->get_realm_id();
   if (realm_id.empty()) // no realm configuration
     return;
 
   // always send out the current period on startup
   RGWPeriod period;
-  int r = period.init(cct, store, realm_id, realm.get_name());
+  auto r = cfgstore->read_period(dpp, y, zone->get_current_period_id(), std::nullopt, period);
   if (r < 0) {
-    lderr(cct) << "failed to load period for realm " << realm_id << dendl;
+    ldpp_dout(dpp, -1) << "failed to load period for realm " << realm_id << dendl;
     return;
   }
 
@@ -175,12 +188,12 @@ RGWPeriodPusher::RGWPeriodPusher(RGWRados* store)
 RGWPeriodPusher::~RGWPeriodPusher() = default;
 
 void RGWPeriodPusher::handle_notify(RGWRealmNotify type,
-                                    bufferlist::iterator& p)
+                                    bufferlist::const_iterator& p)
 {
   // decode the period
   RGWZonesNeedPeriod info;
   try {
-    ::decode(info, p);
+    decode(info, p);
   } catch (buffer::error& e) {
     lderr(cct) << "Failed to decode the period: " << e.what() << dendl;
     return;
@@ -190,7 +203,7 @@ void RGWPeriodPusher::handle_notify(RGWRealmNotify type,
 
   // we can't process this notification without access to our current realm
   // configuration. queue it until resume()
-  if (store == nullptr) {
+  if (driver == nullptr) {
     pending_periods.emplace_back(std::move(info));
     return;
   }
@@ -216,7 +229,7 @@ void RGWPeriodPusher::handle_notify(RGWZonesNeedPeriod&& period)
 
   // find our zonegroup in the new period
   auto& zonegroups = period.get_map().zonegroups;
-  auto i = zonegroups.find(store->get_zonegroup().get_id());
+  auto i = zonegroups.find(driver->get_zone()->get_zonegroup().get_id());
   if (i == zonegroups.end()) {
     lderr(cct) << "The new period does not contain my zonegroup!" << dendl;
     return;
@@ -224,7 +237,7 @@ void RGWPeriodPusher::handle_notify(RGWZonesNeedPeriod&& period)
   auto& my_zonegroup = i->second;
 
   // if we're not a master zone, we're not responsible for pushing any updates
-  if (my_zonegroup.master_zone != store->get_zone_params().get_id())
+  if (my_zonegroup.master_zone != driver->get_zone()->get_id())
     return;
 
   // construct a map of the zones that need this period. the map uses the same
@@ -233,11 +246,11 @@ void RGWPeriodPusher::handle_notify(RGWZonesNeedPeriod&& period)
   auto hint = conns.end();
 
   // are we the master zonegroup in this period?
-  if (period.get_map().master_zonegroup == store->get_zonegroup().get_id()) {
+  if (period.get_map().master_zonegroup == driver->get_zone()->get_zonegroup().get_id()) {
     // update other zonegroup endpoints
     for (auto& zg : zonegroups) {
       auto& zonegroup = zg.second;
-      if (zonegroup.get_id() == store->get_zonegroup().get_id())
+      if (zonegroup.get_id() == driver->get_zone()->get_zonegroup().get_id())
         continue;
       if (zonegroup.endpoints.empty())
         continue;
@@ -245,14 +258,14 @@ void RGWPeriodPusher::handle_notify(RGWZonesNeedPeriod&& period)
       hint = conns.emplace_hint(
           hint, std::piecewise_construct,
           std::forward_as_tuple(zonegroup.get_id()),
-          std::forward_as_tuple(cct, store, zonegroup.get_id(), zonegroup.endpoints));
+          std::forward_as_tuple(cct, driver, zonegroup.get_id(), zonegroup.endpoints, zonegroup.api_name));
     }
   }
 
   // update other zone endpoints
   for (auto& z : my_zonegroup.zones) {
     auto& zone = z.second;
-    if (zone.id == store->get_zone_params().get_id())
+    if (zone.id == driver->get_zone()->get_id())
       continue;
     if (zone.endpoints.empty())
       continue;
@@ -260,7 +273,7 @@ void RGWPeriodPusher::handle_notify(RGWZonesNeedPeriod&& period)
     hint = conns.emplace_hint(
         hint, std::piecewise_construct,
         std::forward_as_tuple(zone.id),
-        std::forward_as_tuple(cct, store, zone.id, zone.endpoints));
+        std::forward_as_tuple(cct, driver, zone.id, zone.endpoints, my_zonegroup.api_name));
   }
 
   if (conns.empty()) {
@@ -283,13 +296,13 @@ void RGWPeriodPusher::pause()
 {
   ldout(cct, 4) << "paused for realm update" << dendl;
   std::lock_guard<std::mutex> lock(mutex);
-  store = nullptr;
+  driver = nullptr;
 }
 
-void RGWPeriodPusher::resume(RGWRados* store)
+void RGWPeriodPusher::resume(rgw::sal::Driver* driver)
 {
   std::lock_guard<std::mutex> lock(mutex);
-  this->store = store;
+  this->driver = driver;
 
   ldout(cct, 4) << "resume with " << pending_periods.size()
       << " periods pending" << dendl;

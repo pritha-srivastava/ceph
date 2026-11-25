@@ -1,5 +1,6 @@
-// -*- mode:C; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -19,11 +20,117 @@
 #include "osd/osd_types.h"
 #include "osd/OSDMap.h"
 #include "gtest/gtest.h"
+#include "include/coredumpctl.h"
 #include "common/Thread.h"
 #include "include/stringify.h"
 #include "osd/ReplicatedBackend.h"
 
+#include <iostream> // for std::cout
 #include <sstream>
+
+using namespace std;
+
+void compare_pg_pool_t(const pg_pool_t l, const pg_pool_t r)
+{
+  ASSERT_EQ(l.type, r.type);
+  ASSERT_EQ(l.size, r.size);
+  ASSERT_EQ(l.crush_rule, r.crush_rule);
+  ASSERT_EQ(l.object_hash, r.object_hash);
+  ASSERT_EQ(l.last_change, r.last_change);
+  ASSERT_EQ(l.snap_seq, r.snap_seq);
+  ASSERT_EQ(l.snap_epoch, r.snap_epoch);
+  //ASSERT_EQ(l.snaps, r.snaps);
+  ASSERT_EQ(l.removed_snaps, r.removed_snaps);
+  ASSERT_EQ(l.auid, r.auid);
+  ASSERT_EQ(l.flags, r.flags);
+  ASSERT_EQ(l.min_size, r.min_size);
+  ASSERT_EQ(l.quota_max_bytes, r.quota_max_bytes);
+  ASSERT_EQ(l.quota_max_objects, r.quota_max_objects);
+  ASSERT_EQ(l.tiers, r.tiers);
+  ASSERT_EQ(l.tier_of, r.tier_of);
+  ASSERT_EQ(l.read_tier, r.read_tier);
+  ASSERT_EQ(l.write_tier, r.write_tier);
+  ASSERT_EQ(l.properties, r.properties);
+  //ASSERT_EQ(l.hit_set_params, r.hit_set_params);
+  //ASSERT_EQ(l.hit_set_period, r.hit_set_period);
+  //ASSERT_EQ(l.hit_set_count, r.hit_set_count);
+  ASSERT_EQ(l.stripe_width, r.stripe_width);
+  ASSERT_EQ(l.target_max_bytes, r.target_max_bytes);
+  ASSERT_EQ(l.target_max_objects, r.target_max_objects);
+  ASSERT_EQ(l.cache_target_dirty_ratio_micro, r.cache_target_dirty_ratio_micro);
+  ASSERT_EQ(l.cache_target_full_ratio_micro, r.cache_target_full_ratio_micro);
+  ASSERT_EQ(l.cache_min_flush_age, r.cache_min_flush_age);
+  ASSERT_EQ(l.cache_min_evict_age, r.cache_min_evict_age);
+  ASSERT_EQ(l.erasure_code_profile, r.erasure_code_profile);
+  ASSERT_EQ(l.ec_data_shard_count, r.ec_data_shard_count);
+  ASSERT_EQ(l.ec_coding_shard_count, r.ec_coding_shard_count);
+  ASSERT_EQ(l.last_force_op_resend_preluminous, r.last_force_op_resend_preluminous);
+  ASSERT_EQ(l.min_read_recency_for_promote, r.min_read_recency_for_promote);
+  ASSERT_EQ(l.expected_num_objects, r.expected_num_objects);
+  ASSERT_EQ(l.cache_target_dirty_high_ratio_micro, r.cache_target_dirty_high_ratio_micro);
+  ASSERT_EQ(l.min_write_recency_for_promote, r.min_write_recency_for_promote);
+  ASSERT_EQ(l.use_gmt_hitset, r.use_gmt_hitset);
+  ASSERT_EQ(l.fast_read, r.fast_read);
+  ASSERT_EQ(l.hit_set_grade_decay_rate, r.hit_set_grade_decay_rate);
+  ASSERT_EQ(l.hit_set_search_last_n, r.hit_set_search_last_n);
+  //ASSERT_EQ(l.opts, r.opts);
+  ASSERT_EQ(l.last_force_op_resend_prenautilus, r.last_force_op_resend_prenautilus);
+  ASSERT_EQ(l.application_metadata, r.application_metadata);
+  ASSERT_EQ(l.create_time, r.create_time);
+  ASSERT_EQ(l.get_pg_num_target(), r.get_pg_num_target());
+  ASSERT_EQ(l.get_pgp_num_target(), r.get_pgp_num_target());
+  ASSERT_EQ(l.get_pg_num_pending(), r.get_pg_num_pending());
+  ASSERT_EQ(l.last_force_op_resend, r.last_force_op_resend);
+  ASSERT_EQ(l.pg_autoscale_mode, r.pg_autoscale_mode);
+  ASSERT_EQ(l.last_pg_merge_meta.source_pgid, r.last_pg_merge_meta.source_pgid);
+  ASSERT_EQ(l.peering_crush_bucket_count, r.peering_crush_bucket_count);
+  ASSERT_EQ(l.peering_crush_bucket_target, r.peering_crush_bucket_target);
+  ASSERT_EQ(l.peering_crush_bucket_barrier, r.peering_crush_bucket_barrier);
+  ASSERT_EQ(l.peering_crush_mandatory_member, r.peering_crush_mandatory_member);
+  ASSERT_EQ(l.peering_crush_bucket_count , r.peering_crush_bucket_count);
+  ASSERT_EQ(l.peering_crush_bucket_target , r.peering_crush_bucket_target);
+  ASSERT_EQ(l.peering_crush_bucket_barrier , r.peering_crush_bucket_barrier);
+  ASSERT_EQ(l.peering_crush_mandatory_member , r.peering_crush_mandatory_member);
+}
+
+TEST(pg_pool_t, encodeDecode)
+{
+  uint64_t features = CEPH_FEATURE_CRUSH_TUNABLES5 |
+                          CEPH_FEATURE_INCARNATION_2 |
+                          CEPH_FEATURE_PGPOOL3 |
+                          CEPH_FEATURE_OSDENC |
+                          CEPH_FEATURE_OSD_POOLRESEND |
+                          CEPH_FEATURE_NEW_OSDOP_ENCODING |
+                          CEPH_FEATUREMASK_SERVER_LUMINOUS |
+                          CEPH_FEATUREMASK_SERVER_MIMIC |
+                          CEPH_FEATUREMASK_SERVER_NAUTILUS;
+  {
+    std::list<pg_pool_t> pools = pg_pool_t::generate_test_instances();
+    for(auto p1 : pools){
+      bufferlist bl;
+      p1.encode(bl, features);
+      bl.hexdump(std::cout);
+      auto pbl = bl.cbegin();
+      pg_pool_t p2;
+      p2.decode(pbl);
+      compare_pg_pool_t(p1, p2);
+    }
+  }
+
+  {
+    // test reef
+    std::list<pg_pool_t> pools = pg_pool_t::generate_test_instances();
+    for(auto p1 : pools){
+      bufferlist bl;
+      p1.encode(bl, features|CEPH_FEATUREMASK_SERVER_REEF);
+      bl.hexdump(std::cout);
+      auto pbl = bl.cbegin();
+      pg_pool_t p2;
+      p2.decode(pbl);
+      compare_pg_pool_t(p1, p2);
+    }
+  }
+}
 
 TEST(hobject, prefixes0)
 {
@@ -122,17 +229,19 @@ TEST(hobject, prefixes5)
 
 TEST(pg_interval_t, check_new_interval)
 {
+// iterate through all 4 combinations
+for (unsigned i = 0; i < 4; ++i) {
   //
   // Create a situation where osdmaps are the same so that
   // each test case can diverge from it using minimal code.
   //
   int osd_id = 1;
   epoch_t epoch = 40;
-  ceph::shared_ptr<OSDMap> osdmap(new OSDMap());
+  std::shared_ptr<OSDMap> osdmap(new OSDMap());
   osdmap->set_max_osd(10);
   osdmap->set_state(osd_id, CEPH_OSD_EXISTS);
   osdmap->set_epoch(epoch);
-  ceph::shared_ptr<OSDMap> lastmap(new OSDMap());
+  std::shared_ptr<OSDMap> lastmap(new OSDMap());
   lastmap->set_max_osd(10);
   lastmap->set_state(osd_id, CEPH_OSD_EXISTS);
   lastmap->set_epoch(epoch);
@@ -146,6 +255,7 @@ TEST(pg_interval_t, check_new_interval)
     OSDMap::Incremental inc(epoch + 1);
     inc.new_pools[pool_id].min_size = min_size;
     inc.new_pools[pool_id].set_pg_num(pg_num);
+    inc.new_pools[pool_id].set_pg_num_pending(pg_num);
     inc.new_up_thru[osd_id] = epoch + 1;
     osdmap->apply_incremental(inc);
     lastmap->apply_incremental(inc);
@@ -170,10 +280,10 @@ TEST(pg_interval_t, check_new_interval)
   // being split
   //
   {
-    map<epoch_t, pg_interval_t> past_intervals;
+    PastIntervals past_intervals;
 
     ASSERT_TRUE(past_intervals.empty());
-    ASSERT_FALSE(pg_interval_t::check_new_interval(old_primary,
+    ASSERT_FALSE(PastIntervals::check_new_interval(old_primary,
 						   new_primary,
 						   old_acting,
 						   new_acting,
@@ -186,7 +296,7 @@ TEST(pg_interval_t, check_new_interval)
 						   osdmap,
 						   lastmap,
 						   pgid,
-                                                   recoverable.get(),
+                                                   *recoverable,
 						   &past_intervals));
     ASSERT_TRUE(past_intervals.empty());
   }
@@ -199,10 +309,10 @@ TEST(pg_interval_t, check_new_interval)
     int _new_primary = osd_id + 1;
     new_acting.push_back(_new_primary);
 
-    map<epoch_t, pg_interval_t> past_intervals;
+    PastIntervals past_intervals;
 
     ASSERT_TRUE(past_intervals.empty());
-    ASSERT_TRUE(pg_interval_t::check_new_interval(old_primary,
+    ASSERT_TRUE(PastIntervals::check_new_interval(old_primary,
 						  new_primary,
 						  old_acting,
 						  new_acting,
@@ -215,14 +325,9 @@ TEST(pg_interval_t, check_new_interval)
 						  osdmap,
 						  lastmap,
 						  pgid,
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals));
     old_primary = new_primary;
-    ASSERT_EQ((unsigned int)1, past_intervals.size());
-    ASSERT_EQ(same_interval_since, past_intervals[same_interval_since].first);
-    ASSERT_EQ(osdmap->get_epoch() - 1, past_intervals[same_interval_since].last);
-    ASSERT_EQ(osd_id, past_intervals[same_interval_since].acting[0]);
-    ASSERT_EQ(osd_id, past_intervals[same_interval_since].up[0]);
   }
 
   //
@@ -233,10 +338,10 @@ TEST(pg_interval_t, check_new_interval)
     int _new_primary = osd_id + 1;
     new_up.push_back(_new_primary);
 
-    map<epoch_t, pg_interval_t> past_intervals;
+    PastIntervals past_intervals;
 
     ASSERT_TRUE(past_intervals.empty());
-    ASSERT_TRUE(pg_interval_t::check_new_interval(old_primary,
+    ASSERT_TRUE(PastIntervals::check_new_interval(old_primary,
 						  new_primary,
 						  old_acting,
 						  new_acting,
@@ -249,13 +354,8 @@ TEST(pg_interval_t, check_new_interval)
 						  osdmap,
 						  lastmap,
 						  pgid,
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals));
-    ASSERT_EQ((unsigned int)1, past_intervals.size());
-    ASSERT_EQ(same_interval_since, past_intervals[same_interval_since].first);
-    ASSERT_EQ(osdmap->get_epoch() - 1, past_intervals[same_interval_since].last);
-    ASSERT_EQ(osd_id, past_intervals[same_interval_since].acting[0]);
-    ASSERT_EQ(osd_id, past_intervals[same_interval_since].up[0]);
   }
 
   //
@@ -265,10 +365,10 @@ TEST(pg_interval_t, check_new_interval)
     vector<int> new_up;
     int _new_up_primary = osd_id + 1;
 
-    map<epoch_t, pg_interval_t> past_intervals;
+    PastIntervals past_intervals;
 
     ASSERT_TRUE(past_intervals.empty());
-    ASSERT_TRUE(pg_interval_t::check_new_interval(old_primary,
+    ASSERT_TRUE(PastIntervals::check_new_interval(old_primary,
 						  new_primary,
 						  old_acting,
 						  new_acting,
@@ -281,20 +381,15 @@ TEST(pg_interval_t, check_new_interval)
 						  osdmap,
 						  lastmap,
 						  pgid,
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals));
-    ASSERT_EQ((unsigned int)1, past_intervals.size());
-    ASSERT_EQ(same_interval_since, past_intervals[same_interval_since].first);
-    ASSERT_EQ(osdmap->get_epoch() - 1, past_intervals[same_interval_since].last);
-    ASSERT_EQ(osd_id, past_intervals[same_interval_since].acting[0]);
-    ASSERT_EQ(osd_id, past_intervals[same_interval_since].up[0]);
   }
 
   //
   // PG is splitting
   //
   {
-    ceph::shared_ptr<OSDMap> osdmap(new OSDMap());
+    std::shared_ptr<OSDMap> osdmap(new OSDMap());
     osdmap->set_max_osd(10);
     osdmap->set_state(osd_id, CEPH_OSD_EXISTS);
     osdmap->set_epoch(epoch);
@@ -304,10 +399,10 @@ TEST(pg_interval_t, check_new_interval)
     inc.new_pools[pool_id].set_pg_num(new_pg_num);
     osdmap->apply_incremental(inc);
 
-    map<epoch_t, pg_interval_t> past_intervals;
+    PastIntervals past_intervals;
 
     ASSERT_TRUE(past_intervals.empty());
-    ASSERT_TRUE(pg_interval_t::check_new_interval(old_primary,
+    ASSERT_TRUE(PastIntervals::check_new_interval(old_primary,
 						  new_primary,
 						  old_acting,
 						  new_acting,
@@ -320,20 +415,216 @@ TEST(pg_interval_t, check_new_interval)
 						  osdmap,
 						  lastmap,
 						  pgid,
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals));
-    ASSERT_EQ((unsigned int)1, past_intervals.size());
-    ASSERT_EQ(same_interval_since, past_intervals[same_interval_since].first);
-    ASSERT_EQ(osdmap->get_epoch() - 1, past_intervals[same_interval_since].last);
-    ASSERT_EQ(osd_id, past_intervals[same_interval_since].acting[0]);
-    ASSERT_EQ(osd_id, past_intervals[same_interval_since].up[0]);
+  }
+
+  //
+  // PG is pre-merge source
+  //
+  {
+    std::shared_ptr<OSDMap> osdmap(new OSDMap());
+    osdmap->set_max_osd(10);
+    osdmap->set_state(osd_id, CEPH_OSD_EXISTS);
+    osdmap->set_epoch(epoch);
+    OSDMap::Incremental inc(epoch + 1);
+    inc.new_pools[pool_id].min_size = min_size;
+    inc.new_pools[pool_id].set_pg_num(pg_num);
+    inc.new_pools[pool_id].set_pg_num_pending(pg_num - 1);
+    osdmap->apply_incremental(inc);
+    cout << "pg_num " << pg_num << std::endl;
+    PastIntervals past_intervals;
+
+    ASSERT_TRUE(past_intervals.empty());
+    ASSERT_TRUE(PastIntervals::check_new_interval(old_primary,
+						  new_primary,
+						  old_acting,
+						  new_acting,
+						  old_up_primary,
+						  new_up_primary,
+						  old_up,
+						  new_up,
+						  same_interval_since,
+						  last_epoch_clean,
+						  osdmap,
+						  lastmap,
+						  pg_t(pg_num - 1, pool_id),
+                                                  *recoverable,
+						  &past_intervals));
+  }
+
+  //
+  // PG was pre-merge source
+  //
+  {
+    std::shared_ptr<OSDMap> osdmap(new OSDMap());
+    osdmap->set_max_osd(10);
+    osdmap->set_state(osd_id, CEPH_OSD_EXISTS);
+    osdmap->set_epoch(epoch);
+    OSDMap::Incremental inc(epoch + 1);
+    inc.new_pools[pool_id].min_size = min_size;
+    inc.new_pools[pool_id].set_pg_num(pg_num);
+    inc.new_pools[pool_id].set_pg_num_pending(pg_num - 1);
+    osdmap->apply_incremental(inc);
+
+    cout << "pg_num " << pg_num << std::endl;
+    PastIntervals past_intervals;
+
+    ASSERT_TRUE(past_intervals.empty());
+    ASSERT_TRUE(PastIntervals::check_new_interval(old_primary,
+						  new_primary,
+						  old_acting,
+						  new_acting,
+						  old_up_primary,
+						  new_up_primary,
+						  old_up,
+						  new_up,
+						  same_interval_since,
+						  last_epoch_clean,
+						  lastmap,  // reverse order!
+						  osdmap,
+						  pg_t(pg_num - 1, pool_id),
+                                                  *recoverable,
+						  &past_intervals));
+  }
+
+  //
+  // PG is merge source
+  //
+  {
+    std::shared_ptr<OSDMap> osdmap(new OSDMap());
+    osdmap->set_max_osd(10);
+    osdmap->set_state(osd_id, CEPH_OSD_EXISTS);
+    osdmap->set_epoch(epoch);
+    OSDMap::Incremental inc(epoch + 1);
+    inc.new_pools[pool_id].min_size = min_size;
+    inc.new_pools[pool_id].set_pg_num(pg_num - 1);
+    osdmap->apply_incremental(inc);
+
+    PastIntervals past_intervals;
+
+    ASSERT_TRUE(past_intervals.empty());
+    ASSERT_TRUE(PastIntervals::check_new_interval(old_primary,
+						  new_primary,
+						  old_acting,
+						  new_acting,
+						  old_up_primary,
+						  new_up_primary,
+						  old_up,
+						  new_up,
+						  same_interval_since,
+						  last_epoch_clean,
+						  osdmap,
+						  lastmap,
+						  pg_t(pg_num - 1, pool_id),
+                                                  *recoverable,
+						  &past_intervals));
+  }
+
+  //
+  // PG is pre-merge target
+  //
+  {
+    std::shared_ptr<OSDMap> osdmap(new OSDMap());
+    osdmap->set_max_osd(10);
+    osdmap->set_state(osd_id, CEPH_OSD_EXISTS);
+    osdmap->set_epoch(epoch);
+    OSDMap::Incremental inc(epoch + 1);
+    inc.new_pools[pool_id].min_size = min_size;
+    inc.new_pools[pool_id].set_pg_num_pending(pg_num - 1);
+    osdmap->apply_incremental(inc);
+
+    PastIntervals past_intervals;
+
+    ASSERT_TRUE(past_intervals.empty());
+    ASSERT_TRUE(PastIntervals::check_new_interval(old_primary,
+						  new_primary,
+						  old_acting,
+						  new_acting,
+						  old_up_primary,
+						  new_up_primary,
+						  old_up,
+						  new_up,
+						  same_interval_since,
+						  last_epoch_clean,
+						  osdmap,
+						  lastmap,
+						  pg_t(pg_num / 2 - 1, pool_id),
+                                                  *recoverable,
+						  &past_intervals));
+  }
+
+  //
+  // PG was pre-merge target
+  //
+  {
+    std::shared_ptr<OSDMap> osdmap(new OSDMap());
+    osdmap->set_max_osd(10);
+    osdmap->set_state(osd_id, CEPH_OSD_EXISTS);
+    osdmap->set_epoch(epoch);
+    OSDMap::Incremental inc(epoch + 1);
+    inc.new_pools[pool_id].min_size = min_size;
+    inc.new_pools[pool_id].set_pg_num_pending(pg_num - 1);
+    osdmap->apply_incremental(inc);
+
+    PastIntervals past_intervals;
+
+    ASSERT_TRUE(past_intervals.empty());
+    ASSERT_TRUE(PastIntervals::check_new_interval(old_primary,
+						  new_primary,
+						  old_acting,
+						  new_acting,
+						  old_up_primary,
+						  new_up_primary,
+						  old_up,
+						  new_up,
+						  same_interval_since,
+						  last_epoch_clean,
+						  lastmap,  // reverse order!
+						  osdmap,
+						  pg_t(pg_num / 2 - 1, pool_id),
+                                                  *recoverable,
+						  &past_intervals));
+  }
+
+  //
+  // PG is merge target
+  //
+  {
+    std::shared_ptr<OSDMap> osdmap(new OSDMap());
+    osdmap->set_max_osd(10);
+    osdmap->set_state(osd_id, CEPH_OSD_EXISTS);
+    osdmap->set_epoch(epoch);
+    OSDMap::Incremental inc(epoch + 1);
+    inc.new_pools[pool_id].min_size = min_size;
+    inc.new_pools[pool_id].set_pg_num(pg_num - 1);
+    osdmap->apply_incremental(inc);
+
+    PastIntervals past_intervals;
+
+    ASSERT_TRUE(past_intervals.empty());
+    ASSERT_TRUE(PastIntervals::check_new_interval(old_primary,
+						  new_primary,
+						  old_acting,
+						  new_acting,
+						  old_up_primary,
+						  new_up_primary,
+						  old_up,
+						  new_up,
+						  same_interval_since,
+						  last_epoch_clean,
+						  osdmap,
+						  lastmap,
+						  pg_t(pg_num / 2 - 1, pool_id),
+                                                  *recoverable,
+						  &past_intervals));
   }
 
   //
   // PG size has changed
   //
   {
-    ceph::shared_ptr<OSDMap> osdmap(new OSDMap());
+    std::shared_ptr<OSDMap> osdmap(new OSDMap());
     osdmap->set_max_osd(10);
     osdmap->set_state(osd_id, CEPH_OSD_EXISTS);
     osdmap->set_epoch(epoch);
@@ -343,10 +634,10 @@ TEST(pg_interval_t, check_new_interval)
     inc.new_pools[pool_id].set_pg_num(pg_num);
     osdmap->apply_incremental(inc);
 
-    map<epoch_t, pg_interval_t> past_intervals;
+    PastIntervals past_intervals;
 
     ASSERT_TRUE(past_intervals.empty());
-    ASSERT_TRUE(pg_interval_t::check_new_interval(old_primary,
+    ASSERT_TRUE(PastIntervals::check_new_interval(old_primary,
 						  new_primary,
 						  old_acting,
 						  new_acting,
@@ -359,13 +650,8 @@ TEST(pg_interval_t, check_new_interval)
 						  osdmap,
 						  lastmap,
 						  pgid,
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals));
-    ASSERT_EQ((unsigned int)1, past_intervals.size());
-    ASSERT_EQ(same_interval_since, past_intervals[same_interval_since].first);
-    ASSERT_EQ(osdmap->get_epoch() - 1, past_intervals[same_interval_since].last);
-    ASSERT_EQ(osd_id, past_intervals[same_interval_since].acting[0]);
-    ASSERT_EQ(osd_id, past_intervals[same_interval_since].up[0]);
   }
 
   //
@@ -375,12 +661,12 @@ TEST(pg_interval_t, check_new_interval)
   {
     vector<int> old_acting;
 
-    map<epoch_t, pg_interval_t> past_intervals;
+    PastIntervals past_intervals;
 
     ostringstream out;
 
     ASSERT_TRUE(past_intervals.empty());
-    ASSERT_TRUE(pg_interval_t::check_new_interval(old_primary,
+    ASSERT_TRUE(PastIntervals::check_new_interval(old_primary,
 						  new_primary,
 						  old_acting,
 						  new_acting,
@@ -393,11 +679,9 @@ TEST(pg_interval_t, check_new_interval)
 						  osdmap,
 						  lastmap,
 						  pgid,
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals,
 						  &out));
-    ASSERT_EQ((unsigned int)1, past_intervals.size());
-    ASSERT_FALSE(past_intervals[same_interval_since].maybe_went_rw);
     ASSERT_NE(string::npos, out.str().find("acting set is too small"));
   }
 
@@ -417,7 +701,7 @@ TEST(pg_interval_t, check_new_interval)
     // The new osdmap is created so that it triggers the
     // bug.
     //
-    ceph::shared_ptr<OSDMap> osdmap(new OSDMap());
+    std::shared_ptr<OSDMap> osdmap(new OSDMap());
     osdmap->set_max_osd(10);
     osdmap->set_state(osd_id, CEPH_OSD_EXISTS);
     osdmap->set_epoch(epoch);
@@ -429,10 +713,10 @@ TEST(pg_interval_t, check_new_interval)
 
     ostringstream out;
 
-    map<epoch_t, pg_interval_t> past_intervals;
+    PastIntervals past_intervals;
 
     ASSERT_TRUE(past_intervals.empty());
-    ASSERT_TRUE(pg_interval_t::check_new_interval(old_primary,
+    ASSERT_TRUE(PastIntervals::check_new_interval(old_primary,
 						  new_primary,
 						  old_acting,
 						  new_acting,
@@ -445,11 +729,9 @@ TEST(pg_interval_t, check_new_interval)
 						  osdmap,
 						  lastmap,
 						  pgid,
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals,
 						  &out));
-    ASSERT_EQ((unsigned int)1, past_intervals.size());
-    ASSERT_FALSE(past_intervals[same_interval_since].maybe_went_rw);
     ASSERT_NE(string::npos, out.str().find("acting set is too small"));
   }
 
@@ -464,10 +746,10 @@ TEST(pg_interval_t, check_new_interval)
 
     ostringstream out;
 
-    map<epoch_t, pg_interval_t> past_intervals;
+    PastIntervals past_intervals;
 
     ASSERT_TRUE(past_intervals.empty());
-    ASSERT_TRUE(pg_interval_t::check_new_interval(old_primary,
+    ASSERT_TRUE(PastIntervals::check_new_interval(old_primary,
 						  new_primary,
 						  old_acting,
 						  new_acting,
@@ -480,11 +762,9 @@ TEST(pg_interval_t, check_new_interval)
 						  osdmap,
 						  lastmap,
 						  pgid,
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals,
 						  &out));
-    ASSERT_EQ((unsigned int)1, past_intervals.size());
-    ASSERT_TRUE(past_intervals[same_interval_since].maybe_went_rw);
     ASSERT_NE(string::npos, out.str().find("includes interval"));
   }
   //
@@ -497,7 +777,7 @@ TEST(pg_interval_t, check_new_interval)
     new_acting.push_back(osd_id + 4);
     new_acting.push_back(osd_id + 5);
 
-    ceph::shared_ptr<OSDMap> lastmap(new OSDMap());
+    std::shared_ptr<OSDMap> lastmap(new OSDMap());
     lastmap->set_max_osd(10);
     lastmap->set_state(osd_id, CEPH_OSD_EXISTS);
     lastmap->set_epoch(epoch);
@@ -509,10 +789,10 @@ TEST(pg_interval_t, check_new_interval)
 
     ostringstream out;
 
-    map<epoch_t, pg_interval_t> past_intervals;
+    PastIntervals past_intervals;
 
     ASSERT_TRUE(past_intervals.empty());
-    ASSERT_TRUE(pg_interval_t::check_new_interval(old_primary,
+    ASSERT_TRUE(PastIntervals::check_new_interval(old_primary,
 						  new_primary,
 						  old_acting,
 						  new_acting,
@@ -525,11 +805,9 @@ TEST(pg_interval_t, check_new_interval)
 						  osdmap,
 						  lastmap,
 						  pgid,
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals,
 						  &out));
-    ASSERT_EQ((unsigned int)1, past_intervals.size());
-    ASSERT_TRUE(past_intervals[same_interval_since].maybe_went_rw);
     ASSERT_NE(string::npos, out.str().find("presumed to have been rw"));
   }
 
@@ -546,7 +824,7 @@ TEST(pg_interval_t, check_new_interval)
 
     epoch_t last_epoch_clean = epoch - 10;
 
-    ceph::shared_ptr<OSDMap> lastmap(new OSDMap());
+    std::shared_ptr<OSDMap> lastmap(new OSDMap());
     lastmap->set_max_osd(10);
     lastmap->set_state(osd_id, CEPH_OSD_EXISTS);
     lastmap->set_epoch(epoch);
@@ -558,10 +836,10 @@ TEST(pg_interval_t, check_new_interval)
 
     ostringstream out;
 
-    map<epoch_t, pg_interval_t> past_intervals;
+    PastIntervals past_intervals;
 
     ASSERT_TRUE(past_intervals.empty());
-    ASSERT_TRUE(pg_interval_t::check_new_interval(old_primary,
+    ASSERT_TRUE(PastIntervals::check_new_interval(old_primary,
 						  new_primary,
 						  old_acting,
 						  new_acting,
@@ -574,30 +852,29 @@ TEST(pg_interval_t, check_new_interval)
 						  osdmap,
 						  lastmap,
 						  pgid,
-                                                  recoverable.get(),
+                                                  *recoverable,
 						  &past_intervals,
 						  &out));
-    ASSERT_EQ((unsigned int)1, past_intervals.size());
-    ASSERT_FALSE(past_intervals[same_interval_since].maybe_went_rw);
     ASSERT_NE(string::npos, out.str().find("does not include interval"));
   }
+} // end for, didn't want to reindent
 }
 
 TEST(pg_t, get_ancestor)
 {
-  ASSERT_EQ(pg_t(0, 0, -1), pg_t(16, 0, -1).get_ancestor(16));
-  ASSERT_EQ(pg_t(1, 0, -1), pg_t(17, 0, -1).get_ancestor(16));
-  ASSERT_EQ(pg_t(0, 0, -1), pg_t(16, 0, -1).get_ancestor(8));
-  ASSERT_EQ(pg_t(16, 0, -1), pg_t(16, 0, -1).get_ancestor(80));
-  ASSERT_EQ(pg_t(16, 0, -1), pg_t(16, 0, -1).get_ancestor(83));
-  ASSERT_EQ(pg_t(1, 0, -1), pg_t(1321, 0, -1).get_ancestor(123).get_ancestor(8));
-  ASSERT_EQ(pg_t(3, 0, -1), pg_t(1323, 0, -1).get_ancestor(123).get_ancestor(8));
-  ASSERT_EQ(pg_t(3, 0, -1), pg_t(1323, 0, -1).get_ancestor(8));
+  ASSERT_EQ(pg_t(0, 0), pg_t(16, 0).get_ancestor(16));
+  ASSERT_EQ(pg_t(1, 0), pg_t(17, 0).get_ancestor(16));
+  ASSERT_EQ(pg_t(0, 0), pg_t(16, 0).get_ancestor(8));
+  ASSERT_EQ(pg_t(16, 0), pg_t(16, 0).get_ancestor(80));
+  ASSERT_EQ(pg_t(16, 0), pg_t(16, 0).get_ancestor(83));
+  ASSERT_EQ(pg_t(1, 0), pg_t(1321, 0).get_ancestor(123).get_ancestor(8));
+  ASSERT_EQ(pg_t(3, 0), pg_t(1323, 0).get_ancestor(123).get_ancestor(8));
+  ASSERT_EQ(pg_t(3, 0), pg_t(1323, 0).get_ancestor(8));
 }
 
 TEST(pg_t, split)
 {
-  pg_t pgid(0, 0, -1);
+  pg_t pgid(0, 0);
   set<pg_t> s;
   bool b;
 
@@ -611,21 +888,21 @@ TEST(pg_t, split)
   b = pgid.is_split(2, 4, &s);
   ASSERT_TRUE(b);
   ASSERT_EQ(1u, s.size());
-  ASSERT_TRUE(s.count(pg_t(2, 0, -1)));
+  ASSERT_TRUE(s.count(pg_t(2, 0)));
 
   s.clear();
   b = pgid.is_split(2, 8, &s);
   ASSERT_TRUE(b);
   ASSERT_EQ(3u, s.size());
-  ASSERT_TRUE(s.count(pg_t(2, 0, -1)));
-  ASSERT_TRUE(s.count(pg_t(4, 0, -1)));
-  ASSERT_TRUE(s.count(pg_t(6, 0, -1)));
+  ASSERT_TRUE(s.count(pg_t(2, 0)));
+  ASSERT_TRUE(s.count(pg_t(4, 0)));
+  ASSERT_TRUE(s.count(pg_t(6, 0)));
 
   s.clear();
   b = pgid.is_split(3, 8, &s);
   ASSERT_TRUE(b);
   ASSERT_EQ(1u, s.size());
-  ASSERT_TRUE(s.count(pg_t(4, 0, -1)));
+  ASSERT_TRUE(s.count(pg_t(4, 0)));
 
   s.clear();
   b = pgid.is_split(6, 8, NULL);
@@ -634,69 +911,169 @@ TEST(pg_t, split)
   ASSERT_TRUE(!b);
   ASSERT_EQ(0u, s.size());
 
-  pgid = pg_t(1, 0, -1);
+  pgid = pg_t(1, 0);
 
   s.clear();
   b = pgid.is_split(2, 4, &s);
   ASSERT_TRUE(b);
   ASSERT_EQ(1u, s.size());
-  ASSERT_TRUE(s.count(pg_t(3, 0, -1)));
+  ASSERT_TRUE(s.count(pg_t(3, 0)));
 
   s.clear();
   b = pgid.is_split(2, 6, &s);
   ASSERT_TRUE(b);
   ASSERT_EQ(2u, s.size());
-  ASSERT_TRUE(s.count(pg_t(3, 0, -1)));
-  ASSERT_TRUE(s.count(pg_t(5, 0, -1)));
+  ASSERT_TRUE(s.count(pg_t(3, 0)));
+  ASSERT_TRUE(s.count(pg_t(5, 0)));
 
   s.clear();
   b = pgid.is_split(2, 8, &s);
   ASSERT_TRUE(b);
   ASSERT_EQ(3u, s.size());
-  ASSERT_TRUE(s.count(pg_t(3, 0, -1)));
-  ASSERT_TRUE(s.count(pg_t(5, 0, -1)));
-  ASSERT_TRUE(s.count(pg_t(7, 0, -1)));
+  ASSERT_TRUE(s.count(pg_t(3, 0)));
+  ASSERT_TRUE(s.count(pg_t(5, 0)));
+  ASSERT_TRUE(s.count(pg_t(7, 0)));
 
   s.clear();
   b = pgid.is_split(4, 8, &s);
   ASSERT_TRUE(b);
   ASSERT_EQ(1u, s.size());
-  ASSERT_TRUE(s.count(pg_t(5, 0, -1)));
+  ASSERT_TRUE(s.count(pg_t(5, 0)));
 
   s.clear();
   b = pgid.is_split(3, 8, &s);
   ASSERT_TRUE(b);
   ASSERT_EQ(3u, s.size());
-  ASSERT_TRUE(s.count(pg_t(3, 0, -1)));
-  ASSERT_TRUE(s.count(pg_t(5, 0, -1)));
-  ASSERT_TRUE(s.count(pg_t(7, 0, -1)));
+  ASSERT_TRUE(s.count(pg_t(3, 0)));
+  ASSERT_TRUE(s.count(pg_t(5, 0)));
+  ASSERT_TRUE(s.count(pg_t(7, 0)));
 
   s.clear();
   b = pgid.is_split(6, 8, &s);
   ASSERT_TRUE(!b);
   ASSERT_EQ(0u, s.size());
 
-  pgid = pg_t(3, 0, -1);
+  pgid = pg_t(3, 0);
 
   s.clear();
   b = pgid.is_split(7, 8, &s);
   ASSERT_TRUE(b);
   ASSERT_EQ(1u, s.size());
-  ASSERT_TRUE(s.count(pg_t(7, 0, -1)));
+  ASSERT_TRUE(s.count(pg_t(7, 0)));
 
   s.clear();
   b = pgid.is_split(7, 12, &s);
   ASSERT_TRUE(b);
   ASSERT_EQ(2u, s.size());
-  ASSERT_TRUE(s.count(pg_t(7, 0, -1)));
-  ASSERT_TRUE(s.count(pg_t(11, 0, -1)));
+  ASSERT_TRUE(s.count(pg_t(7, 0)));
+  ASSERT_TRUE(s.count(pg_t(11, 0)));
 
   s.clear();
   b = pgid.is_split(7, 11, &s);
   ASSERT_TRUE(b);
   ASSERT_EQ(1u, s.size());
-  ASSERT_TRUE(s.count(pg_t(7, 0, -1)));
+  ASSERT_TRUE(s.count(pg_t(7, 0)));
 
+}
+
+TEST(pg_t, merge)
+{
+  pg_t pgid, parent;
+  bool b;
+
+  pgid = pg_t(7, 0);
+  b = pgid.is_merge_source(8, 7, &parent);
+  ASSERT_TRUE(b);
+  ASSERT_EQ(parent, pg_t(3, 0));
+  ASSERT_TRUE(parent.is_merge_target(8, 7));
+
+  b = pgid.is_merge_source(8, 5, &parent);
+  ASSERT_TRUE(b);
+  ASSERT_EQ(parent, pg_t(3, 0));
+  ASSERT_TRUE(parent.is_merge_target(8, 5));
+
+  b = pgid.is_merge_source(8, 4, &parent);
+  ASSERT_TRUE(b);
+  ASSERT_EQ(parent, pg_t(3, 0));
+  ASSERT_TRUE(parent.is_merge_target(8, 4));
+
+  b = pgid.is_merge_source(8, 3, &parent);
+  ASSERT_TRUE(b);
+  ASSERT_EQ(parent, pg_t(1, 0));
+  ASSERT_TRUE(parent.is_merge_target(8, 4));
+
+  b = pgid.is_merge_source(9, 8, &parent);
+  ASSERT_FALSE(b);
+  ASSERT_FALSE(parent.is_merge_target(9, 8));
+}
+
+TEST(ObjectCleanRegions, mark_data_region_dirty)
+{
+  ObjectCleanRegions clean_regions;
+  uint64_t offset_1, len_1, offset_2, len_2;
+  offset_1 = 4096;
+  len_1 = 8192;
+  offset_2 = 40960;
+  len_2 = 4096;
+
+  interval_set<uint64_t> expect_dirty_region;
+  EXPECT_EQ(expect_dirty_region, clean_regions.get_dirty_regions());
+  expect_dirty_region.insert(offset_1, len_1);
+  expect_dirty_region.insert(offset_2, len_2);
+
+  clean_regions.mark_data_region_dirty(offset_1, len_1);
+  clean_regions.mark_data_region_dirty(offset_2, len_2);
+  EXPECT_EQ(expect_dirty_region, clean_regions.get_dirty_regions());
+}
+
+TEST(ObjectCleanRegions, mark_omap_dirty)
+{
+  ObjectCleanRegions clean_regions;
+
+  EXPECT_FALSE(clean_regions.omap_is_dirty());
+  clean_regions.mark_omap_dirty();
+  EXPECT_TRUE(clean_regions.omap_is_dirty());
+}
+
+TEST(ObjectCleanRegions, merge)
+{
+  ObjectCleanRegions cr1, cr2;
+  interval_set<uint64_t> cr1_expect;
+  interval_set<uint64_t> cr2_expect;
+  ASSERT_EQ(cr1_expect, cr1.get_dirty_regions());
+  ASSERT_EQ(cr2_expect, cr2.get_dirty_regions());
+
+  cr1.mark_data_region_dirty(4096, 4096);
+  cr1_expect.insert(4096, 4096);
+  ASSERT_EQ(cr1_expect, cr1.get_dirty_regions());
+  cr1.mark_data_region_dirty(12288, 8192);
+  cr1_expect.insert(12288, 8192);
+  ASSERT_TRUE(cr1_expect.subset_of(cr1.get_dirty_regions()));
+  cr1.mark_data_region_dirty(32768, 10240);
+  cr1_expect.insert(32768, 10240);
+  cr1_expect.erase(4096, 4096);
+  ASSERT_TRUE(cr1_expect.subset_of(cr1.get_dirty_regions()));
+
+  cr2.mark_data_region_dirty(20480, 12288);
+  cr2_expect.insert(20480, 12288);
+  ASSERT_EQ(cr2_expect, cr2.get_dirty_regions());
+  cr2.mark_data_region_dirty(102400, 4096);
+  cr2_expect.insert(102400, 4096);
+  cr2.mark_data_region_dirty(204800, 8192);
+  cr2_expect.insert(204800, 8192);
+  cr2.mark_data_region_dirty(409600, 4096);
+  cr2_expect.insert(409600, 4096);
+  ASSERT_TRUE(cr2_expect.subset_of(cr2.get_dirty_regions()));
+
+  ASSERT_FALSE(cr2.omap_is_dirty());
+  cr2.mark_omap_dirty();
+  ASSERT_FALSE(cr1.omap_is_dirty());
+  ASSERT_TRUE(cr2.omap_is_dirty());
+
+  cr1.merge(cr2);
+  cr1_expect.insert(204800, 8192);
+  ASSERT_TRUE(cr1_expect.subset_of(cr1.get_dirty_regions()));
+  ASSERT_TRUE(cr1.omap_is_dirty());
 }
 
 TEST(pg_missing_t, constructor)
@@ -711,7 +1088,7 @@ TEST(pg_missing_t, have_missing)
   hobject_t oid(object_t("objname"), "key", 123, 456, 0, "");
   pg_missing_t missing;
   EXPECT_FALSE(missing.have_missing());
-  missing.add(oid, eversion_t(), eversion_t());
+  missing.add(oid, eversion_t(), eversion_t(), false);
   EXPECT_TRUE(missing.have_missing());
 }
 
@@ -720,13 +1097,13 @@ TEST(pg_missing_t, claim)
   hobject_t oid(object_t("objname"), "key", 123, 456, 0, "");
   pg_missing_t missing;
   EXPECT_FALSE(missing.have_missing());
-  missing.add(oid, eversion_t(), eversion_t());
+  missing.add(oid, eversion_t(), eversion_t(), false);
   EXPECT_TRUE(missing.have_missing());
 
   pg_missing_t other;
   EXPECT_FALSE(other.have_missing());
 
-  other.claim(missing);
+  other.claim(std::move(missing));
   EXPECT_TRUE(other.have_missing());
 }
 
@@ -737,7 +1114,7 @@ TEST(pg_missing_t, is_missing)
     hobject_t oid(object_t("objname"), "key", 123, 456, 0, "");
     pg_missing_t missing;
     EXPECT_FALSE(missing.is_missing(oid));
-    missing.add(oid, eversion_t(), eversion_t());
+    missing.add(oid, eversion_t(), eversion_t(), false);
     EXPECT_TRUE(missing.is_missing(oid));
   }
 
@@ -747,23 +1124,11 @@ TEST(pg_missing_t, is_missing)
     pg_missing_t missing;
     eversion_t need(10,5);
     EXPECT_FALSE(missing.is_missing(oid, eversion_t()));
-    missing.add(oid, need, eversion_t());
+    missing.add(oid, need, eversion_t(), false);
     EXPECT_TRUE(missing.is_missing(oid));
     EXPECT_FALSE(missing.is_missing(oid, eversion_t()));
     EXPECT_TRUE(missing.is_missing(oid, need));
   }
-}
-
-TEST(pg_missing_t, have_old)
-{
-  hobject_t oid(object_t("objname"), "key", 123, 456, 0, "");
-  pg_missing_t missing;
-  EXPECT_EQ(eversion_t(), missing.have_old(oid));
-  missing.add(oid, eversion_t(), eversion_t());
-  EXPECT_EQ(eversion_t(), missing.have_old(oid));
-  eversion_t have(1,1);
-  missing.revise_have(oid, have);
-  EXPECT_EQ(have, missing.have_old(oid));
 }
 
 TEST(pg_missing_t, add_next_event)
@@ -787,15 +1152,16 @@ TEST(pg_missing_t, add_next_event)
     EXPECT_TRUE(e.object_is_indexed());
     EXPECT_TRUE(e.reqid_is_indexed());
     EXPECT_FALSE(missing.is_missing(oid));
-    missing.add_next_event(e);
+    missing.add_next_event(e, pg_pool_t(), shard_id_t());
     EXPECT_TRUE(missing.is_missing(oid));
     EXPECT_EQ(eversion_t(), missing.get_items().at(oid).have);
-    EXPECT_EQ(oid, missing.get_rmissing().at(e.version.version));
+    ASSERT_EQ(1u, missing.get_rmissing().count(e.version));
+    EXPECT_EQ(oid, missing.get_rmissing().begin()->second);
     EXPECT_EQ(1U, missing.num_missing());
     EXPECT_EQ(1U, missing.get_rmissing().size());
 
     // adding the same object replaces the previous one
-    missing.add_next_event(e);
+    missing.add_next_event(e, pg_pool_t(), shard_id_t());
     EXPECT_TRUE(missing.is_missing(oid));
     EXPECT_EQ(1U, missing.num_missing());
     EXPECT_EQ(1U, missing.get_rmissing().size());
@@ -812,15 +1178,16 @@ TEST(pg_missing_t, add_next_event)
     EXPECT_TRUE(e.object_is_indexed());
     EXPECT_FALSE(e.reqid_is_indexed());
     EXPECT_FALSE(missing.is_missing(oid));
-    missing.add_next_event(e);
+    missing.add_next_event(e, pg_pool_t(), shard_id_t());
     EXPECT_TRUE(missing.is_missing(oid));
     EXPECT_EQ(eversion_t(), missing.get_items().at(oid).have);
-    EXPECT_EQ(oid, missing.get_rmissing().at(e.version.version));
+    ASSERT_EQ(1u, missing.get_rmissing().count(e.version));
+    EXPECT_EQ(oid, missing.get_rmissing().begin()->second);
     EXPECT_EQ(1U, missing.num_missing());
     EXPECT_EQ(1U, missing.get_rmissing().size());
 
     // adding the same object replaces the previous one
-    missing.add_next_event(e);
+    missing.add_next_event(e, pg_pool_t(), shard_id_t());
     EXPECT_TRUE(missing.is_missing(oid));
     EXPECT_EQ(1U, missing.num_missing());
     EXPECT_EQ(1U, missing.get_rmissing().size());
@@ -837,16 +1204,17 @@ TEST(pg_missing_t, add_next_event)
     EXPECT_TRUE(e.object_is_indexed());
     EXPECT_TRUE(e.reqid_is_indexed());
     EXPECT_FALSE(missing.is_missing(oid));
-    missing.add_next_event(e);
+    missing.add_next_event(e, pg_pool_t(), shard_id_t());
     EXPECT_TRUE(missing.is_missing(oid));
     EXPECT_EQ(eversion_t(), missing.get_items().at(oid).have);
-    EXPECT_EQ(oid, missing.get_rmissing().at(e.version.version));
+    ASSERT_EQ(1u, missing.get_rmissing().count(e.version));
+    EXPECT_EQ(oid, missing.get_rmissing().begin()->second);
     EXPECT_EQ(1U, missing.num_missing());
     EXPECT_EQ(1U, missing.get_rmissing().size());
 
     // adding the same object with a different version
     e.prior_version = prior_version;
-    missing.add_next_event(e);
+    missing.add_next_event(e, pg_pool_t(), shard_id_t());
     EXPECT_EQ(eversion_t(), missing.get_items().at(oid).have);
     EXPECT_TRUE(missing.is_missing(oid));
     EXPECT_EQ(1U, missing.num_missing());
@@ -863,26 +1231,14 @@ TEST(pg_missing_t, add_next_event)
     EXPECT_TRUE(e.object_is_indexed());
     EXPECT_TRUE(e.reqid_is_indexed());
     EXPECT_FALSE(missing.is_missing(oid));
-    missing.add_next_event(e);
+    missing.add_next_event(e, pg_pool_t(), shard_id_t());
     EXPECT_TRUE(missing.is_missing(oid));
     EXPECT_EQ(prior_version, missing.get_items().at(oid).have);
     EXPECT_EQ(version, missing.get_items().at(oid).need);
-    EXPECT_EQ(oid, missing.get_rmissing().at(e.version.version));
+    ASSERT_EQ(1u, missing.get_rmissing().count(e.version));
+    EXPECT_EQ(oid, missing.get_rmissing().begin()->second);
     EXPECT_EQ(1U, missing.num_missing());
     EXPECT_EQ(1U, missing.get_rmissing().size());
-  }
-
-  // obsolete (BACKLOG)
-  {
-    pg_missing_t missing;
-    pg_log_entry_t e = sample_e;
-
-    e.op = pg_log_entry_t::BACKLOG;
-    EXPECT_TRUE(e.is_backlog());
-    EXPECT_TRUE(e.object_is_indexed());
-    EXPECT_FALSE(e.reqid_is_indexed());
-    EXPECT_FALSE(missing.is_missing(oid));
-    EXPECT_DEATH(missing.add_next_event(e), "");
   }
 
   // adding a DELETE matching an existing event
@@ -895,50 +1251,48 @@ TEST(pg_missing_t, add_next_event)
     EXPECT_TRUE(e.object_is_indexed());
     EXPECT_TRUE(e.reqid_is_indexed());
     EXPECT_FALSE(missing.is_missing(oid));
-    missing.add_next_event(e);
+    missing.add_next_event(e, pg_pool_t(), shard_id_t());
     EXPECT_TRUE(missing.is_missing(oid));
 
     e.op = pg_log_entry_t::DELETE;
     EXPECT_TRUE(e.is_delete());
-    missing.add_next_event(e);
-    EXPECT_FALSE(missing.have_missing());
+    missing.add_next_event(e, pg_pool_t(), shard_id_t());
+    EXPECT_TRUE(missing.is_missing(oid));
+    EXPECT_TRUE(missing.get_items().at(oid).is_delete());
+    EXPECT_EQ(prior_version, missing.get_items().at(oid).have);
+    EXPECT_EQ(version, missing.get_items().at(oid).need);
+    ASSERT_EQ(1u, missing.get_rmissing().count(e.version));
+    EXPECT_EQ(oid, missing.get_rmissing().begin()->second);
+    EXPECT_EQ(1U, missing.num_missing());
+    EXPECT_EQ(1U, missing.get_rmissing().size());
   }
 
-  // ERROR op should only be used for dup detection
+  // adding a LOST_DELETE after an existing event
   {
     pg_missing_t missing;
     pg_log_entry_t e = sample_e;
 
-    e.op = pg_log_entry_t::ERROR;
-    e.return_code = -ENOENT;
-    EXPECT_FALSE(e.is_update());
-    EXPECT_FALSE(e.object_is_indexed());
+    e.op = pg_log_entry_t::MODIFY;
+    EXPECT_TRUE(e.is_update());
+    EXPECT_TRUE(e.object_is_indexed());
     EXPECT_TRUE(e.reqid_is_indexed());
     EXPECT_FALSE(missing.is_missing(oid));
-    missing.add_next_event(e);
-    EXPECT_FALSE(missing.is_missing(oid));
-    EXPECT_FALSE(e.object_is_indexed());
-    EXPECT_TRUE(e.reqid_is_indexed());
-  }
-
-  // ERROR op should not affect previous entries
-  {
-    pg_missing_t missing;
-    pg_log_entry_t modify = sample_e;
-
-    modify.op = pg_log_entry_t::MODIFY;
-    EXPECT_FALSE(missing.is_missing(oid));
-    missing.add_next_event(modify);
+    missing.add_next_event(e, pg_pool_t(), shard_id_t());
     EXPECT_TRUE(missing.is_missing(oid));
-    EXPECT_EQ(missing.get_items().at(oid).need, version);
+    EXPECT_FALSE(missing.get_items().at(oid).is_delete());
 
-    pg_log_entry_t error = sample_e;
-    error.op = pg_log_entry_t::ERROR;
-    error.return_code = -ENOENT;
-    error.version = eversion_t(11, 5);
-    missing.add_next_event(error);
+    e.op = pg_log_entry_t::LOST_DELETE;
+    e.version.version++;
+    EXPECT_TRUE(e.is_delete());
+    missing.add_next_event(e, pg_pool_t(), shard_id_t());
     EXPECT_TRUE(missing.is_missing(oid));
-    EXPECT_EQ(missing.get_items().at(oid).need, version);
+    EXPECT_TRUE(missing.get_items().at(oid).is_delete());
+    EXPECT_EQ(prior_version, missing.get_items().at(oid).have);
+    EXPECT_EQ(e.version, missing.get_items().at(oid).need);
+    ASSERT_EQ(1u, missing.get_rmissing().count(e.version));
+    EXPECT_EQ(oid, missing.get_rmissing().begin()->second);
+    EXPECT_EQ(1U, missing.num_missing());
+    EXPECT_EQ(1U, missing.get_rmissing().size());
   }
 }
 
@@ -949,7 +1303,7 @@ TEST(pg_missing_t, revise_need)
   // create a new entry
   EXPECT_FALSE(missing.is_missing(oid));
   eversion_t need(10,10);
-  missing.revise_need(oid, need);
+  missing.revise_need(oid, need, false);
   EXPECT_TRUE(missing.is_missing(oid));
   EXPECT_EQ(eversion_t(), missing.get_items().at(oid).have);
   EXPECT_EQ(need, missing.get_items().at(oid).need);
@@ -958,7 +1312,7 @@ TEST(pg_missing_t, revise_need)
   missing.revise_have(oid, have);
   eversion_t new_need(10,12);
   EXPECT_EQ(have, missing.get_items().at(oid).have);
-  missing.revise_need(oid, new_need);
+  missing.revise_need(oid, new_need, false);
   EXPECT_EQ(have, missing.get_items().at(oid).have);
   EXPECT_EQ(new_need, missing.get_items().at(oid).need);
 }
@@ -974,7 +1328,7 @@ TEST(pg_missing_t, revise_have)
   EXPECT_FALSE(missing.is_missing(oid));
   // update an existing entry
   eversion_t need(10,12);
-  missing.add(oid, need, have);
+  missing.add(oid, need, have, false);
   EXPECT_TRUE(missing.is_missing(oid));
   eversion_t new_have(2,2);
   EXPECT_EQ(have, missing.get_items().at(oid).have);
@@ -990,7 +1344,7 @@ TEST(pg_missing_t, add)
   EXPECT_FALSE(missing.is_missing(oid));
   eversion_t have(1,1);
   eversion_t need(10,10);
-  missing.add(oid, need, have);
+  missing.add(oid, need, have, false);
   EXPECT_TRUE(missing.is_missing(oid));
   EXPECT_EQ(have, missing.get_items().at(oid).have);
   EXPECT_EQ(need, missing.get_items().at(oid).need);
@@ -1005,7 +1359,7 @@ TEST(pg_missing_t, rm)
     EXPECT_FALSE(missing.is_missing(oid));
     epoch_t epoch = 10;
     eversion_t need(epoch,10);
-    missing.add(oid, need, eversion_t());
+    missing.add(oid, need, eversion_t(), false);
     EXPECT_TRUE(missing.is_missing(oid));
     // rm of an older version is a noop
     missing.rm(oid, eversion_t(epoch / 2,20));
@@ -1019,7 +1373,7 @@ TEST(pg_missing_t, rm)
     hobject_t oid(object_t("objname"), "key", 123, 456, 0, "");
     pg_missing_t missing;
     EXPECT_FALSE(missing.is_missing(oid));
-    missing.add(oid, eversion_t(), eversion_t());
+    missing.add(oid, eversion_t(), eversion_t(), false);
     EXPECT_TRUE(missing.is_missing(oid));
     auto m = missing.get_items().find(oid);
     missing.rm(m);
@@ -1034,14 +1388,20 @@ TEST(pg_missing_t, got)
     hobject_t oid(object_t("objname"), "key", 123, 456, 0, "");
     pg_missing_t missing;
     // assert if the oid does not exist
-    EXPECT_DEATH(missing.got(oid, eversion_t()), "");
+    {
+      PrCtl unset_dumpable;
+      EXPECT_DEATH(missing.got(oid, eversion_t()), "");
+    }
     EXPECT_FALSE(missing.is_missing(oid));
     epoch_t epoch = 10;
     eversion_t need(epoch,10);
-    missing.add(oid, need, eversion_t());
+    missing.add(oid, need, eversion_t(), false);
     EXPECT_TRUE(missing.is_missing(oid));
     // assert if that the version to be removed is lower than the version of the object
-    EXPECT_DEATH(missing.got(oid, eversion_t(epoch / 2,20)), "");
+    {
+      PrCtl unset_dumpable;
+      EXPECT_DEATH(missing.got(oid, eversion_t(epoch / 2,20)), "");
+    }
     // remove of a later version removes the object
     missing.got(oid, eversion_t(epoch * 2,20));
     EXPECT_FALSE(missing.is_missing(oid));
@@ -1051,7 +1411,7 @@ TEST(pg_missing_t, got)
     hobject_t oid(object_t("objname"), "key", 123, 456, 0, "");
     pg_missing_t missing;
     EXPECT_FALSE(missing.is_missing(oid));
-    missing.add(oid, eversion_t(), eversion_t());
+    missing.add(oid, eversion_t(), eversion_t(), false);
     EXPECT_TRUE(missing.is_missing(oid));
     auto m = missing.get_items().find(oid);
     missing.got(m);
@@ -1066,8 +1426,8 @@ TEST(pg_missing_t, split_into)
   uint32_t hash2 = 2;
   hobject_t oid2(object_t("objname"), "key2", 123, hash2, 0, "");
   pg_missing_t missing;
-  missing.add(oid1, eversion_t(), eversion_t());
-  missing.add(oid2, eversion_t(), eversion_t());
+  missing.add(oid1, eversion_t(1, 1), eversion_t(), false);
+  missing.add(oid2, eversion_t(1, 2), eversion_t(), false);
   pg_t child_pgid;
   child_pgid.m_seed = 1;
   pg_missing_t child;
@@ -1079,195 +1439,388 @@ TEST(pg_missing_t, split_into)
   EXPECT_TRUE(missing.is_missing(oid2));
 }
 
-class ObjectContextTest : public ::testing::Test {
-protected:
-
-  static const useconds_t DELAY_MAX = 20 * 1000 * 1000;
-
-  class Thread_read_lock : public Thread {
-  public:
-    ObjectContext &obc;
-
-    explicit Thread_read_lock(ObjectContext& _obc) :
-      obc(_obc)
-    {
-    }
-
-    void *entry() override {
-      obc.ondisk_read_lock();
-      return NULL;
-    }
-  };
-
-  class Thread_write_lock : public Thread {
-  public:
-    ObjectContext &obc;
-
-    explicit Thread_write_lock(ObjectContext& _obc) :
-      obc(_obc)
-    {
-    }
-
-    void *entry() override {
-      obc.ondisk_write_lock();
-      return NULL;
-    }
-  };
-
-};
-
-TEST_F(ObjectContextTest, read_write_lock)
+TEST(pg_missing_t, is_missing_any_head_or_clone_of)
 {
-  {
-    ObjectContext obc;
+  hobject_t head_oid(object_t("objname"), "key", 123, 456, 0, "");
+  auto clone_oid = head_oid;
+  clone_oid.snap = 1;
 
-    //
-    // write_lock
-    // write_lock
-    // write_unlock
-    // write_unlock
-    //
-    EXPECT_EQ(0, obc.writers_waiting);
-    EXPECT_EQ(0, obc.unstable_writes);
+  // empty missing
+  pg_missing_t missing;
+  EXPECT_FALSE(missing.is_missing(head_oid));
+  EXPECT_FALSE(missing.is_missing_any_head_or_clone_of(head_oid));
+  EXPECT_FALSE(missing.is_missing(clone_oid));
+  EXPECT_FALSE(missing.is_missing_any_head_or_clone_of(clone_oid));
 
-    obc.ondisk_write_lock();
+  // only head is missing
+  missing.add(head_oid, eversion_t(), eversion_t(), false);
+  EXPECT_TRUE(missing.is_missing(head_oid));
+  EXPECT_TRUE(missing.is_missing_any_head_or_clone_of(head_oid));
+  EXPECT_FALSE(missing.is_missing(clone_oid));
+  EXPECT_TRUE(missing.is_missing_any_head_or_clone_of(clone_oid));
 
-    EXPECT_EQ(0, obc.writers_waiting);
-    EXPECT_EQ(1, obc.unstable_writes);
+  // only clone is missing
+  pg_missing_t missing2;
+  missing2.add(clone_oid, eversion_t(), eversion_t(), false);
+  EXPECT_FALSE(missing2.is_missing(head_oid));
+  EXPECT_TRUE(missing2.is_missing_any_head_or_clone_of(head_oid));
+  EXPECT_TRUE(missing2.is_missing(clone_oid));
+  EXPECT_TRUE(missing2.is_missing_any_head_or_clone_of(clone_oid));
+}
 
-    obc.ondisk_write_lock();
-
-    EXPECT_EQ(0, obc.writers_waiting);
-    EXPECT_EQ(2, obc.unstable_writes);
-
-    obc.ondisk_write_unlock();
-
-    EXPECT_EQ(0, obc.writers_waiting);
-    EXPECT_EQ(1, obc.unstable_writes);
-
-    obc.ondisk_write_unlock();
-
-    EXPECT_EQ(0, obc.writers_waiting);
-    EXPECT_EQ(0, obc.unstable_writes);
+// Helper function to check consistency between missing and rmissing maps
+// This verifies the bidirectional map invariant
+static void check_pg_missing_consistency(const pg_missing_t& missing) {
+  const auto& items = missing.get_items();
+  const auto& rmissing = missing.get_rmissing();
+  
+  // Check 1: Every entry in rmissing must exist in missing
+  for (const auto& [version, oid] : rmissing) {
+    auto it = items.find(oid);
+    ASSERT_NE(it, items.end()) 
+      << "rmissing contains oid " << oid << " at version " << version 
+      << " but it's not in missing map";
+    ASSERT_EQ(it->second.need, version)
+      << "rmissing has version " << version << " for oid " << oid
+      << " but missing has version " << it->second.need;
   }
-
-  useconds_t delay = 0;
-
-  {
-    ObjectContext obc;
-
-    //
-    // write_lock
-    // read_lock => wait
-    // write_unlock => signal
-    // read_unlock
-    //
-    EXPECT_EQ(0, obc.readers_waiting);
-    EXPECT_EQ(0, obc.readers);
-    EXPECT_EQ(0, obc.writers_waiting);
-    EXPECT_EQ(0, obc.unstable_writes);
-
-    obc.ondisk_write_lock();
-
-    EXPECT_EQ(0, obc.readers_waiting);
-    EXPECT_EQ(0, obc.readers);
-    EXPECT_EQ(0, obc.writers_waiting);
-    EXPECT_EQ(1, obc.unstable_writes);
-
-    Thread_read_lock t(obc);
-    t.create("obc_read");
-
-    do {
-      cout << "Trying (1) with delay " << delay << "us\n";
-      usleep(delay);
-    } while (obc.readers_waiting == 0 &&
-	     ( delay = delay * 2 + 1) < DELAY_MAX);
-
-    EXPECT_EQ(1, obc.readers_waiting);
-    EXPECT_EQ(0, obc.readers);
-    EXPECT_EQ(0, obc.writers_waiting);
-    EXPECT_EQ(1, obc.unstable_writes);
-
-    obc.ondisk_write_unlock();
-
-    do {
-      cout << "Trying (2) with delay " << delay << "us\n";
-      usleep(delay);
-    } while ((obc.readers == 0 || obc.readers_waiting == 1) &&
-	     ( delay = delay * 2 + 1) < DELAY_MAX);
-    EXPECT_EQ(0, obc.readers_waiting);
-    EXPECT_EQ(1, obc.readers);
-    EXPECT_EQ(0, obc.writers_waiting);
-    EXPECT_EQ(0, obc.unstable_writes);
-
-    obc.ondisk_read_unlock();
-
-    EXPECT_EQ(0, obc.readers_waiting);
-    EXPECT_EQ(0, obc.readers);
-    EXPECT_EQ(0, obc.writers_waiting);
-    EXPECT_EQ(0, obc.unstable_writes);
-
-    t.join();
+  
+  // Check 2: Every entry in missing must exist in rmissing
+  for (const auto& [oid, item] : items) {
+    bool found = false;
+    auto range = rmissing.equal_range(item.need);
+    for (auto it = range.first; it != range.second; ++it) {
+      if (it->second == oid) {
+        found = true;
+        break;
+      }
+    }
+    ASSERT_TRUE(found)
+      << "missing contains oid " << oid << " with version " << item.need
+      << " but it's not in rmissing";
   }
+  
+  // Check 3: Size consistency
+  ASSERT_EQ(items.size(), rmissing.size())
+    << "missing has " << items.size() << " entries but rmissing has " 
+    << rmissing.size() << " entries";
+}
 
-  {
-    ObjectContext obc;
+TEST(pg_missing_t, consistency_empty)
+{
+  pg_missing_t missing;
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(0U, missing.num_missing());
+  EXPECT_EQ(0U, missing.get_rmissing().size());
+}
 
-    //
-    // read_lock
-    // write_lock => wait
-    // read_unlock => signal
-    // write_unlock
-    //
-    EXPECT_EQ(0, obc.readers_waiting);
-    EXPECT_EQ(0, obc.readers);
-    EXPECT_EQ(0, obc.writers_waiting);
-    EXPECT_EQ(0, obc.unstable_writes);
+TEST(pg_missing_t, consistency_single_add)
+{
+  hobject_t oid(object_t("obj1"), "key", 123, 456, 0, "");
+  pg_missing_t missing;
+  eversion_t need(10, 5);
+  eversion_t have(5, 3);
+  
+  missing.add(oid, need, have, false);
+  check_pg_missing_consistency(missing);
+  
+  EXPECT_EQ(1U, missing.num_missing());
+  EXPECT_EQ(1U, missing.get_rmissing().size());
+  EXPECT_TRUE(missing.is_missing(oid));
+}
 
-    obc.ondisk_read_lock();
+TEST(pg_missing_t, consistency_multiple_inserts_same_oid_version)
+{
+  // Test: Multiple inserts of same {oid, version} should be idempotent
+  hobject_t oid(object_t("obj1"), "key", 123, 456, 0, "");
+  pg_missing_t missing;
+  eversion_t need(10, 5);
+  eversion_t have(5, 3);
+  
+  // First add
+  missing.add(oid, need, have, false);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(1U, missing.num_missing());
+  
+  // Second add of same oid/version - should replace, not duplicate
+  missing.add(oid, need, have, false);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(1U, missing.num_missing());
+  EXPECT_EQ(1U, missing.get_rmissing().size());
+  
+  // Third add with different have version
+  eversion_t new_have(6, 4);
+  missing.add(oid, need, new_have, false);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(1U, missing.num_missing());
+  EXPECT_EQ(1U, missing.get_rmissing().size());
+  EXPECT_EQ(new_have, missing.get_items().at(oid).have);
+}
 
-    EXPECT_EQ(0, obc.readers_waiting);
-    EXPECT_EQ(1, obc.readers);
-    EXPECT_EQ(0, obc.writers_waiting);
-    EXPECT_EQ(0, obc.unstable_writes);
+TEST(pg_missing_t, consistency_same_version_multiple_oids)
+{
+  // Test: Multiple OIDs can share the same version (multimap behavior)
+  pg_missing_t missing;
+  eversion_t shared_version(10, 5);
+  
+  hobject_t oid1(object_t("obj1"), "key", 123, 456, 0, "");
+  hobject_t oid2(object_t("obj2"), "key", 789, 012, 0, "");
+  hobject_t oid3(object_t("obj3"), "key", 345, 678, 0, "");
+  
+  missing.add(oid1, shared_version, eversion_t(), false);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(1U, missing.num_missing());
+  
+  missing.add(oid2, shared_version, eversion_t(), false);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(2U, missing.num_missing());
+  
+  missing.add(oid3, shared_version, eversion_t(), false);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(3U, missing.num_missing());
+  
+  // Verify rmissing has 3 entries for the same version
+  EXPECT_EQ(3U, missing.get_rmissing().count(shared_version));
+  EXPECT_EQ(3U, missing.get_rmissing().size());
+  
+  // Verify all three OIDs are in missing
+  EXPECT_TRUE(missing.is_missing(oid1));
+  EXPECT_TRUE(missing.is_missing(oid2));
+  EXPECT_TRUE(missing.is_missing(oid3));
+}
 
-    Thread_write_lock t(obc);
-    t.create("obc_write");
+TEST(pg_missing_t, consistency_add_and_remove)
+{
+  pg_missing_t missing;
+  hobject_t oid1(object_t("obj1"), "key", 123, 456, 0, "");
+  hobject_t oid2(object_t("obj2"), "key", 789, 012, 0, "");
+  eversion_t need1(10, 5);
+  eversion_t need2(12, 7);
+  
+  // Add two objects
+  missing.add(oid1, need1, eversion_t(), false);
+  missing.add(oid2, need2, eversion_t(), false);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(2U, missing.num_missing());
+  
+  // Remove first object
+  missing.rm(oid1, need1);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(1U, missing.num_missing());
+  EXPECT_FALSE(missing.is_missing(oid1));
+  EXPECT_TRUE(missing.is_missing(oid2));
+  
+  // Remove second object
+  missing.rm(oid2, need2);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(0U, missing.num_missing());
+  EXPECT_FALSE(missing.is_missing(oid2));
+}
 
-    do {
-      cout << "Trying (3) with delay " << delay << "us\n";
-      usleep(delay);
-    } while ((obc.writers_waiting == 0) &&
-	     ( delay = delay * 2 + 1) < DELAY_MAX);
+TEST(pg_missing_t, consistency_revise_need)
+{
+  hobject_t oid(object_t("obj1"), "key", 123, 456, 0, "");
+  pg_missing_t missing;
+  eversion_t need1(10, 5);
+  eversion_t need2(15, 8);
+  
+  // Add with initial need
+  missing.add(oid, need1, eversion_t(), false);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(need1, missing.get_items().at(oid).need);
+  
+  // Revise need to a different version
+  missing.revise_need(oid, need2, false);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(1U, missing.num_missing());
+  EXPECT_EQ(need2, missing.get_items().at(oid).need);
+  
+  // Verify old version is not in rmissing
+  EXPECT_EQ(0U, missing.get_rmissing().count(need1));
+  // Verify new version is in rmissing
+  EXPECT_EQ(1U, missing.get_rmissing().count(need2));
+}
 
-    EXPECT_EQ(0, obc.readers_waiting);
-    EXPECT_EQ(1, obc.readers);
-    EXPECT_EQ(1, obc.writers_waiting);
-    EXPECT_EQ(0, obc.unstable_writes);
+TEST(pg_missing_t, consistency_complex_sequence)
+{
+  // Complex test: multiple versions, adds, removes, and revisions
+  pg_missing_t missing;
+  eversion_t shared_v(10, 5);
+  eversion_t v1(11, 6);
+  eversion_t v2(12, 7);
+  eversion_t v3(13, 8);
+  
+  hobject_t oid1(object_t("obj1"), "key", 100, 200, 0, "");
+  hobject_t oid2(object_t("obj2"), "key", 300, 400, 0, "");
+  hobject_t oid3(object_t("obj3"), "key", 500, 600, 0, "");
+  hobject_t oid4(object_t("obj4"), "key", 700, 800, 0, "");
+  
+  // Step 1: Add three objects with same version
+  missing.add(oid1, shared_v, eversion_t(), false);
+  missing.add(oid2, shared_v, eversion_t(), false);
+  missing.add(oid3, shared_v, eversion_t(), false);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(3U, missing.num_missing());
+  EXPECT_EQ(3U, missing.get_rmissing().count(shared_v));
+  
+  // Step 2: Revise one to a different version
+  missing.revise_need(oid2, v1, false);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(3U, missing.num_missing());
+  EXPECT_EQ(2U, missing.get_rmissing().count(shared_v));
+  EXPECT_EQ(1U, missing.get_rmissing().count(v1));
+  
+  // Step 3: Add another object with yet another version
+  missing.add(oid4, v2, eversion_t(), false);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(4U, missing.num_missing());
+  
+  // Step 4: Remove one of the objects with shared version
+  missing.rm(oid1, shared_v);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(3U, missing.num_missing());
+  EXPECT_EQ(1U, missing.get_rmissing().count(shared_v));
+  EXPECT_FALSE(missing.is_missing(oid1));
+  
+  // Step 5: Revise the remaining shared_v object to v3
+  missing.revise_need(oid3, v3, false);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(3U, missing.num_missing());
+  EXPECT_EQ(0U, missing.get_rmissing().count(shared_v));
+  EXPECT_EQ(1U, missing.get_rmissing().count(v3));
+  
+  // Step 6: Remove all remaining
+  missing.rm(oid2, v1);
+  missing.rm(oid3, v3);
+  missing.rm(oid4, v2);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(0U, missing.num_missing());
+  EXPECT_EQ(0U, missing.get_rmissing().size());
+}
 
-    obc.ondisk_read_unlock();
+TEST(pg_missing_t, consistency_got_removes_correctly)
+{
+  hobject_t oid(object_t("obj1"), "key", 123, 456, 0, "");
+  pg_missing_t missing;
+  eversion_t need(10, 5);
+  
+  missing.add(oid, need, eversion_t(), false);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(1U, missing.num_missing());
+  
+  // got() should remove the entry
+  missing.got(oid, need);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(0U, missing.num_missing());
+  EXPECT_FALSE(missing.is_missing(oid));
+}
 
-    do {
-      cout << "Trying (4) with delay " << delay << "us\n";
-      usleep(delay);
-    } while ((obc.unstable_writes == 0 || obc.writers_waiting == 1) &&
-	     ( delay = delay * 2 + 1) < DELAY_MAX);
+TEST(pg_missing_t, consistency_multiple_versions_interleaved)
+{
+  // Test adding and removing with multiple versions interleaved
+  pg_missing_t missing;
+  
+  hobject_t oid1(object_t("obj1"), "key", 100, 200, 0, "");
+  hobject_t oid2(object_t("obj2"), "key", 300, 400, 0, "");
+  hobject_t oid3(object_t("obj3"), "key", 500, 600, 0, "");
+  
+  eversion_t v1(10, 1);
+  eversion_t v2(10, 2);
+  eversion_t v3(10, 3);
+  eversion_t v4(10, 4);
+  
+  // Add with different versions
+  missing.add(oid1, v1, eversion_t(), false);
+  check_pg_missing_consistency(missing);
+  
+  missing.add(oid2, v3, eversion_t(), false);
+  check_pg_missing_consistency(missing);
+  
+  missing.add(oid3, v2, eversion_t(), false);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(3U, missing.num_missing());
+  
+  // Revise to create version collisions
+  missing.revise_need(oid1, v4, false);
+  check_pg_missing_consistency(missing);
+  
+  missing.revise_need(oid3, v4, false);
+  check_pg_missing_consistency(missing);
+  
+  // Now oid1 and oid3 share v4, oid2 has v3
+  EXPECT_EQ(2U, missing.get_rmissing().count(v4));
+  EXPECT_EQ(1U, missing.get_rmissing().count(v3));
+  EXPECT_EQ(0U, missing.get_rmissing().count(v1));
+  EXPECT_EQ(0U, missing.get_rmissing().count(v2));
+  
+  // Remove one with shared version
+  missing.rm(oid1, v4);
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(2U, missing.num_missing());
+  EXPECT_EQ(1U, missing.get_rmissing().count(v4));
+}
 
-    EXPECT_EQ(0, obc.readers_waiting);
-    EXPECT_EQ(0, obc.readers);
-    EXPECT_EQ(0, obc.writers_waiting);
-    EXPECT_EQ(1, obc.unstable_writes);
+TEST(pg_missing_t, consistency_claim_operation)
+{
+  hobject_t oid1(object_t("obj1"), "key", 123, 456, 0, "");
+  hobject_t oid2(object_t("obj2"), "key", 789, 012, 0, "");
+  
+  pg_missing_t missing1;
+  missing1.add(oid1, eversion_t(10, 5), eversion_t(), false);
+  missing1.add(oid2, eversion_t(12, 7), eversion_t(), false);
+  check_pg_missing_consistency(missing1);
+  EXPECT_EQ(2U, missing1.num_missing());
+  
+  pg_missing_t missing2;
+  missing2.claim(std::move(missing1));
+  check_pg_missing_consistency(missing2);
+  EXPECT_EQ(2U, missing2.num_missing());
+  EXPECT_TRUE(missing2.is_missing(oid1));
+  EXPECT_TRUE(missing2.is_missing(oid2));
+}
 
-    obc.ondisk_write_unlock();
-
-    EXPECT_EQ(0, obc.readers_waiting);
-    EXPECT_EQ(0, obc.readers);
-    EXPECT_EQ(0, obc.writers_waiting);
-    EXPECT_EQ(0, obc.unstable_writes);
-
-    t.join();
+TEST(pg_missing_t, consistency_edge_case_same_oid_different_versions)
+{
+  // Edge case: repeatedly updating the same OID to different versions
+  hobject_t oid(object_t("obj1"), "key", 123, 456, 0, "");
+  pg_missing_t missing;
+  
+  for (int i = 1; i <= 10; ++i) {
+    eversion_t v(10, i);
+    missing.revise_need(oid, v, false);
+    check_pg_missing_consistency(missing);
+    EXPECT_EQ(1U, missing.num_missing());
+    EXPECT_EQ(1U, missing.get_rmissing().size());
+    EXPECT_EQ(v, missing.get_items().at(oid).need);
   }
+}
 
+TEST(pg_missing_t, consistency_stress_many_objects_same_version)
+{
+  // Stress test: many objects with the same version
+  pg_missing_t missing;
+  eversion_t shared_v(100, 50);
+  std::vector<hobject_t> oids;
+  
+  const int num_objects = 100;
+  for (int i = 0; i < num_objects; ++i) {
+    hobject_t oid(object_t("obj" + std::to_string(i)), "key", i, i * 2, 0, "");
+    oids.push_back(oid);
+    missing.add(oid, shared_v, eversion_t(), false);
+  }
+  
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(num_objects, missing.num_missing());
+  EXPECT_EQ(num_objects, missing.get_rmissing().count(shared_v));
+  
+  // Remove half of them
+  for (int i = 0; i < num_objects / 2; ++i) {
+    missing.rm(oids[i], shared_v);
+  }
+  
+  check_pg_missing_consistency(missing);
+  EXPECT_EQ(num_objects / 2, missing.num_missing());
+  EXPECT_EQ(num_objects / 2, missing.get_rmissing().count(shared_v));
 }
 
 TEST(pg_pool_t_test, get_pg_num_divisor) {
@@ -1280,8 +1833,7 @@ TEST(pg_pool_t_test, get_pg_num_divisor) {
 
   p.set_pg_num(12);
   p.set_pgp_num(12);
-  //cout << "num " << p.get_pg_num()
-  //     << " mask " << p.get_pg_num_mask() << std::endl;
+
   ASSERT_EQ(16u, p.get_pg_num_divisor(pg_t(0, 1)));
   ASSERT_EQ(16u, p.get_pg_num_divisor(pg_t(1, 1)));
   ASSERT_EQ(16u, p.get_pg_num_divisor(pg_t(2, 1)));
@@ -1485,6 +2037,7 @@ TEST(ghobject_t, parse) {
 
 TEST(pool_opts_t, invalid_opt) {
   EXPECT_FALSE(pool_opts_t::is_opt_name("INVALID_OPT"));
+  PrCtl unset_dumpable;
   EXPECT_DEATH(pool_opts_t::get_opt_desc("INVALID_OPT"), "");
 }
 
@@ -1496,7 +2049,10 @@ TEST(pool_opts_t, scrub_min_interval) {
 
   pool_opts_t opts;
   EXPECT_FALSE(opts.is_set(pool_opts_t::SCRUB_MIN_INTERVAL));
-  EXPECT_DEATH(opts.get(pool_opts_t::SCRUB_MIN_INTERVAL), "");
+  {
+    PrCtl unset_dumpable;
+    EXPECT_DEATH(opts.get(pool_opts_t::SCRUB_MIN_INTERVAL), "");
+  }
   double val;
   EXPECT_FALSE(opts.get(pool_opts_t::SCRUB_MIN_INTERVAL, &val));
   opts.set(pool_opts_t::SCRUB_MIN_INTERVAL, static_cast<double>(2015));
@@ -1514,7 +2070,10 @@ TEST(pool_opts_t, scrub_max_interval) {
 
   pool_opts_t opts;
   EXPECT_FALSE(opts.is_set(pool_opts_t::SCRUB_MAX_INTERVAL));
-  EXPECT_DEATH(opts.get(pool_opts_t::SCRUB_MAX_INTERVAL), "");
+  {
+    PrCtl unset_dumpable;
+    EXPECT_DEATH(opts.get(pool_opts_t::SCRUB_MAX_INTERVAL), "");
+  }
   double val;
   EXPECT_FALSE(opts.get(pool_opts_t::SCRUB_MAX_INTERVAL, &val));
   opts.set(pool_opts_t::SCRUB_MAX_INTERVAL, static_cast<double>(2015));
@@ -1532,7 +2091,10 @@ TEST(pool_opts_t, deep_scrub_interval) {
 
   pool_opts_t opts;
   EXPECT_FALSE(opts.is_set(pool_opts_t::DEEP_SCRUB_INTERVAL));
-  EXPECT_DEATH(opts.get(pool_opts_t::DEEP_SCRUB_INTERVAL), "");
+  {
+    PrCtl unset_dumpable;
+    EXPECT_DEATH(opts.get(pool_opts_t::DEEP_SCRUB_INTERVAL), "");
+  }
   double val;
   EXPECT_FALSE(opts.get(pool_opts_t::DEEP_SCRUB_INTERVAL, &val));
   opts.set(pool_opts_t::DEEP_SCRUB_INTERVAL, static_cast<double>(2015));
@@ -1540,6 +2102,992 @@ TEST(pool_opts_t, deep_scrub_interval) {
   EXPECT_EQ(val, 2015);
   opts.unset(pool_opts_t::DEEP_SCRUB_INTERVAL);
   EXPECT_FALSE(opts.is_set(pool_opts_t::DEEP_SCRUB_INTERVAL));
+}
+
+struct RequiredPredicate : IsPGRecoverablePredicate {
+  unsigned required_size;
+  explicit RequiredPredicate(unsigned required_size) : required_size(required_size) {}
+  bool operator()(const set<pg_shard_t> &have) const override {
+    return have.size() >= required_size;
+  }
+};
+
+using namespace std;
+struct MapPredicate {
+  map<int, pair<PastIntervals::osd_state_t, epoch_t>> states;
+  explicit MapPredicate(
+    const vector<pair<int, pair<PastIntervals::osd_state_t, epoch_t>>> &_states)
+   : states(_states.begin(), _states.end()) {}
+  PastIntervals::osd_state_t operator()(epoch_t start, int osd, epoch_t *lost_at) {
+    auto val = states.at(osd);
+    if (lost_at)
+      *lost_at = val.second;
+    return val.first;
+  }
+};
+
+using sit = shard_id_t;
+using PI = PastIntervals;
+using pst = pg_shard_t;
+using ival = PastIntervals::pg_interval_t;
+using ivallst = std::list<ival>;
+const int N = 0x7fffffff /* CRUSH_ITEM_NONE, can't import crush.h here */;
+
+struct PITest : ::testing::Test {
+  PITest() {}
+  void run(
+    bool ec_pool,
+    ivallst intervals,
+    epoch_t last_epoch_started,
+    unsigned min_to_peer,
+    vector<pair<int, pair<PastIntervals::osd_state_t, epoch_t>>> osd_states,
+    vector<int> up,
+    vector<int> acting,
+    set<pg_shard_t> probe,
+    set<int> down,
+    map<int, epoch_t> blocked_by,
+    bool pg_down) {
+    RequiredPredicate rec_pred(min_to_peer);
+    MapPredicate map_pred(osd_states);
+
+    auto correct_pcontdec = std::make_unique<RequiredPredicate>(rec_pred);
+    PI::PriorSet correct(
+      ec_pool,
+      probe,
+      down,
+      blocked_by,
+      pg_down,
+      correct_pcontdec.get());
+
+    PastIntervals compact;
+    for (auto &&i: intervals) {
+      compact.add_interval(ec_pool, i);
+    }
+    auto compact_ps_pcontdec = std::make_unique<RequiredPredicate>(rec_pred);
+    PI::PriorSet compact_ps = compact.get_prior_set(
+      ec_pool,
+      last_epoch_started,
+      compact_ps_pcontdec.get(),
+      map_pred,
+      up,
+      acting,
+      nullptr);
+    ASSERT_EQ(correct, compact_ps);
+  }
+};
+
+TEST_F(PITest, past_intervals_rep) {
+  run(
+    /* ec_pool    */ false,
+    /* intervals  */
+    { ival{{0, 1, 2}, {0, 1, 2}, 10, 20,  true, 0, 0}
+    , ival{{   1, 2}, {   1, 2}, 21, 30,  true, 1, 1}
+    , ival{{      2}, {      2}, 31, 35, false, 2, 2}
+    , ival{{0,    2}, {0,    2}, 36, 50,  true, 0, 0}
+    },
+    /* les        */ 5,
+    /* min_peer   */ 1,
+    /* osd states at end */
+    { make_pair(0, make_pair(PI::UP   , 0))
+    , make_pair(1, make_pair(PI::UP   , 0))
+    , make_pair(2, make_pair(PI::DOWN , 0))
+    },
+    /* acting     */ {0, 1   },
+    /* up         */ {0, 1   },
+    /* probe      */ {pst(0), pst(1)},
+    /* down       */ {2},
+    /* blocked_by */ {},
+    /* pg_down    */ false);
+}
+
+TEST_F(PITest, past_intervals_ec) {
+  run(
+    /* ec_pool    */ true,
+    /* intervals  */
+    { ival{{0, 1, 2}, {0, 1, 2}, 10, 20,  true, 0, 0}
+    , ival{{N, 1, 2}, {N, 1, 2}, 21, 30,  true, 1, 1}
+    },
+    /* les        */ 5,
+    /* min_peer   */ 2,
+    /* osd states at end */
+    { make_pair(0, make_pair(PI::DOWN , 0))
+    , make_pair(1, make_pair(PI::UP   , 0))
+    , make_pair(2, make_pair(PI::UP   , 0))
+    },
+    /* acting     */ {N, 1, 2},
+    /* up         */ {N, 1, 2},
+    /* probe      */ {pst(1, sit(1)), pst(2, sit(2))},
+    /* down       */ {0},
+    /* blocked_by */ {},
+    /* pg_down    */ false);
+}
+
+TEST_F(PITest, past_intervals_rep_down) {
+  run(
+    /* ec_pool    */ false,
+    /* intervals  */
+    { ival{{0, 1, 2}, {0, 1, 2}, 10, 20,  true, 0, 0}
+    , ival{{   1, 2}, {   1, 2}, 21, 30,  true, 1, 1}
+    , ival{{      2}, {      2}, 31, 35,  true, 2, 2}
+    , ival{{0,    2}, {0,    2}, 36, 50,  true, 0, 0}
+    },
+    /* les        */ 5,
+    /* min_peer   */ 1,
+    /* osd states at end */
+    { make_pair(0, make_pair(PI::UP   , 0))
+    , make_pair(1, make_pair(PI::UP   , 0))
+    , make_pair(2, make_pair(PI::DOWN , 0))
+    },
+    /* acting     */ {0, 1   },
+    /* up         */ {0, 1   },
+    /* probe      */ {pst(0), pst(1)},
+    /* down       */ {2},
+    /* blocked_by */ {{2, 0}},
+    /* pg_down    */ true);
+}
+
+TEST_F(PITest, past_intervals_ec_down) {
+  run(
+    /* ec_pool    */ true,
+    /* intervals  */
+    { ival{{0, 1, 2}, {0, 1, 2}, 10, 20,  true, 0, 0}
+    , ival{{N, 1, 2}, {N, 1, 2}, 21, 30,  true, 1, 1}
+    , ival{{N, N, 2}, {N, N, 2}, 31, 35, false, 2, 2}
+    },
+    /* les        */ 5,
+    /* min_peer   */ 2,
+    /* osd states at end */
+    { make_pair(0, make_pair(PI::UP   , 0))
+    , make_pair(1, make_pair(PI::DOWN , 0))
+    , make_pair(2, make_pair(PI::UP   , 0))
+    },
+    /* acting     */ {0, N, 2},
+    /* up         */ {0, N, 2},
+    /* probe      */ {pst(0, sit(0)), pst(2, sit(2))},
+    /* down       */ {1},
+    /* blocked_by */ {{1, 0}},
+    /* pg_down    */ true);
+}
+
+TEST_F(PITest, past_intervals_rep_no_subsets) {
+  run(
+    /* ec_pool    */ false,
+    /* intervals  */
+    { ival{{0,    2}, {0,    2}, 10, 20,  true, 0, 0}
+    , ival{{   1, 2}, {   1, 2}, 21, 30,  true, 1, 1}
+    , ival{{0, 1   }, {0, 1   }, 31, 35,  true, 0, 0}
+    },
+    /* les        */ 5,
+    /* min_peer   */ 1,
+    /* osd states at end */
+    { make_pair(0, make_pair(PI::UP   , 0))
+    , make_pair(1, make_pair(PI::UP   , 0))
+    , make_pair(2, make_pair(PI::DOWN , 0))
+    },
+    /* acting     */ {0, 1   },
+    /* up         */ {0, 1   },
+    /* probe      */ {pst(0), pst(1)},
+    /* down       */ {2},
+    /* blocked_by */ {},
+    /* pg_down    */ false);
+}
+
+TEST_F(PITest, past_intervals_ec_no_subsets) {
+  run(
+    /* ec_pool    */ true,
+    /* intervals  */
+    { ival{{0, N, 2}, {0, N, 2}, 10, 20,  true, 0, 0}
+    , ival{{N, 1, 2}, {N, 1, 2}, 21, 30,  true, 1, 1}
+    , ival{{0, 1, N}, {0, 1, N}, 31, 35,  true, 0, 0}
+    },
+    /* les        */ 5,
+    /* min_peer   */ 2,
+    /* osd states at end */
+    { make_pair(0, make_pair(PI::UP   , 0))
+    , make_pair(1, make_pair(PI::DOWN , 0))
+    , make_pair(2, make_pair(PI::UP   , 0))
+    },
+    /* acting     */ {0, N, 2},
+    /* up         */ {0, N, 2},
+    /* probe      */ {pst(0, sit(0)), pst(2, sit(2))},
+    /* down       */ {1},
+    /* blocked_by */ {{1, 0}},
+    /* pg_down    */ true);
+}
+
+TEST_F(PITest, past_intervals_ec_no_subsets2) {
+  run(
+    /* ec_pool    */ true,
+    /* intervals  */
+    { ival{{N, 1, 2}, {N, 1, 2}, 10, 20,  true, 0, 0}
+    , ival{{0, N, 2}, {0, N, 2}, 21, 30,  true, 1, 1}
+    , ival{{0, 3, N}, {0, 3, N}, 31, 35,  true, 0, 0}
+    },
+    /* les        */ 31,
+    /* min_peer   */ 2,
+    /* osd states at end */
+    { make_pair(0, make_pair(PI::UP   , 0))
+    , make_pair(1, make_pair(PI::DOWN , 0))
+    , make_pair(2, make_pair(PI::UP   , 0))
+    , make_pair(3, make_pair(PI::UP   , 0))
+    },
+    /* acting     */ {0, N, 2},
+    /* up         */ {0, N, 2},
+    /* probe      */ {pst(0, sit(0)), pst(2, sit(2)), pst(3, sit(1))},
+    /* down       */ {1},
+    /* blocked_by */ {},
+    /* pg_down    */ false);
+}
+
+TEST_F(PITest, past_intervals_rep_lost) {
+  run(
+    /* ec_pool    */ false,
+    /* intervals  */
+    { ival{{0, 1, 2}, {0, 1, 2}, 10, 20,  true, 0, 0}
+    , ival{{   1, 2}, {   1, 2}, 21, 30,  true, 1, 1}
+    , ival{{      2}, {      2}, 31, 35,  true, 2, 2}
+    , ival{{0,    2}, {0,    2}, 36, 50,  true, 0, 0}
+    },
+    /* les        */ 5,
+    /* min_peer   */ 1,
+    /* osd states at end */
+    { make_pair(0, make_pair(PI::UP   , 0))
+    , make_pair(1, make_pair(PI::UP   , 0))
+    , make_pair(2, make_pair(PI::LOST , 55))
+    },
+    /* acting     */ {0, 1   },
+    /* up         */ {0, 1   },
+    /* probe      */ {pst(0), pst(1)},
+    /* down       */ {2},
+    /* blocked_by */ {},
+    /* pg_down    */ false);
+}
+
+TEST_F(PITest, past_intervals_ec_lost) {
+  run(
+    /* ec_pool    */ true,
+    /* intervals  */
+    { ival{{0, N, 2}, {0, N, 2}, 10, 20,  true, 0, 0}
+    , ival{{N, 1, 2}, {N, 1, 2}, 21, 30,  true, 1, 1}
+    , ival{{0, 1, N}, {0, 1, N}, 31, 35,  true, 0, 0}
+    },
+    /* les        */ 5,
+    /* min_peer   */ 2,
+    /* osd states at end */
+    { make_pair(0, make_pair(PI::UP   , 0))
+    , make_pair(1, make_pair(PI::LOST , 36))
+    , make_pair(2, make_pair(PI::UP   , 0))
+    },
+    /* acting     */ {0, N, 2},
+    /* up         */ {0, N, 2},
+    /* probe      */ {pst(0, sit(0)), pst(2, sit(2))},
+    /* down       */ {1},
+    /* blocked_by */ {},
+    /* pg_down    */ false);
+}
+
+void ci_ref_test(
+  object_manifest_t l,
+  object_manifest_t to_remove,
+  object_manifest_t g,
+  object_ref_delta_t expected_delta)
+{
+  {
+    object_ref_delta_t delta;
+    to_remove.calc_refs_to_drop_on_removal(
+      &l,
+      &g,
+      delta);
+    ASSERT_EQ(
+      expected_delta,
+      delta);
+  }
+
+  // calc_refs_to_drop specifically handles nullptr identically to empty
+  // chunk_map
+  if (l.chunk_map.empty() || g.chunk_map.empty()) {
+    object_ref_delta_t delta;
+    to_remove.calc_refs_to_drop_on_removal(
+      l.chunk_map.empty() ? nullptr : &l,
+      g.chunk_map.empty() ? nullptr : &g,
+      delta);
+    ASSERT_EQ(
+      expected_delta,
+      delta);
+  }
+}
+
+void ci_ref_test_on_modify(
+  object_manifest_t l,
+  object_manifest_t to_remove,
+  ObjectCleanRegions clean_regions,
+  object_ref_delta_t expected_delta)
+{
+  {
+    object_ref_delta_t delta;
+    to_remove.calc_refs_to_drop_on_modify(
+      &l,
+      clean_regions,
+      delta);
+    ASSERT_EQ(
+      expected_delta,
+      delta);
+  }
+}
+
+void ci_ref_test_inc_on_set(
+  object_manifest_t l,
+  object_manifest_t added_set,
+  object_manifest_t g,
+  object_ref_delta_t expected_delta)
+{
+  {
+    object_ref_delta_t delta;
+    added_set.calc_refs_to_inc_on_set(
+      &l,
+      &g,
+      delta);
+    ASSERT_EQ(
+      expected_delta,
+      delta);
+  }
+}
+
+hobject_t mk_hobject(string name)
+{
+  return hobject_t(
+    std::move(name),
+    string(),
+    CEPH_NOSNAP,
+    0x42,
+    1,
+    string());
+}
+
+object_manifest_t mk_manifest(
+  std::map<uint64_t, std::tuple<uint64_t, uint64_t, string>> m)
+{
+  object_manifest_t ret;
+  ret.type = object_manifest_t::TYPE_CHUNKED;
+  for (auto &[offset, tgt] : m) {
+    auto &[tgt_off, length, name] = tgt;
+    auto &ci = ret.chunk_map[offset];
+    ci.offset = tgt_off;
+    ci.length = length;
+    ci.oid = mk_hobject(name);
+  }
+  return ret;
+}
+
+object_ref_delta_t mk_delta(std::map<string, int> _m) {
+  std::map<hobject_t, int> m;
+  for (auto &[name, delta] : _m) {
+    m.insert(
+      std::make_pair(
+	mk_hobject(name),
+	delta));
+  }
+  return object_ref_delta_t(std::move(m));
+}
+
+TEST(chunk_info_test, calc_refs_to_drop) {
+  ci_ref_test(
+    mk_manifest({}),
+    mk_manifest({{0, {0, 1024, "foo"}}}),
+    mk_manifest({}),
+    mk_delta({{"foo", -1}}));
+
+}
+
+
+TEST(chunk_info_test, calc_refs_to_drop_match) {
+  ci_ref_test(
+    mk_manifest({{0, {0, 1024, "foo"}}}),
+    mk_manifest({{0, {0, 1024, "foo"}}}),
+    mk_manifest({{0, {0, 1024, "foo"}}}),
+    mk_delta({}));
+
+}
+
+TEST(chunk_info_test, calc_refs_to_drop_head_match) {
+  ci_ref_test(
+    mk_manifest({}),
+    mk_manifest({{0, {0, 1024, "foo"}}}),
+    mk_manifest({{0, {0, 1024, "foo"}}}),
+    mk_delta({}));
+
+}
+
+TEST(chunk_info_test, calc_refs_to_drop_tail_match) {
+  ci_ref_test(
+    mk_manifest({{0, {0, 1024, "foo"}}}),
+    mk_manifest({{0, {0, 1024, "foo"}}}),
+    mk_manifest({}),
+    mk_delta({}));
+
+}
+
+TEST(chunk_info_test, calc_refs_to_drop_second_reference) {
+  ci_ref_test(
+    mk_manifest({{0, {0, 1024, "foo"}}}),
+    mk_manifest({{0, {0, 1024, "foo"}}, {4<<10, {0, 1<<10, "foo"}}}),
+    mk_manifest({}),
+    mk_delta({{"foo", -1}}));
+
+}
+
+TEST(chunk_info_test, calc_refs_offsets_dont_match) {
+  ci_ref_test(
+    mk_manifest({{0, {0, 1024, "foo"}}}),
+    mk_manifest({{512, {0, 1024, "foo"}}, {(4<<10) + 512, {0, 1<<10, "foo"}}}),
+    mk_manifest({}),
+    mk_delta({{"foo", -2}}));
+
+}
+
+TEST(chunk_info_test, calc_refs_g_l_match) {
+  ci_ref_test(
+    mk_manifest({{4096, {0, 1024, "foo"}}}),
+    mk_manifest({{0, {0, 1024, "foo"}}, {4096, {0, 1024, "bar"}}}),
+    mk_manifest({{4096, {0, 1024, "foo"}}}),
+    mk_delta({{"foo", -2}, {"bar", -1}}));
+
+}
+
+TEST(chunk_info_test, calc_refs_g_l_match_no_this) {
+  ci_ref_test(
+    mk_manifest({{4096, {0, 1024, "foo"}}}),
+    mk_manifest({{0, {0, 1024, "bar"}}}),
+    mk_manifest({{4096, {0, 1024, "foo"}}}),
+    mk_delta({{"foo", -1}, {"bar", -1}}));
+
+}
+
+TEST(chunk_info_test, calc_refs_modify_mismatch) {
+  ObjectCleanRegions clean_regions(0, 8192, false);
+  clean_regions.mark_data_region_dirty(0, 1024);
+  clean_regions.mark_data_region_dirty(512, 1024);
+  ci_ref_test_on_modify(
+    mk_manifest({{512, {2048, 1024, "foo"}}, {4096, {0, 1024, "foo"}}}),
+    mk_manifest({{0, {0, 1024, "bar"}}, {512, {2048, 1024, "ttt"}}}),
+    clean_regions,
+    mk_delta({{"bar", -1}, {"ttt", -1}}));
+}
+
+TEST(chunk_info_test, calc_refs_modify_match) {
+  ObjectCleanRegions clean_regions(0, 8192, false);
+  clean_regions.mark_data_region_dirty(0, 1024);
+  clean_regions.mark_data_region_dirty(512, 1024);
+  clean_regions.mark_data_region_dirty(4096, 1024);
+  ci_ref_test_on_modify(
+    mk_manifest({{512, {2048, 1024, "foo"}}, {4096, {0, 1024, "ttt"}}}),
+    mk_manifest({{0, {0, 1024, "bar"}}, {512, {2048, 1024, "foo"}}, {4096, {0, 1024, "ttt"}}}),
+    clean_regions,
+    mk_delta({{"bar", -1}}));
+}
+
+TEST(chunk_info_test, calc_refs_modify_match_dirty_overlap) {
+  ObjectCleanRegions clean_regions(0, 8192, false);
+  clean_regions.mark_data_region_dirty(0, 256);
+  clean_regions.mark_data_region_dirty(256, 4096);
+  ci_ref_test_on_modify(
+    mk_manifest({}),
+    mk_manifest({{0, {0, 256, "bar"}}, {512, {2048, 1024, "foo"}}, {4096, {0, 1024, "ttt"}}}),
+    clean_regions,
+    mk_delta({{"bar", -1}, {"foo", -1}, {"ttt", -1}}));
+}
+
+TEST(chunk_info_test, calc_refs_modify_match_dirty_overlap2) {
+  ObjectCleanRegions clean_regions(0, 8192, false);
+  clean_regions.mark_data_region_dirty(0, 256);
+  clean_regions.mark_data_region_dirty(256, 1024);
+  clean_regions.mark_data_region_dirty(3584, 1024);
+  ci_ref_test_on_modify(
+    mk_manifest({{512, {2048, 1024, "foo"}}, {4096, {0, 1024, "ttt"}}}),
+    mk_manifest({{0, {0, 256, "bar"}}, {512, {2048, 1024, "foo"}}, {4096, {0, 1024, "ttt"}}}),
+    clean_regions,
+    mk_delta({{"bar", -1}}));
+}
+
+TEST(chunk_info_test, calc_refs_modify_match_dirty_overlap3) {
+  ObjectCleanRegions clean_regions(0, 8192, false);
+  clean_regions.mark_data_region_dirty(0, 256);
+  clean_regions.mark_data_region_dirty(256, 4096);
+  ci_ref_test_on_modify(
+    mk_manifest({{512, {2048, 1024, "foo"}}, {4096, {0, 1024, "ttt"}}}),
+    mk_manifest({{0, {0, 256, "bar"}}, {512, {2048, 1024, "foo"}}, {4096, {0, 1024, "ttt"}}}),
+    clean_regions,
+    mk_delta({{"bar", -1}}));
+}
+
+TEST(chunk_info_test, calc_refs_modify_match_clone_overlap) {
+  ObjectCleanRegions clean_regions(0, 8192, false);
+  clean_regions.mark_data_region_dirty(0, 256);
+  clean_regions.mark_data_region_dirty(256, 1024);
+  clean_regions.mark_data_region_dirty(3584, 1024);
+  ci_ref_test_on_modify(
+    mk_manifest({{512, {2048, 1024, "foo"}}, {4096, {0, 1024, "ttt"}}}),
+    mk_manifest({{0, {0, 256, "bar"}}, {256, {2048, 1024, "foo"}}, {3584, {0, 1024, "ttt"}}}),
+    clean_regions,
+    mk_delta({{"bar", -1}, {"foo", -1}, {"ttt", -1}}));
+}
+
+TEST(chunk_info_test, calc_refs_modify_no_snap) {
+  ObjectCleanRegions clean_regions(0, 8192, false);
+  clean_regions.mark_data_region_dirty(0, 1024);
+  clean_regions.mark_data_region_dirty(512, 1024);
+  ci_ref_test_on_modify(
+    mk_manifest({}),
+    mk_manifest({{0, {0, 1024, "bar"}}, {512, {2048, 1024, "ttt"}}}),
+    clean_regions,
+    mk_delta({{"bar", -1}, {"ttt", -1}}));
+}
+
+TEST(chunk_info_test, calc_refs_inc) {
+  ci_ref_test_inc_on_set(
+    mk_manifest({{256, {0, 256, "aaa"}}, {4096, {0, 1024, "foo"}}}),
+    mk_manifest({{1024, {0, 1024, "bar"}}}),
+    mk_manifest({{4096, {0, 1024, "foo"}}}),
+    mk_delta({{"bar", 1}}));
+}
+
+TEST(chunk_info_test, calc_refs_inc2) {
+  ci_ref_test_inc_on_set(
+    mk_manifest({{512, {0, 1024, "aaa"}}, {4096, {0, 1024, "foo"}}}),
+    mk_manifest({{1024, {0, 1024, "bar"}}, {4096, {0, 1024, "bbb"}}}),
+    mk_manifest({{512, {0, 1024, "foo"}}}),
+    mk_delta({{"bar", 1}, {"bbb", 1}}));
+}
+
+TEST(chunk_info_test, calc_refs_inc_no_l) {
+  ci_ref_test_inc_on_set(
+    mk_manifest({}),
+    mk_manifest({{1024, {0, 1024, "bar"}}, {4096, {0, 1024, "bbb"}}}),
+    mk_manifest({{512, {0, 1024, "foo"}}}),
+    mk_delta({{"bar", 1}, {"bbb", 1}}));
+}
+
+TEST(chunk_info_test, calc_refs_inc_no_g) {
+  ci_ref_test_inc_on_set(
+    mk_manifest({{512, {0, 1024, "aaa"}}, {4096, {0, 1024, "foo"}}}),
+    mk_manifest({{1024, {0, 1024, "bar"}}, {4096, {0, 1024, "foo"}}}),
+    mk_manifest({}),
+    mk_delta({{"bar", 1}}));
+}
+
+TEST(chunk_info_test, calc_refs_inc_match_g_l) {
+  ci_ref_test_inc_on_set(
+    mk_manifest({{256, {0, 256, "aaa"}}, {4096, {0, 1024, "foo"}}}),
+    mk_manifest({{256, {0, 256, "aaa"}}, {4096, {0, 1024, "foo"}}}),
+    mk_manifest({{256, {0, 256, "aaa"}}, {4096, {0, 1024, "foo"}}}),
+    mk_delta({{"aaa", -1}, {"foo", -1}}));
+}
+
+TEST(chunk_info_test, calc_refs_inc_match) {
+  ci_ref_test_inc_on_set(
+    mk_manifest({{256, {0, 256, "bbb"}}, {4096, {0, 1024, "foo"}}}),
+    mk_manifest({{256, {0, 256, "aaa"}}, {4096, {0, 1024, "foo"}}}),
+    mk_manifest({{256, {0, 256, "aaa"}}, {4096, {0, 1024, "ccc"}}}),
+    mk_delta({}));
+}
+
+// pg_history_t::merge()'s vulnerability-window onset field (last_degraded)
+// is the one part of this struct that isn't a plain monotonic max-merge: a
+// side's onset is open when it is later than the merged
+// vuln_window_reported. last_clean is only max-merged, for peers on older
+// code. See the class comment on those fields and the merge() algorithm's
+// own comments in osd_types.h.
+TEST(pg_history_t, merge_vulnerability_onset_normal_handover)
+{
+  // Local side has no window open; the peer (e.g. the departing primary,
+  // arriving via peering info exchange) has one open since t1. The merge
+  // should inherit the peer's true onset.
+  utime_t t0(100, 0), t1(150, 0);
+  pg_history_t local;
+  local.last_clean = t0;
+  local.vuln_window_reported = t0;
+  local.last_degraded = t0; // not open (last_degraded <= reported)
+
+  pg_history_t peer;
+  peer.last_clean = t0;
+  peer.vuln_window_reported = t0;
+  peer.last_degraded = t1; // open since t1
+
+  ASSERT_TRUE(local.merge(peer));
+  ASSERT_EQ(t0, local.last_clean);
+  ASSERT_EQ(t1, local.last_degraded);
+}
+
+TEST(pg_history_t, merge_vulnerability_onset_stale_peer_after_close)
+{
+  // The peer carries an old, already-superseded onset (t1) from before the
+  // window closed elsewhere; the local side already knows the window
+  // closed at a later point (t2 > t1). The merge must not resurrect the
+  // stale onset just because the peer still shows it as open relative to
+  // ITS OWN vuln_window_reported.
+  utime_t t0(100, 0), t1(150, 0), t2(200, 0);
+  pg_history_t local;
+  local.last_clean = t2;
+  local.vuln_window_reported = t2; // already knows the window closed
+  local.last_degraded = t2; // not open locally
+
+  pg_history_t peer;
+  peer.last_clean = t0;
+  peer.vuln_window_reported = t0; // peer's stale view, from before the close
+  peer.last_degraded = t1; // peer still thinks it's open (t1 > t0)
+
+  // merge is a no-op here as local is already at the correct final state.
+  ASSERT_FALSE(local.merge(peer));
+  ASSERT_EQ(t2, local.vuln_window_reported);
+  // Not t1 - the stale onset must be dropped once vuln_window_reported is
+  // merged past it, not carried forward.
+  ASSERT_EQ(t2, local.last_degraded);
+}
+
+TEST(pg_history_t, merge_vulnerability_onset_redegrade_after_close)
+{
+  // One peer's view (a stale, already-superseded onset from before a
+  // close) is merged together with a genuinely newer re-degradation from
+  // a different peer. The merge must reflect the new episode's onset, not
+  // the old, already-closed one.
+  utime_t t0(150, 0), t1(200, 0), t2(250, 0);
+  pg_history_t local;
+  local.last_clean = t1;
+  local.vuln_window_reported = t1; // a close already known locally
+  local.last_degraded = t0; // stale onset from before that close
+
+  pg_history_t peer;
+  peer.last_clean = t1;
+  peer.vuln_window_reported = t1; // agrees on the same close point
+  peer.last_degraded = t2; // but has since observed a genuine re-degrade
+
+  ASSERT_TRUE(local.merge(peer));
+  ASSERT_EQ(t1, local.vuln_window_reported);
+  ASSERT_EQ(t2, local.last_degraded);
+}
+
+TEST(pg_history_t, merge_vulnerability_onset_ignores_peer_last_clean)
+{
+  // A peer on older code stamps last_clean on every clean publish, so its
+  // last_clean can be later than an onset that no OSD has recorded yet.
+  // That must not hide the open window: only vuln_window_reported marks a
+  // window as recorded. last_clean is still max-merged for older peers.
+  utime_t t0(100, 0), t1(150, 0), t2(200, 0);
+  pg_history_t local;
+  local.last_clean = t0;
+  local.vuln_window_reported = t0;
+  local.last_degraded = t1; // open since t1, not yet recorded
+
+  pg_history_t peer;
+  peer.last_clean = t2; // a clean stamp later than the onset
+  peer.vuln_window_reported = t0;
+  peer.last_degraded = t0; // not open on the peer
+
+  ASSERT_TRUE(local.merge(peer));
+  EXPECT_EQ(t1, local.last_degraded)
+      << "the open onset must survive a peer's later last_clean";
+  EXPECT_EQ(t0, local.vuln_window_reported);
+  EXPECT_EQ(t2, local.last_clean);
+}
+
+TEST(pg_history_t, merge_vuln_window_reported_is_plain_max)
+{
+  // Unlike the onset, vuln_window_reported is a genuine monotonic marker --
+  // a plain max-merge, same as every other progress field in this struct.
+  utime_t t0(100, 0), t1(150, 0);
+  pg_history_t local;
+  local.vuln_window_reported = t0;
+
+  pg_history_t peer;
+  peer.vuln_window_reported = t1;
+
+  ASSERT_TRUE(local.merge(peer));
+  ASSERT_EQ(t1, local.vuln_window_reported);
+
+  // Merging an older value back in is a no-op.
+  pg_history_t older_peer;
+  older_peer.vuln_window_reported = t0;
+  ASSERT_FALSE(local.merge(older_peer));
+  ASSERT_EQ(t1, local.vuln_window_reported);
+}
+
+// A genuinely never-touched peer (e.g. a brand-new replica whose own
+// pg_history_t is still all-default) must not disturb an already-settled,
+// not-open last_degraded/vuln_window_reported pair, even when last_clean
+// has since advanced past them (a peer on older code re-stamps last_clean
+// to "now" on every clean publish, independent of any real episode).
+TEST(pg_history_t, merge_never_touched_peer_does_not_open_false_window)
+{
+  utime_t creation(50, 0), later_clean(100, 0);
+  pg_history_t local;
+  local.last_clean = later_clean;
+  local.last_degraded = creation;         // pinned at creation, not open
+  local.vuln_window_reported = creation;  // nothing has ever been recorded
+
+  pg_history_t never_touched_peer;  // all fields default-constructed
+
+  ASSERT_FALSE(local.merge(never_touched_peer));
+  EXPECT_EQ(creation, local.last_degraded)
+      << "merging a blank peer must not move last_degraded past "
+         "vuln_window_reported and create a false open window";
+  EXPECT_EQ(creation, local.vuln_window_reported);
+  EXPECT_EQ(later_clean, local.last_clean);
+}
+
+// Rolling-upgrade test: a peer still on older code encodes
+// pg_history_t at struct_v=10, with no last_degraded/last_clean/
+// vuln_window_reported fields at all. Decoding that blob on this (newer)
+// code must land on the documented safe default with no window open, nothing
+// pending and without an arbitrary or uninitialized value. The struct_v=10
+// wire format below mirrors pg_history_t::encode() as it existed immediately
+// before this struct grew those 5 fields; the current encode() can no
+// longer produce that format on its own, since it always writes at the
+// current struct_v.
+TEST(pg_history_t, decode_pre_v11_defaults_vulnerability_fields)
+{
+  pg_history_t src;
+  src.epoch_created = 5;
+  src.last_epoch_started = 6;
+  src.last_epoch_clean = 6;
+  src.same_interval_since = 6;
+  src.same_up_since = 6;
+  src.same_primary_since = 6;
+  src.last_interval_started = 6;
+  src.last_interval_clean = 6;
+  src.epoch_pool_created = 5;
+
+  bufferlist bl;
+  ENCODE_START(10, 4, bl);
+  encode(src.epoch_created, bl);
+  encode(src.last_epoch_started, bl);
+  encode(src.last_epoch_clean, bl);
+  encode(src.last_epoch_split, bl);
+  encode(src.same_interval_since, bl);
+  encode(src.same_up_since, bl);
+  encode(src.same_primary_since, bl);
+  encode(src.last_scrub, bl);
+  encode(src.last_scrub_stamp, bl);
+  encode(src.last_deep_scrub, bl);
+  encode(src.last_deep_scrub_stamp, bl);
+  encode(src.last_clean_scrub_stamp, bl);
+  encode(src.last_epoch_marked_full, bl);
+  encode(src.last_interval_started, bl);
+  encode(src.last_interval_clean, bl);
+  encode(src.epoch_pool_created, bl);
+  encode(src.prior_readable_until_ub, bl);
+  ENCODE_FINISH(bl);
+
+  pg_history_t decoded;
+  auto p = bl.cbegin();
+  decoded.decode(p);
+
+  // Ordinary pre-v11 fields still decode correctly.
+  EXPECT_EQ(src.epoch_created, decoded.epoch_created);
+  EXPECT_EQ(src.last_epoch_started, decoded.last_epoch_started);
+  EXPECT_EQ(src.same_interval_since, decoded.same_interval_since);
+
+  // The 5 new fields must default to "no window open, nothing pending",
+  // not retroactively discover a pre-upgrade window from whatever memory
+  // happens to hold.
+  EXPECT_EQ(utime_t(), decoded.last_degraded);
+  EXPECT_EQ(decoded.last_clean, decoded.last_degraded);
+  EXPECT_EQ(decoded.last_degraded, decoded.vuln_window_reported);
+  EXPECT_EQ(utime_t(), decoded.last_rebuild_active_start);
+  EXPECT_EQ(decoded.last_rebuild_active_start, decoded.rebuild_span_reported);
+  EXPECT_EQ(utime_t(), decoded.rebuild_active_accum);
+}
+
+// pg_history_t::merge()'s active-rebuild span onset fields
+// (last_rebuild_active_start/rebuild_span_reported) are pg_rebuild_duration's
+// counterpart to the vulnerability-window tests above, with the same
+// non-monotonic-onset merge problem but no separate "clean" field to anchor
+// against -- see the field and merge() comments in osd_types.h.
+TEST(pg_history_t, merge_rebuild_onset_normal_handover)
+{
+  // Local side has no span open; the peer (e.g. the departing primary,
+  // arriving via peering info exchange) has one open since t1. The merge
+  // should inherit the peer's true onset.
+  utime_t t0(100, 0), t1(150, 0);
+  pg_history_t local;
+  local.rebuild_span_reported = t0;
+  local.last_rebuild_active_start = t0; // not open
+
+  pg_history_t peer;
+  peer.rebuild_span_reported = t0;
+  peer.last_rebuild_active_start = t1; // open since t1
+
+  ASSERT_TRUE(local.merge(peer));
+  ASSERT_EQ(t1, local.last_rebuild_active_start);
+}
+
+TEST(pg_history_t, merge_rebuild_onset_stale_peer_after_close)
+{
+  // The peer carries an old, already-superseded onset (t1) from before the
+  // span closed elsewhere; the local side already knows the span closed at
+  // a later point (t2 > t1). The merge must not resurrect the stale onset
+  // just because the peer still shows it as open relative to ITS OWN
+  // rebuild_span_reported.
+  utime_t t0(100, 0), t1(150, 0), t2(200, 0);
+  pg_history_t local;
+  local.rebuild_span_reported = t2; // already knows the span closed
+  local.last_rebuild_active_start = t2; // not open locally
+
+  pg_history_t peer;
+  peer.rebuild_span_reported = t0; // peer's stale view, from before the close
+  peer.last_rebuild_active_start = t1; // peer still thinks it's open (t1 > t0)
+
+  ASSERT_FALSE(local.merge(peer));
+  ASSERT_EQ(t2, local.rebuild_span_reported);
+  ASSERT_EQ(t2, local.last_rebuild_active_start);
+}
+
+TEST(pg_history_t, merge_rebuild_onset_redegrade_after_close)
+{
+  // A stale, already-superseded onset from before a close is merged
+  // together with a genuinely newer re-arm from a different peer. The
+  // merge must reflect the new span's onset, not the old, already-closed
+  // one.
+  utime_t t0(150, 0), t1(200, 0), t2(250, 0);
+  pg_history_t local;
+  local.rebuild_span_reported = t1; // a close already known locally
+  local.last_rebuild_active_start = t0; // stale onset from before that close
+
+  pg_history_t peer;
+  peer.rebuild_span_reported = t1; // agrees on the same close point
+  peer.last_rebuild_active_start = t2; // but has since observed a new span
+
+  ASSERT_TRUE(local.merge(peer));
+  ASSERT_EQ(t1, local.rebuild_span_reported);
+  ASSERT_EQ(t2, local.last_rebuild_active_start);
+}
+
+// rebuild_active_accum only means anything relative to the specific onset
+// it was accrued against, so it must travel with whichever side's onset
+// wins, not be merged independently (e.g. a plain max would wrongly pair
+// one side's paused-time total with the other side's, unrelated, earlier
+// onset).
+TEST(pg_history_t, merge_rebuild_accum_travels_with_winning_peer_onset)
+{
+  utime_t t0(100, 0), t1(150, 0);
+  pg_history_t local;
+  local.rebuild_span_reported = t0;
+  local.last_rebuild_active_start = t1; // open since t1
+  local.rebuild_active_accum = utime_t(5, 0); // 5s accrued locally
+
+  pg_history_t peer;
+  peer.rebuild_span_reported = t0;
+  // setup peer's active-start to be open since an earlier point than local
+  // (t0+10 < t1)
+  peer.last_rebuild_active_start = t0 + utime_t(10, 0);
+  peer.rebuild_active_accum = utime_t(20, 0); // peer's own 20s
+
+  ASSERT_TRUE(local.merge(peer));
+  // Peer's onset is earlier, so it wins -- its accumulator must come
+  // along with it, not local's own.
+  ASSERT_EQ(peer.last_rebuild_active_start, local.last_rebuild_active_start);
+  ASSERT_EQ(utime_t(20, 0), local.rebuild_active_accum);
+}
+
+TEST(pg_history_t, merge_rebuild_accum_stays_with_winning_local_onset)
+{
+  utime_t t0(100, 0), t1(150, 0);
+  pg_history_t local;
+  local.rebuild_span_reported = t0;
+  local.last_rebuild_active_start = t0 + utime_t(10, 0); // earlier onset
+  local.rebuild_active_accum = utime_t(5, 0);
+
+  pg_history_t peer;
+  peer.rebuild_span_reported = t0;
+  peer.last_rebuild_active_start = t1; // later onset than local
+  peer.rebuild_active_accum = utime_t(20, 0);
+
+  ASSERT_FALSE(local.merge(peer));
+  ASSERT_EQ(utime_t(5, 0), local.rebuild_active_accum);
+}
+
+// A genuinely paused (not currently armed, but not yet closed either)
+// episode's accumulated time must survive a handover -- pause_rebuild_
+// span() advances rebuild_span_reported the same way a close does, so
+// "not open" (onset <= reported) does NOT by itself mean "nothing to
+// preserve": rebuild_span_reported being strictly newer than a peer's is
+// what makes this side's whole onset+accum pair authoritative, even
+// while merely paused.
+TEST(pg_history_t, merge_rebuild_accum_survives_handover_while_paused)
+{
+  utime_t t0(100, 0), t1(150, 0);
+  pg_history_t local; // blank, e.g. a newly-promoted replica's own view
+
+  pg_history_t peer;
+  peer.rebuild_span_reported = t1; // most recent transition was the pause
+  peer.last_rebuild_active_start = t0; // not currently armed (t0 <= t1)
+  peer.rebuild_active_accum = utime_t(5, 0); // accrued before the pause
+
+  ASSERT_TRUE(local.merge(peer));
+  ASSERT_EQ(t1, local.rebuild_span_reported);
+  ASSERT_EQ(t0, local.last_rebuild_active_start);
+  ASSERT_EQ(utime_t(5, 0), local.rebuild_active_accum);
+}
+
+// The flip side of the above: a peer's STALE pause (one it never learned
+// was superseded by a later close elsewhere) must not resurrect a
+// nonzero accum once this side already knows the episode was fully
+// closed and recorded (rebuild_span_reported strictly newer, accum
+// already reset to zero by close_rebuild_span()).
+TEST(pg_history_t, merge_rebuild_accum_stale_peer_does_not_resurrect_after_close)
+{
+  utime_t t0(100, 0), t1(150, 0);
+  pg_history_t local;
+  local.rebuild_span_reported = t1; // closed later; accum already recorded+reset
+  local.last_rebuild_active_start = t0;
+  local.rebuild_active_accum = utime_t(); // already reset by close_rebuild_span()
+
+  pg_history_t peer;
+  peer.rebuild_span_reported = t0; // peer's stale, pre-close view
+  peer.last_rebuild_active_start = t0;
+  peer.rebuild_active_accum = utime_t(5, 0); // peer's stale leftover
+
+  ASSERT_FALSE(local.merge(peer));
+  ASSERT_EQ(utime_t(), local.rebuild_active_accum);
+}
+
+TEST(pg_history_t, merge_rebuild_span_reported_is_plain_max)
+{
+  // Unlike the onset, rebuild_span_reported is a genuine monotonic marker --
+  // a plain max-merge, same as every other progress field in this struct.
+  utime_t t0(100, 0), t1(150, 0);
+  pg_history_t local;
+  local.rebuild_span_reported = t0;
+
+  pg_history_t peer;
+  peer.rebuild_span_reported = t1;
+
+  ASSERT_TRUE(local.merge(peer));
+  ASSERT_EQ(t1, local.rebuild_span_reported);
+
+  // Merging an older value back in is a no-op.
+  pg_history_t older_peer;
+  older_peer.rebuild_span_reported = t0;
+  ASSERT_FALSE(local.merge(older_peer));
+  ASSERT_EQ(t1, local.rebuild_span_reported);
+}
+
+// A genuinely never-touched peer (e.g. a brand-new replica whose own
+// pg_history_t is still all-default) must not disturb an already-settled,
+// not-open last_rebuild_active_start/rebuild_span_reported pair.
+TEST(pg_history_t, merge_never_touched_peer_does_not_open_false_rebuild_span)
+{
+  utime_t creation(50, 0), later_report(100, 0);
+  pg_history_t local;
+  local.rebuild_span_reported = later_report;
+  local.last_rebuild_active_start = creation; // pinned at creation, not open
+
+  pg_history_t never_touched_peer;  // all fields default-constructed
+
+  ASSERT_FALSE(local.merge(never_touched_peer));
+  EXPECT_EQ(creation, local.last_rebuild_active_start)
+      << "merging a blank peer must not move last_rebuild_active_start past "
+         "rebuild_span_reported and create a false open span";
+  EXPECT_EQ(later_report, local.rebuild_span_reported);
 }
 
 /*

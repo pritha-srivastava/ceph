@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -26,10 +27,12 @@
 #include "common/sharedptr_registry.hpp"
 #include "common/ceph_argparse.h"
 
+using namespace std;
+
 class SharedPtrRegistryTest : public SharedPtrRegistry<unsigned int, int> {
 public:
-  Mutex &get_lock() { return lock; }
-  map<unsigned int, pair<ceph::weak_ptr<int>, int*> > &get_contents() {
+  ceph::mutex &get_lock() { return lock; }
+  map<unsigned int, pair<std::weak_ptr<int>, int*> > &get_contents() {
     return contents;
   }
 };
@@ -42,7 +45,7 @@ public:
     SharedPtrRegistryTest &registry;
     unsigned int key;
     int value;
-    ceph::shared_ptr<int> ptr;
+    std::shared_ptr<int> ptr;
     enum in_method_t { LOOKUP, LOOKUP_OR_CREATE } in_method;
 
     Thread_wait(SharedPtrRegistryTest& _registry, unsigned int _key, int _value, in_method_t _in_method) : 
@@ -62,7 +65,7 @@ public:
 	  ptr = registry.lookup_or_create(key);
 	break;
       case LOOKUP:
-	ptr = ceph::shared_ptr<int>(new int);
+	ptr = std::shared_ptr<int>(new int);
 	*ptr = value;
 	ptr = registry.lookup(key);
 	break;
@@ -85,7 +88,7 @@ public:
       if (delay > 0)
 	usleep(delay);
       {
-	Mutex::Locker l(registry.get_lock());
+	std::lock_guard l(registry.get_lock());
 	if (registry.waiting == waiting) 
 	  break;
       }
@@ -102,7 +105,7 @@ TEST_F(SharedPtrRegistry_all, lookup_or_create) {
   SharedPtrRegistryTest registry;
   unsigned int key = 1;
   int value = 2;
-  ceph::shared_ptr<int> ptr = registry.lookup_or_create(key);
+  std::shared_ptr<int> ptr = registry.lookup_or_create(key);
   *ptr = value;
   ASSERT_EQ(value, *registry.lookup_or_create(key));
 }
@@ -123,7 +126,7 @@ TEST_F(SharedPtrRegistry_all, wait_lookup_or_create) {
   {
     unsigned int key = 1;
     {
-      ceph::shared_ptr<int> ptr(new int);
+      std::shared_ptr<int> ptr(new int);
       registry.get_contents()[key] = make_pair(ptr, ptr.get());
     }
     EXPECT_FALSE(registry.get_contents()[key].first.lock());
@@ -143,7 +146,7 @@ TEST_F(SharedPtrRegistry_all, wait_lookup_or_create) {
     unsigned int key = 2;
     int value = 3;
     {
-      ceph::shared_ptr<int> ptr(new int);
+      std::shared_ptr<int> ptr(new int);
       registry.get_contents()[key] = make_pair(ptr, ptr.get());
     }
     EXPECT_FALSE(registry.get_contents()[key].first.lock());
@@ -156,7 +159,7 @@ TEST_F(SharedPtrRegistry_all, wait_lookup_or_create) {
     {
       int other_value = value + 1;
       unsigned int other_key = key + 1;
-      ceph::shared_ptr<int> ptr = registry.lookup_or_create<int>(other_key, other_value);
+      std::shared_ptr<int> ptr = registry.lookup_or_create<int>(other_key, other_value);
       EXPECT_TRUE(ptr.get());
       EXPECT_EQ(other_value, *ptr);
     }
@@ -172,7 +175,7 @@ TEST_F(SharedPtrRegistry_all, lookup) {
   SharedPtrRegistryTest registry;
   unsigned int key = 1;
   {
-    ceph::shared_ptr<int> ptr = registry.lookup_or_create(key);
+    std::shared_ptr<int> ptr = registry.lookup_or_create(key);
     int value = 2;
     *ptr = value;
     ASSERT_EQ(value, *registry.lookup(key));
@@ -186,7 +189,7 @@ TEST_F(SharedPtrRegistry_all, wait_lookup) {
   unsigned int key = 1;
   int value = 2;
   {
-    ceph::shared_ptr<int> ptr(new int);
+    std::shared_ptr<int> ptr(new int);
     registry.get_contents()[key] = make_pair(ptr, ptr.get());
   }
   EXPECT_FALSE(registry.get_contents()[key].first.lock());
@@ -215,15 +218,15 @@ TEST_F(SharedPtrRegistry_all, get_next) {
     SharedPtrRegistryTest registry;
 
     const unsigned int key2 = 333;
-    ceph::shared_ptr<int> ptr2 = registry.lookup_or_create(key2);
+    std::shared_ptr<int> ptr2 = registry.lookup_or_create(key2);
     const int value2 = *ptr2 = 400;
 
     // entries with expired pointers are silentely ignored
     const unsigned int key_gone = 222;
-    registry.get_contents()[key_gone] = make_pair(ceph::shared_ptr<int>(), (int*)0);
+    registry.get_contents()[key_gone] = make_pair(std::shared_ptr<int>(), (int*)0);
 
     const unsigned int key1 = 111;
-    ceph::shared_ptr<int> ptr1 = registry.lookup_or_create(key1);
+    std::shared_ptr<int> ptr1 = registry.lookup_or_create(key1);
     const int value1 = *ptr1 = 800;
 
     pair<unsigned int, int> i;
@@ -244,11 +247,11 @@ TEST_F(SharedPtrRegistry_all, get_next) {
     //
     SharedPtrRegistryTest registry;
     const unsigned int key1 = 111;
-    ceph::shared_ptr<int> *ptr1 = new ceph::shared_ptr<int>(registry.lookup_or_create(key1));
+    std::shared_ptr<int> *ptr1 = new std::shared_ptr<int>(registry.lookup_or_create(key1));
     const unsigned int key2 = 222;
-    ceph::shared_ptr<int> ptr2 = registry.lookup_or_create(key2);
+    std::shared_ptr<int> ptr2 = registry.lookup_or_create(key2);
     
-    pair<unsigned int, ceph::shared_ptr<int> > i;
+    pair<unsigned int, std::shared_ptr<int> > i;
     EXPECT_TRUE(registry.get_next(i.first, &i));
     EXPECT_EQ(key1, i.first);
     delete ptr1;
@@ -261,32 +264,32 @@ TEST_F(SharedPtrRegistry_all, remove) {
   {
     SharedPtrRegistryTest registry;
     const unsigned int key1 = 1;
-    ceph::shared_ptr<int> ptr1 = registry.lookup_or_create(key1);
+    std::shared_ptr<int> ptr1 = registry.lookup_or_create(key1);
     *ptr1 = 400;
     registry.remove(key1);
 
-    ceph::shared_ptr<int> ptr2 = registry.lookup_or_create(key1);
+    std::shared_ptr<int> ptr2 = registry.lookup_or_create(key1);
     *ptr2 = 500;
 
-    ptr1 = ceph::shared_ptr<int>();
-    ceph::shared_ptr<int> res = registry.lookup(key1);
-    assert(res);
-    assert(res == ptr2);
-    assert(*res == 500);
+    ptr1 = std::shared_ptr<int>();
+    std::shared_ptr<int> res = registry.lookup(key1);
+    ceph_assert(res);
+    ceph_assert(res == ptr2);
+    ceph_assert(*res == 500);
   }
   {
     SharedPtrRegistryTest registry;
     const unsigned int key1 = 1;
-    ceph::shared_ptr<int> ptr1 = registry.lookup_or_create(key1, 400);
+    std::shared_ptr<int> ptr1 = registry.lookup_or_create(key1, 400);
     registry.remove(key1);
 
-    ceph::shared_ptr<int> ptr2 = registry.lookup_or_create(key1, 500);
+    std::shared_ptr<int> ptr2 = registry.lookup_or_create(key1, 500);
 
-    ptr1 = ceph::shared_ptr<int>();
-    ceph::shared_ptr<int> res = registry.lookup(key1);
-    assert(res);
-    assert(res == ptr2);
-    assert(*res == 500);
+    ptr1 = std::shared_ptr<int>();
+    std::shared_ptr<int> res = registry.lookup(key1);
+    ceph_assert(res);
+    ceph_assert(res == ptr2);
+    ceph_assert(*res == 500);
   }
 }
 
@@ -300,7 +303,7 @@ public:
     TellDie() { died = NO; }
     ~TellDie() { died = YES; }
     
-    int value;
+    int value = 0;
   };
 
   void SetUp() override {
@@ -315,7 +318,7 @@ TEST_F(SharedPtrRegistry_destructor, destructor) {
   EXPECT_EQ(UNDEFINED, died);
   int key = 101;
   {
-    ceph::shared_ptr<TellDie> a = registry.lookup_or_create(key);
+    std::shared_ptr<TellDie> a = registry.lookup_or_create(key);
     EXPECT_EQ(NO, died);
     EXPECT_TRUE(a.get());
   }

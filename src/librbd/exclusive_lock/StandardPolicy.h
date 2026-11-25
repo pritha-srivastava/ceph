@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_EXCLUSIVE_LOCK_STANDARD_POLICY_H
 #define CEPH_LIBRBD_EXCLUSIVE_LOCK_STANDARD_POLICY_H
@@ -12,23 +12,25 @@ struct ImageCtx;
 
 namespace exclusive_lock {
 
+template <typename ImageCtxT = ImageCtx>
 class StandardPolicy : public Policy {
 public:
-  StandardPolicy(ImageCtx *image_ctx) : m_image_ctx(image_ctx) {
+  StandardPolicy(ImageCtxT* image_ctx) : m_image_ctx(image_ctx) {
   }
 
-  virtual bool may_auto_request_lock() {
+  bool may_auto_request_lock() override {
     return false;
   }
 
-  virtual int lock_requested(bool force);
+  int lock_requested(bool force) override;
 
 private:
-  ImageCtx *m_image_ctx;
-
+  ImageCtxT* m_image_ctx;
 };
 
 } // namespace exclusive_lock
 } // namespace librbd
+
+extern template class librbd::exclusive_lock::StandardPolicy<librbd::ImageCtx>;
 
 #endif // CEPH_LIBRBD_EXCLUSIVE_LOCK_STANDARD_POLICY_H

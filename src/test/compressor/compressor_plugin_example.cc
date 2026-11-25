@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph distributed storage system
  *
@@ -19,6 +20,8 @@
 #include "ceph_ver.h"
 #include "compressor/CompressionPlugin.h"
 #include "compressor_example.h"
+
+using namespace std;
 
 class CompressorPluginExample : public CompressionPlugin {
 public:

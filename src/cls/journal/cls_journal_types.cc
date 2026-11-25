@@ -1,26 +1,29 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "cls/journal/cls_journal_types.h"
 #include "include/stringify.h"
 #include "common/Formatter.h"
+
+using ceph::bufferlist;
+using ceph::Formatter;
 
 namespace cls {
 namespace journal {
 
 void ObjectPosition::encode(bufferlist& bl) const {
   ENCODE_START(1, 1, bl);
-  ::encode(object_number, bl);
-  ::encode(tag_tid, bl);
-  ::encode(entry_tid, bl);
+  encode(object_number, bl);
+  encode(tag_tid, bl);
+  encode(entry_tid, bl);
   ENCODE_FINISH(bl);
 }
 
-void ObjectPosition::decode(bufferlist::iterator& iter) {
+void ObjectPosition::decode(bufferlist::const_iterator& iter) {
   DECODE_START(1, iter);
-  ::decode(object_number, iter);
-  ::decode(tag_tid, iter);
-  ::decode(entry_tid, iter);
+  decode(object_number, iter);
+  decode(tag_tid, iter);
+  decode(entry_tid, iter);
   DECODE_FINISH(iter);
 }
 
@@ -30,20 +33,22 @@ void ObjectPosition::dump(Formatter *f) const {
   f->dump_unsigned("entry_tid", entry_tid);
 }
 
-void ObjectPosition::generate_test_instances(std::list<ObjectPosition *> &o) {
-  o.push_back(new ObjectPosition());
-  o.push_back(new ObjectPosition(1, 2, 3));
+std::list<ObjectPosition> ObjectPosition::generate_test_instances() {
+  std::list<ObjectPosition> o;
+  o.emplace_back();
+  o.push_back(ObjectPosition(1, 2, 3));
+  return o;
 }
 
 void ObjectSetPosition::encode(bufferlist& bl) const {
   ENCODE_START(1, 1, bl);
-  ::encode(object_positions, bl);
+  encode(object_positions, bl);
   ENCODE_FINISH(bl);
 }
 
-void ObjectSetPosition::decode(bufferlist::iterator& iter) {
+void ObjectSetPosition::decode(bufferlist::const_iterator& iter) {
   DECODE_START(1, iter);
-  ::decode(object_positions, iter);
+  decode(object_positions, iter);
   DECODE_FINISH(iter);
 }
 
@@ -57,29 +62,30 @@ void ObjectSetPosition::dump(Formatter *f) const {
   f->close_section();
 }
 
-void ObjectSetPosition::generate_test_instances(
-    std::list<ObjectSetPosition *> &o) {
-  o.push_back(new ObjectSetPosition());
-  o.push_back(new ObjectSetPosition({{0, 1, 120}, {121, 2, 121}}));
+std::list<ObjectSetPosition> ObjectSetPosition::generate_test_instances() {
+  std::list<ObjectSetPosition> o;
+  o.emplace_back();
+  o.push_back(ObjectSetPosition({{0, 1, 120}, {121, 2, 121}}));
+  return o;
 }
 
 void Client::encode(bufferlist& bl) const {
   ENCODE_START(1, 1, bl);
-  ::encode(id, bl);
-  ::encode(data, bl);
-  ::encode(commit_position, bl);
-  ::encode(static_cast<uint8_t>(state), bl);
+  encode(id, bl);
+  encode(data, bl);
+  encode(commit_position, bl);
+  encode(static_cast<uint8_t>(state), bl);
   ENCODE_FINISH(bl);
 }
 
-void Client::decode(bufferlist::iterator& iter) {
+void Client::decode(bufferlist::const_iterator& iter) {
   DECODE_START(1, iter);
-  ::decode(id, iter);
-  ::decode(data, iter);
-  ::decode(commit_position, iter);
+  decode(id, iter);
+  decode(data, iter);
+  decode(commit_position, iter);
 
   uint8_t state_raw;
-  ::decode(state_raw, iter);
+  decode(state_raw, iter);
   state = static_cast<ClientState>(state_raw);
   DECODE_FINISH(iter);
 }
@@ -98,28 +104,30 @@ void Client::dump(Formatter *f) const {
   f->dump_string("state", stringify(state));
 }
 
-void Client::generate_test_instances(std::list<Client *> &o) {
+std::list<Client> Client::generate_test_instances() {
+  std::list<Client> o;
   bufferlist data;
-  data.append(std::string('1', 128));
+  data.append(std::string(128, '1'));
 
-  o.push_back(new Client());
-  o.push_back(new Client("id", data));
-  o.push_back(new Client("id", data, {{{1, 2, 120}, {2, 3, 121}}}));
+  o.push_back(Client());
+  o.push_back(Client("id", data));
+  o.push_back(Client("id", data, {{{1, 2, 120}, {2, 3, 121}}}));
+  return o;
 }
 
 void Tag::encode(bufferlist& bl) const {
   ENCODE_START(1, 1, bl);
-  ::encode(tid, bl);
-  ::encode(tag_class, bl);
-  ::encode(data, bl);
+  encode(tid, bl);
+  encode(tag_class, bl);
+  encode(data, bl);
   ENCODE_FINISH(bl);
 }
 
-void Tag::decode(bufferlist::iterator& iter) {
+void Tag::decode(bufferlist::const_iterator& iter) {
   DECODE_START(1, iter);
-  ::decode(tid, iter);
-  ::decode(tag_class, iter);
-  ::decode(data, iter);
+  decode(tid, iter);
+  decode(tag_class, iter);
+  decode(data, iter);
   DECODE_FINISH(iter);
 }
 
@@ -132,12 +140,14 @@ void Tag::dump(Formatter *f) const {
   f->dump_string("data", data_ss.str());
 }
 
-void Tag::generate_test_instances(std::list<Tag *> &o) {
-  o.push_back(new Tag());
+std::list<Tag> Tag::generate_test_instances() {
+  std::list<Tag> o;
+  o.emplace_back();
 
   bufferlist data;
-  data.append(std::string('1', 128));
-  o.push_back(new Tag(123, 234, data));
+  data.append(std::string(128, '1'));
+  o.push_back(Tag(123, 234, data));
+  return o;
 }
 
 std::ostream &operator<<(std::ostream &os, const ClientState &state) {

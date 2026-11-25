@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -13,10 +14,14 @@
  */
 
 
-#include "MDSUtility.h"
 #include "include/rados/librados.hpp"
 
+#include "MDSUtility.h"
+#include "ProgressTracker.h"
+
+struct inode_backtrace_t;
 class InodeStore;
+class MDSTable;
 
 class RecoveryDriver {
   protected:
@@ -30,6 +35,7 @@ class RecoveryDriver {
   public:
     virtual int init(
         librados::Rados &rados,
+	std::string &metadata_pool_name,
         const FSMap *fsmap,
         fs_cluster_id_t fscid) = 0;
 
@@ -118,20 +124,21 @@ class LocalFileDriver : public RecoveryDriver
     // Implement RecoveryDriver interface
     int init(
         librados::Rados &rados,
+	std::string &metadata_pool_name,
         const FSMap *fsmap,
-        fs_cluster_id_t fscid);
+        fs_cluster_id_t fscid) override;
 
     int inject_with_backtrace(
         const inode_backtrace_t &bt,
-        const InodeStore &dentry);
+        const InodeStore &dentry) override;
 
     int inject_lost_and_found(
         inodeno_t ino,
-        const InodeStore &dentry);
+        const InodeStore &dentry) override;
 
-    int init_roots(int64_t data_pool_id);
+    int init_roots(int64_t data_pool_id) override;
 
-    int check_roots(bool *result);
+    int check_roots(bool *result) override;
 };
 
 /**
@@ -150,7 +157,8 @@ class MetadataTool
   void build_file_dentry(
     inodeno_t ino, uint64_t file_size, time_t file_mtime,
     const file_layout_t &layout,
-    InodeStore *out);
+    InodeStore *out,
+    std::string symlink);
 
   /**
    * Construct a synthetic InodeStore for a directory
@@ -171,7 +179,7 @@ class MetadataTool
    * Try and read a dentry from a dirfrag
    */
   int read_dentry(inodeno_t parent_ino, frag_t frag,
-                  const std::string &dname, InodeStore *inode);
+		  const std::string &dname, InodeStore *inode, snapid_t *dnfirst=nullptr);
 };
 
 /**
@@ -211,118 +219,144 @@ class MetadataDriver : public RecoveryDriver, public MetadataTool
     // Implement RecoveryDriver interface
     int init(
         librados::Rados &rados,
+	std::string &metadata_pool_name,
         const FSMap *fsmap,
-        fs_cluster_id_t fscid);
+        fs_cluster_id_t fscid) override;
 
     int inject_linkage(
         inodeno_t dir_ino, const std::string &dname,
-        const frag_t fragment, const InodeStore &inode);
+        const frag_t fragment, const InodeStore &inode, snapid_t dnfirst=CEPH_NOSNAP);
 
     int inject_with_backtrace(
         const inode_backtrace_t &bt,
-        const InodeStore &dentry);
+        const InodeStore &dentry) override;
 
     int inject_lost_and_found(
         inodeno_t ino,
-        const InodeStore &dentry);
+        const InodeStore &dentry) override;
 
-    int init_roots(int64_t data_pool_id);
+    int init_roots(int64_t data_pool_id) override;
 
-    int check_roots(bool *result);
+    int check_roots(bool *result) override;
+
+    int load_table(MDSTable *table);
+    int save_table(MDSTable *table);
 };
 
 class DataScan : public MDSUtility, public MetadataTool
 {
-  protected:
-    RecoveryDriver *driver;
-    fs_cluster_id_t fscid;
+private:
+  librados::Rados rados;
 
-    // IoCtx for data pool (where we scrape file backtraces from)
-    librados::IoCtx data_io;
-    // Remember the data pool ID for use in layouts
-    int64_t data_pool_id;
+  uint64_t get_pool_objects(const std::vector<librados::IoCtx*>& data_ios);
+  uint64_t get_metadata_pool_objects(
+      librados::IoCtx& metadata_io,
+      bool worker_sliced = false);
 
-    uint32_t n;
-    uint32_t m;
+protected:
+  RecoveryDriver* driver;
+  fs_cluster_id_t fscid;
 
-    /**
+  std::string get_progress_operation_name(std::string_view op_name) const;
+
+  // IoCtx for data pool (where we scrape file backtraces from)
+  librados::IoCtx data_io;
+  // Remember the data pool ID for use in layouts
+  int64_t data_pool_id;
+  // IoCtxs for extra data pools
+  std::vector<librados::IoCtx> extra_data_ios;
+
+  uint32_t worker_n;
+  uint32_t worker_m;
+
+  std::string metadata_pool_name;
+  std::vector<int64_t> data_pools;
+
+  /**
      * Scan data pool for backtraces, and inject inodes to metadata pool
      */
-    int scan_inodes();
+  int scan_inodes();
 
-    /**
+  /**
      * Scan data pool for file sizes and mtimes
      */
-    int scan_extents();
+  int scan_extents();
 
-    /**
+  /**
      * Scan metadata pool for 0th dirfrags to link orphaned
      * directory inodes.
      */
-    int scan_frags();
+  int scan_frags();
 
-    /**
+  /**
      * Cleanup xattrs from data pool
      */
-    int cleanup();
+  int cleanup();
 
-    /**
+  /**
      * Check if an inode number is in the permitted ranges
      */
-    bool valid_ino(inodeno_t ino) const;
+  bool valid_ino(inodeno_t ino) const;
 
 
-    int scan_links();
+  int scan_links();
 
-    // Accept pools which are not in the FSMap
-    bool force_pool;
-    // Respond to decode errors by overwriting
-    bool force_corrupt;
-    // Overwrite root objects even if they exist
-    bool force_init;
-    // Only scan inodes without this scrub tag
-    string filter_tag;
+  // Accept pools which are not in the FSMap
+  bool force_pool;
+  // Respond to decode errors by overwriting
+  bool force_corrupt;
+  // Overwrite root objects even if they exist
+  bool force_init;
+  // Only scan inodes without this scrub tag
+  std::string filter_tag;
+  // Interval to update progress
+  ProgressTracker::duration progress_update_interval;
 
-    /**
+  /**
      * @param r set to error on valid key with invalid value
      * @return true if argument consumed, else false
      */
-    bool parse_kwarg(
-        const std::vector<const char*> &args,
-        std::vector<const char *>::const_iterator &i,
-        int *r);
+  bool parse_kwarg(
+      const std::vector<const char*>& args,
+      std::vector<const char*>::const_iterator& i,
+      int* r);
 
-    /**
+  /**
      * @return true if argument consumed, else false
      */
-    bool parse_arg(
-      const std::vector<const char*> &arg,
-      std::vector<const char *>::const_iterator &i);
+  bool parse_arg(
+      const std::vector<const char*>& arg,
+      std::vector<const char*>::const_iterator& i);
 
-    int probe_filter(librados::IoCtx &ioctx);
+  int probe_filter(librados::IoCtx& ioctx);
 
-    /**
+  /**
      * Apply a function to all objects in an ioctx's pool, optionally
      * restricted to only those objects with a 00000000 offset and
      * no tag matching DataScan::scrub_tag.
      */
-    int forall_objects(
-        librados::IoCtx &ioctx,
-        bool untagged_only,
-        std::function<int(std::string, uint64_t, uint64_t)> handler);
+  int forall_objects(
+      librados::IoCtx& ioctx,
+      bool untagged_only,
+      std::function<int(std::string, uint64_t, uint64_t)> handler);
 
-  public:
-    void usage();
-    int main(const std::vector<const char *> &args);
+public:
+  static void usage();
+  int main(const std::vector<const char*>& args);
 
-    DataScan()
-      : driver(NULL), fscid(FS_CLUSTER_ID_NONE), data_pool_id(-1), n(0), m(1),
-        force_pool(false), force_corrupt(false),
-        force_init(false)
-    {
-    }
+  DataScan() :
+    driver(NULL),
+    fscid(FS_CLUSTER_ID_NONE),
+    data_pool_id(-1),
+    worker_n(0),
+    worker_m(1),
+    force_pool(false),
+    force_corrupt(false),
+    force_init(false)
+  {
+  }
 
-    ~DataScan()
+    ~DataScan() override
     {
       delete driver;
     }

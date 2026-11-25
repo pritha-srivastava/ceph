@@ -1,0 +1,60 @@
+<nav
+  class="pagination"
+  aria-label="Pagination"
+  i18n-aria-label
+>
+  <button
+    class="pagination__btn pagination__btn_first"
+    aria-label="Go to first page"
+    i18n-aria-label
+    [disabled]="!canPrevious()"
+    (click)="selectPage(1)"
+    type="button"
+  >
+    <cd-icon type="angleDoubleLeft"></cd-icon>
+  </button>
+  <button
+    class="pagination__btn pagination__btn_prev"
+    aria-label="Go to previous page"
+    i18n-aria-label
+    [disabled]="!canPrevious()"
+    type="button"
+    (click)="prevPage()"
+  >
+    <cd-icon type="leftArrow"></cd-icon>
+  </button>
+  <div class="pagination__pages">
+    <input
+      #pageNumber
+      class="pagination__page_input"
+      aria-label="Current page"
+      i18n-aria-label
+      type="number"
+      min="1"
+      [max]="totalPages"
+      [value]="page"
+      (input)="selectPage(pageNumber.valueAsNumber)"
+    />
+    <span aria-hidden="true"> of {{ totalPages }} </span>
+  </div>
+  <button
+    class="pagination__btn pagination__btn_next"
+    aria-label="Go to next page"
+    i18n-aria-label
+    (click)="nextPage()"
+    [disabled]="!canNext()"
+    type="button"
+  >
+    <cd-icon type="rightArrow"></cd-icon>
+  </button>
+  <button
+    class="pagination__btn pagination__btn_last"
+    aria-label="Go to last page"
+    i18n-aria-label
+    [disabled]="!canNext()"
+    (click)="selectPage(totalPages)"
+    type="button"
+  >
+    <cd-icon type="angleDoubleRight"></cd-icon>
+  </button>
+</nav>

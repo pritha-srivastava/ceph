@@ -1,3 +1,5 @@
+.. _rados-operations:
+
 ====================
  Cluster Operations
 ====================
@@ -11,14 +13,16 @@ restarting a cluster with the ``ceph`` service;  checking the cluster's health;
 and, monitoring an operating cluster.
 
 .. toctree::
-	:maxdepth: 1 
-	
+	:maxdepth: 1
+
 	operating
+	health-checks
 	monitoring
 	monitoring-osd-pg
 	user-management
+        pgcalc/index
 
-.. raw:: html 
+.. raw:: html
 
 	</td><td><h3>Data Placement</h3>
 
@@ -35,7 +39,17 @@ CRUSH algorithm.
 	erasure-code
 	cache-tiering
 	placement-groups
+        pg-states
+        pg-concepts
+	upmap
+        read-balancer
+        balancer
+	require-min-compat-client
+	require-osd-release
 	crush-map
+	crush-map-edits
+	stretch-mode
+	change-mon-elections
 
 
 
@@ -45,7 +59,7 @@ CRUSH algorithm.
 
 Low-level cluster operations consist of starting, stopping, and restarting a
 particular daemon within a cluster; changing the settings of a particular
-daemon or subsystem; and, adding a daemon to the cluster or removing a  daemon
+daemon or subsystem; and, adding a daemon to the cluster or removing a daemon
 from the cluster. The most common use cases for low-level operations include
 growing or shrinking the Ceph cluster and replacing legacy or failed hardware
 with new hardware.
@@ -55,9 +69,11 @@ with new hardware.
 
 	add-or-rm-osds
 	add-or-rm-mons
+	devices
+	bluestore-migration
 	Command Reference <control>
 
-	
+
 
 .. raw:: html
 
@@ -68,7 +84,7 @@ you to evaluate your Ceph configuration and modify your logging and debugging
 settings to identify and remedy issues you are encountering with your cluster.
 
 .. toctree::
-	:maxdepth: 1 
+	:maxdepth: 1
 
 	../troubleshooting/community
 	../troubleshooting/troubleshooting-mon

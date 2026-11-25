@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -49,7 +50,7 @@ struct rbd_loc {
   /**
      Constructs an rbd_loc with the given pool, image, and snap.
    */
-  rbd_loc(std::string pool, std::string image, std::string snap);
+  rbd_loc(const std::string &pool, const std::string &image, const std::string &snap);
 
   /**
      Parses an rbd_loc from the given string.

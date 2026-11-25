@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,16 +18,20 @@
 
 // MDS TABLES
 
+#include <string_view>
+
+#include "include/ceph_assert.h" // for ceph_abort()
+
 enum {
   TABLE_ANCHOR,
   TABLE_SNAP,
 };
 
-inline const char *get_mdstable_name(int t) {
+inline std::string_view get_mdstable_name(int t) {
   switch (t) {
   case TABLE_ANCHOR: return "anchortable";
   case TABLE_SNAP: return "snaptable";
-  default: ceph_abort();
+  default: ceph_abort(); return std::string_view();
   }
 }
 
@@ -40,9 +45,11 @@ enum {
   TABLESERVER_OP_ROLLBACK     =  7,
   TABLESERVER_OP_SERVER_UPDATE = 8,
   TABLESERVER_OP_SERVER_READY = -9,
+  TABLESERVER_OP_NOTIFY_ACK   = 10,
+  TABLESERVER_OP_NOTIFY_PREP  = -11,
 };
 
-inline const char *get_mdstableserver_opname(int op) {
+inline std::string_view get_mdstableserver_opname(int op) {
   switch (op) {
   case TABLESERVER_OP_QUERY: return "query";
   case TABLESERVER_OP_QUERY_REPLY: return "query_reply";
@@ -53,7 +60,9 @@ inline const char *get_mdstableserver_opname(int op) {
   case TABLESERVER_OP_ROLLBACK: return "rollback";
   case TABLESERVER_OP_SERVER_UPDATE: return "server_update";
   case TABLESERVER_OP_SERVER_READY: return "server_ready";
-  default: ceph_abort(); return 0;
+  case TABLESERVER_OP_NOTIFY_ACK: return "notify_ack";
+  case TABLESERVER_OP_NOTIFY_PREP: return "notify_prep";
+  default: ceph_abort(); return std::string_view();
   }
 }
 
@@ -63,12 +72,12 @@ enum {
   TABLE_OP_DESTROY,
 };
 
-inline const char *get_mdstable_opname(int op) {
+inline std::string_view get_mdstable_opname(int op) {
   switch (op) {
   case TABLE_OP_CREATE: return "create";
   case TABLE_OP_UPDATE: return "update";
   case TABLE_OP_DESTROY: return "destroy";
-  default: ceph_abort(); return 0;
+  default: ceph_abort(); return std::string_view();
   }
 }
 

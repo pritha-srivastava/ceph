@@ -1,8 +1,6 @@
 #!/bin/sh
 
-set -e
-
-ceph mds set allow_new_snaps true --yes-i-really-mean-it
+set -ex
 
 do_tarball() {
     wget http://download.ceph.com/qa/$1

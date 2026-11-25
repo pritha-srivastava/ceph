@@ -57,18 +57,42 @@
      -i mapfn --reweight-item name weight
                            reweight a given item (and adjust ancestor
                            weights as needed)
+     -i mapfn --add-bucket name type [--loc type name ...]
+                           insert a bucket into the hierarchy at the given
+                           location
+     -i mapfn --move       name --loc type name ...
+                           move the given item to specified location
      -i mapfn --reweight   recalculate all bucket weights
+     -i mapfn --rebuild-class-roots
+                           rebuild the per-class shadow trees (normally a no-op)
+     -i mapfn --create-simple-rule name root type mode
+                           create crush rule <name> to start from <root>,
+                           replicate across buckets of type <type>, using
+                           a choose mode of <firstn|indep>
+     -i mapfn --create-replicated-rule name root type
+                           create crush rule <name> to start from <root>,
+                           replicate across buckets of type <type>
+     --device-class <class>
+                           use device class <class> for new rule
+     -i mapfn --remove-rule name
+                           remove the specified crush rule
   
   Options for the display/test stage
   
+     -f --format           the format of --dump, defaults to json-pretty
+                           can be one of json, json-pretty, xml, xml-pretty,
+                           table, table-kv, html, html-pretty
+     --dump                dump the crush map
      --tree                print map summary as a tree
+     --bucket-tree         print bucket map summary as a tree
+     --bucket-name         specify bucket bucket name for bucket-tree
      --check [max_id]      check if any item is referencing an unknown name/type
      -i mapfn --show-location id
                            show location for given device id
      -i mapfn --test       test a range of inputs on the map
         [--min-x x] [--max-x x] [--x x]
-        [--min-rule r] [--max-rule r] [--rule r] [--ruleset rs]
-        [--num-rep n]
+        [--min-rule r] [--max-rule r] [--rule r]
+        [--min-rep n] [--max-rep n] [--num-rep n]
         [--pool-id n]      specifies pool id
         [--batches b]      split the CRUSH mapping into b > 1 rounds
         [--weight|-w devno weight]
@@ -83,6 +107,8 @@
      --show-mappings       show mappings
      --show-bad-mappings   show bad mappings
      --show-choose-tries   show choose tries histogram
+     --show-retry-exhaustion
+                           check for and report CRUSH retry exhaustion
      --output-name name
                            prepend the data file(s) generated during the
                            testing routine with name
@@ -90,12 +116,20 @@
                            export select data generated during testing routine
                            to CSV files for off-line post-processing
                            use --help-output for more information
+     --reclassify          transform legacy CRUSH map buckets and rules
+                           by adding classes
+        --reclassify-bucket <bucket-match> <class> <default-parent>
+        --reclassify-root <bucket-name> <class>
+     --set-subtree-class <bucket-name> <class>
+                           set class for all items beneath bucket-name
+     --compare <otherfile> compare two maps using --test parameters
   
   Options for the output stage
   
      [--outfn|-o outfile]
                            specify output for modified crush map
   
+ 
   $ crushtool --help-output
   data output from testing routine ...
              absolute_weights

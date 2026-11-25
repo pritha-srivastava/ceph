@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,22 +13,68 @@
  * 
  */
 
+#include "SessionMap.h"
+#include "Capability.h"
+#include "CDentry.h" // for struct ClientLease
+#include "CInode.h"
+#include "MDSContext.h" // for MDSIOContextBase
 #include "MDSRank.h"
 #include "MDCache.h"
 #include "Mutation.h"
-#include "SessionMap.h"
 #include "osdc/Filer.h"
+#include "osdc/Objecter.h"
 #include "common/Finisher.h"
 
 #include "common/config.h"
+#include "common/debug.h"
 #include "common/errno.h"
-#include "include/assert.h"
+#include "common/DecayCounter.h"
+#include "common/perf_counters.h"
+#include "common/strescape.h" // for get_trimmed_path()
+#include "include/ceph_assert.h"
 #include "include/stringify.h"
+
+#ifdef WITH_CRIMSON
+#include "crimson/common/perf_counters_collection.h"
+#else
+#include "common/perf_counters_collection.h"
+#endif
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_mds
 #undef dout_prefix
 #define dout_prefix *_dout << "mds." << rank << ".sessionmap "
+
+using namespace std;
+
+Session::Session(ConnectionRef con) :
+  item_session_list(this),
+  requests(member_offset(MDRequestImpl, item_session_request)),
+  recall_caps(g_conf().get_val<double>("mds_recall_warning_decay_rate")),
+  release_caps(g_conf().get_val<double>("mds_recall_warning_decay_rate")),
+  recall_caps_throttle(g_conf().get_val<double>("mds_recall_max_decay_rate")),
+  recall_caps_throttle2o(0.5),
+  session_cache_liveness(g_conf().get_val<double>("mds_session_cache_liveness_decay_rate")),
+  cap_acquisition(g_conf().get_val<double>("mds_session_cap_acquisition_decay_rate")),
+  birth_time(clock::now())
+{
+  set_connection(std::move(con));
+}
+
+void Session::touch_cap(Capability *cap) {
+  session_cache_liveness.hit(1.0);
+  caps.push_front(&cap->item_session_caps);
+}
+
+void Session::touch_cap_bottom(Capability *cap) {
+  session_cache_liveness.hit(1.0);
+  caps.push_back(&cap->item_session_caps);
+}
+
+void Session::touch_lease(ClientLease *r) {
+  session_cache_liveness.hit(1.0);
+  leases.push_back(&r->item_session_lease);
+}
 
 namespace {
 class SessionMapIOContext : public MDSIOContextBase
@@ -37,21 +84,52 @@ class SessionMapIOContext : public MDSIOContextBase
     MDSRank *get_mds() override {return sessionmap->mds;}
   public:
     explicit SessionMapIOContext(SessionMap *sessionmap_) : sessionmap(sessionmap_) {
-      assert(sessionmap != NULL);
+      ceph_assert(sessionmap != NULL);
     }
 };
 };
+
+SessionMap::SessionMap(MDSRank *m)
+  : mds(m),
+    mds_session_metadata_threshold(g_conf().get_val<Option::size_t>("mds_session_metadata_threshold")) {
+}
+
+SessionMap::~SessionMap()
+{
+  for (auto p : by_state)
+      delete p.second;
+
+  if (logger) {
+    g_ceph_context->get_perfcounters_collection()->remove(logger);
+  }
+
+  delete logger;
+}
 
 void SessionMap::register_perfcounters()
 {
   PerfCountersBuilder plb(g_ceph_context, "mds_sessions",
       l_mdssm_first, l_mdssm_last);
+
   plb.add_u64(l_mdssm_session_count, "session_count",
-      "Session count");
+      "Session count", "sess", PerfCountersBuilder::PRIO_INTERESTING);
+
+  plb.set_prio_default(PerfCountersBuilder::PRIO_USEFUL);
   plb.add_u64_counter(l_mdssm_session_add, "session_add",
       "Sessions added");
   plb.add_u64_counter(l_mdssm_session_remove, "session_remove",
       "Sessions removed");
+  plb.add_u64(l_mdssm_session_open, "sessions_open",
+              "Sessions currently open");
+  plb.add_u64(l_mdssm_session_stale, "sessions_stale",
+              "Sessions currently stale");
+  plb.add_u64(l_mdssm_total_load, "total_load", "Total Load");
+  plb.add_u64(l_mdssm_avg_load, "average_load", "Average Load");
+  plb.add_u64(l_mdssm_avg_session_uptime, "avg_session_uptime",
+               "Average session uptime");
+  plb.add_u64(l_mdssm_metadata_threshold_sessions_evicted, "mdthresh_evicted",
+	      "Sessions evicted on reaching metadata threshold");
+
   logger = plb.create_perf_counters();
   g_ceph_context->get_perfcounters_collection()->add(logger);
 }
@@ -59,14 +137,12 @@ void SessionMap::register_perfcounters()
 void SessionMap::dump()
 {
   dout(10) << "dump" << dendl;
-  for (ceph::unordered_map<entity_name_t,Session*>::iterator p = session_map.begin();
-       p != session_map.end();
-       ++p) 
+  for (auto p = session_map.begin(); p != session_map.end(); ++p) 
     dout(10) << p->first << " " << p->second
 	     << " state " << p->second->get_state_name()
 	     << " completed " << p->second->info.completed_requests
-	     << " prealloc_inos " << p->second->info.prealloc_inos
-	     << " used_inos " << p->second->info.used_inos
+	     << " free_prealloc_inos " << p->second->free_prealloc_inos
+	     << " delegated_inos " << p->second->delegated_inos
 	     << dendl;
 }
 
@@ -90,12 +166,17 @@ public:
   int values_r;  //< Return value from OMAP value read
   bufferlist header_bl;
   std::map<std::string, bufferlist> session_vals;
+  bool more_session_vals = false;
 
   C_IO_SM_Load(SessionMap *cm, const bool f)
     : SessionMapIOContext(cm), first(f), header_r(0), values_r(0) {}
 
   void finish(int r) override {
-    sessionmap->_load_finish(r, header_r, values_r, first, header_bl, session_vals);
+    sessionmap->_load_finish(r, header_r, values_r, first, header_bl, session_vals,
+      more_session_vals);
+  }
+  void print(ostream& out) const override {
+    out << "session_load";
   }
 };
 }
@@ -107,9 +188,9 @@ public:
 void SessionMapStore::decode_header(
       bufferlist &header_bl)
 {
-  bufferlist::iterator q = header_bl.begin();
+  auto q = header_bl.cbegin();
   DECODE_START(1, q)
-  ::decode(version, q);
+  decode(version, q);
   DECODE_FINISH(q);
 }
 
@@ -117,7 +198,7 @@ void SessionMapStore::encode_header(
     bufferlist *header_bl)
 {
   ENCODE_START(1, 1, *header_bl);
-  ::encode(version, *header_bl);
+  encode(version, *header_bl);
   ENCODE_FINISH(*header_bl);
 }
 
@@ -139,9 +220,11 @@ void SessionMapStore::decode_values(std::map<std::string, bufferlist> &session_v
     }
 
     Session *s = get_or_add_session(inst);
-    if (s->is_closed())
+    if (s->is_closed()) {
       s->set_state(Session::STATE_OPEN);
-    bufferlist::iterator q = i->second.begin();
+      s->set_load_avg_decay_rate(decay_rate);
+    }
+    auto q = i->second.cbegin();
     s->decode(q);
   }
 }
@@ -155,7 +238,8 @@ void SessionMap::_load_finish(
     int values_r,
     bool first,
     bufferlist &header_bl,
-    std::map<std::string, bufferlist> &session_vals)
+    std::map<std::string, bufferlist> &session_vals,
+    bool more_session_vals)
 {
   if (operation_r < 0) {
     derr << "_load_finish got " << cpp_strerror(operation_r) << dendl;
@@ -210,25 +294,23 @@ void SessionMap::_load_finish(
     ceph_abort();  // Should be unreachable because damaged() calls respawn()
   }
 
-  if (session_vals.size() == g_conf->mds_sessionmap_keys_per_op) {
+  if (more_session_vals) {
     // Issue another read if we're not at the end of the omap
     const std::string last_key = session_vals.rbegin()->first;
     dout(10) << __func__ << ": continue omap load from '"
              << last_key << "'" << dendl;
     object_t oid = get_object_name();
-    object_locator_t oloc(mds->mdsmap->get_metadata_pool());
+    object_locator_t oloc(mds->get_metadata_pool());
     C_IO_SM_Load *c = new C_IO_SM_Load(this, false);
     ObjectOperation op;
-#warning fixme use the pmore arg
-    op.omap_get_vals(last_key, "", g_conf->mds_sessionmap_keys_per_op,
-		     &c->session_vals, nullptr, &c->values_r);
+    op.omap_get_vals(last_key, "", g_conf()->mds_sessionmap_keys_per_op,
+		     &c->session_vals, &c->more_session_vals, &c->values_r);
     mds->objecter->read(oid, oloc, op, CEPH_NOSNAP, NULL, 0,
         new C_OnFinisher(c, mds->finisher));
   } else {
     // I/O is complete.  Update `by_state`
     dout(10) << __func__ << ": omap load complete" << dendl;
-    for (ceph::unordered_map<entity_name_t, Session*>::iterator i = session_map.begin();
-         i != session_map.end(); ++i) {
+    for (auto i = session_map.begin(); i != session_map.end(); ++i) {
       Session *s = i->second;
       auto by_state_entry = by_state.find(s->get_state());
       if (by_state_entry == by_state.end())
@@ -250,7 +332,7 @@ void SessionMap::_load_finish(
  * Populate session state from OMAP records in this
  * rank's sessionmap object.
  */
-void SessionMap::load(MDSInternalContextBase *onload)
+void SessionMap::load(MDSContext *onload)
 {
   dout(10) << "load" << dendl;
 
@@ -259,13 +341,12 @@ void SessionMap::load(MDSInternalContextBase *onload)
   
   C_IO_SM_Load *c = new C_IO_SM_Load(this, true);
   object_t oid = get_object_name();
-  object_locator_t oloc(mds->mdsmap->get_metadata_pool());
+  object_locator_t oloc(mds->get_metadata_pool());
 
   ObjectOperation op;
   op.omap_get_header(&c->header_bl, &c->header_r);
-#warning use the pmore arg
-  op.omap_get_vals("", "", g_conf->mds_sessionmap_keys_per_op,
-		   &c->session_vals, nullptr, &c->values_r);
+  op.omap_get_vals("", "", g_conf()->mds_sessionmap_keys_per_op,
+		   &c->session_vals, &c->more_session_vals, &c->values_r);
 
   mds->objecter->read(oid, oloc, op, CEPH_NOSNAP, NULL, 0, new C_OnFinisher(c, mds->finisher));
 }
@@ -277,6 +358,9 @@ public:
   explicit C_IO_SM_LoadLegacy(SessionMap *cm) : SessionMapIOContext(cm) {}
   void finish(int r) override {
     sessionmap->_load_legacy_finish(r, bl);
+  }
+  void print(ostream& out) const override {
+    out << "session_load_legacy";
   }
 };
 }
@@ -294,7 +378,7 @@ void SessionMap::load_legacy()
 
   C_IO_SM_LoadLegacy *c = new C_IO_SM_LoadLegacy(this);
   object_t oid = get_object_name();
-  object_locator_t oloc(mds->mdsmap->get_metadata_pool());
+  object_locator_t oloc(mds->get_metadata_pool());
 
   mds->objecter->read_full(oid, oloc, CEPH_NOSNAP, &c->bl, 0,
 			   new C_OnFinisher(c, mds->finisher));
@@ -302,10 +386,10 @@ void SessionMap::load_legacy()
 
 void SessionMap::_load_legacy_finish(int r, bufferlist &bl)
 { 
-  bufferlist::iterator blp = bl.begin();
+  auto blp = bl.cbegin();
   if (r < 0) {
     derr << "_load_finish got " << cpp_strerror(r) << dendl;
-    assert(0 == "failed to load sessionmap");
+    ceph_abort_msg("failed to load sessionmap");
   }
   dump();
   decode_legacy(blp);  // note: this sets last_cap_renew = now()
@@ -318,8 +402,7 @@ void SessionMap::_load_legacy_finish(int r, bufferlist &bl)
 
   // Mark all sessions dirty, so that on next save() we will write
   // a complete OMAP version of the data loaded from the legacy format
-  for (ceph::unordered_map<entity_name_t, Session*>::iterator i = session_map.begin();
-       i != session_map.end(); ++i) {
+  for (auto i = session_map.begin(); i != session_map.end(); ++i) {
     // Don't use mark_dirty because on this occasion we want to ignore the
     // keys_per_op limit and do one big write (upgrade must be atomic)
     dirty_sessions.insert(i->first);
@@ -339,18 +422,29 @@ class C_IO_SM_Save : public SessionMapIOContext {
 public:
   C_IO_SM_Save(SessionMap *cm, version_t v) : SessionMapIOContext(cm), version(v) {}
   void finish(int r) override {
-    assert(r == 0);
-    sessionmap->_save_finish(version);
+    if (r != 0) {
+      get_mds()->handle_write_error(r);
+    } else {
+      sessionmap->_save_finish(version);
+    }
+  }
+  void print(ostream& out) const override {
+    out << "session_save";
   }
 };
 }
 
-void SessionMap::save(MDSInternalContextBase *onsave, version_t needv)
+bool SessionMap::validate_and_encode_session(MDSRank *mds, Session *session, bufferlist& bl) {
+  session->info.encode(bl, mds->mdsmap->get_up_features());
+  return bl.length() < mds_session_metadata_threshold;
+}
+
+void SessionMap::save(MDSContext *onsave, version_t needv)
 {
   dout(10) << __func__ << ": needv " << needv << ", v " << version << dendl;
  
   if (needv && committing >= needv) {
-    assert(committing > committed);
+    ceph_assert(committing > committed);
     commit_waiters[committing].push_back(onsave);
     return;
   }
@@ -360,7 +454,7 @@ void SessionMap::save(MDSInternalContextBase *onsave, version_t needv)
   committing = version;
   SnapContext snapc;
   object_t oid = get_object_name();
-  object_locator_t oloc(mds->mdsmap->get_metadata_pool());
+  object_locator_t oloc(mds->get_metadata_pool());
 
   ObjectOperation op;
 
@@ -380,6 +474,7 @@ void SessionMap::save(MDSInternalContextBase *onsave, version_t needv)
 
   dout(20) << " updating keys:" << dendl;
   map<string, bufferlist> to_set;
+  std::set<entity_name_t> to_blocklist;
   for(std::set<entity_name_t>::iterator i = dirty_sessions.begin();
       i != dirty_sessions.end(); ++i) {
     const entity_name_t name = *i;
@@ -390,16 +485,22 @@ void SessionMap::save(MDSInternalContextBase *onsave, version_t needv)
 	session->is_stale() ||
 	session->is_killing()) {
       dout(20) << "  " << name << dendl;
-      // Serialize K
-      std::ostringstream k;
-      k << name;
 
       // Serialize V
       bufferlist bl;
-      session->info.encode(bl, mds->mdsmap->get_up_features());
+      if (!validate_and_encode_session(mds, session, bl)) {
+	derr << __func__ << ": session (" << name << ") exceeds"
+	     << " sesion metadata threshold - blocklisting" << dendl;
+	to_blocklist.emplace(name);
+	continue;
+      }
+
+      // Serialize K
+      CachedStackStringStream css;
+      *css << name;
 
       // Add to RADOS op
-      to_set[k.str()] = bl;
+      to_set[std::string(css->strv())] = bl;
 
       session->clear_dirty_completed_requests();
     } else {
@@ -415,9 +516,9 @@ void SessionMap::save(MDSInternalContextBase *onsave, version_t needv)
   for(std::set<entity_name_t>::const_iterator i = null_sessions.begin();
       i != null_sessions.end(); ++i) {
     dout(20) << "  " << *i << dendl;
-    std::ostringstream k;
-    k << *i;
-    to_remove.insert(k.str());
+    CachedStackStringStream css;
+    *css << *i;
+    to_remove.insert(css->str());
   }
   if (!to_remove.empty()) {
     op.omap_rm_keys(to_remove);
@@ -431,6 +532,8 @@ void SessionMap::save(MDSInternalContextBase *onsave, version_t needv)
 			0,
 			new C_OnFinisher(new C_IO_SM_Save(this, version),
 					 mds->finisher));
+  apply_blocklist(to_blocklist);
+  logger->inc(l_mdssm_metadata_threshold_sessions_evicted, to_blocklist.size());
 }
 
 void SessionMap::_save_finish(version_t v)
@@ -446,14 +549,13 @@ void SessionMap::_save_finish(version_t v)
 /**
  * Deserialize sessions, and update by_state index
  */
-void SessionMap::decode_legacy(bufferlist::iterator &p)
+void SessionMap::decode_legacy(bufferlist::const_iterator &p)
 {
   // Populate `sessions`
   SessionMapStore::decode_legacy(p);
 
   // Update `by_state`
-  for (ceph::unordered_map<entity_name_t, Session*>::iterator i = session_map.begin();
-       i != session_map.end(); ++i) {
+  for (auto i = session_map.begin(); i != session_map.end(); ++i) {
     Session *s = i->second;
     auto by_state_entry = by_state.find(s->get_state());
     if (by_state_entry == by_state.end())
@@ -470,27 +572,41 @@ uint64_t SessionMap::set_state(Session *session, int s) {
     if (by_state_entry == by_state.end())
       by_state_entry = by_state.emplace(s, new xlist<Session*>).first;
     by_state_entry->second->push_back(&session->item_session_list);
+
+    if (session->is_open() || session->is_stale()) {
+      session->set_load_avg_decay_rate(decay_rate);
+    }
+
+    // refresh number of sessions for states which have perf
+    // couters associated
+    logger->set(l_mdssm_session_open,
+                get_session_count_in_state(Session::STATE_OPEN));
+    logger->set(l_mdssm_session_stale,
+                get_session_count_in_state(Session::STATE_STALE));
   }
+
   return session->get_state_seq();
 }
 
-void SessionMapStore::decode_legacy(bufferlist::iterator& p)
+void SessionMapStore::decode_legacy(bufferlist::const_iterator& p)
 {
-  utime_t now = ceph_clock_now();
+  auto now = clock::now();
   uint64_t pre;
-  ::decode(pre, p);
+  decode(pre, p);
   if (pre == (uint64_t)-1) {
     DECODE_START_LEGACY_COMPAT_LEN(3, 3, 3, p);
-    assert(struct_v >= 2);
+    ceph_assert(struct_v >= 2);
     
-    ::decode(version, p);
+    decode(version, p);
     
     while (!p.end()) {
       entity_inst_t inst;
-      ::decode(inst.name, p);
+      decode(inst.name, p);
       Session *s = get_or_add_session(inst);
-      if (s->is_closed())
+      if (s->is_closed()) {
         s->set_state(Session::STATE_OPEN);
+        s->set_load_avg_decay_rate(decay_rate);
+      }
       s->decode(p);
     }
 
@@ -501,52 +617,112 @@ void SessionMapStore::decode_legacy(bufferlist::iterator& p)
 
     // this is a meaningless upper bound.  can be ignored.
     __u32 n;
-    ::decode(n, p);
+    decode(n, p);
     
     while (n-- && !p.end()) {
-      bufferlist::iterator p2 = p;
-      Session *s = new Session;
+      auto p2 = p;
+      Session *s = new Session(ConnectionRef());
       s->info.decode(p);
-      if (session_map.count(s->info.inst.name)) {
-	// eager client connected too fast!  aie.
-	dout(10) << " already had session for " << s->info.inst.name << ", recovering" << dendl;
-	entity_name_t n = s->info.inst.name;
-	delete s;
-	s = session_map[n];
-	p = p2;
-	s->info.decode(p);
-      } else {
-	session_map[s->info.inst.name] = s;
+      {
+        auto& name = s->info.inst.name;
+        auto it = session_map.find(name);
+        if (it != session_map.end()) {
+	  // eager client connected too fast!  aie.
+	  dout(10) << " already had session for " << name << ", recovering" << dendl;
+	  delete s;
+	  s = it->second;
+	  p = p2;
+	  s->info.decode(p);
+        } else {
+	  it->second = s;
+        }
       }
       s->set_state(Session::STATE_OPEN);
+      s->set_load_avg_decay_rate(decay_rate);
       s->last_cap_renew = now;
     }
   }
 }
 
+void Session::dump(Formatter *f, bool cap_dump) const
+{
+  f->dump_int("id", info.inst.name.num());
+  f->dump_object("auth_name", info.auth_name);
+  f->dump_object("entity", info.inst);
+  f->dump_string("state", get_state_name());
+  f->dump_int("num_leases", leases.size());
+  f->dump_int("num_caps", caps.size());
+  if (cap_dump) {
+    f->open_array_section("caps");
+    for (const auto& cap : caps) {
+      f->dump_object("cap", *cap);
+    }
+    f->close_section();
+  }
+  if (is_open() || is_stale()) {
+    f->dump_unsigned("request_load_avg", get_load_avg());
+  }
+  f->dump_float("uptime", get_session_uptime());
+  f->dump_unsigned("requests_in_flight", get_request_count());
+  f->dump_unsigned("num_completed_requests", get_num_completed_requests());
+  f->dump_unsigned("num_completed_flushes", get_num_completed_flushes());
+  f->dump_bool("reconnecting", reconnecting);
+  f->dump_int("importing_count", importing_count);
+  f->dump_object("recall_caps", recall_caps);
+  f->dump_object("release_caps", release_caps);
+  f->dump_object("recall_caps_throttle", recall_caps_throttle);
+  f->dump_object("recall_caps_throttle2o", recall_caps_throttle2o);
+  f->dump_object("session_cache_liveness", session_cache_liveness);
+  f->dump_object("cap_acquisition", cap_acquisition);
+
+  f->dump_unsigned("last_trim_completed_requests_tid", last_trim_completed_requests_tid);
+  f->dump_unsigned("last_trim_completed_flushes_tid", last_trim_completed_flushes_tid);
+
+  f->open_array_section("delegated_inos");
+  for (const auto& [start, len] : delegated_inos) {
+    f->open_object_section("ino_range");
+    f->dump_stream("start") << start;
+    f->dump_unsigned("length", len);
+    f->close_section();
+  }
+  f->close_section();
+
+  info.dump(f);
+}
+
 void SessionMapStore::dump(Formatter *f) const
 {
-  f->open_array_section("Sessions");
-  for (ceph::unordered_map<entity_name_t,Session*>::const_iterator p = session_map.begin();
-       p != session_map.end();
-       ++p)  {
-    f->open_object_section("Session");
-    f->open_object_section("entity name");
-    p->first.dump(f);
-    f->close_section(); // entity name
-    f->dump_string("state", p->second->get_state_name());
-    f->open_object_section("Session info");
-    p->second->info.dump(f);
-    f->close_section(); // Session info
-    f->close_section(); // Session
+  f->open_array_section("sessions");
+  for (const auto& p : session_map) {
+    f->dump_object("session", *p.second);
   }
   f->close_section(); // Sessions
 }
 
-void SessionMapStore::generate_test_instances(list<SessionMapStore*>& ls)
+Session* SessionMapStore::get_or_add_session(const entity_inst_t& i) {
+  Session *s;
+  auto session_map_entry = session_map.find(i.name);
+  if (session_map_entry != session_map.end()) {
+    s = session_map_entry->second;
+  } else {
+    s = session_map[i.name] = new Session(ConnectionRef());
+    s->info.inst = i;
+    s->last_cap_renew = Session::clock::now();
+    if (logger) {
+      logger->set(l_mdssm_session_count, session_map.size());
+      logger->inc(l_mdssm_session_add);
+    }
+  }
+
+  return s;
+}
+
+std::list<SessionMapStore> SessionMapStore::generate_test_instances()
 {
+  std::list<SessionMapStore> ls;
   // pretty boring for now
-  ls.push_back(new SessionMapStore());
+  ls.push_back(SessionMapStore());
+  return ls;
 }
 
 void SessionMap::wipe()
@@ -565,12 +741,11 @@ void SessionMap::wipe()
 
 void SessionMap::wipe_ino_prealloc()
 {
-  for (ceph::unordered_map<entity_name_t,Session*>::iterator p = session_map.begin(); 
-       p != session_map.end(); 
-       ++p) {
+  for (auto p = session_map.begin();  p != session_map.end();  ++p) {
     p->second->pending_prealloc_inos.clear();
+    p->second->free_prealloc_inos.clear();
+    p->second->delegated_inos.clear();
     p->second->info.prealloc_inos.clear();
-    p->second->info.used_inos.clear();
   }
   projected = ++version;
 }
@@ -579,13 +754,15 @@ void SessionMap::add_session(Session *s)
 {
   dout(10) << __func__ << " s=" << s << " name=" << s->info.inst.name << dendl;
 
-  assert(session_map.count(s->info.inst.name) == 0);
+  ceph_assert(session_map.count(s->info.inst.name) == 0);
   session_map[s->info.inst.name] = s;
   auto by_state_entry = by_state.find(s->state);
   if (by_state_entry == by_state.end())
     by_state_entry = by_state.emplace(s->state, new xlist<Session*>).first;
   by_state_entry->second->push_back(&s->item_session_list);
   s->get();
+
+  update_average_birth_time(*s);
 
   logger->set(l_mdssm_session_count, session_map.size());
   logger->inc(l_mdssm_session_add);
@@ -595,8 +772,11 @@ void SessionMap::remove_session(Session *s)
 {
   dout(10) << __func__ << " s=" << s << " name=" << s->info.inst.name << dendl;
 
+  update_average_birth_time(*s, false);
+
   s->trim_completed_requests(0);
   s->item_session_list.remove_myself();
+  broken_root_squash_clients.erase(s);
   session_map.erase(s->info.inst.name);
   dirty_sessions.erase(s->info.inst.name);
   null_sessions.insert(s->info.inst.name);
@@ -612,34 +792,39 @@ void SessionMap::touch_session(Session *session)
 
   // Move to the back of the session list for this state (should
   // already be on a list courtesy of add_session and set_state)
-  assert(session->item_session_list.is_on_list());
+  ceph_assert(session->item_session_list.is_on_list());
   auto by_state_entry = by_state.find(session->state);
   if (by_state_entry == by_state.end())
     by_state_entry = by_state.emplace(session->state,
 				      new xlist<Session*>).first;
   by_state_entry->second->push_back(&session->item_session_list);
 
-  session->last_cap_renew = ceph_clock_now();
+  session->last_cap_renew = clock::now();
 }
 
-void SessionMap::_mark_dirty(Session *s)
+void SessionMap::_mark_dirty(Session *s, bool may_save)
 {
-  if (dirty_sessions.size() >= g_conf->mds_sessionmap_keys_per_op) {
+  if (dirty_sessions.count(s->info.inst.name))
+    return;
+
+  if (may_save &&
+      dirty_sessions.size() >= g_conf()->mds_sessionmap_keys_per_op) {
     // Pre-empt the usual save() call from journal segment trim, in
     // order to avoid building up an oversized OMAP update operation
     // from too many sessions modified at once
     save(new C_MDSInternalNoop, version);
   }
 
+  null_sessions.erase(s->info.inst.name);
   dirty_sessions.insert(s->info.inst.name);
 }
 
-void SessionMap::mark_dirty(Session *s)
+void SessionMap::mark_dirty(Session *s, bool may_save)
 {
   dout(20) << __func__ << " s=" << s << " name=" << s->info.inst.name
     << " v=" << version << dendl;
 
-  _mark_dirty(s);
+  _mark_dirty(s, may_save);
   version++;
   s->pop_pv(version);
 }
@@ -649,7 +834,7 @@ void SessionMap::replay_dirty_session(Session *s)
   dout(20) << __func__ << " s=" << s << " name=" << s->info.inst.name
     << " v=" << version << dendl;
 
-  _mark_dirty(s);
+  _mark_dirty(s, false);
 
   replay_advance_version();
 }
@@ -658,6 +843,46 @@ void SessionMap::replay_advance_version()
 {
   version++;
   projected = version;
+}
+
+void SessionMap::replay_open_sessions(version_t event_cmapv,
+			    map<client_t,entity_inst_t>& client_map,
+			    map<client_t,client_metadata_t>& client_metadata_map)
+{
+  unsigned already_saved;
+
+  if (version + client_map.size() < event_cmapv)
+    goto bad;
+
+  // Server::finish_force_open_sessions() marks sessions dirty one by one.
+  // Marking a session dirty may flush all existing dirty sessions. So it's
+  // possible that some sessions are already saved in sessionmap.
+  already_saved = client_map.size() - (event_cmapv - version);
+  for (const auto& p : client_map) {
+    Session *s = get_or_add_session(p.second);
+    auto q = client_metadata_map.find(p.first);
+    if (q != client_metadata_map.end())
+      s->info.client_metadata.merge(q->second);
+
+    if (already_saved > 0) {
+      if (s->is_closed())
+	goto bad;
+
+      --already_saved;
+      continue;
+    }
+
+    set_state(s, Session::STATE_OPEN);
+    replay_dirty_session(s);
+  }
+  return;
+
+bad:
+  mds->clog->error() << "error replaying open sessions(" << client_map.size()
+		     << ") sessionmap v " << event_cmapv << " table " << version;
+  ceph_assert(g_conf()->mds_wipe_sessions);
+  mds->sessionmap.wipe();
+  mds->sessionmap.set_version(event_cmapv);
 }
 
 version_t SessionMap::mark_projected(Session *s)
@@ -671,9 +896,9 @@ version_t SessionMap::mark_projected(Session *s)
 
 namespace {
 class C_IO_SM_Save_One : public SessionMapIOContext {
-  MDSInternalContextBase *on_safe;
+  MDSContext *on_safe;
 public:
-  C_IO_SM_Save_One(SessionMap *cm, MDSInternalContextBase *on_safe_)
+  C_IO_SM_Save_One(SessionMap *cm, MDSContext *on_safe_)
     : SessionMapIOContext(cm), on_safe(on_safe_) {}
   void finish(int r) override {
     if (r != 0) {
@@ -682,6 +907,9 @@ public:
       on_safe->complete(r);
     }
   }
+  void print(ostream& out) const override {
+    out << "session_save_one";
+  }
 };
 }
 
@@ -689,9 +917,10 @@ public:
 void SessionMap::save_if_dirty(const std::set<entity_name_t> &tgt_sessions,
                                MDSGatherBuilder *gather_bld)
 {
-  assert(gather_bld != NULL);
+  ceph_assert(gather_bld != NULL);
 
-  std::vector<entity_name_t> write_sessions;
+  std::set<entity_name_t> to_blocklist;
+  std::map<entity_name_t, bufferlist> write_sessions;
 
   // Decide which sessions require a write
   for (std::set<entity_name_t>::iterator i = tgt_sessions.begin();
@@ -716,58 +945,63 @@ void SessionMap::save_if_dirty(const std::set<entity_name_t> &tgt_sessions,
       // need to pre-empt that.
       continue;
     }
+
+    // Serialize V
+    bufferlist bl;
+    if (!validate_and_encode_session(mds, session, bl)) {
+      derr << __func__ << ": session (" << session_id << ") exceeds"
+	   << " sesion metadata threshold - blocklisting" << dendl;
+      to_blocklist.emplace(session_id);
+      continue;
+    }
+
     // Okay, passed all our checks, now we write
     // this session out.  The version we write
     // into the OMAP may now be higher-versioned
     // than the version in the header, but that's
     // okay because it's never a problem to have
     // an overly-fresh copy of a session.
-    write_sessions.push_back(*i);
+    write_sessions.emplace(session_id, std::move(bl));
+    session->clear_dirty_completed_requests();
   }
 
   dout(4) << __func__ << ": writing " << write_sessions.size() << dendl;
 
   // Batch writes into mds_sessionmap_keys_per_op
-  const uint32_t kpo = g_conf->mds_sessionmap_keys_per_op;
+  const uint32_t kpo = g_conf()->mds_sessionmap_keys_per_op;
   map<string, bufferlist> to_set;
-  for (uint32_t i = 0; i < write_sessions.size(); ++i) {
-    // Start a new write transaction?
-    if (i % g_conf->mds_sessionmap_keys_per_op == 0) {
-      to_set.clear();
-    }
 
-    const entity_name_t &session_id = write_sessions[i];
-    Session *session = session_map[session_id];
-    session->clear_dirty_completed_requests();
-
+  uint32_t i = 0;
+  for (auto &[session_id, bl] : write_sessions) {
     // Serialize K
-    std::ostringstream k;
-    k << session_id;
-
-    // Serialize V
-    bufferlist bl;
-    session->info.encode(bl, mds->mdsmap->get_up_features());
+    CachedStackStringStream css;
+    *css << session_id;
 
     // Add to RADOS op
-    to_set[k.str()] = bl;
+    to_set[css->str()] = std::move(bl);
 
     // Complete this write transaction?
     if (i == write_sessions.size() - 1
         || i % kpo == kpo - 1) {
       ObjectOperation op;
       op.omap_set(to_set);
+      to_set.clear(); // clear to start a new transaction      
 
       SnapContext snapc;
       object_t oid = get_object_name();
-      object_locator_t oloc(mds->mdsmap->get_metadata_pool());
-      MDSInternalContextBase *on_safe = gather_bld->new_sub();
+      object_locator_t oloc(mds->get_metadata_pool());
+      MDSContext *on_safe = gather_bld->new_sub();
       mds->objecter->mutate(oid, oloc, op, snapc,
-			    ceph::real_clock::now(),
-			    0, new C_OnFinisher(
+			    ceph::real_clock::now(), 0,
+			    new C_OnFinisher(
 			      new C_IO_SM_Save_One(this, on_safe),
 			      mds->finisher));
     }
+    ++i;
   }
+
+  apply_blocklist(to_blocklist);
+  logger->inc(l_mdssm_metadata_threshold_sessions_evicted, to_blocklist.size());
 }
 
 // =================
@@ -780,20 +1014,13 @@ void SessionMap::save_if_dirty(const std::set<entity_name_t> &tgt_sessions,
  * Calculate the length of the `requests` member list,
  * because elist does not have a size() method.
  *
- * O(N) runtime.  This would be const, but elist doesn't
- * have const iterators.
+ * O(N) runtime.
  */
-size_t Session::get_request_count()
+size_t Session::get_request_count() const
 {
   size_t result = 0;
-
-  elist<MDRequestImpl*>::iterator p = requests.begin(
-      member_offset(MDRequestImpl, item_session_request));
-  while (!p.end()) {
+  for (auto p = requests.begin(); !p.end(); ++p)
     ++result;
-    ++p;
-  }
-
   return result;
 }
 
@@ -805,11 +1032,8 @@ size_t Session::get_request_count()
  */
 void Session::notify_cap_release(size_t n_caps)
 {
-  if (!recalled_at.is_zero()) {
-    recall_release_count += n_caps;
-    if (recall_release_count >= recall_count)
-      clear_recalled_at();
-  }
+  recall_caps.hit(-(double)n_caps);
+  release_caps.hit(n_caps);
 }
 
 /**
@@ -818,32 +1042,27 @@ void Session::notify_cap_release(size_t n_caps)
  * in order to generate health metrics if the session doesn't see
  * a commensurate number of calls to ::notify_cap_release
  */
-void Session::notify_recall_sent(int const new_limit)
+uint64_t Session::notify_recall_sent(size_t new_limit)
 {
-  if (recalled_at.is_zero()) {
-    // Entering recall phase, set up counters so we can later
-    // judge whether the client has respected the recall request
-    recalled_at = last_recall_sent = ceph_clock_now();
-    assert (new_limit < caps.size());  // Behaviour of Server::recall_client_state
-    recall_count = caps.size() - new_limit;
-    recall_release_count = 0;
+  const auto num_caps = caps.size();
+  ceph_assert(new_limit < num_caps);  // Behaviour of Server::recall_client_state
+  const auto count = num_caps-new_limit;
+  uint64_t new_change;
+  if (recall_limit != new_limit) {
+    new_change = count;
   } else {
-    last_recall_sent = ceph_clock_now();
+    new_change = 0; /* no change! */
   }
-}
 
-void Session::clear_recalled_at()
-{
-  recalled_at = last_recall_sent = utime_t();
-  recall_count = 0;
-  recall_release_count = 0;
-}
-
-void Session::set_client_metadata(map<string, string> const &meta)
-{
-  info.client_metadata = meta;
-
-  _update_human_name();
+  /* Always hit the session counter as a RECALL message is still sent to the
+   * client and we do not want the MDS to burn its global counter tokens on a
+   * session that is not releasing caps (i.e. allow the session counter to
+   * throttle future RECALL messages).
+   */
+  recall_caps_throttle.hit(count);
+  recall_caps_throttle2o.hit(count);
+  recall_caps.hit(count);
+  return new_change;
 }
 
 /**
@@ -878,61 +1097,202 @@ void Session::_update_human_name()
   }
 }
 
-void Session::decode(bufferlist::iterator &p)
+void Session::decode(bufferlist::const_iterator &p)
 {
   info.decode(p);
+
+  free_prealloc_inos = info.prealloc_inos;
 
   _update_human_name();
 }
 
-int Session::check_access(CInode *in, unsigned mask,
+int Session::check_access(std::string_view fs_name, CInode *in, unsigned mask,
 			  int caller_uid, int caller_gid,
 			  const vector<uint64_t> *caller_gid_list,
-			  int new_uid, int new_gid)
+			  int new_uid, int new_gid,
+                          bool check_quarantine_access)
 {
+  dout(20) << __func__ << ": " << *in
+           << " caller_uid=" << caller_uid
+           << " caller_gid=" << caller_gid
+           << " caller_gid_list=" << *caller_gid_list
+           << dendl;
+
   string path;
-  CInode *diri = NULL;
-  if (!in->is_base())
-    diri = in->get_projected_parent_dn()->get_dir()->get_inode();
-  if (diri && diri->is_stray()){
-    path = in->get_projected_inode()->stray_prior_path;
+  if (!in->is_base()) {
+    auto* dn = in->get_projected_parent_dn();
+    auto* pdiri = dn->get_dir()->get_inode();
+    if (pdiri) {
+      if (pdiri->is_stray()) {
+        path = in->get_projected_inode()->stray_prior_path;
+      } else if (!pdiri->is_base()) {
+        /* is the pdiri in the stray (is this inode in a snapshotted deleted directory?) */
+        auto* gpdiri = pdiri->get_projected_parent_dn()->get_dir()->get_inode();
+        /* stray_prior_path will not necessarily be part of the inode because
+         * it's set on unlink but that happens after the snapshot, naturally.
+         * We need to construct it manually.
+         */
+        if (gpdiri->is_stray()) {
+          /* just check access on the parent dir */
+          path = pdiri->get_projected_inode()->stray_prior_path;
+        }
+      }
+    }
+  }
+
+  string trimmed_path = "";
+  if (!path.empty()) {
     dout(20) << __func__ << " stray_prior_path " << path << dendl;
   } else {
     in->make_path_string(path, true);
-    dout(20) << __func__ << " path " << path << dendl;
+    /* Log only 10 final components fo the path to since logging entire
+     * path is not useful and also reduces readability. */
+    dout(20) << __func__ << " path " << get_trimmed_path_str(path) << dendl;
   }
   if (path.length())
     path = path.substr(1);    // drop leading /
 
-  if (in->inode.is_dir() &&
-      in->inode.has_layout() &&
-      in->inode.layout.pool_ns.length() &&
+  const auto& inode = in->get_inode();
+  if (in->is_dir() &&
+      inode->has_layout() &&
+      inode->layout.pool_ns.length() &&
       !connection->has_feature(CEPH_FEATURE_FS_FILE_LAYOUT_V2)) {
     dout(10) << __func__ << " client doesn't support FS_FILE_LAYOUT_V2" << dendl;
     return -EIO;
   }
 
-  if (!auth_caps.is_capable(path, in->inode.uid, in->inode.gid, in->inode.mode,
+  if (!auth_caps.is_capable(fs_name, path, inode->uid, inode->gid, inode->mode,
 			    caller_uid, caller_gid, caller_gid_list, mask,
-			    new_uid, new_gid)) {
+			    new_uid, new_gid, info.inst.addr, trimmed_path,
+                            check_quarantine_access)) {
     return -EACCES;
   }
   return 0;
 }
 
+// track total and per session load
+void SessionMap::hit_session(Session *session) {
+  uint64_t sessions = get_session_count_in_state(Session::STATE_OPENING) +
+                      get_session_count_in_state(Session::STATE_OPEN) +
+                      get_session_count_in_state(Session::STATE_STALE) +
+                      get_session_count_in_state(Session::STATE_CLOSING) +
+                      get_session_count_in_state(Session::STATE_KILLING);
+  ceph_assert(sessions != 0);
+
+  double total_load = total_load_avg.hit();
+  double avg_load = total_load / sessions;
+
+  logger->set(l_mdssm_total_load, (uint64_t)total_load);
+  logger->set(l_mdssm_avg_load, (uint64_t)avg_load);
+
+  session->hit_session();
+}
+
+void SessionMap::handle_conf_change(const std::set<std::string>& changed)
+{
+  auto apply_to_open_sessions = [this](auto f) {
+    if (auto it = by_state.find(Session::STATE_OPEN); it != by_state.end()) {
+      for (const auto &session : *(it->second)) {
+        f(session);
+      }
+    }
+    if (auto it = by_state.find(Session::STATE_STALE); it != by_state.end()) {
+      for (const auto &session : *(it->second)) {
+        f(session);
+      }
+    }
+  };
+
+  if (changed.count("mds_request_load_average_decay_rate")) {
+    auto d = g_conf().get_val<double>("mds_request_load_average_decay_rate");
+
+    decay_rate = d;
+    total_load_avg = DecayCounter(d);
+
+    auto mut = [d](auto s) {
+      s->set_load_avg_decay_rate(d);
+    };
+    apply_to_open_sessions(mut);
+  }
+  if (changed.count("mds_recall_max_decay_rate")) {
+    auto d = g_conf().get_val<double>("mds_recall_max_decay_rate");
+    auto mut = [d](auto s) {
+      s->recall_caps_throttle = DecayCounter(d);
+    };
+    apply_to_open_sessions(mut);
+  }
+  if (changed.count("mds_recall_warning_decay_rate")) {
+    auto d = g_conf().get_val<double>("mds_recall_warning_decay_rate");
+    auto mut = [d](auto s) {
+      s->recall_caps = DecayCounter(d);
+      s->release_caps = DecayCounter(d);
+    };
+    apply_to_open_sessions(mut);
+  }
+  if (changed.count("mds_session_cache_liveness_decay_rate")) {
+    auto d = g_conf().get_val<double>("mds_session_cache_liveness_decay_rate");
+    auto mut = [d](auto s) {
+      s->session_cache_liveness = DecayCounter(d);
+      s->session_cache_liveness.hit(s->caps.size()); /* so the MDS doesn't immediately start trimming a new session */
+    };
+    apply_to_open_sessions(mut);
+  }
+  if (changed.count("mds_session_cap_acquisition_decay_rate")) {
+    auto d = g_conf().get_val<double>("mds_session_cap_acquisition_decay_rate");
+    auto mut = [d](auto s) {
+      s->cap_acquisition = DecayCounter(d);
+    };
+    apply_to_open_sessions(mut);
+  }
+
+  if (changed.count("mds_session_metadata_threshold")) {
+    mds_session_metadata_threshold = g_conf().get_val<Option::size_t>("mds_session_metadata_threshold");
+  }
+}
+
+void SessionMap::update_average_session_age() {
+  if (!session_map.size()) {
+    return;
+  }
+
+  double avg_uptime = std::chrono::duration<double>(clock::now()-avg_birth_time).count();
+  logger->set(l_mdssm_avg_session_uptime, (uint64_t)avg_uptime);
+}
+
+void SessionMap::apply_blocklist(const std::set<entity_name_t>& victims) {
+  if (victims.empty()) {
+    return;
+  }
+
+  C_GatherBuilder gather(g_ceph_context, new C_MDSInternalNoop);
+  for (auto &victim : victims) {
+    CachedStackStringStream css;
+    mds->evict_client(victim.num(), false, g_conf()->mds_session_blocklist_on_evict, *css,
+		      gather.new_sub());
+  }
+  gather.activate();
+}
+
 int SessionFilter::parse(
     const std::vector<std::string> &args,
-    std::stringstream *ss)
+    std::ostream *ss)
 {
-  assert(ss != NULL);
+  ceph_assert(ss != NULL);
 
   for (const auto &s : args) {
     dout(20) << __func__ << " parsing filter '" << s << "'" << dendl;
 
     auto eq = s.find("=");
     if (eq == std::string::npos || eq == s.size()) {
-      *ss << "Invalid filter '" << s << "'";
-      return -EINVAL;
+      // allow this to be a bare id for compatibility with pre-octopus asok
+      // 'session evict'.
+      std::string err;
+      id = strict_strtoll(s.c_str(), 10, &err);
+      if (!err.empty()) {
+	*ss << "Invalid filter '" << s << "'";
+	return -EINVAL;
+      }
+      return 0;
     }
 
     // Keys that start with this are to be taken as referring
@@ -957,6 +1317,19 @@ int SessionFilter::parse(
       state = v;
     } else if (k == "id") {
       std::string err;
+      if (v == "*") {
+        // evict all clients , by default id set to 0
+        return 0;
+      } else {
+        try {
+          if (!std::stoi(v)) {
+            *ss << "Invalid value";
+            return -EINVAL; } 
+          } catch (...) {
+            *ss << "Invalid input";
+            return -EINVAL;
+          }
+        }
       id = strict_strtoll(v.c_str(), 10, &err);
       if (!err.empty()) {
         *ss << err;
@@ -968,9 +1341,9 @@ int SessionFilter::parse(
        * Strict boolean parser.  Allow true/false/0/1.
        * Anything else is -EINVAL.
        */
-      auto is_true = [](const std::string &bstr, bool *out) -> bool
+      auto is_true = [](std::string_view bstr, bool *out) -> bool
       {
-        assert(out != nullptr);
+        ceph_assert(out != nullptr);
 
         if (bstr == "true" || bstr == "1") {
           *out = true;
@@ -1007,10 +1380,11 @@ bool SessionFilter::match(
   for (const auto &m : metadata) {
     const auto &k = m.first;
     const auto &v = m.second;
-    if (session.info.client_metadata.count(k) == 0) {
+    auto it = session.info.client_metadata.find(k);
+    if (it == session.info.client_metadata.end()) {
       return false;
     }
-    if (session.info.client_metadata.at(k) != v) {
+    if (it->second != v) {
       return false;
     }
   }
@@ -1035,5 +1409,15 @@ bool SessionFilter::match(
   }
 
   return true;
+}
+
+std::ostream& operator<<(std::ostream &out, const Session &s)
+{
+ if (s.get_human_name() == stringify(s.get_client())) {
+   out << s.get_human_name();
+ } else {
+   out << s.get_human_name() << " (" << std::dec << s.get_client() << ")";
+ }
+ return out;
 }
 

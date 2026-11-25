@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -21,7 +22,7 @@
 #define CEPH_ERASURE_CODE_SHEC_TABLE_CACHE_H
 
 // -----------------------------------------------------------------------------
-#include "common/Mutex.h"
+#include "common/ceph_mutex.h"
 #include "erasure-code/ErasureCodeInterface.h"
 // -----------------------------------------------------------------------------
 #include <list>
@@ -42,10 +43,10 @@ class ErasureCodeShecTableCache {
     int* dm_column;  // size: k
     int* minimum;  // size: k+m
     DecodingCacheParameter() {
-      decoding_matrix = 0;
-      dm_row = 0;
-      dm_column = 0;
-      minimum = 0;
+      decoding_matrix = nullptr;
+      dm_row = nullptr;
+      dm_column = nullptr;
+      minimum = nullptr;
     }
     ~DecodingCacheParameter() {
       if (decoding_matrix) {
@@ -78,14 +79,10 @@ class ErasureCodeShecTableCache {
   typedef std::map< uint64_t, lru_entry_t > lru_map_t;
   typedef std::list< uint64_t > lru_list_t;
 
- ErasureCodeShecTableCache() :
-  codec_tables_guard("shec-lru-cache")
-    {
-    }
-  
+  ErasureCodeShecTableCache()  = default;
   virtual ~ErasureCodeShecTableCache();
-  
-  Mutex codec_tables_guard; // mutex used to protect modifications in encoding/decoding table maps
+  // mutex used to protect modifications in encoding/decoding table maps
+  ceph::mutex codec_tables_guard = ceph::make_mutex("shec-lru-cache");
   
   bool getDecodingTableFromCache(int* matrix,
                                  int* dm_row, int* dm_column,
@@ -118,7 +115,7 @@ class ErasureCodeShecTableCache {
   uint64_t getDecodingCacheSignature(int k, int m, int c, int w,
                                      int *want, int *avails);
 
-  Mutex* getLock();
+  ceph::mutex* getLock();
 };
 
 #endif

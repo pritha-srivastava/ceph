@@ -1,6 +1,7 @@
   $ monmaptool --create --add foo 2.3.4.5:6789 mymonmap
   monmaptool: monmap file mymonmap
   monmaptool: generated fsid [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12} (re)
+  setting min_mon_release = vampire
   monmaptool: writing epoch 0 to mymonmap (1 monitors)
 
   $ ORIG_FSID="$(monmaptool --print mymonmap|grep ^fsid)"
@@ -9,21 +10,22 @@
   monmaptool: monmap file mymonmap
   monmaptool: removing doesnotexist
   monmaptool: map does not contain doesnotexist
-   usage: [--print] [--create [--clobber][--fsid uuid]]
-          [--generate] [--set-initial-members]
-          [--add name 1.2.3.4:567] [--rm name]
-          [--feature-list [plain|parseable]]
-          [--feature-set <value> [--optional|--persistent]]
-          [--feature-unset <value> [--optional|--persistent]] <mapfilename>
+  monmaptool -h for usage
   [1]
 
   $ monmaptool --print mymonmap
   monmaptool: monmap file mymonmap
   epoch 0
   fsid [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12} (re)
-  last_changed \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ (re)
-  created \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ (re)
-  0: 2.3.4.5:6789/0 mon.foo
+  last_changed \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+.\d\d\d\d (re)
+  created \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+.\d\d\d\d (re)
+  min_mon_release 22 (vampire)
+  election_strategy: 1
+  0: v1:2.3.4.5:6789/0 mon.foo
+  auth_epoch 0
+  auth_service_cipher aes256k
+  auth_allowed_ciphers aes256k
+  auth_preferred_cipher aes256k
 
   $ NEW_FSID="$(monmaptool --print mymonmap|grep ^fsid)"
   $ [ "$ORIG_FSID" = "$NEW_FSID" ]

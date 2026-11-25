@@ -1,0 +1,47 @@
+<div class="row mt-2">
+  <div class="col-3 d-flex flex-column align-self-center">
+    <br />
+    <b
+      class="chartTitle pb-2"
+      i18n
+      >{{ chartTitle }}</b
+    >
+    @for (data of currentChartData.dataset; track data) {
+      <div i18n>
+        @if (data.data.length !== 0) {
+          <div class="d-inline-flex align-items-center gap-1">
+            <div
+              class="box"
+              [style.background-color]="data.pointBackgroundColor"
+            ></div>
+            @if (!chartTitle.includes(data.label)) {
+              <span
+                [ngClass]="{ 'd-inline-block text-truncate': truncateLabel }"
+                [ngStyle]="{ width: truncateLabel ? '10rem' : 'auto' }"
+                [title]="data.label"
+                >{{ data.label }}</span
+              >:
+            }
+            <span>{{ data?.currentData || 'N/A' }} {{ data?.currentDataUnits }}</span>
+            @if (maxValue && data.currentData) {
+              <div>used of {{ maxConvertedValue }} {{ maxConvertedValueUnits }}</div>
+            }
+          </div>
+        }
+      </div>
+    }
+  </div>
+
+  <div class="col-9 d-flex flex-column">
+    <div [ngClass]="{ 'chart mt-3': !isMultiCluster, 'mt-3': isMultiCluster }">
+      <canvas
+        baseChart
+        [datasets]="chartData.dataset"
+        [options]="options"
+        [type]="'line'"
+        [plugins]="chartAreaBorderPlugin"
+      >
+      </canvas>
+    </div>
+  </div>
+</div>

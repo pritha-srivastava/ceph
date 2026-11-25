@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_TEST_CLASS_HANDLER_H
 #define CEPH_TEST_CLASS_HANDLER_H
@@ -27,6 +27,7 @@ public:
 
     TestIoCtxImpl *io_ctx_impl;
     std::string oid;
+    uint64_t snap_id;
     SnapContext snapc;
   };
   typedef boost::shared_ptr<MethodContext> SharedMethodContext;
@@ -54,6 +55,7 @@ public:
                                    const std::string &method);
   SharedMethodContext get_method_context(TestIoCtxImpl *io_ctx_impl,
                                          const std::string &oid,
+                                         uint64_t snap_id,
                                          const SnapContext &snapc);
 
   int create_filter(cls_handle_t hclass, const std::string& filter_name,

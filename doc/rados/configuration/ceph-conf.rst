@@ -1,530 +1,801 @@
+.. _configuring-ceph:
+
 ==================
  Configuring Ceph
 ==================
 
-When you start the Ceph service, the initialization process activates a series
-of daemons that run in the background. A :term:`Ceph Storage Cluster` runs 
-two types of daemons: 
+Every :term:`Ceph Storage Cluster` runs at
+least three types of daemons:
 
 - :term:`Ceph Monitor` (``ceph-mon``)
+- :term:`Ceph Manager` (``ceph-mgr``)
 - :term:`Ceph OSD Daemon` (``ceph-osd``)
 
-Ceph Storage Clusters that support the :term:`Ceph Filesystem` run at least one
-:term:`Ceph Metadata Server` (``ceph-mds``). Clusters that support :term:`Ceph
-Object Storage` run Ceph Gateway daemons (``radosgw``). For your convenience,
-each daemon has a series of default values (*i.e.*, many are set by
-``ceph/src/common/config_opts.h``). You may override these settings with a Ceph
-configuration file.
+A Ceph Storage Cluster that deploys the :term:`Ceph File System` also runs
+at least one :term:`Ceph Metadata Server` (``ceph-mds``). A cluster that
+deploys :term:`Ceph Object Storage` runs Ceph RADOS Gateway daemons
+(``radosgw``).
 
+Each daemon has a number of configuration options, and each of those options
+has a default value. Adjust the behavior of the system by changing these
+configuration options. Make sure to understand the consequences before
+overriding the default values, as it is possible to significantly degrade the
+performance and stability of your cluster. Remember that default values
+sometimes change between releases. For this reason, it is best to review the
+version of this documentation that applies to your Ceph release.  When updating
+to a new Ceph release, also review the release notes for important changes.
+
+Option Names
+============
+
+Each Ceph configuration option has a unique name that consists of words
+formed with lowercase characters and connected with underscore characters
+(``_``).
+
+When option names are specified on the command line or in persisted
+configuration, underscore (``_``) and
+dash (``-``) characters can be used interchangeably (for example,
+``--mon-host`` is equivalent to ``--mon_host``).
+
+When option names appear in configuration files, spaces can also be used in
+place of underscores or dashes.
+
+For the sake of clarity and
+convenience, we suggest that you consistently use underscores, as we do
+throughout this documentation.
+
+Config Sources
+==============
+
+Each Ceph daemon and client pulls configuration option values from one or more
+of the sources listed below. Option values found via sources later in the list
+will override any found in sources earlier in the list.  In other words,
+the last value wins.
+
+- The compiled-in default value
+- The central configuration database maintained by the Monitors
+- A configuration file stored on the local host
+- Environment variables
+- Command-line arguments
+- Runtime overrides set via the admin socket or injection
+
+One of the first things a Ceph process does on startup is parse the
+configuration options provided via the command line, via the environment, and
+via the local configuration file. Next, the process contacts the monitor
+cluster to retrieve centrally-stored configuration for the entire cluster.
+After a complete set of configuration options is available, the startup of the
+daemon or process will commence.
+
+.. _bootstrap-options:
+
+Bootstrap Options
+-----------------
+
+Bootstrap options enable each Ceph daemon
+to contact the Monitors, to authenticate, and to retrieve central
+configuration values.  For this reason, these options are usually stored locally
+on each node in a local configuration file. These options
+include the following:
+
+.. confval:: mon_host
+.. confval:: mon_host_override
+
+- :confval:`mon_dns_srv_name`
+- :confval:`mon_data`, :confval:`osd_data`, :confval:`mds_data`,
+  :confval:`mgr_data`, and similar options that define the local directory
+  in which the daemon stores data.
+- :confval:`keyring`, :confval:`keyfile`, and/or :confval:`key`, which can be
+  used to specify the authentication credential to use to authenticate with the
+  Monitors. Note that in most cases the default keyring location is in the data
+  directory specified above.
+
+There is usually no reason to modify the default values of these
+options. However, there is one exception: the :confval:`mon_host`
+option that identifies the addresses of the cluster's Monitors. When
+:ref:`DNS is used to identify monitors<mon-dns-lookup>`, a local Ceph
+configuration file can be avoided entirely.
+
+
+Skipping Monitor Config
+-----------------------
+
+The option ``--no-mon-config`` can be passed to any command in order to skip
+the step that retrieves configuration information from the cluster's Monitors.
+Skipping this config option source can be useful in cases where configuration is
+managed entirely via configuration files, or when maintenance is necessary
+but the Monitor quorum is down.
 
 .. _ceph-conf-file:
 
-The Configuration File
+Configuration Sections
 ======================
 
-When you start a Ceph Storage Cluster, each daemon looks for a Ceph
-configuration file (i.e., ``ceph.conf`` by default) that provides the cluster's
-configuration settings. For manual deployments, you need to create a Ceph
-configuration file. For tools that create configuration files for you (*e.g.*,
-``ceph-deploy``, Chef, etc.), you may use the information contained herein as a
-reference. The Ceph configuration file defines:
-
-- Cluster Identity
-- Authentication settings
-- Cluster membership
-- Host names
-- Host addresses
-- Paths to keyrings
-- Paths to journals
-- Paths to data
-- Other runtime options
-
-The default Ceph configuration file locations in sequential order include:
-
-#. ``$CEPH_CONF`` (*i.e.,* the path following the ``$CEPH_CONF`` 
-   environment variable)
-#. ``-c path/path``  (*i.e.,* the ``-c`` command line argument)
-#. ``/etc/ceph/ceph.conf``
-#. ``~/.ceph/config``
-#. ``./ceph.conf`` (*i.e.,* in the current working directory)
+Each configuration option associated with a single process or daemon
+has a single value. The value for a configuration option may be
+set for all daemon types or for only daemons of a given type.
+Ceph options that stored in the Monitor configuration database or in
+local configuration files are grouped into *configuration
+sections* in order to indicate to which daemons or clients they apply.
 
 
-The Ceph configuration file uses an *ini* style syntax. You can add comments 
-by preceding comments with a pound sign (#) or a semi-colon (;).  For example:
+These sections include the following:
 
-.. code-block:: ini
+.. confsec:: global
 
-	# <--A number (#) sign precedes a comment.
-	; A comment may be anything. 
-	# Comments always follow a semi-colon (;) or a pound (#) on each line.
-	# The end of the line terminates a comment.
-	# We recommend that you provide comments in your configuration file(s).
+   Settings under ``global`` affect all daemons and clients
+   in a Ceph Storage Cluster.  In some cases an option may
+   need to be set in one or more sections, for one or more daemons,
+   that is not obvious from its name. In such cases the description
+   of that option may call this out, or in most cases one can
+   select the ``global`` section (aka central config ``who``) to
+   ensure that it is applied to all appropriate daemons or clients.
 
+   :example: ``log_file = /var/log/ceph/$cluster-$type.$id.log``
 
-.. _ceph-conf-settings:
+.. confsec:: mon
 
-Config Sections 
-===============
+   Settings under ``mon`` affect all ``ceph-mon`` Monitor daemons in
+   the Ceph Storage Cluster, and override any value set in
+   ``global``.
 
-The configuration file can configure all Ceph daemons in a Ceph Storage Cluster,
-or all Ceph daemons of a particular type. To configure a series of daemons, the
-settings must be included under the processes that will receive the
-configuration as follows: 
+   :example: ``mon_cluster_log_to_syslog = true``
 
-``[global]``
+.. confsec:: mgr
 
-:Description: Settings under ``[global]`` affect all daemons in a Ceph Storage
-              Cluster.
-              
-:Example: ``auth supported = cephx``
+   Settings in the ``mgr`` section affect all ``ceph-mgr`` Manager daemons in
+   the Ceph Storage Cluster, and override any value set in
+   ``global``.
 
-``[osd]``
+   :example: ``mgr_stats_period = 10``
 
-:Description: Settings under ``[osd]`` affect all ``ceph-osd`` daemons in 
-              the Ceph Storage Cluster, and override the same setting in 
-              ``[global]``.
+.. confsec:: osd
 
-:Example: ``osd journal size = 1000``
+   Settings under ``osd`` affect all ``ceph-osd`` OSD daemons in
+   the Ceph Storage Cluster, and override any value set in
+   ``global``.
 
-``[mon]``
+   :example: ``osd_op_queue = wpq``
 
-:Description: Settings under ``[mon]`` affect all ``ceph-mon`` daemons in 
-              the Ceph Storage Cluster, and override the same setting in 
-              ``[global]``.
+.. confsec:: mds
 
-:Example: ``mon addr = 10.0.0.101:6789``
+   Settings in the ``mds`` section affect all CephFS ``ceph-mds`` daemons in
+   the Ceph Storage Cluster, and override any value set in
+   ``global``.
 
+   :example: ``mds_cache_memory_limit = 10G``
 
-``[mds]``
+.. confsec:: client
 
-:Description: Settings under ``[mds]`` affect all ``ceph-mds`` daemons in 
-              the Ceph Storage Cluster, and override the same setting in 
-              ``[global]``. 
+   Settings under ``client`` affect all Ceph clients
+   (for example, mounted Ceph File Systems,  attached Ceph Block Devices)
+   and daemons including the RADOS Gateway (RGW) and the NVMeoF Gateway.
 
-:Example: ``host = myserver01``
-
-``[client]``
-
-:Description: Settings under ``[client]`` affect all Ceph Clients 
-              (e.g., mounted Ceph Filesystems, mounted Ceph Block Devices, 
-              etc.).
-
-:Example: ``log file = /var/log/ceph/radosgw.log``
+   :example: ``objecter_inflight_ops = 512``
 
 
-Global settings affect all instances of all daemon in the Ceph Storage Cluster.
-Use the ``[global]`` setting for values that are common for all daemons in the
-Ceph Storage Cluster. You can override each ``[global]`` setting by:
+Configuration sections can also specify a specific daemon or client name. For example,
+``mon.foo``, ``osd.123``, and ``client.smith`` are all valid section names.
+This granularity is rarely needed: in most cases it is best to apply a setting
+to all Monitors, all OSDs (potentially with a *mask* for a device class), etc.
+so that as the cluster grows or the orchestrator changes daemon placement the
+expected values remain in force.
 
-#. Changing the setting in a particular process type 
-   (*e.g.,* ``[osd]``, ``[mon]``, ``[mds]`` ).
+Any given daemon will draw settings from the global section, the daemon- or
+client-type section, and the section sharing its name. Settings in the
+most-specific section take precedence so precedence: for example, if the same
+option is specified in both :confsec:`global`, :confsec:`mon`, and ``mon.foo``
+on the same source (i.e. that is, in the same configuration file), the
+``mon.foo`` setting will be used.
 
-#. Changing the setting in a particular process (*e.g.,* ``[osd.1]`` ).
+If multiple values of the same configuration option are specified in the same
+section, the last value specified takes precedence.
 
-Overriding a global setting affects all child processes, except those that
-you specifically override in a particular daemon. 
-
-A typical global setting involves activating authentication. For example:
-
-.. code-block:: ini
-
-	[global]
-	#Enable authentication between hosts within the cluster.
-	#v 0.54 and earlier
-	auth supported = cephx
-		
-	#v 0.55 and after
-	auth cluster required = cephx
-	auth service required = cephx
-	auth client required = cephx
-
-
-You can specify settings that apply to a particular type of daemon. When you
-specify settings under ``[osd]``, ``[mon]`` or ``[mds]`` without specifying a
-particular instance, the setting will apply to all OSDs, monitors or metadata
-daemons respectively.
-
-A typical daemon-wide setting involves setting journal sizes, filestore
-settings, etc. For example:
-
-.. code-block:: ini
-
-	[osd]
-	osd journal size = 1000
-
-
-You may specify settings for particular instances of a daemon. You may specify
-an instance by entering its type, delimited by a period (.) and by the instance
-ID. The instance ID for a Ceph OSD Daemon is always numeric, but it may be
-alphanumeric for Ceph Monitors and Ceph Metadata Servers.
-
-.. code-block:: ini
-
-	[osd.1]
-	# settings affect osd.1 only.
-		
-	[mon.a]	
-	# settings affect mon.a only.
-		
-	[mds.b]
-	# settings affect mds.b only.
-
-
-If the daemon you specify is a Ceph Gateway client, specify the daemon and the 
-instance, delimited by a period (.). For example:: 
-
-	[client.radosgw.instance-name]
-	# settings affect client.radosgw.instance-name only.
-
-
+Note that values set in the local configuration file always take precedence over
+values from the Monitor central configuration database, regardless of the section in
+which they appear.
 
 .. _ceph-metavariables:
 
 Metavariables
 =============
 
-Metavariables simplify Ceph Storage Cluster configuration dramatically. When a
-metavariable is set in a configuration value, Ceph expands the metavariable into
-a concrete value. Metavariables are very powerful when used within the
-``[global]``, ``[osd]``, ``[mon]``, ``[mds]`` or ``[client]`` sections of your 
-configuration file. Ceph metavariables are similar to Bash shell expansion.
+Metavariables dramatically simplify Ceph storage cluster configuration. When a
+metavariable is set within a configuration value, Ceph expands the metavariable at
+the time the configuration value is used. In this way, Ceph metavariables
+behave similarly to the way that variable expansion works in the Bash shell.
 
-Ceph supports the following metavariables: 
+Ceph supports the following metavariables:
+
+.. describe:: $cluster
+
+   Expands to the Ceph Storage Cluster name. Useful when running
+   multiple Ceph Storage Clusters on the same hardware. Note that cluster
+   *vanity names* are deprecated and may be removed entirely from future
+   releases. We *strongly* urge that new clusters be provisioned only with
+   the default name ``ceph`` and that existing clusters with vanity names
+   be retrofitted to the default name.
+
+   :example: ``/etc/ceph/$cluster.keyring``
+   :default: ``ceph``
+
+.. describe:: $type
+
+   Expands to a daemon or process type (for example, ``mds``, ``osd``, or ``mon``)
+
+   :example: ``/var/lib/ceph/$type``
+
+.. describe:: $id
+
+   Expands to the daemon or client identifier. For
+   ``osd.0``, this would be ``0``; for ``mds.a``, it would
+   be ``a``.
+
+   :example: ``/var/lib/ceph/$type/$cluster-$id``
+
+.. describe:: $host
+
+   Expands to the hostname where the process is running.
+
+.. describe:: $name
+
+   Expands to ``$type.$id``.
+
+   :example: ``/var/run/ceph/$cluster-$name.asok``
+
+.. describe:: $pid
+
+   Expands to the daemon's process id (``PID``).
+
+   :example: ``/var/run/ceph/$cluster-$name-$pid.asok``
 
 
-``$cluster``
+Ceph Configuration File
+=======================
 
-:Description: Expands to the Ceph Storage Cluster name. Useful when running 
-              multiple Ceph Storage Clusters on the same hardware.
+On startup, Ceph processes search for a configuration file in the
+following locations:
 
-:Example: ``/etc/ceph/$cluster.keyring``
-:Default: ``ceph``
+#. ``$CEPH_CONF`` (that is, the value of the ``$CEPH_CONF``
+   environment variable if set)
+#. ``-c path/path``  (that is, the ``-c`` command line argument if supplied)
+#. ``/etc/ceph/$cluster.conf``
+#. ``~/.ceph/$cluster.conf``
+#. ``./$cluster.conf`` (that is, in the current working directory)
+#. On FreeBSD systems only, ``/usr/local/etc/ceph/$cluster.conf``
 
+Here ``$cluster`` is the cluster's name (default: ``ceph``).
 
-``$type``
-
-:Description: Expands to one of ``mds``, ``osd``, or ``mon``, depending on the 
-              type of the instant daemon.
-
-:Example: ``/var/lib/ceph/$type``
-
-
-``$id``
-
-:Description: Expands to the daemon identifier. For ``osd.0``, this would be 
-              ``0``; for ``mds.a``, it would be ``a``.
-
-:Example: ``/var/lib/ceph/$type/$cluster-$id``
-
-
-``$host``
-
-:Description: Expands to the host name of the instant daemon.
-
-
-``$name``
-
-:Description: Expands to ``$type.$id``.
-:Example: ``/var/run/ceph/$cluster-$name.asok``
-
-``$pid``
-
-:Description: Expands to daemon pid.
-:Example: ``/var/run/ceph/$cluster-$name-$pid.asok``
-
-
-.. _ceph-conf-common-settings:
-
-Common Settings
-===============
-
-The `Hardware Recommendations`_ section provides some hardware guidelines for
-configuring a Ceph Storage Cluster. It is possible for a single :term:`Ceph
-Node` to run multiple daemons. For example, a single node with multiple drives
-may run one ``ceph-osd`` for each drive. Ideally, you will  have a node for a
-particular type of process. For example, some nodes may run ``ceph-osd``
-daemons, other nodes may run ``ceph-mds`` daemons, and still  other nodes may
-run ``ceph-mon`` daemons.
-
-Each node has a name identified by the ``host`` setting. Monitors also specify
-a network address and port (i.e., domain name or IP address) identified by the
-``addr`` setting.  A basic configuration file will typically specify only
-minimal settings for each instance of monitor daemons. For example:
+The Ceph configuration file uses an ``ini`` style syntax. One may add comment
+text after a pound sign (#) or a semicolon (;). For example:
 
 .. code-block:: ini
 
-	[global]
-	mon_initial_members = ceph1
-	mon_host = 10.0.0.1
+    # <--A number (#) sign number sign (#) precedes a comment.
+    ; A comment may be anything.
+    # Comments always follow a semicolon (;) or a pound sign (#) on each line.
+    # The end of the line terminates a comment.
+    # We recommend that you provide comments in your configuration file(s).
 
 
-.. important:: The ``host`` setting is the short name of the node (i.e., not 
-   an fqdn). It is **NOT** an IP address either.  Enter ``hostname -s`` on 
-   the command line to retrieve the name of the node. Do not use ``host`` 
-   settings for anything other than initial monitors unless you are deploying
-   Ceph manually. You **MUST NOT** specify ``host`` under individual daemons 
-   when using deployment tools like ``chef`` or ``ceph-deploy``, as those tools 
-   will enter the appropriate values for you in the cluster map.
+.. _ceph-conf-settings:
 
+Config File Section Names
+-------------------------
 
-.. _ceph-network-config:
+The configuration file is divided into sections. Each section must begin with a
+valid configuration section name (see :ref:`ceph-conf-file`, above) within
+square brackets. For example:
 
-Networks
-========
+.. code-block:: ini
 
-See the `Network Configuration Reference`_ for a detailed discussion about
-configuring a network for use with Ceph.
+    [global]
+    debug_ms = 0
 
+    [osd]
+    debug_ms = 1
 
-Monitors
-========
+    [osd.1]
+    debug_ms = 10
 
-Ceph production clusters typically deploy with a minimum 3 :term:`Ceph Monitor`
-daemons to ensure high availability should a monitor instance crash. At least
-three (3) monitors ensures that the Paxos algorithm can determine which version
-of the :term:`Ceph Cluster Map` is the most recent from a majority of Ceph
-Monitors in the quorum.
+    [osd.2]
+    debug_ms = 10
 
-.. note:: You may deploy Ceph with a single monitor, but if the instance fails,
-	       the lack of other monitors may interrupt data service availability.
+Config File Option Values
+-------------------------
 
-Ceph Monitors typically listen on port ``6789``. For example:
+The value of a configuration option is a string. If the string is too long to
+fit on a single line, you may place a backslash (``\``) at the end of the line
+and the backslash will act as a line continuation marker. In such a case, the
+value of the option will be the string after ``=`` in the current line,
+combined with the string in the next line. Here is an example:
 
-.. code-block:: ini 
+.. code-block:: ini
 
-	[mon.a]
-	host = hostName
-	mon addr = 150.140.130.120:6789
+    [global]
+    foo = long long ago\
+    long ago
 
-By default, Ceph expects that you will store a monitor's data under the
-following path::
+In this example, the value of the "``foo``" option is "``long long ago long
+ago``".  Be careful to not place a backslash at the end of the final line
+of the multi-line string.
 
-	/var/lib/ceph/mon/$cluster-$id
-	
-You or a deployment tool (e.g., ``ceph-deploy``) must create the corresponding
-directory. With metavariables fully  expressed and a cluster named "ceph", the
-foregoing directory would evaluate to:: 
+An option value setting in a local config file ends with a newline.
+A comment prefixed with ``#`` may be added before the newline.
 
-	/var/lib/ceph/mon/ceph-a
-	
-For additional details, see the `Monitor Config Reference`_.
+Examples:
 
-.. _Monitor Config Reference: ../mon-config-ref
+.. code-block:: ini
 
+    [global]
+    obscure_one = difficult to explain # I will try harder in next release
+    simpler_one = nothing to explain
 
-.. _ceph-osd-config:
+In this example, the value of the "``obscure one``" option is "``difficult to
+explain``" and the value of the "``simpler one`` options is "``nothing to
+explain``".
 
+When an option value contains spaces, it can be enclosed within single quotes
+or double quotes in order to make its scope clear and in order to make sure
+that the first space in the value is not interpreted as the end of the value.
+For example:
 
-Authentication
-==============
+.. code-block:: ini
 
-.. versionadded:: Bobtail 0.56
+    [global]
+    line = "to be, or not to be"
 
-For Bobtail (v 0.56) and beyond, you should expressly enable or disable
-authentication in the ``[global]`` section of your Ceph configuration file. ::
+There are four metacharacters that must be escaped with a backslash (``\``)
+if they are meant to be part of the option's value: ``=``, ``#``, ``;`` and ``[``.
 
-	auth cluster required = cephx
-	auth service required = cephx
-	auth client required = cephx
+Example:
 
-Additionally, you should enable message signing. See `Cephx Config Reference`_ for details. 
+.. code-block:: ini
 
-.. important:: When upgrading, we recommend expressly disabling authentication 
-   first, then perform the upgrade. Once the upgrade is complete, re-enable 
-   authentication.
+    [global]
+    secret = "I l0ve \# and \["
 
-.. _Cephx Config Reference: ../auth-config-ref
+Each configuration option specifies one of the following types for its value:
 
+.. describe:: int
 
-.. _ceph-monitor-config:
+   A 64-bit signed integer. Some SI suffixes are supported, including ``K``, ``M``,
+   ``G``, ``T``, ``P``, and ``E``.  These represent, respectively, 10\ :sup:`3`, 10\ :sup:`6`,
+   10\ :sup:`9`, etc.). ``B`` (bytes) is the only supported unit string. Thus ``1K``, ``1M``,
+   ``128B`` and ``-1`` are all valid option values. When a negative value is
+   assigned to an option that defines a threshold or limit, this often indicates that the value is
+   "unlimited" -- that is, no threshold or limit will be enforced. Options that
+   allow such a value will usually indicate so in their individual description text.
 
+   :example: ``42``, ``-1``
 
-OSDs
+.. describe:: uint
+
+   An unsigned integer, which differs from ``integer`` only in that negative values are not
+   permitted.
+
+   :example: ``256``, ``0``
+
+.. describe:: str
+
+   A string encoded in UTF-8. Certain characters are not permitted. Reference
+   the above notes for details.
+
+   :example: ``"hello world"``, ``"i love \#"``, ``yet-another-name``
+
+.. describe:: boolean
+
+   Typically either ``true`` or ``false``. However, any
+   integer is permitted: "0" implies ``false``, and any non-zero value implies
+   ``true``. We encourage the use of ``true`` or ``false`` for clarity.
+
+   :example: ``true``, ``false``, ``1``, ``0``
+
+.. describe:: addr
+
+   A single address, optionally prefixed with ``v1``, ``v2`` or ``any`` for the
+   messenger protocol. If no prefix is specified, the ``v2`` protocol is used.
+   For more details, see :ref:`address_formats`.
+
+   :example: ``v1:1.2.3.4:567``, ``v2:1.2.3.4:567``, ``1.2.3.4:567``, ``2409:8a1e:8fb6:aa20:1260:4bff:fe92:18f5::567``, ``[::1]:6789``
+
+.. describe:: addrvec
+
+   A set of IPv4 or IPv6 addresses separated by commas (``,``). The set of addresses can be optionally delimited
+   with ``[`` and ``]``.
+
+   :example: ``[v1:1.2.3.4:567,v2:1.2.3.4:568]``, ``v1:1.2.3.4:567,v1:1.2.3.14:567``, ``[2409:8a1e:8fb6:aa20:1260:4bff:fe92:18f5::567], [2409:8a1e:8fb6:aa20:1260:4bff:fe92:18f5::568]``
+
+.. describe:: uuid
+
+   A UUID string in the format defined by `RFC4122
+   <https://www.ietf.org/rfc/rfc4122.txt>`_. Certain variants are also
+   supported. For more details, see this `Boost document
+   <https://www.boost.org/doc/libs/1_74_0/libs/uuid/doc/uuid.html#String%20Generator>`_.
+
+   :example: ``f81d4fae-7dec-11d0-a765-00a0c91e6bf6``
+
+.. describe:: size
+
+   A 64-bit unsigned integer. Both SI prefixes and IEC prefixes are supported.
+   ``B`` is the only supported unit string. Negative values are not permitted.
+
+   :example: ``1Ki``, ``1K``, ``1KiB`` and ``1B``.
+
+.. describe:: secs
+
+   Denotes a duration of time. The default unit of time is the second.
+   The following units of time are supported:
+
+              * second: ``s``, ``sec``, ``second``, ``seconds``
+              * minute: ``m``, ``min``, ``minute``, ``minutes``
+              * hour: ``hs``, ``hr``, ``hour``, ``hours``
+              * day: ``d``, ``day``, ``days``
+              * week: ``w``, ``wk``, ``week``, ``weeks``
+              * month: ``mo``, ``month``, ``months``
+              * year: ``y``, ``yr``, ``year``, ``years``
+
+   :example: ``1 m``, ``1m`` and ``1 week``
+
+.. _ceph-conf-database:
+
+Monitor configuration database
+==============================
+
+The Monitors manage a database of configuration options that can be
+consumed by the entire cluster. This allows for streamlined central
+configuration of the entire system. For ease of administration,
+transparency, and to avoid inconsistencies, the vast majority of configuration options can and should be
+set in this database instead of in ``ceph.conf`` files on daemon or
+client nodes.
+
+A few specific settings might need to be stored in local configuration files because they
+affect the ability of the process to connect to the Monitors, to authenticate,
+and to fetch additional configuration information. In most cases this applies only to the
+``mon_host`` option. This issue can be avoided by using :ref:`DNS SRV
+records<mon-dns-lookup>` if your DNS infrastructure is very robust and
+under your control.
+
+Sections and Masks
+------------------
+
+Configuration options stored by the Monitors can be stored in a global section,
+in a daemon-type section, or in a specific daemon section. In this sense they are
+no different than options set in a node-local configuration file, subject to the above
+source precedence.
+
+In addition, options may have a *mask* associated with them to further restrict to
+which daemons or clients the option's value applies. Masks take two forms:
+
+#. ``type:location`` where ``type`` is a CRUSH bucket type, for example ``rack`` or
+   ``host``, and ``location`` is a value for that property. For example,
+   ``host:foo`` would limit the option only to daemons or clients
+   running on a host named ``foo``. Recent Ceph releases provide functionality
+   that obviates most situations that formerly required host-specific configuration
+   values. Examples include OSD device classes, the ``osd_memory_target`` autotuner,
+   and options with values that are specific to certain media. Examples
+   of the latter include ``osd_recovery_sleep_ssd`` and ``osd_recovery_max_active_hdd``.
+
+#. ``class:device-class`` where ``device-class`` is the name of a CRUSH
+   device class (for example, ``hdd`` or ``ssd``). For example,
+   ``class:ssd`` would limit the option only to OSDs built solely on
+   SAS, SATA, and NVMe SSDs. This mask has no effect on non-OSD daemons or clients
+
+In commands that specify a configuration option, the argument of the option (in
+the following examples, this is the ``who`` string) may be a section name, a
+mask, or a combination of both separated by a slash character (``/``). For
+example, ``osd/rack:foo`` would refer to all OSD daemons under the ``foo`` CRUSH ``rack`` bucket.
+
+When configuration options are displayed, the section name and any mask are presented
+in separate fields or columns to make them more readable.
+
+.. _configuring-ceph-api:
+
+Configuration Commands
+----------------------
+
+The following CLI commands are used to configure the cluster:
+
+* ``ceph config dump`` dumps the entire Monitor central configuration database.
+
+* ``ceph config ls`` lists the names of all configuration options, including
+  Manager module options. Option names do not form a hierarchy, so no command
+  lists the options under a partial name. Filter the list with ``grep``
+  instead:
+
+  .. prompt:: bash $
+
+     ceph config ls | grep ^osd_recovery
+     ceph config ls | grep ^mgr/balancer/
+
+  Only Manager module options contain slashes, in names of the form
+  ``mgr/<module>/<option>``.
+
+* ``ceph config get <who>`` dumps the configuration options stored in
+  the Monitor configuration database for a specific daemon or client
+  (for example, ``mds.a``). ``<who>`` names a daemon or client, such as
+  ``osd.1`` or ``client.admin``, or a type of daemon or client, such as
+  ``osd``. ``global`` is a section of the database, not a daemon or client,
+  so ``ceph config get global`` fails with
+  ``unrecognized entity 'global'`` even though ``ceph config set global``
+  works. To see the values stored in ``global``, run ``ceph config dump``
+  and look for ``global`` in the ``WHO`` column.
+
+* ``ceph config get <who> <option>`` shows either a configuration value
+  stored in the Monitor configuration database for a specific daemon or client
+  (for example, ``mds.a``), or, if that value is not present in the Monitor
+  configuration database, the compiled-in default value.
+
+* ``ceph config set <who> <option> <value>`` sets a configuration
+  option in the Monitor's configuration database. If a value for this
+  option was previously set, it will be overwritten.  Take care to
+  set values with appropriate ``who`` and optional mask attributes. If,
+  for example, a value exists with the ``who`` scope of ``osd`` for
+  the ``someoption`` option, then a command of the
+  form ``ceph config set global someoption somevalue`` is executed,
+  the central database will retain both.  This may be useful in
+  certain situations, but it can lead to confusion and is often best
+  avoided.
+
+* ``ceph config show <who>`` shows configuration values for a running daemon.
+  These settings might differ from those stored by the monitors if there are
+  also local configuration files in use or if options have been overridden on
+  the command line or at runtime via admin socket, ``ceph tell``, or ``ceph daemon``
+  commands. The source of each option value is displayed.
+
+* ``ceph config show-with-defaults <who>`` is like the above,
+  but also shows all defaults, and for changed values, where they are changed.
+
+* ``ceph config generate-minimal-conf`` generates a minimal ``ceph.conf`` file
+  necessary to bootstrap connections to the cluster. Further configuration
+  can be done via the ``ceph config`` interface.
+
+  .. note:: Some configs only affect startup behavior for clients or daemons. In that case, modifying the local ``ceph.conf`` is required.
+
+* ``ceph config assimilate-conf -i <input_file> -o <output_file>`` ingests a
+  configuration file from *input_file* and sets any valid options found into the
+  Monitor configuration database. Any settings that are unrecognized, are
+  invalid, or cannot be managed by the Monitors will be returned in an
+  abbreviated configuration file stored in *output_file*. This command is
+  useful when transitioning from legacy configuration files to centralized
+  Monitor-based configuration.
+
+* ``ceph-conf --show-config`` is a legacy command.
+
+Note that ``ceph config get <who> [<option>]`` and ``ceph config show
+<who>`` will not necessarily return the same values. The former
+command shows only compiled-in default values. In order to determine whether a
+configuration option is present in the Monitor configuration database, run
+``ceph config dump``.
+
+Help
 ====
 
-Ceph production clusters typically deploy :term:`Ceph OSD Daemons` where one node
-has one OSD daemon running a filestore on one storage drive. A typical
-deployment specifies a journal size. For example:
+To get help for a particular option, run the following command:
 
-.. code-block:: ini
+.. prompt:: bash $
 
-	[osd]
-	osd journal size = 10000
-		
-	[osd.0]
-	host = {hostname} #manual deployments only.
+   ceph config help <option>
 
+For example:
 
-By default, Ceph expects that you will store a Ceph OSD Daemon's data with the 
-following path:: 
+.. prompt:: bash $
 
-	/var/lib/ceph/osd/$cluster-$id
-	
-You or a deployment tool (e.g., ``ceph-deploy``) must create the corresponding
-directory. With metavariables fully  expressed and a cluster named "ceph", the
-foregoing directory would evaluate to:: 
+   ceph config help log_file
 
-	/var/lib/ceph/osd/ceph-0
-	
-You may override this path using the ``osd data`` setting. We don't recommend 
-changing the default location. Create the default directory on your OSD host.
+::
 
-:: 
+   log_file - path to log file
+    (std::string, basic)
+    Default (non-daemon):
+    Default (daemon): /var/log/ceph/$cluster-$name.log
+    Can update at runtime: false
+    See also: [log_to_stderr,err_to_stderr,log_to_syslog,err_to_syslog]
 
-	ssh {osd-host}
-	sudo mkdir /var/lib/ceph/osd/ceph-{osd-number}	
+or:
 
-The ``osd data`` path ideally leads to a mount point with a hard disk that is
-separate from the hard disk storing and running the operating system and
-daemons. If the OSD is for a disk other than the OS disk, prepare it for
-use with Ceph, and mount it to the directory you just created:: 
+.. prompt:: bash $
 
-	ssh {new-osd-host}
-	sudo mkfs -t {fstype} /dev/{disk}
-	sudo mount -o user_xattr /dev/{hdd} /var/lib/ceph/osd/ceph-{osd-number}
+   ceph config help log_file -f json-pretty
 
-We recommend using the ``xfs`` file system or the ``btrfs`` file system when
-running :command:`mkfs`.
+::
 
-See the `OSD Config Reference`_ for additional configuration details.
+  {
+      "name": "log_file",
+      "type": "std::string",
+      "level": "basic",
+      "desc": "path to log file",
+      "long_desc": "",
+      "default": "",
+      "daemon_default": "/var/log/ceph/$cluster-$name.log",
+      "tags": [],
+      "services": [],
+      "see_also": [
+          "log_to_stderr",
+          "err_to_stderr",
+          "log_to_syslog",
+          "err_to_syslog"
+      ],
+      "enum_values": [],
+      "min": "",
+      "max": "",
+      "can_update_at_runtime": false
+  }
 
+The ``level`` property of each option is ``basic``, ``advanced``, or ``dev``. Options
+tagged with the ``dev`` level are intended for use by developers for testing purposes, and
+Ceph admins (operators) are urged to not change their values without expert-level understanding
+or advice from expert support professionals.
 
-Heartbeats
-==========
+.. note:: This command uses the configuration schema that is compiled into the
+   running Monitors. If you have a mixed-version cluster (as might exist
+   during an upgrade), you might want to query the option schema from
+   a specific running daemon by running a command of the following form:
 
-During runtime operations, Ceph OSD Daemons check up on other Ceph OSD Daemons
-and report their  findings to the Ceph Monitor. You do not have to provide any
-settings. However, if you have network latency issues, you may wish to modify
-the settings. 
+.. prompt:: bash $
 
-See `Configuring Monitor/OSD Interaction`_ for additional details.
+   ceph daemon <name> config help [option]
 
-
-.. _ceph-logging-and-debugging:
-
-Logs / Debugging
-================
-
-Sometimes you may encounter issues with Ceph that require
-modifying logging output and using Ceph's debugging. See `Debugging and
-Logging`_ for details on log rotation.
-
-.. _Debugging and Logging: ../../troubleshooting/log-and-debug
-
-
-Example ceph.conf
-=================
-
-.. literalinclude:: demo-ceph.conf
-   :language: ini
-
-.. _ceph-runtime-config:
+.. note:: The Ceph release versions of *running* daemons may be reported by
+   running the ``ceph versions`` commands.  If your cluster is not in the
+   process of an upgrade, all daemons should show the same version. If multiple
+   versions are reported outside of an upgrade, a prior upgrade may have failed
+   or manual changes may have been executed, and the circumstances should be
+   examined and an upgrade to harmonize versions should be considered.
 
 Runtime Changes
 ===============
 
-Ceph allows you to make changes to the configuration of a ``ceph-osd``,
-``ceph-mon``, or ``ceph-mds`` daemon at runtime. This capability is quite
-useful for increasing/decreasing logging output, enabling/disabling debug
-settings, and even for runtime optimization. The following reflects runtime
-configuration usage::
+In most cases, runtime changes to the configuration of a daemon take effect
+without requiring that the daemon be restarted. This might be used for
+increasing or decreasing the amount of logging output, for temporarily
+raising or lowering log subsystem debug levels, or for runtime optimization.
 
-	ceph tell {daemon-type}.{id or *} injectargs --{name} {value} [--{name} {value}]
-	
-Replace ``{daemon-type}`` with one of ``osd``, ``mon`` or ``mds``. You may apply
-the  runtime setting to all daemons of a particular type with ``*``, or specify
-a specific  daemon's ID (i.e., its number or letter). For example, to increase
-debug logging for a ``ceph-osd`` daemon named ``osd.0``, execute the following::
+Use the ``ceph config set`` command to update configuration options. For
+example, to enable the most verbose debug log level on a specific OSD, run a
+command of the following form:
 
-	ceph tell osd.0 injectargs --debug-osd 20 --debug-ms 1
+.. prompt:: bash #
 
-In your ``ceph.conf`` file, you may use spaces when specifying a
-setting name.  When specifying a setting name on the command line,
-ensure that you use an underscore or hyphen (``_`` or ``-``) between
-terms (e.g., ``debug osd`` becomes ``--debug-osd``).
+   ceph config set osd.1701 debug_ms 20
 
+.. note:: If an option has been customized in a local configuration file, the
+   `central config
+   <https://ceph.io/en/news/blog/2018/new-mimic-centralized-configuration-management/>`_
+   setting will be ignored because it has a lower precedence than the local
+   configuration file.
 
-Viewing a Configuration at Runtime
-==================================
+.. note:: Log subsystem levels range from 0 to 20.
 
-If your Ceph Storage Cluster is running, and you would like to see the
-configuration settings from a running daemon, execute the following:: 
+Override Values
+---------------
 
-	ceph daemon {daemon-type}.{id} config show | less
+Runtime option values can be set temporarily by using the ``ceph tell``
+or ``ceph daemon`` CLI commands.  This process is known as *injection*.
+These *override* values are ephemeral, which means
+that they affect only the current instance of the daemon and revert to
+persistently configured values when the daemon restarts.  Thus they are
+useful for careful testing of option value adjustments, but take care to
+also persist permanent changes via ``ceph config set``.
 
-If you are on a machine where osd.0 is running, the command would be::
+Override values can be set in two ways:
 
-    ceph daemon osd.0 config show | less
+#. From any host, send a message to a daemon with a command of the following
+   form:
 
+   .. prompt:: bash #
 
-Running Multiple Clusters
-=========================
+      ceph tell <name> config set <option> <value>
 
-With Ceph, you can run multiple Ceph Storage Clusters on the same hardware.
-Running multiple clusters provides a higher level of isolation compared to 
-using different pools on the same cluster with different CRUSH rulesets. A 
-separate cluster will have separate monitor, OSD and metadata server processes. 
-When running Ceph with  default settings, the default cluster name is ``ceph``, 
-which means you would  save your Ceph configuration file with the file name
-``ceph.conf`` in the  ``/etc/ceph`` default directory.
+   For example:
 
-See `ceph-deploy new`_ for details.
-.. _ceph-deploy new:../ceph-deploy-new
+   .. prompt:: bash #
 
-When you run multiple clusters, you must name your cluster and save the Ceph
-configuration file with the name of the cluster. For example, a cluster named
-``openstack`` will have a Ceph configuration file with the file name
-``openstack.conf`` in the  ``/etc/ceph`` default directory. 
+      ceph tell osd.1701 config set debug_osd 20
 
-.. important:: Cluster names must consist of letters a-z and digits 0-9 only.
+   The ``tell`` command can also accept a wildcard as the daemon identifier.
+   For example, to adjust the debug level on all OSD daemons, run a command of
+   the following form:
 
-Separate clusters imply separate data disks and journals, which are not shared
-between clusters. Referring to `Metavariables`_, the ``$cluster``  metavariable
-evaluates to the cluster name (i.e., ``openstack`` in the  foregoing example).
-Various settings use the ``$cluster`` metavariable, including: 
+   .. prompt:: bash #
 
-- ``keyring``
-- ``admin socket``
-- ``log file``
-- ``pid file``
-- ``mon data``
-- ``mon cluster log file``
-- ``osd data``
-- ``osd journal``
-- ``mds data``
-- ``rgw data``
+      ceph tell osd.* config set debug_osd 20
 
-See `General Settings`_, `OSD Settings`_, `Monitor Settings`_, `MDS Settings`_, 
-`RGW Settings`_ and `Log Settings`_ for relevant path defaults that use the 
-``$cluster`` metavariable.
+#. On the host where a specific daemon is running, connect to the daemon via a socket
+   in ``/var/run/ceph`` by running a command of the following form:
 
-.. _General Settings: ../general-config-ref
-.. _OSD Settings: ../osd-config-ref
-.. _Monitor Settings: ../mon-config-ref
-.. _MDS Settings: ../../../cephfs/mds-config-ref
-.. _RGW Settings: ../../../radosgw/config-ref/
-.. _Log Settings: ../../troubleshooting/log-and-debug
+   .. prompt:: bash #
+
+      ceph daemon <name> config set <option> <value>
+
+   For example:
+
+   .. prompt:: bash #
+
+      ceph daemon osd.4 config set debug_osd 20
+
+.. note:: In the output of the ``ceph config show`` command, these temporary
+   values are shown to have a source of ``override``.
 
 
-When creating default directories or files, you should use the cluster
-name at the appropriate places in the path. For example:: 
+.. _configuring_ceph_runtime_view:
 
-	sudo mkdir /var/lib/ceph/osd/openstack-0
-	sudo mkdir /var/lib/ceph/mon/openstack-a
-	
-.. important:: When running monitors on the same host, you should use 
-   different ports. By default, monitors use port 6789. If you already 
-   have monitors using port 6789, use a different port for your other cluster(s). 
+Viewing Runtime Settings
+========================
 
-To invoke a cluster other than the default ``ceph`` cluster, use the 
-``-c {filename}.conf`` option with the ``ceph`` command. For example:: 
+You can see the current settings specified for a running daemon with the ``ceph
+config show`` command. For example, to see the (non-default) settings for the
+daemon ``osd.1701``, run the following command:
 
-	ceph -c {cluster-name}.conf health
-	ceph -c openstack.conf health
+.. prompt:: bash #
+
+   ceph config show osd.1701
+
+To see only the value of a single option for a specific daemon, run a command of following form:
+
+.. prompt:: bash #
+
+   ceph config show osd.1701 debug_osd
+
+To see all settings for a specific daemon (including the settings with default
+values), run a command of the following form:
+
+.. prompt:: bash #
+
+   ceph config show-with-defaults osd.1701
+
+You can show all settings for a daemon that is currently running by connecting
+to the admin socket on the host where it runs. For example, to dump all
+current settings for ``osd.1701``, run the following command on the host
+where ``osd.1701`` runs. The host where a daemon runs can be determined with
+the ``ceph osd find`` command or ``ceph orch ps`` commands.
+
+.. prompt:: bash #
+
+   ceph daemon osd.1701 config show
+
+To see non-default settings and to see the source of each value came (for example,
+a config file, the central Monitor DB, or an override), run a command of the
+following form:
+
+.. prompt:: bash #
+
+   ceph daemon osd.1701 config diff
+
+To see the value of a single option, run a command of the following form:
+
+.. prompt:: bash #
+
+   ceph daemon osd.1701 config get debug_osd
 
 
-.. _Hardware Recommendations: ../../../start/hardware-recommendations
-.. _Network Configuration Reference: ../network-config-ref
-.. _OSD Config Reference: ../osd-config-ref
-.. _Configuring Monitor/OSD Interaction: ../mon-osd-interaction
-.. _ceph-deploy new: ../../deployment/ceph-deploy-new#naming-a-cluster
+Changes Introduced in Octopus
+=============================
+
+The Octopus release changed the way that the configuration file is parsed.
+These changes are as follows:
+
+- Repeated configuration options are allowed, and no warnings will be
+  displayed. This means that the value that comes last in the file is the one
+  that takes effect. Prior to this change, Ceph displayed warning messages
+  of the following form when lines containing duplicate options were encountered::
+
+    warning line 42: 'foo' in section 'bar' redefined
+- Prior to Octopus, options containing invalid UTF-8 characters were ignored
+  with warning messages. In Octopus and later releases they are treated as fatal errors.
+- The backslash character ``\`` is interpreted as a line-continuation marker that
+  combines the next line with the current one. Prior to Octopus, there was a
+  requirement that any end-of-line backslash be followed by a non-empty line.
+  In Octopus and later releases, an empty line following a backslash is allowed.
+- In the configuration file, each line specifies an individual configuration
+  option. The option's name and its value are separated with ``=``, and the
+  value may be enclosed within single or double quotes. If an invalid
+  configuration is specified, we will treat it as an invalid configuration
+  file and log a message of the following form::
+
+    bad option ==== bad value
+- Prior to Octopus, if no section name was specified in the configuration file,
+  all options would be set as though they were within the :confsec:`global`
+  section. This approach is discouraged. Since Octopus, any configuration
+  file that has no section name must contain only a single option.
+
+.. |---|   unicode:: U+2014 .. EM DASH :trim:

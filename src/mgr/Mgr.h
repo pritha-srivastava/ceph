@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,75 +16,129 @@
 #define CEPH_MGR_H_
 
 // Python.h comes first because otherwise it clobbers ceph's assert
-#include "Python.h"
-// Python's pyconfig-64.h conflicts with ceph's acconfig.h
-#undef HAVE_SYS_WAIT_H
-#undef HAVE_UNISTD_H
-#undef HAVE_UTIME_H
-#undef _POSIX_C_SOURCE
-#undef _XOPEN_SOURCE
+#include <Python.h>
 
-#include "mds/FSMap.h"
-#include "messages/MFSMap.h"
-#include "msg/Messenger.h"
 #include "auth/Auth.h"
 #include "common/Finisher.h"
-#include "common/Timer.h"
+#include "mon/MgrMap.h"
+#include "msg/Dispatcher.h"
+#include "msg/Messenger.h"
 
-#include "DaemonServer.h"
-#include "PyModules.h"
-
-#include "DaemonState.h"
 #include "ClusterState.h"
+#include "DaemonServer.h"
+#include "DaemonState.h"
+#include "PyModuleRegistry.h"
 
 class MCommand;
 class MMgrDigest;
+class MLog;
+class MServiceMap;
 class Objecter;
+class MFSMap;
 
-
-class MgrPyModule;
-
-class Mgr {
+class Mgr : public AdminSocketHook {
 protected:
   MonClient *monc;
   Objecter  *objecter;
   Messenger *client_messenger;
 
-  Mutex lock;
-  SafeTimer timer;
+  mutable ceph::mutex lock = ceph::make_mutex("Mgr::lock");
   Finisher finisher;
 
-  Context *waiting_for_fs_map;
+  // Track receipt of initial data during startup
+  ceph::condition_variable fs_map_cond;
+  bool digest_received;
+  ceph::condition_variable digest_cond;
 
-  PyModules py_modules;
+  PyModuleRegistry *py_module_registry;
   DaemonStateIndex daemon_state;
   ClusterState cluster_state;
 
   DaemonServer server;
 
-  void load_config();
+  LogChannelRef clog;
+  LogChannelRef audit_clog;
+
+  std::map<std::string, std::string> pre_init_store;
+
   void load_all_metadata();
+  std::map<std::string, std::string> load_store();
   void init();
 
   bool initialized;
   bool initializing;
+  ceph::coarse_mono_time initialization_start_time;
 
 public:
-  Mgr(MonClient *monc_, Messenger *clientm_, Objecter *objecter_);
+  Mgr(MonClient *monc_, const MgrMap& mgrmap,
+      PyModuleRegistry *py_module_registry_,
+      Messenger *clientm_, Objecter *objecter_,
+      LogChannelRef clog_, LogChannelRef audit_clog_);
   ~Mgr();
+  void shutdown();
 
   bool is_initialized() const {return initialized;}
-  entity_addr_t get_server_addr() const { return server.get_myaddr(); }
+  bool exceeded_initialization_expiration();
+  entity_addrvec_t get_server_addrs() const {
+    return server.get_myaddrs();
+  }
 
-  void handle_mgr_digest(MMgrDigest* m);
-  void handle_fs_map(MFSMap* m);
+  void handle_mgr_digest(ceph::ref_t<MMgrDigest> m);
+  void handle_fs_map(ceph::ref_t<MFSMap> m);
   void handle_osd_map();
+  void handle_log(ceph::ref_t<MLog> m);
+  void handle_service_map(ceph::ref_t<MServiceMap> m);
+  void handle_mon_map();
 
-  bool ms_dispatch(Message *m);
+  bool got_mgr_map(const MgrMap& m);
 
-  void background_init();
-  void shutdown();
-  int main(vector<const char *> args);
+  Dispatcher::dispatch_result_t ms_dispatch2(const ceph::ref_t<Message>& m);
+
+  void background_init(Context *completion);
+
+  std::map<std::string, std::string> get_services() const;
+
+  int call(
+    std::string_view command,
+    const cmdmap_t& cmdmap,
+    const bufferlist& inbl,
+    Formatter *f,
+    std::ostream& errss,
+    ceph::buffer::list& out) override;
 };
+
+/**
+ * Context for completion of metadata mon commands: take
+ * the result and stash it in DaemonStateIndex
+ */
+class MetadataUpdate : public Context
+{
+
+private:
+  DaemonStateIndex &daemon_state;
+  ClusterState &cluster_state;
+  DaemonKey key;
+
+  std::map<std::string, std::string> defaults;
+
+public:
+  bufferlist outbl;
+  std::string outs;
+
+  MetadataUpdate(DaemonStateIndex &daemon_state_, ClusterState &cluster_state_,
+                 const DaemonKey &key_)
+    : daemon_state(daemon_state_), cluster_state(cluster_state_), key(key_)
+  {
+      daemon_state.notify_updating(key);
+  }
+
+  void set_default(const std::string &k, const std::string &v)
+  {
+    defaults[k] = v;
+  }
+
+  void finish(int r) override;
+};
+
 
 #endif

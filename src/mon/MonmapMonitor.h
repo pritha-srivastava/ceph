@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -19,48 +20,46 @@
 #ifndef CEPH_MONMAPMONITOR_H
 #define CEPH_MONMAPMONITOR_H
 
-#include <map>
+#include <iosfwd>
 #include <set>
+#include <string>
 
-using namespace std;
-
-#include "include/types.h"
-#include "msg/Messenger.h"
+#include "include/buffer_fwd.h"
 
 #include "PaxosService.h"
 #include "MonMap.h"
 #include "MonitorDBStore.h"
 
-class MMonGetMap;
-class MMonMap;
-class MMonCommand;
-class MMonJoin;
+struct Subscription;
 
 class MonmapMonitor : public PaxosService {
  public:
-  MonmapMonitor(Monitor *mn, Paxos *p, const string& service_name)
+  MonmapMonitor(Monitor &mn, Paxos &p, const std::string& service_name)
     : PaxosService(mn, p, service_name)
   {
   }
   MonMap pending_map; //the pending map awaiting passage
 
-  void create_initial();
+  void init() override;
 
-  void update_from_paxos(bool *need_bootstrap);
+  void create_initial() override;
 
-  void create_pending();
+  void update_from_paxos(bool *need_bootstrap) override;
 
-  void encode_pending(MonitorDBStore::TransactionRef t);
+  void create_pending() override;
+
+  void encode_pending(MonitorDBStore::TransactionRef t) override;
   // we always encode the full map; we have no use for full versions
-  virtual void encode_full(MonitorDBStore::TransactionRef t) { }
+  void encode_full(MonitorDBStore::TransactionRef t) override { }
 
-  void on_active();
-  void apply_mon_features(const mon_feature_t& features);
+  void on_active() override;
+  void apply_mon_features(const mon_feature_t& features,
+			  ceph_release_t min_mon_release);
 
-  void dump_info(Formatter *f);
+  void dump_info(ceph::Formatter *f);
 
-  bool preprocess_query(MonOpRequestRef op);
-  bool prepare_update(MonOpRequestRef op);
+  bool preprocess_query(MonOpRequestRef op) override;
+  bool prepare_update(MonOpRequestRef op) override;
 
   bool preprocess_join(MonOpRequestRef op);
   bool prepare_join(MonOpRequestRef op);
@@ -68,27 +67,73 @@ class MonmapMonitor : public PaxosService {
   bool preprocess_command(MonOpRequestRef op);
   bool prepare_command(MonOpRequestRef op);
 
-  void get_health(list<pair<health_status_t,string> >& summary,
-		  list<pair<health_status_t,string> > *detail,
-		  CephContext *cct) const override;
-
-  int get_monmap(bufferlist &bl);
+  int get_monmap(ceph::buffer::list &bl);
 
   /*
    * Since monitors are pretty
    * important, this implementation will just write 0.0.
    */
-  bool should_propose(double& delay);
-
-  void tick();
+  bool should_propose(double& delay) override;
 
   void check_sub(Subscription *sub);
 
-private:
-  void check_subs();
+  void tick() override;
+
+  epoch_t bump_auth_epoch(epoch_t e);
 
 private:
-  bufferlist monmap_bl;
+  void check_subs();
+  ceph::buffer::list monmap_bl;
+  /**
+   * Check validity of inputs and monitor state to
+   * engage stretch mode. Designed to be used with
+   * OSDMonitor::try_enable_stretch_mode() where we call both twice,
+   * first with commit=false to validate.
+   * @param ss: a stringstream to write errors into
+   * @param okay: Filled to true if okay, false if validation fails
+   * @param errcode: filled with -errno if there's a problem
+   * @param commit: true if we should commit the change, false if just testing
+   * @param tiebreaker_mon: the name of the monitor to declare tiebreaker (empty for auto-select)
+   * @param dividing_bucket: the bucket type (eg 'dc') that divides the cluster
+   * @param crush: the pending CrushWrapper for validating monitor locations against subtrees
+   *
+   * Note: CRUSH bucket type and subtree count validation is performed by
+   * OSDMonitor::try_enable_stretch_mode() to avoid redundancy.
+   */
+  void try_enable_stretch_mode(std::stringstream& ss, bool *okay,
+			       int *errcode, bool commit,
+			       std::string tiebreaker_mon,
+			       const std::string& dividing_bucket,
+			       const CrushWrapper& crush);
+
+public:
+  /**
+   * Static helper for validating and enabling stretch mode on a MonMap.
+   * Extracted for testability - can be called from unit tests.
+   * Parameters same as try_enable_stretch_mode above.
+   * @param monmap: current committed monmap to validate against
+   * @param pending_map: pending monmap to modify when commit=true
+   */
+  static void validate_and_enable_stretch_mode(
+			       const MonMap& monmap,
+			       MonMap& pending_map,
+			       std::stringstream& ss, bool *okay,
+			       int *errcode, bool commit,
+			       std::string tiebreaker_mon,
+			       const std::string& dividing_bucket,
+			       const CrushWrapper& crush);
+
+public:
+  /**
+   * Set us to degraded stretch mode. Put the dead_mons in
+   * the MonMap.
+   */
+  void trigger_degraded_stretch_mode(const std::set<std::string>& dead_mons);
+  /**
+   * Set us to healthy stretch mode: clear out the
+   * down list to allow any non-tiebreaker mon to be the leader again.
+   */
+  void trigger_healthy_stretch_mode();
 };
 
 

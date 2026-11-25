@@ -1,0 +1,105 @@
+import argparse
+from ceph_volume.util import arg_validators
+
+def create_parser(prog: str, description: str) -> argparse.ArgumentParser:
+    """
+    Both prepare and create share the same parser, those are defined here to
+    avoid duplication
+    """
+    parser = argparse.ArgumentParser(
+        prog=prog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=description,
+    )
+    parser.add_argument(
+        '--objectstore',
+        dest='objectstore',
+        help='The OSD objectstore.',
+        default='bluestore',
+        choices=['bluestore', 'seastore'],
+        type=str,
+    ),
+    parser.add_argument(
+        '--data',
+        required=True,
+        type=arg_validators.ValidRawDevice(as_string=True),
+        help='a raw device to use for the OSD',
+    )
+    parser.add_argument(
+        '--bluestore',
+        action='store_true',
+        help='Use BlueStore backend. (DEPRECATED: use --objectstore instead)'
+    )
+    parser.add_argument(
+        '--crush-device-class',
+        dest='crush_device_class',
+        help='Crush device class to assign this OSD to',
+        default=""
+    )
+    parser.add_argument(
+        '--no-tmpfs',
+        action='store_true',
+        help='Do not use a tmpfs mount for OSD data dir'
+    )
+    parser.add_argument(
+        '--block.db',
+        dest='block_db',
+        help='Path to bluestore block.db block device',
+        type=arg_validators.ValidRawDevice(as_string=True)
+    )
+    parser.add_argument(
+        '--block.wal',
+        dest='block_wal',
+        help='Path to bluestore block.wal block device',
+        type=arg_validators.ValidRawDevice(as_string=True)
+    )
+    parser.add_argument(
+        '--dmcrypt',
+        action=arg_validators.DmcryptAction,
+        help='Enable device encryption via dm-crypt',
+    )
+    parser.add_argument(
+        '--with-tpm',
+        dest='with_tpm',
+        help='Whether encrypted OSDs should be enrolled with TPM.',
+        action='store_true'
+    ),
+    parser.add_argument(
+        '--tpm2-pcrs',
+        dest='tpm2_pcrs',
+        help=('PCRs for systemd-cryptenroll --tpm2-pcrs when using --with-tpm '
+              '(default binds to Secure Boot policy, see systemd-cryptenroll(1)).'),
+        default='7',
+        type=str,
+    ),
+    parser.add_argument(
+        '--osd-id',
+        help='Reuse an existing OSD id',
+        default=None,
+        type=arg_validators.valid_osd_id,
+    )
+    parser.add_argument(
+        '--osd-fsid',
+        help='Reuse an existing OSD fsid',
+        default=None,
+    )
+    parser.add_argument(
+        '--osd-type',
+        dest='osd_type',
+        help='The Ceph OSD type to use.',
+        default='classic',
+        choices=['classic', 'crimson'],
+        type=str,
+    )
+    parser.add_argument(
+        '--report',
+        action='store_true',
+        help='Only report on the OSD that would be created and exit',
+    )
+    parser.add_argument(
+        '--format',
+        help='output format, defaults to "pretty"',
+        default='pretty',
+        choices=['json', 'json-pretty', 'pretty'],
+    )
+    return parser

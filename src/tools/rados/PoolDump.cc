@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -13,11 +14,16 @@
  */
 
 #include "include/rados/librados.hpp"
+#include "common/debug.h"
 #include "common/errno.h"
 
 #include "PoolDump.h"
 
 using namespace librados;
+using std::cerr;
+using std::less;
+using std::map;
+using std::string;
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rados
@@ -30,7 +36,7 @@ using namespace librados;
  */
 int PoolDump::dump(IoCtx *io_ctx)
 {
-  assert(io_ctx != NULL);
+  ceph_assert(io_ctx != NULL);
 
   int r = 0;
   write_super();
@@ -70,6 +76,7 @@ int PoolDump::dump(IoCtx *io_ctx)
     const uint32_t op_size = 4096 * 1024;
     uint64_t offset = 0;
     io_ctx->set_namespace(i->get_nspace());
+    io_ctx->locator_set_key(i->get_locator());
     while (true) {
       bufferlist outdata;
       r = io_ctx->read(oid, outdata, op_size, offset);
@@ -87,7 +94,6 @@ int PoolDump::dump(IoCtx *io_ctx)
 
       if (outdata.length() < op_size) {
         // No more data
-        r = 0;
         break;
       }
       offset += outdata.length();
@@ -96,7 +102,7 @@ int PoolDump::dump(IoCtx *io_ctx)
     // Compose TYPE_ATTRS chunk
     // ========================
     std::map<std::string, bufferlist> raw_xattrs;
-    std::map<std::string, bufferlist> xattrs;
+    std::map<std::string, bufferlist,less<>> xattrs;
     r = io_ctx->getxattrs(oid, raw_xattrs);
     if (r < 0) {
       cerr << "error getting xattr set " << oid << ": " << cpp_strerror(r)
@@ -151,7 +157,6 @@ int PoolDump::dump(IoCtx *io_ctx)
       }
       r = values.size();
     } while (r == MAX_READ);
-    r = 0;
 
     // Close object
     // =============

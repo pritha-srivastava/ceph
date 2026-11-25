@@ -20,7 +20,7 @@ block device (rbd) images among Ceph clusters. It replays changes to
 images in remote clusters in a local cluster, for disaster recovery.
 
 It connects to remote clusters via the RADOS protocol, relying on
-default search paths to find ceph.conf files monitor addresses and
+default search paths to find ceph.conf files, monitor addresses and
 authentication information for them, i.e. ``/etc/ceph/$cluster.conf``,
 ``/etc/ceph/$cluster.keyring``, and
 ``/etc/ceph/$cluster.$name.keyring``, where ``$cluster`` is the
@@ -65,7 +65,7 @@ Availability
 ============
 
 :program:`rbd-mirror` is part of Ceph, a massively scalable, open-source, distributed
-storage system. Please refer to the Ceph documentation at http://ceph.com/docs for
+storage system. Please refer to the Ceph documentation at https://docs.ceph.com for
 more information.
 
 

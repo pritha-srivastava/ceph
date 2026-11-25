@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -29,6 +30,8 @@
 #include "erasure-code/ErasureCodePlugin.h"
 #include "global/global_context.h"
 #include "gtest/gtest.h"
+
+using namespace std;
 
 void* thread1(void* pParam);
 
@@ -84,6 +87,7 @@ TEST(ErasureCodeShec, thread)
   pthread_join(tid5, NULL);
 }
 
+IGNORE_DEPRECATED
 void* thread1(void* pParam)
 {
   TestParam* param = static_cast<TestParam*>(pParam);
@@ -94,7 +98,7 @@ void* thread1(void* pParam)
 
   instance.disable_dlclose = true;
   {
-    Mutex::Locker l(instance.lock);
+    std::lock_guard l{instance.lock};
     __erasure_code_init((char*) "shec", (char*) "");
   }
   std::cout << "__erasure_code_init finish " << std::endl;
@@ -129,7 +133,7 @@ void* thread1(void* pParam)
     ErasureCodeProfile *profile = new ErasureCodeProfile();
     (*profile)["plugin"] = "shec";
     (*profile)["technique"] = "multiple";
-    (*profile)["ruleset-failure-domain"] = "osd";
+    (*profile)["crush-failure-domain"] = "osd";
     (*profile)["k"] = param->k;
     (*profile)["m"] = param->m;
     (*profile)["c"] = param->c;
@@ -147,8 +151,8 @@ void* thread1(void* pParam)
     EXPECT_EQ(i_c, shec->c);
     EXPECT_EQ(i_w, shec->w);
     EXPECT_EQ(ErasureCodeShec::MULTIPLE, shec->technique);
-    EXPECT_STREQ("default", shec->ruleset_root.c_str());
-    EXPECT_STREQ("osd", shec->ruleset_failure_domain.c_str());
+    EXPECT_STREQ("default", shec->rule_root.c_str());
+    EXPECT_STREQ("osd", shec->rule_failure_domain.c_str());
     EXPECT_TRUE(shec->matrix != NULL);
     if ((shec->matrix == NULL)) {
       std::cout << "matrix is null" << std::endl;
@@ -173,9 +177,9 @@ void* thread1(void* pParam)
     }
 
     //decode
-    r = shec->decode(set<int>(want_to_decode, want_to_decode + 2),
-		     encoded,
-		     &decoded);
+    r = shec->_decode(set<int>(want_to_decode, want_to_decode + 2),
+		      encoded,
+		      &decoded);
 
     EXPECT_EQ(0, r);
     EXPECT_EQ(2u, decoded.size());
@@ -215,3 +219,4 @@ void* thread1(void* pParam)
 
   return NULL;
 }
+END_IGNORE_DEPRECATED

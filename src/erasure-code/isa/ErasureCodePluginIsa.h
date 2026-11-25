@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph distributed storage system
  *
@@ -21,14 +22,14 @@
 #include "erasure-code/ErasureCodePlugin.h"
 #include "ErasureCodeIsaTableCache.h"
 
-class ErasureCodePluginIsa : public ErasureCodePlugin {
+class ErasureCodePluginIsa : public ceph::ErasureCodePlugin {
 public:
   ErasureCodeIsaTableCache tcache;
 
-  virtual int factory(const std::string &directory,
-		      ErasureCodeProfile &profile,
-		      ErasureCodeInterfaceRef *erasure_code,
-		      ostream *ss);
+  int factory(const std::string &directory,
+	      ceph::ErasureCodeProfile &profile,
+	      ceph::ErasureCodeInterfaceRef *erasure_code,
+	      std::ostream *ss) override;
 };
 
 #endif

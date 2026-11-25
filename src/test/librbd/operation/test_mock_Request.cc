@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/librbd/test_mock_fixture.h"
 #include "test/librbd/test_support.h"
@@ -7,6 +7,8 @@
 #include "test/librbd/mock/MockJournal.h"
 #include "librbd/AsyncRequest.h"
 #include "librbd/operation/Request.h"
+
+#include <shared_mutex> // for std::shared_lock
 
 namespace librbd {
 namespace {
@@ -109,7 +111,7 @@ struct TestMockOperationRequest : public TestMockFixture {
     EXPECT_CALL(mock_request, send_op())
       .WillOnce(Invoke([&mock_image_ctx, &mock_request, r]() {
                   mock_image_ctx.image_ctx->op_work_queue->queue(
-                    new FunctionContext([&mock_request, r](int _) {
+                    new LambdaContext([&mock_request, r](int _) {
                       mock_request.send_op_impl(r);
                     }), 0);
                 }));
@@ -136,7 +138,7 @@ TEST_F(TestMockOperationRequest, SendJournalDisabled) {
   expect_send_op(*mock_request, 0);
 
   {
-    RWLock::RLocker owner_locker(mock_image_ctx.owner_lock);
+    std::shared_lock owner_locker{mock_image_ctx.owner_lock};
     mock_request->send();
   }
 
@@ -164,7 +166,7 @@ TEST_F(TestMockOperationRequest, SendAffectsIOJournalDisabled) {
   expect_is_journal_appending(mock_journal, false);
 
   {
-    RWLock::RLocker owner_locker(mock_image_ctx.owner_lock);
+    std::shared_lock owner_locker{mock_image_ctx.owner_lock};
     mock_request->send();
   }
 

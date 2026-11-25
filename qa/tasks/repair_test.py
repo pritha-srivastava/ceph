@@ -4,8 +4,6 @@ Test pool repairing after objects are damaged.
 import logging
 import time
 
-from teuthology import misc as teuthology
-
 log = logging.getLogger(__name__)
 
 
@@ -94,7 +92,7 @@ def repair_test_1(manager, corrupter, chooser, scrub_type):
         log.info("scrubbing")
         manager.do_pg_scrub(pool, 0, scrub_type)
 
-        assert manager.pg_inconsistent(pool, 0)
+        manager.with_pg_state(pool, 0, lambda s: 'inconsistent' in s)
 
         # repair
         log.info("repairing")
@@ -104,7 +102,7 @@ def repair_test_1(manager, corrupter, chooser, scrub_type):
         manager.do_pg_scrub(pool, 0, scrub_type)
 
         # verify consistent
-        assert not manager.pg_inconsistent(pool, 0)
+        manager.with_pg_state(pool, 0, lambda s: 'inconsistent' not in s)
         log.info("done")
 
 
@@ -123,20 +121,16 @@ def repair_test_2(ctx, manager, config, chooser):
     with manager.pool(pool, 1):
         log.info("starting repair test type 2")
         victim_osd = chooser(manager, pool, 0)
-        first_mon = teuthology.get_first_mon(ctx, config)
-        (mon,) = ctx.cluster.only(first_mon).remotes.iterkeys()
 
         # create object
         log.info("doing put and setomapval")
         manager.do_put(pool, 'file1', '/etc/hosts')
-        manager.do_rados(mon, ['-p', pool, 'setomapval', 'file1',
-                                   'key', 'val'])
+        manager.do_rados(['setomapval', 'file1', 'key', 'val'], pool=pool)
         manager.do_put(pool, 'file2', '/etc/hosts')
         manager.do_put(pool, 'file3', '/etc/hosts')
         manager.do_put(pool, 'file4', '/etc/hosts')
         manager.do_put(pool, 'file5', '/etc/hosts')
-        manager.do_rados(mon, ['-p', pool, 'setomapval', 'file5',
-                                   'key', 'val'])
+        manager.do_rados(['setomapval', 'file5', 'key', 'val'], pool=pool)
         manager.do_put(pool, 'file6', '/etc/hosts')
 
         # corrupt object
@@ -147,13 +141,13 @@ def repair_test_2(ctx, manager, config, chooser):
         log.info("scrubbing")
         manager.do_pg_scrub(pool, 0, 'deep-scrub')
 
-        assert manager.pg_inconsistent(pool, 0)
+        manager.with_pg_state(pool, 0, lambda s: 'inconsistent' in s)
 
         # Regression test for bug #4778, should still
         # be inconsistent after scrub
         manager.do_pg_scrub(pool, 0, 'scrub')
 
-        assert manager.pg_inconsistent(pool, 0)
+        manager.with_pg_state(pool, 0, lambda s: 'inconsistent' in s)
 
         # Additional corruptions including 2 types for file1
         log.info("corrupting more objects")
@@ -166,7 +160,7 @@ def repair_test_2(ctx, manager, config, chooser):
         log.info("scrubbing")
         manager.do_pg_scrub(pool, 0, 'deep-scrub')
 
-        assert manager.pg_inconsistent(pool, 0)
+        manager.with_pg_state(pool, 0, lambda s: 'inconsistent' in s)
 
         # repair
         log.info("repairing")
@@ -176,7 +170,7 @@ def repair_test_2(ctx, manager, config, chooser):
         time.sleep(10)
 
         # verify consistent
-        assert not manager.pg_inconsistent(pool, 0)
+        manager.with_pg_state(pool, 0, lambda s: 'inconsistent' not in s)
 
         # In the future repair might determine state of
         # inconsistency itself, verify with a deep-scrub
@@ -184,7 +178,7 @@ def repair_test_2(ctx, manager, config, chooser):
         manager.do_pg_scrub(pool, 0, 'deep-scrub')
 
         # verify consistent
-        assert not manager.pg_inconsistent(pool, 0)
+        manager.with_pg_state(pool, 0, lambda s: 'inconsistent' not in s)
 
         log.info("done")
 
@@ -230,7 +224,7 @@ def repair_test_erasure_code(manager, corrupter, victim, scrub_type):
         log.info("scrubbing")
         manager.do_pg_scrub(pool, 0, scrub_type)
 
-        assert manager.pg_inconsistent(pool, 0)
+        manager.with_pg_state(pool, 0, lambda s: 'inconsistent' in s)
 
         # repair
         log.info("repairing")
@@ -240,7 +234,7 @@ def repair_test_erasure_code(manager, corrupter, victim, scrub_type):
         manager.do_pg_scrub(pool, 0, scrub_type)
 
         # verify consistent
-        assert not manager.pg_inconsistent(pool, 0)
+        manager.with_pg_state(pool, 0, lambda s: 'inconsistent' not in s)
         log.info("done")
 
 
@@ -251,7 +245,7 @@ def task(ctx, config):
 
     The config should be as follows:
 
-      Must include the log-whitelist below
+      Must include the log-ignorelist below
       Must enable filestore_debug_inject_read_err config
 
     example:
@@ -260,7 +254,7 @@ def task(ctx, config):
     - chef:
     - install:
     - ceph:
-        log-whitelist:
+        log-ignorelist:
           - 'candidate had a stat error'
           - 'candidate had a read error'
           - 'deep-scrub 0 missing, 1 inconsistent objects'
@@ -275,7 +269,8 @@ def task(ctx, config):
           - 'scrub [0-9]+ errors'
           - 'size 1 != size'
           - 'attr name mismatch'
-          - 'Regular scrub request, losing deep-scrub details'
+          - 'Regular scrub request, deep-scrub details will be lost'
+          - 'candidate size [0-9]+ info size [0-9]+ mismatch'
         conf:
           osd:
             filestore debug inject read err: true
@@ -288,7 +283,7 @@ def task(ctx, config):
         'repair_test task only accepts a dict for config'
 
     manager = ctx.managers['ceph']
-    manager.wait_for_all_up()
+    manager.wait_for_all_osds_up()
 
     manager.raw_cluster_cmd('osd', 'set', 'noscrub')
     manager.raw_cluster_cmd('osd', 'set', 'nodeep-scrub')
@@ -303,3 +298,6 @@ def task(ctx, config):
     repair_test_2(ctx, manager, config, choose_replica)
 
     repair_test_erasure_code(manager, hinfoerr, 'primary', "deep-scrub")
+
+    manager.raw_cluster_cmd('osd', 'unset', 'noscrub')
+    manager.raw_cluster_cmd('osd', 'unset', 'nodeep-scrub')

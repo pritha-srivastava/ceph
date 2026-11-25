@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,7 +18,10 @@
 #include <memory>
 #include <sstream>
 #include <algorithm>
+#include <boost/algorithm/string/replace.hpp>
 #include "auth/KeyRing.h"
+#include "include/stringify.h"
+#include "common/ceph_context.h"
 #include "common/config.h"
 #include "common/debug.h"
 #include "common/errno.h"
@@ -28,23 +32,17 @@
 #undef dout_prefix
 #define dout_prefix *_dout << "auth: "
 
-using namespace std;
+using std::map;
+using std::ostream;
+using std::ostringstream;
+using std::string;
 
-int KeyRing::from_ceph_context(CephContext *cct)
+using ceph::bufferlist;
+using ceph::Formatter;
+
+int KeyRing::from_ceph_context(CephContext *cct, std::ostream* os)
 {
-  const md_config_t *conf = cct->_conf;
-  string filename;
-
-  int ret = ceph_resolve_file_search(conf->keyring, filename);
-  if (!ret) {
-    ret = load(cct, filename);
-    if (ret < 0)
-      lderr(cct) << "failed to load " << filename
-		 << ": " << cpp_strerror(ret) << dendl;
-  } else {
-    lderr(cct) << "unable to find a keyring on " << conf->keyring
-	       << ": " << cpp_strerror(ret) << dendl;
-  }
+  const auto& conf = cct->_conf;
 
   if (!conf->key.empty()) {
     EntityAuth ea;
@@ -53,8 +51,8 @@ int KeyRing::from_ceph_context(CephContext *cct)
       add(conf->name, ea);
       return 0;
     }
-    catch (buffer::error& e) {
-      lderr(cct) << "failed to decode key '" << conf->key << "'" << dendl;
+    catch (ceph::buffer::error& e) {
+      *os << "failed to decode key from 'key' config";
       return -EINVAL;
     }
   }
@@ -64,31 +62,47 @@ int KeyRing::from_ceph_context(CephContext *cct)
     string err;
     int r = bl.read_file(conf->keyfile.c_str(), &err);
     if (r < 0) {
-      lderr(cct) << err << dendl;
+      *os << "unable to read keyfile '" << conf->keyfile << "': " << err;
       return r;
+    } else {
+      string k(bl.c_str(), bl.length());
+      EntityAuth ea;
+      try {
+        ea.key.decode_base64(k);
+        add(conf->name, ea);
+        return 0;
+      }
+      catch (ceph::buffer::error& e) {
+        *os << "failed to decode key from 'keyfile' config: '" << conf->keyfile << "'";
+        return -EINVAL;
+      }
     }
-    string k(bl.c_str(), bl.length());
-    EntityAuth ea;
-    try {
-      ea.key.decode_base64(k);
-      add(conf->name, ea);
-    }
-    catch (buffer::error& e) {
-      lderr(cct) << "failed to decode key '" << k << "'" << dendl;
-      return -EINVAL;
-    }
-    return 0;
   }
 
-  return ret;
+  if (!conf->keyring.empty()) {
+    string filename;
+    int ret = ceph_resolve_file_search(conf->keyring, filename);
+    if (!ret) {
+      ret = load(cct, filename);
+      if (ret < 0) {
+        *os << "failed to load 'keyring' config file '" << filename << "': " << cpp_strerror(ret);
+      }
+      return ret;
+    } else {
+      *os << "unable to find a keyring via 'keyring' config " << conf->keyring << ": " << cpp_strerror(ret);
+      return -ENOENT;
+    }
+  }
+
+  /* Note: this can happen during startup when configs are still being set */
+  *os << "unable to find suitable key from configs 'keyring', 'keyfile', or 'key'";
+  return -ENOENT;
 }
 
-KeyRing *KeyRing::create_empty()
-{
-  return new KeyRing();
-}
-
-int KeyRing::set_modifier(const char *type, const char *val, EntityName& name, map<string, bufferlist>& caps)
+int KeyRing::set_modifier(const char *type,
+			  const char *val,
+			  EntityName& name,
+			  map<string, bufferlist>& caps)
 {
   if (!val)
     return -EINVAL;
@@ -98,7 +112,7 @@ int KeyRing::set_modifier(const char *type, const char *val, EntityName& name, m
     string l(val);
     try {
       key.decode_base64(l);
-    } catch (const buffer::error& err) {
+    } catch (const ceph::buffer::error& err) {
       return -EINVAL;
     }
     set_key(name, key);
@@ -108,12 +122,11 @@ int KeyRing::set_modifier(const char *type, const char *val, EntityName& name, m
       return -EINVAL;
     string l(val);
     bufferlist bl;
-    ::encode(l, bl);
+    encode(l, bl);
     caps[caps_entity] = bl;
     set_caps(name, caps);
   } else if (strcmp(type, "auid") == 0) {
-    uint64_t auid = strtoull(val, NULL, 0);
-    set_uid(name, auid);
+    // just ignore it so we can still decode "old" keyrings that have an auid
   } else
     return -EINVAL;
 
@@ -130,27 +143,20 @@ void KeyRing::encode_plaintext(bufferlist& bl)
 
 void KeyRing::encode_formatted(string label, Formatter *f, bufferlist& bl)
 {
-  std::ostringstream(os);
   f->open_array_section(label.c_str());
-  for (map<EntityName, EntityAuth>::iterator p = keys.begin();
-       p != keys.end();
-       ++p) {
-
+  for (const auto &[ename, eauth] : keys) {
     f->open_object_section("auth_entities");
-    f->dump_string("entity", p->first.to_str().c_str());
-    std::ostringstream keyss;
-    keyss << p->second.key;
-    f->dump_string("key", keyss.str());
-    if (p->second.auid != CEPH_AUTH_UID_DEFAULT)
-      f->dump_int("auid", p->second.auid);
+    f->dump_string("entity", ename.to_str().c_str());
+    f->dump_string("key", stringify(eauth.key));
+    if (!eauth.pending_key.empty()) {
+      f->dump_string("pending_key", stringify(eauth.pending_key));
+    }
     f->open_object_section("caps");
-    for (map<string, bufferlist>::iterator q = p->second.caps.begin();
- 	 q != p->second.caps.end();
-	 ++q) {
-      bufferlist::iterator dataiter = q->second.begin();
+    for (auto& [sys, capsbl] : eauth.caps) {
+      auto dataiter = capsbl.cbegin();
       string caps;
-      ::decode(caps, dataiter);
-      f->dump_string(q->first.c_str(), caps);
+      ceph::decode(caps, dataiter);
+      f->dump_string(sys.c_str(), caps);
     }
     f->close_section();	/* caps */
     f->close_section();	/* auth_entities */
@@ -159,21 +165,18 @@ void KeyRing::encode_formatted(string label, Formatter *f, bufferlist& bl)
   f->flush(bl);
 }
 
-void KeyRing::decode_plaintext(bufferlist::iterator& bli)
+void KeyRing::decode(bufferlist::const_iterator& bli)
 {
   int ret;
   bufferlist bl;
   bli.copy_all(bl);
   ConfFile cf;
-  std::deque<std::string> parse_errors;
 
-  if (cf.parse_bufferlist(&bl, &parse_errors, NULL) != 0) {
-    throw buffer::malformed_input("cannot parse buffer");
+  if (cf.parse_bufferlist(&bl, nullptr) != 0) {
+    throw ceph::buffer::malformed_input("cannot parse buffer");
   }
 
-  for (ConfFile::const_section_iter_t s = cf.sections_begin();
-	    s != cf.sections_end(); ++s) {
-    string name = s->first;
+  for (auto& [name, section] : cf) {
     if (name == "global")
       continue;
 
@@ -182,35 +185,22 @@ void KeyRing::decode_plaintext(bufferlist::iterator& bli)
     if (!ename.from_str(name)) {
       ostringstream oss;
       oss << "bad entity name in keyring: " << name;
-      throw buffer::malformed_input(oss.str().c_str());
+      throw ceph::buffer::malformed_input(oss.str().c_str());
     }
 
-    for (ConfSection::const_line_iter_t l = s->second.lines.begin();
-	 l != s->second.lines.end(); ++l) {
-      if (l->key.empty())
+    for (auto& [k, val] : section) {
+      if (k.empty())
         continue;
-      string k(l->key);
-      std::replace(k.begin(), k.end(), '_', ' ');
-      ret = set_modifier(k.c_str(), l->val.c_str(), ename, caps);
+      string key;
+      std::replace_copy(k.begin(), k.end(), back_inserter(key), '_', ' ');
+      ret = set_modifier(key.c_str(), val.c_str(), ename, caps);
       if (ret < 0) {
 	ostringstream oss;
-	oss << "error setting modifier for [" << name << "] type=" << k
-	    << " val=" << l->val;
-	throw buffer::malformed_input(oss.str().c_str());
+	oss << "error setting modifier for [" << name << "] type=" << key
+	    << " val=" << val;
+	throw ceph::buffer::malformed_input(oss.str().c_str());
       }
     }
-  }
-}
-
-void KeyRing::decode(bufferlist::iterator& bl) {
-  __u8 struct_v;
-  bufferlist::iterator start_pos = bl;
-  try {
-    ::decode(struct_v, bl);
-    ::decode(keys, bl);
-  } catch (buffer::error& err) {
-    keys.clear();
-    decode_plaintext(start_pos);
   }
 }
 
@@ -228,11 +218,11 @@ int KeyRing::load(CephContext *cct, const std::string &filename)
   }
 
   try {
-    bufferlist::iterator iter = bl.begin();
+    auto iter = bl.cbegin();
     decode(iter);
   }
-  catch (const buffer::error& err) {
-    lderr(cct) << "error parsing file " << filename << dendl;
+  catch (const ceph::buffer::error& err) {
+    lderr(cct) << "error parsing file " << filename << ": " << err.what() << dendl;
     return -EIO;
   }
 
@@ -242,21 +232,19 @@ int KeyRing::load(CephContext *cct, const std::string &filename)
 
 void KeyRing::print(ostream& out)
 {
-  for (map<EntityName, EntityAuth>::iterator p = keys.begin();
-       p != keys.end();
-       ++p) {
-    out << "[" << p->first << "]" << std::endl;
-    out << "\tkey = " << p->second.key << std::endl;
-    if (p->second.auid != CEPH_AUTH_UID_DEFAULT)
-      out << "\tauid = " << p->second.auid << std::endl;
+  for (auto& [ename, eauth] : keys) {
+    out << "[" << ename << "]" << std::endl;
+    out << "\tkey = " << eauth.key << std::endl;
+    if (!eauth.pending_key.empty()) {
+      out << "\tpending key = " << eauth.pending_key << std::endl;
+    }
 
-    for (map<string, bufferlist>::iterator q = p->second.caps.begin();
-	 q != p->second.caps.end();
-	 ++q) {
-      bufferlist::iterator dataiter = q->second.begin();
+    for (auto& [sys, capbl] : eauth.caps) {
+      auto dataiter = capbl.cbegin();
       string caps;
-      ::decode(caps, dataiter);
-      out << "\tcaps " << q->first << " = \"" << caps << '"' << std::endl;
+      ceph::decode(caps, dataiter);
+      boost::replace_all(caps, "\"", "\\\"");
+      out << "\tcaps " << sys << " = \"" << caps << '"' << std::endl;
     }
   }
 }

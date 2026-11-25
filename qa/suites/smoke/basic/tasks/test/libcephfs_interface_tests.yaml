@@ -1,0 +1,21 @@
+overrides:
+  ceph:
+    conf:
+      client:
+        debug ms: 1
+        debug client: 20
+      mds:
+        debug ms: 1
+        debug mds: 20
+tasks:
+- ceph:
+    log-ignorelist:
+      - \(POOL_APP_NOT_ENABLED\)
+      - \(FS_DEGRADED\)
+      - MDS_ALL_DOWN
+      - MDS_UP_LESS_THAN_MAX
+- ceph-fuse:
+- workunit:
+    clients:
+      client.0:
+        - libcephfs/test.sh

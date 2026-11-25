@@ -56,7 +56,7 @@ void rados_striper_destroy(rados_striper_t striper);
  * This layout will be used when new objects are created (by writing to them)
  * Already existing objects will be opened with their own layout.
  *
- * @param striper the targetted striper
+ * @param striper the targeted striper
  * @param stripe_unit the stripe_unit value of the new object layout
  * @returns 0 on success, negative error code on failure
  */
@@ -68,7 +68,7 @@ int rados_striper_set_object_layout_stripe_unit(rados_striper_t striper,
  * This layout will be used when new objects are created (by writing to them)
  * Already existing objects will be opened with their own layout.
  *
- * @param striper the targetted striper
+ * @param striper the targeted striper
  * @param stripe_count the stripe_count value of the new object layout
  * @returns 0 on success, negative error code on failure
  */
@@ -80,7 +80,7 @@ int rados_striper_set_object_layout_stripe_count(rados_striper_t striper,
  * This layout will be used when new objects are created (by writing to them)
  * Already existing objects will be opened with their own layout.
  *
- * @param striper the targetted striper
+ * @param striper the targeted striper
  * @param object_size the object_size value of the new object layout
  * @returns 0 on success, negative error code on failure
  */
@@ -207,7 +207,7 @@ int rados_striper_remove(rados_striper_t striper,
  * @param size the new size of the object in bytes
  * @returns 0 on success, negative error code on failure
  */
-int rados_striper_trunc(rados_ioctx_t io, const char *soid, uint64_t size);
+int rados_striper_trunc(rados_striper_t striper, const char *soid, uint64_t size);
 
 /** @} Synchronous I/O */
 
@@ -323,6 +323,11 @@ int rados_striper_stat(rados_striper_t striper,
                        const char* soid,
                        uint64_t *psize,
                        time_t *pmtime);
+
+int rados_striper_stat2(rados_striper_t striper,
+                       const char* soid,
+                       uint64_t *psize,
+                       struct timespec *pmtime);
 
 /**
  * @defgroup libradosstriper_h_asynch_io Asynchronous I/O
@@ -601,6 +606,11 @@ int rados_striper_aio_stat(rados_striper_t striper,
                            uint64_t *psize,
                            time_t *pmtime);
 
+int rados_striper_aio_stat2(rados_striper_t striper,
+                           const char* soid,
+                           rados_completion_t completion,
+                           uint64_t *psize,
+                           struct timespec *pmtime);
 /** @} Asynchronous I/O */
 
 #ifdef __cplusplus

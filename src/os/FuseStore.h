@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_OS_FUSESTORE_H
 #define CEPH_OS_FUSESTORE_H
@@ -23,20 +23,20 @@ public:
 
   struct OpenFile {
     std::string path;
-    bufferlist bl;
+    ceph::buffer::list bl;
     bool dirty = false;
     int ref = 0;
   };
   std::map<std::string,OpenFile*> open_files;
 
   int open_file(std::string p, struct fuse_file_info *fi,
-		std::function<int(bufferlist *bl)> f);
+		std::function<int(ceph::buffer::list *bl)> f);
 
   class FuseThread : public Thread {
     FuseStore *fs;
   public:
     explicit FuseThread(FuseStore *f) : fs(f) {}
-    void *entry() {
+    void *entry() override {
       fs->loop();
       return NULL;
     }

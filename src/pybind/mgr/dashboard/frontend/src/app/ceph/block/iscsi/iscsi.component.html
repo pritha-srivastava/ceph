@@ -1,0 +1,66 @@
+<cd-iscsi-tabs></cd-iscsi-tabs>
+
+<legend i18n>Gateways</legend>
+<div>
+  <cd-table
+    [data]="gateways"
+    (fetchData)="refresh()"
+    [columns]="gatewaysColumns"
+  >
+  </cd-table>
+</div>
+
+<legend i18n>Images</legend>
+<div>
+  <cd-table
+    [data]="images"
+    [columns]="imagesColumns"
+  >
+  </cd-table>
+</div>
+
+<ng-template
+  #iscsiSparklineTpl
+  let-row="data.row"
+  let-value="data.value"
+>
+  @if (row.backstore === 'user:rbd') {
+    <span>
+      <cd-sparkline
+        [data]="value"
+        [isBinary]="row.cdIsBinary"
+      ></cd-sparkline>
+    </span>
+  }
+  @if (row.backstore !== 'user:rbd') {
+    <span class="text-muted"> n/a </span>
+  }
+</ng-template>
+
+<ng-template
+  #iscsiPerSecondTpl
+  let-row="data.row"
+  let-value="data.value"
+>
+  @if (row.backstore === 'user:rbd') {
+    <span> {{ value }} /s </span>
+  }
+  @if (row.backstore !== 'user:rbd') {
+    <span class="text-muted"> n/a </span>
+  }
+</ng-template>
+
+<ng-template
+  #iscsiRelativeDateTpl
+  let-row="data.row"
+  let-value="data.value"
+>
+  @if (row.backstore === 'user:rbd') {
+    <span>
+      {{ value | relativeDate | notAvailable }}
+    </span>
+  }
+  @if (row.backstore !== 'user:rbd') {
+    <span class="text-muted"> n/a </span>
+  }
+</ng-template>

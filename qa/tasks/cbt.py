@@ -1,0 +1,265 @@
+import logging
+import os
+import yaml
+from tasks.cbt_performance import CBTperformance
+
+from teuthology import misc
+from teuthology.orchestra import run
+from teuthology.task import Task
+
+log = logging.getLogger(__name__)
+
+CBT_FIRST_RELEASE = 21
+CBT_RELEASE_MAP = {
+    21 : "umbrella",
+    22 : "vampire",
+    # 23 : "w_release" ...
+}
+
+class CBT(Task):
+    """
+    Passes through a CBT configuration yaml fragment.
+    """
+    def __init__(self, ctx, config):
+        super(CBT, self).__init__(ctx, config)
+        self.log = log
+
+    def hosts_of_type(self, type_):
+        return [r.name for r in self.ctx.cluster.only(misc.is_type(type_)).remotes.keys()]
+
+    def generate_cbt_config(self):
+        mon_hosts = self.hosts_of_type('mon')
+        osd_hosts = self.hosts_of_type('osd')
+        client_hosts = self.hosts_of_type('client')
+        rgw_client = {}
+        rgw_client[client_hosts[0]] = None
+        rgw_hosts = self.config.get('cluster', {}).get('rgws', rgw_client)
+        cluster_config = dict(
+            user=self.config.get('cluster', {}).get('user', 'ubuntu'),
+            head=mon_hosts[0],
+            osds=osd_hosts,
+            mons=mon_hosts,
+            clients=client_hosts,
+            rgws=rgw_hosts,
+            osds_per_node=self.config.get('cluster', {}).get('osds_per_node', 1),
+            rebuild_every_test=False,
+            use_existing=True,
+            is_teuthology=self.config.get('cluster', {}).get('is_teuthology', True),
+            iterations=self.config.get('cluster', {}).get('iterations', 1),
+            tmp_dir='/tmp/cbt',
+            pool_profiles=self.config.get('cluster', {}).get('pool_profiles'),
+            pid_dir=self.config.get('cluster', {}).get('pid_dir', '/var/run/ceph'),
+            )
+
+        benchmark_config = self.config.get('benchmarks')
+        benchmark_type = next(iter(benchmark_config.keys()))
+  
+        if benchmark_type in ['librbdfio', 'fio']:
+          testdir = misc.get_testdir(self.ctx)
+          benchmark_config[benchmark_type]['cmd_path'] = os.path.join(testdir, 'fio/fio')
+  
+        client_endpoints_config = self.config.get('client_endpoints', None)
+        monitoring_profiles = self.config.get('monitoring_profiles', {})
+
+        return dict(
+            cluster=cluster_config,
+            benchmarks=benchmark_config,
+            client_endpoints = client_endpoints_config,
+            monitoring_profiles = monitoring_profiles,
+            )
+
+    def install_dependencies(self):
+        system_type = misc.get_system_type(self.first_mon)
+
+        if system_type == 'rpm':
+            install_cmd = ['sudo', 'yum', '-y', 'install']
+            cbt_depends = ['librbd-devel', 'perf']
+
+            # pdsh is not available in the repos for el10, use el9 version which works fine.
+            # Pull it straight from the epel9 repo rather than hardcoding an rpm URL, since
+            # epel rebuilds/bumps pdsh and any pinned version eventually 404s. The repo is
+            # limited to the pdsh packages so nothing else gets resolved against el9.
+            os_version = misc.get_distro_version(self.ctx)
+            os_major_version = int(os_version.split('.')[0])
+            if os_major_version >= 10:
+                self.log.info('Installing pdsh from el9 repo into el10 system')
+                pdsh_packages = ['pdsh', 'pdsh-rcmd-ssh']
+                epel9_baseurl = 'https://dl.fedoraproject.org/pub/epel/9/Everything/x86_64/'
+                self.first_mon.run(args=[
+                    'sudo', 'yum', '-y',
+                    '--repofrompath', f'epel9-pdsh,{epel9_baseurl}',
+                    f'--setopt=epel9-pdsh.includepkgs={",".join(pdsh_packages)}',
+                    '--nogpgcheck',
+                    'install',
+                ] + pdsh_packages)
+            else:
+                cbt_depends += ['pdsh', 'pdsh-rcmd-ssh']
+
+            self.log.info('Installing collectl')
+            collectl_location = "https://download.ceph.com/qa/collectl-4.3.1.src.tar.gz"
+            self.first_mon.run(
+                args=[
+                    'sudo', 'mkdir', 'collectl', run.Raw('&&'),
+                    'cd', 'collectl', run.Raw('&&'),
+                    'sudo', 'wget', collectl_location, '-O', 'collectl.tar.gz', run.Raw('&&'),
+                    'sudo', 'tar', '-xvf', 'collectl.tar.gz' , run.Raw('&&'),
+                    'cd', 'collectl-4.3.1', run.Raw('&&'),
+                    'sudo', './INSTALL'
+                ]
+            )
+        else:
+            install_cmd = ['sudo', 'apt-get', '-y', '--force-yes', 'install']
+            cbt_depends = ['librbd-dev', 'collectl', 'linux-tools-generic', 'python3-venv']
+        self.first_mon.run(args=install_cmd + cbt_depends)
+
+        # Create a virtual environment for CBT
+        testdir = misc.get_testdir(self.ctx)
+        venv_path = f'{testdir}/cbt-venv'
+        self.first_mon.run(args=['python3', '-m', 'venv', venv_path])
+
+        # Install the python dependencies from the CBT project requirements.txt file into the venv
+        pip_install_cmd = [
+            f'{venv_path}/bin/pip',
+            'install',
+            '-r',
+            f'{testdir}/cbt/requirements.txt',
+        ]
+        self.first_mon.run(args=pip_install_cmd)
+
+        benchmark_type = next(iter(self.cbt_config.get('benchmarks').keys()))
+        self.log.info('benchmark: %s', benchmark_type)
+
+        if benchmark_type in ['librbdfio', 'fio']:
+            # install fio
+            testdir = misc.get_testdir(self.ctx)
+            self.first_mon.run(
+                args=[
+                    'git', 'clone', '-b', 'master',
+                    'https://github.com/axboe/fio.git',
+                    '{tdir}/fio'.format(tdir=testdir)
+                ]
+            )
+            self.first_mon.run(
+                args=[
+                    'cd', os.path.join(testdir, 'fio'), run.Raw('&&'),
+                    './configure', run.Raw('&&'),
+                    'make'
+                ]
+            )
+
+    def extract_ceph_major_version(self):
+        ceph_version_str = self.first_mon.sh(['ceph', '-v'])
+        self.log.debug('ceph -v output: %s', ceph_version_str)
+        # ceph version 21.3.0 <sha1> umbrella (dev)
+        
+        full_version_num = ceph_version_str.split()[2]
+        major_version_num = int(full_version_num.split(".")[0])
+
+        self.log.debug('extracted ceph major version: %d', major_version_num)
+        return major_version_num
+
+    def cbt_branch_from_version(self):
+        try:
+            # Extract major version number
+            ceph_major_version = self.extract_ceph_major_version()
+        except Exception as e:
+            self.log.error('Failed to extract ceph version: %s', e)
+            raise
+        
+        # If older than CBT's first release use 'master' CBT branch
+        if ceph_major_version < CBT_FIRST_RELEASE:
+            self.log.debug('ceph major version is %d, so returning master', ceph_major_version)
+            return "master"
+
+        # Otherwise use corresponding or latest release CBT branch
+        return CBT_RELEASE_MAP.get(ceph_major_version, CBT_RELEASE_MAP[max(CBT_RELEASE_MAP)])
+
+    def checkout_cbt(self):
+        testdir = misc.get_testdir(self.ctx)
+        repo = self.config.get('repo', 'https://github.com/ceph/cbt.git')
+        branch = self.config.get('branch', self.cbt_branch)
+        branch = self.config.get('force-branch', branch)
+        sha1 = self.config.get('sha1')
+        if sha1 is None:
+            self.first_mon.run(
+                args=[
+                    'git', 'clone', '--depth', '1', '-b', branch, repo,
+                    '{tdir}/cbt'.format(tdir=testdir)
+                ]
+            )
+        else:
+            self.first_mon.run(
+                args=[
+                    'git', 'clone', '-b', branch, repo,
+                    '{tdir}/cbt'.format(tdir=testdir)
+                ]
+            )
+            self.first_mon.run(
+                args=[
+                    'cd', os.path.join(testdir, 'cbt'), run.Raw('&&'),
+                    'git', 'reset', '--hard', sha1,
+                ]
+            )
+
+    def setup(self):
+        super(CBT, self).setup()
+        self.first_mon = next(iter(self.ctx.cluster.only(misc.get_first_mon(self.ctx, self.config)).remotes.keys()))
+        self.cbt_config = self.generate_cbt_config()
+        self.cbt_branch = self.cbt_branch_from_version()
+        self.log.info('cbt configuration is %s', self.cbt_config)
+        self.cbt_dir = os.path.join(misc.get_archive_dir(self.ctx), 'cbt')
+        self.ctx.cluster.run(args=['mkdir', '-p', '-m0755', '--', self.cbt_dir])
+        self.first_mon.write_file(
+                os.path.join(self.cbt_dir, 'cbt_config.yaml'),
+                yaml.safe_dump(self.cbt_config, default_flow_style=False))
+        self.checkout_cbt()
+        self.install_dependencies()
+
+    def begin(self):
+        super(CBT, self).begin()
+        testdir = misc.get_testdir(self.ctx)
+        # disable perf_event_paranoid to allow perf to run
+        self.first_mon.run(
+            args=[
+                'sudo',
+                '/sbin/sysctl',
+                '-q',
+                '-w',
+                'kernel.perf_event_paranoid=0',
+            ],
+        )
+        self.first_mon.run(
+            args=[
+                '{tdir}/cbt-venv/bin/python'.format(tdir=testdir),
+                '{tdir}/cbt/cbt.py'.format(tdir=testdir),
+                '-a', self.cbt_dir,
+                '{cbtdir}/cbt_config.yaml'.format(cbtdir=self.cbt_dir),
+            ],
+        )
+        preserve_file = os.path.join(self.ctx.archive, '.preserve')
+        open(preserve_file, 'a').close()
+
+    def end(self):
+        super(CBT, self).end()
+        testdir = misc.get_testdir(self.ctx)
+        self.first_mon.run(
+            args=[
+                'rm', '--one-file-system', '-rf', '--',
+                '{tdir}/cbt'.format(tdir=testdir),
+                '{tdir}/cbt-venv'.format(tdir=testdir),
+            ]
+        )
+        benchmark_type = next(iter(self.cbt_config.get('benchmarks').keys()))
+        if benchmark_type in ['librbdfio', 'fio']:
+            self.first_mon.run(
+                args=[
+                    'rm', '--one-file-system', '-rf', '--',
+                    '{tdir}/fio'.format(tdir=testdir),
+                ]
+            )
+
+        # Collect cbt performance data
+        cbt_performance = CBTperformance()
+        cbt_performance.collect(self.ctx, self.config)
+
+task = CBT

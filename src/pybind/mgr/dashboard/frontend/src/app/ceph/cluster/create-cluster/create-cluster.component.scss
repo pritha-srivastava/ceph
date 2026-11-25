@@ -1,0 +1,21 @@
+@use '@carbon/layout';
+
+.container-fluid {
+  padding-left: 0;
+  padding-bottom: 0 !important;
+  width: 100%;
+
+  &-main {
+    align-items: flex-start;
+    display: flex;
+  }
+}
+
+.storage-requirements-header {
+  border-bottom: 0;
+  margin-top: var(--cds-spacing-10) !important;
+}
+
+.ceph-logo {
+  width: 7%;
+}

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -19,17 +20,21 @@
 
 #include "include/types.h"
 
-class MMonGetMap : public Message {
- public:
-  MMonGetMap() : Message(CEPH_MSG_MON_GET_MAP) { }
+class MMonGetMap final : public Message {
+public:
+  MMonGetMap() : Message{CEPH_MSG_MON_GET_MAP} { }
 private:
-  ~MMonGetMap() {}
+  ~MMonGetMap() final {}
 
 public:
-  const char *get_type_name() const { return "mon_getmap"; }
+  std::string_view get_type_name() const override { return "mon_getmap"; }
   
-  void encode_payload(uint64_t features) { }
-  void decode_payload() { }
+  void encode_payload(uint64_t features) override { }
+  void decode_payload() override { }
+
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

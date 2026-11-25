@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -13,6 +14,7 @@
  */
 
 #include "gtest/gtest.h"
+#include "include/compat.h"
 #include "include/cephfs/libcephfs.h"
 
 #include <sstream>
@@ -26,12 +28,12 @@ TEST(LibCephConfig, SimpleSet) {
   int ret = ceph_create(&cmount, NULL);
   ASSERT_EQ(ret, 0);
 
-  ret = ceph_conf_set(cmount, "max_open_files", "21");
+  ret = ceph_conf_set(cmount, "log_max_new", "21");
   ASSERT_EQ(ret, 0);
 
   char buf[128];
   memset(buf, 0, sizeof(buf));
-  ret = ceph_conf_get(cmount, "max_open_files", buf, sizeof(buf));
+  ret = ceph_conf_get(cmount, "log_max_new", buf, sizeof(buf));
   ASSERT_EQ(ret, 0);
   ASSERT_EQ(string("21"), string(buf));
 
@@ -43,19 +45,19 @@ TEST(LibCephConfig, ArgV) {
   int ret = ceph_create(&cmount, NULL);
   ASSERT_EQ(ret, 0);
 
-  const char *argv[] = { "foo", "--max-open-files", "2",
-			 "--keyfile", "/tmp/my-keyfile", NULL };
+  const char *argv[] = { "foo", "--log_max_new", "2",
+			 "--key", "my-key", NULL };
   size_t argc = (sizeof(argv) / sizeof(argv[0])) - 1;
   ceph_conf_parse_argv(cmount, argc, argv);
 
   char buf[128];
   memset(buf, 0, sizeof(buf));
-  ret = ceph_conf_get(cmount, "keyfile", buf, sizeof(buf));
+  ret = ceph_conf_get(cmount, "key", buf, sizeof(buf));
   ASSERT_EQ(ret, 0);
-  ASSERT_EQ(string("/tmp/my-keyfile"), string(buf));
+  ASSERT_EQ(string("my-key"), string(buf));
 
   memset(buf, 0, sizeof(buf));
-  ret = ceph_conf_get(cmount, "max_open_files", buf, sizeof(buf));
+  ret = ceph_conf_get(cmount, "log_max_new", buf, sizeof(buf));
   ASSERT_EQ(ret, 0);
   ASSERT_EQ(string("2"), string(buf));
 

@@ -1,9 +1,10 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_OPERATION_DISABLE_FEATURES_REQUEST_H
 #define CEPH_LIBRBD_OPERATION_DISABLE_FEATURES_REQUEST_H
 
+#include "librbd/ImageCtx.h"
 #include "librbd/operation/Request.h"
 #include "cls/rbd/cls_rbd_client.h"
 
@@ -20,21 +21,21 @@ class DisableFeaturesRequest : public Request<ImageCtxT> {
 public:
   static DisableFeaturesRequest *create(ImageCtxT &image_ctx, Context *on_finish,
                                         uint64_t journal_op_tid,
-                                        uint64_t features) {
+                                        uint64_t features, bool force) {
     return new DisableFeaturesRequest(image_ctx, on_finish, journal_op_tid,
-                                      features);
+                                      features, force);
   }
 
   DisableFeaturesRequest(ImageCtxT &image_ctx, Context *on_finish,
-                         uint64_t journal_op_tid, uint64_t features);
+                         uint64_t journal_op_tid, uint64_t features, bool force);
 
 protected:
-  virtual void send_op();
-  virtual bool should_complete(int r);
-  virtual bool can_affect_io() const override {
+  void send_op() override;
+  bool should_complete(int r) override;
+  bool can_affect_io() const override {
     return true;
   }
-  virtual journal::Event create_event(uint64_t op_tid) const {
+  journal::Event create_event(uint64_t op_tid) const override {
     return journal::UpdateFeaturesEvent(op_tid, m_features, false);
   }
 
@@ -55,7 +56,7 @@ private:
    *    v
    * STATE_ACQUIRE_EXCLUSIVE_LOCK (skip if not
    *    |                          required)
-   *    | (disbling journaling)
+   *    | (disabling journaling)
    *    \-------------------\
    *    |                    |
    *    |                    V
@@ -91,8 +92,8 @@ private:
    * STATE_NOTIFY_UPDATE
    *    |
    *    v
-   * STATE_REALEASE_EXCLUSIVE_LOCK (skip if not
-   *    |                           required)
+   * STATE_RELEASE_EXCLUSIVE_LOCK (skip if not
+   *    |                          required)
    *    | (unblock writes)
    *    v
    * <finish>
@@ -102,16 +103,18 @@ private:
    */
 
   uint64_t m_features;
+  bool m_force;
 
   bool m_acquired_lock = false;
   bool m_writes_blocked = false;
-  bool m_snap_lock_acquired = false;
+  bool m_image_lock_acquired = false;
   bool m_requests_blocked = false;
 
   uint64_t m_new_features = 0;
   uint64_t m_disable_flags = 0;
   uint64_t m_features_mask = 0;
 
+  decltype(ImageCtxT::journal) m_journal = nullptr;
   cls::rbd::MirrorMode m_mirror_mode = cls::rbd::MIRROR_MODE_DISABLED;
   bufferlist m_out_bl;
 
@@ -121,7 +124,7 @@ private:
   void send_block_writes();
   Context *handle_block_writes(int *result);
 
-  void send_acquire_exclusive_lock();
+  Context *send_acquire_exclusive_lock(int *result);
   Context *handle_acquire_exclusive_lock(int *result);
 
   void send_get_mirror_mode();

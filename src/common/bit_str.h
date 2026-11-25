@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,9 +15,9 @@
 #ifndef CEPH_COMMON_BIT_STR_H
 #define CEPH_COMMON_BIT_STR_H
 
-#include <ostream>
+#include <cstdint>
+#include <iosfwd>
 #include <functional>
-#include <stdint.h>
 
 namespace ceph {
   class Formatter;
@@ -25,13 +26,13 @@ namespace ceph {
 extern void print_bit_str(
     uint64_t bits,
     std::ostream &out,
-    std::function<const char*(uint64_t)> func,
+    const std::function<const char*(uint64_t)> &func,
     bool dump_bit_val = false);
 
 extern void dump_bit_str(
     uint64_t bits,
     ceph::Formatter *f,
-    std::function<const char*(uint64_t)> func,
+    const std::function<const char*(uint64_t)> &func,
     bool dump_bit_val = false);
 
 #endif /* CEPH_COMMON_BIT_STR_H */

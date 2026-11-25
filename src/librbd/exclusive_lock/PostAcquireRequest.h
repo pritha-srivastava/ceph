@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_EXCLUSIVE_LOCK_POST_ACQUIRE_REQUEST_H
 #define CEPH_LIBRBD_EXCLUSIVE_LOCK_POST_ACQUIRE_REQUEST_H
@@ -48,7 +48,14 @@ private:
    *  ALLOCATE_JOURNAL_TAG  *
    *      |            *    *
    *      |            *    *
-   *      |            v    v
+   *      v            *    *
+   *  PROCESS_PLUGIN_ACQUIRE*
+   *      |            *    *
+   *      |            *    *
+   *      |         v  v    v
+   *      |         PROCESS_PLUGIN_RELEASE
+   *      |               |
+   *      |               v
    *      |         CLOSE_JOURNAL
    *      |               |
    *      |               v
@@ -90,6 +97,12 @@ private:
 
   void send_close_object_map();
   void handle_close_object_map(int r);
+
+  void send_process_plugin_acquire_lock();
+  void handle_process_plugin_acquire_lock(int r);
+
+  void send_process_plugin_release_lock();
+  void handle_process_plugin_release_lock(int r);
 
   void apply();
   void revert();

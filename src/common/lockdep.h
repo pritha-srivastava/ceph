@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,17 +16,35 @@
 #ifndef CEPH_LOCKDEP_H
 #define CEPH_LOCKDEP_H
 
-class CephContext;
+#include "include/common_fwd.h"
 
-extern int g_lockdep;
+#ifdef CEPH_DEBUG_MUTEX
+
+__attribute__((visibility("default"))) extern bool g_lockdep;
 
 extern void lockdep_register_ceph_context(CephContext *cct);
 extern void lockdep_unregister_ceph_context(CephContext *cct);
+// lockdep tracks dependencies between multiple and different instances
+// of locks within a class denoted by `n`.
+// Caller is obliged to guarantee name uniqueness.
 extern int lockdep_register(const char *n);
 extern void lockdep_unregister(int id);
-extern int lockdep_will_lock(const char *n, int id, bool force_backtrace=false);
+extern int lockdep_will_lock(const char *n, int id, bool force_backtrace=false,
+			     bool recursive=false);
 extern int lockdep_locked(const char *n, int id, bool force_backtrace=false);
 extern int lockdep_will_unlock(const char *n, int id);
 extern int lockdep_dump_locks();
+
+#else
+
+static constexpr bool g_lockdep = false;
+#define lockdep_register(...) 0
+#define lockdep_unregister(...)
+#define lockdep_will_lock(...) 0
+#define lockdep_locked(...) 0
+#define lockdep_will_unlock(...) 0
+
+#endif	// CEPH_DEBUG_MUTEX
+
 
 #endif

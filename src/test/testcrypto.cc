@@ -1,14 +1,19 @@
 #include "auth/Crypto.h"
-#include "common/Clock.h"
 
+#include <iostream> // for std::cout
+
+#include "common/Clock.h"
 #include "common/config.h"
 #include "common/debug.h"
+#include "include/ceph_fs.h" // for CEPH_CRYPTO_AES
 
 #define dout_subsys ceph_subsys_auth
 
 #define AES_KEY_LEN	16
 
 #define dout_context g_ceph_context
+
+using namespace std;
 
 int main(int argc, char *argv[])
 {
@@ -28,7 +33,7 @@ int main(int argc, char *argv[])
   bufferlist enc_out;
   std::string error;
   if (key.encrypt(g_ceph_context, enc_in, enc_out, &error) < 0) {
-    assert(!error.empty());
+    ceph_assert(!error.empty());
     dout(0) << "couldn't encode! error " << error << dendl;
     exit(1);
   }
@@ -45,7 +50,7 @@ int main(int argc, char *argv[])
   dec_in = enc_out;
 
   if (key.decrypt(g_ceph_context, dec_in, dec_out, &error) < 0) {
-    assert(!error.empty());
+    ceph_assert(!error.empty());
     dout(0) << "couldn't decode! error " << error << dendl;
     exit(1);
   }

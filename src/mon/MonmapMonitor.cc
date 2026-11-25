@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,44 +15,85 @@
 
 #include "MonmapMonitor.h"
 #include "Monitor.h"
+#include "OSDMonitor.h"
+#include "Paxos.h"
 #include "messages/MMonCommand.h"
 #include "messages/MMonJoin.h"
 
 #include "common/ceph_argparse.h"
+#include "common/debug.h"
 #include "common/errno.h"
 #include <sstream>
 #include "common/config.h"
 #include "common/cmdparse.h"
+#include "crush/CrushWrapper.h"
 
-#include "include/assert.h"
+#include "include/ceph_assert.h"
 #include "include/stringify.h"
 
 #define dout_subsys ceph_subsys_mon
 #undef dout_prefix
 #define dout_prefix _prefix(_dout, mon)
-static ostream& _prefix(std::ostream *_dout, Monitor *mon) {
-  return *_dout << "mon." << mon->name << "@" << mon->rank
-		<< "(" << mon->get_state_name()
-		<< ").monmap v" << mon->monmap->epoch << " ";
+using namespace TOPNSPC::common;
+
+using std::cout;
+using std::dec;
+using std::hex;
+using std::list;
+using std::map;
+using std::make_pair;
+using std::ostream;
+using std::ostringstream;
+using std::pair;
+using std::set;
+using std::setfill;
+using std::string;
+using std::stringstream;
+using std::to_string;
+using std::vector;
+using std::unique_ptr;
+
+using ceph::bufferlist;
+using ceph::decode;
+using ceph::encode;
+using ceph::Formatter;
+using ceph::JSONFormatter;
+using ceph::make_message;
+using ceph::mono_clock;
+using ceph::mono_time;
+using ceph::timespan_str;
+static ostream& _prefix(std::ostream *_dout, Monitor &mon) {
+  return *_dout << "mon." << mon.name << "@" << mon.rank
+		<< "(" << mon.get_state_name()
+		<< ").monmap v" << mon.monmap->epoch << " ";
 }
 
 void MonmapMonitor::create_initial()
 {
-  dout(10) << "create_initial using current monmap" << dendl;
-  pending_map = *mon->monmap;
+  dout(10) << __func__ << " using current monmap" << dendl;
+  pending_map = *mon.monmap;
   pending_map.epoch = 1;
+
+  if (g_conf()->mon_debug_no_initial_persistent_features) {
+    derr << __func__ << " mon_debug_no_initial_persistent_features=true"
+	 << dendl;
+  } else {
+    // initialize with default persistent features for new clusters
+    pending_map.persistent_features = ceph::features::mon::get_persistent();
+    pending_map.min_mon_release = ceph_release();
+  }
 }
 
 void MonmapMonitor::update_from_paxos(bool *need_bootstrap)
 {
   version_t version = get_last_committed();
-  if (version <= mon->monmap->get_epoch())
+  if (version <= mon.monmap->get_epoch())
     return;
 
   dout(10) << __func__ << " version " << version
-	   << ", my v " << mon->monmap->epoch << dendl;
+	   << ", my v " << mon.monmap->epoch << dendl;
   
-  if (need_bootstrap && version != mon->monmap->get_epoch()) {
+  if (need_bootstrap && version != mon.monmap->get_epoch()) {
     dout(10) << " signaling that we need a bootstrap" << dendl;
     *need_bootstrap = true;
   }
@@ -59,99 +101,141 @@ void MonmapMonitor::update_from_paxos(bool *need_bootstrap)
   // read and decode
   monmap_bl.clear();
   int ret = get_version(version, monmap_bl);
-  assert(ret == 0);
-  assert(monmap_bl.length());
+  ceph_assert(ret == 0);
+  ceph_assert(monmap_bl.length());
 
-  dout(10) << "update_from_paxos got " << version << dendl;
-  mon->monmap->decode(monmap_bl);
+  dout(10) << __func__ << " got " << version << dendl;
+  mon.monmap->decode(monmap_bl);
 
-  if (mon->store->exists("mkfs", "monmap")) {
+  if (mon.store->exists("mkfs", "monmap")) {
     auto t(std::make_shared<MonitorDBStore::Transaction>());
     t->erase("mkfs", "monmap");
-    mon->store->apply_transaction(t);
+    mon.store->apply_transaction(t);
   }
 
   check_subs();
+
+  // make sure we've recorded min_mon_release
+  string val;
+  if (mon.store->read_meta("min_mon_release", &val) < 0 ||
+      val.size() == 0 ||
+      atoi(val.c_str()) != (int)ceph_release()) {
+    dout(10) << __func__ << " updating min_mon_release meta" << dendl;
+    mon.store->write_meta("min_mon_release",
+			   stringify(ceph_release()));
+  }
+
+  mon.notify_new_monmap(true);
+}
+
+void MonmapMonitor::init()
+{
+  /* init relevant Monitor state */
+  mon.notify_new_monmap(false, false);
 }
 
 void MonmapMonitor::create_pending()
 {
-  pending_map = *mon->monmap;
+  pending_map = *mon.monmap;
   pending_map.epoch++;
   pending_map.last_changed = ceph_clock_now();
-  dout(10) << "create_pending monmap epoch " << pending_map.epoch << dendl;
+  pending_map.removed_ranks.clear();
 }
 
 void MonmapMonitor::encode_pending(MonitorDBStore::TransactionRef t)
 {
-  dout(10) << "encode_pending epoch " << pending_map.epoch << dendl;
+  dout(10) << __func__ << " epoch " << pending_map.epoch << dendl;
 
-  assert(mon->monmap->epoch + 1 == pending_map.epoch ||
+  ceph_assert(mon.monmap->epoch + 1 == pending_map.epoch ||
 	 pending_map.epoch == 1);  // special case mkfs!
   bufferlist bl;
-  pending_map.encode(bl, mon->get_quorum_con_features());
+  pending_map.encode(bl, mon.get_quorum_con_features());
 
   put_version(t, pending_map.epoch, bl);
   put_last_committed(t, pending_map.epoch);
 
   // generate a cluster fingerprint, too?
   if (pending_map.epoch == 1) {
-    mon->prepare_new_fingerprint(t);
+    mon.prepare_new_fingerprint(t);
   }
+
+  //health
+  auto& next = get_health_checks_pending_writeable();
+  pending_map.check_health(&next);
 }
 
 class C_ApplyFeatures : public Context {
   MonmapMonitor *svc;
   mon_feature_t features;
-  public:
-  C_ApplyFeatures(MonmapMonitor *s, const mon_feature_t& f) :
-    svc(s), features(f) { }
+  ceph_release_t min_mon_release;
+public:
+  C_ApplyFeatures(MonmapMonitor *s, const mon_feature_t& f, ceph_release_t mmr) :
+    svc(s), features(f), min_mon_release(mmr) { }
   void finish(int r) override {
     if (r >= 0) {
-      svc->apply_mon_features(features);
+      svc->apply_mon_features(features, min_mon_release);
     } else if (r == -EAGAIN || r == -ECANCELED) {
       // discard features if we're no longer on the quorum that
       // established them in the first place.
       return;
     } else {
-      assert(0 == "bad C_ApplyFeatures return value");
+      ceph_abort_msg("bad C_ApplyFeatures return value");
     }
   }
 };
 
-void MonmapMonitor::apply_mon_features(const mon_feature_t& features)
+void MonmapMonitor::apply_mon_features(const mon_feature_t& features,
+				       ceph_release_t min_mon_release)
 {
   if (!is_writeable()) {
     dout(5) << __func__ << " wait for service to be writeable" << dendl;
-    wait_for_writeable_ctx(new C_ApplyFeatures(this, features));
+    wait_for_writeable_ctx(new C_ApplyFeatures(this, features, min_mon_release));
     return;
   }
 
-  assert(is_writeable());
-  assert(features.contains_all(pending_map.persistent_features));
+  // do nothing here unless we have a full quorum
+  if (mon.get_quorum().size() < mon.monmap->size()) {
+    return;
+  }
+
+  ceph_assert(is_writeable());
+  ceph_assert(features.contains_all(pending_map.persistent_features));
+  // we should never hit this because `features` should be the result
+  // of the quorum's supported features. But if it happens, die.
+  ceph_assert(ceph::features::mon::get_supported().contains_all(features));
 
   mon_feature_t new_features =
     (pending_map.persistent_features ^
      (features & ceph::features::mon::get_persistent()));
 
-  if (new_features.empty()) {
-    dout(10) << __func__ << " features match current pending: "
-             << features << dendl;
+  if (new_features.empty() &&
+      pending_map.min_mon_release == min_mon_release) {
+    dout(10) << __func__ << " min_mon_release (" << (int)min_mon_release
+	     << ") and features (" << features << ") match" << dendl;
     return;
   }
 
-  new_features |= pending_map.persistent_features;
+  if (!new_features.empty()) {
+    dout(1) << __func__ << " applying new features "
+	    << new_features << ", had " << pending_map.persistent_features
+	    << ", will have "
+	    << (new_features | pending_map.persistent_features)
+	    << dendl;
+    pending_map.persistent_features |= new_features;
+  }
+  if (min_mon_release > pending_map.min_mon_release) {
+    dout(1) << __func__ << " increasing min_mon_release to "
+	    << to_integer<int>(min_mon_release) << " (" << min_mon_release
+	    << ")" << dendl;
+    pending_map.min_mon_release = min_mon_release;
+  }
 
-  dout(5) << __func__ << " applying new features to monmap;"
-          << " had " << pending_map.persistent_features
-          << ", will have " << new_features << dendl;
-  pending_map.persistent_features = new_features;
   propose_pending();
 }
 
 void MonmapMonitor::on_active()
 {
-  if (get_last_committed() >= 1 && !mon->has_ever_joined) {
+  if (get_last_committed() >= 1 && !mon.has_ever_joined) {
     // make note of the fact that i was, once, part of the quorum.
     dout(10) << "noting that i was, once, part of an active quorum." << dendl;
 
@@ -163,23 +247,34 @@ void MonmapMonitor::on_active()
      */
     auto t(std::make_shared<MonitorDBStore::Transaction>());
     t->put(Monitor::MONITOR_NAME, "joined", 1);
-    mon->store->apply_transaction(t);
-    mon->has_ever_joined = true;
+    mon.store->apply_transaction(t);
+    mon.has_ever_joined = true;
   }
 
-  if (mon->is_leader())
-    mon->clog->info() << "monmap " << *mon->monmap << "\n";
+  if (mon.is_leader()) {
+    mon.clog->debug() << "monmap " << *mon.monmap;
+  }
 
-  apply_mon_features(mon->get_quorum_mon_features());
+  apply_mon_features(mon.get_quorum_mon_features(),
+		     mon.quorum_min_mon_release);
+
+  mon.update_pending_metadata();
 }
 
 bool MonmapMonitor::preprocess_query(MonOpRequestRef op)
 {
-  PaxosServiceMessage *m = static_cast<PaxosServiceMessage*>(op->get_req());
+  auto m = op->get_req<PaxosServiceMessage>();
   switch (m->get_type()) {
     // READs
   case MSG_MON_COMMAND:
-    return preprocess_command(op);
+    try {
+      return preprocess_command(op);
+    }
+    catch (const bad_cmd_get& e) {
+      bufferlist bl;
+      mon.reply_command(op, -EINVAL, e.what(), bl, get_last_committed());
+      return true;
+    }
   case MSG_MON_JOIN:
     return preprocess_join(op);
   default:
@@ -193,41 +288,64 @@ void MonmapMonitor::dump_info(Formatter *f)
   f->dump_unsigned("monmap_first_committed", get_first_committed());
   f->dump_unsigned("monmap_last_committed", get_last_committed());
   f->open_object_section("monmap");
-  mon->monmap->dump(f);
+  mon.monmap->dump(f);
   f->close_section();
   f->open_array_section("quorum");
-  for (set<int>::iterator q = mon->get_quorum().begin(); q != mon->get_quorum().end(); ++q)
+  for (set<int>::iterator q = mon.get_quorum().begin(); q != mon.get_quorum().end(); ++q)
     f->dump_int("mon", *q);
   f->close_section();
 }
 
 bool MonmapMonitor::preprocess_command(MonOpRequestRef op)
 {
-  MMonCommand *m = static_cast<MMonCommand*>(op->get_req());
+  auto m = op->get_req<MMonCommand>();
   int r = -1;
   bufferlist rdata;
   stringstream ss;
 
-  map<string, cmd_vartype> cmdmap;
+  cmdmap_t cmdmap;
   if (!cmdmap_from_json(m->cmd, &cmdmap, ss)) {
     string rs = ss.str();
-    mon->reply_command(op, -EINVAL, rs, rdata, get_last_committed());
+    mon.reply_command(op, -EINVAL, rs, rdata, get_last_committed());
     return true;
   }
 
   string prefix;
-  cmd_getval(g_ceph_context, cmdmap, "prefix", prefix);
+  cmd_getval(cmdmap, "prefix", prefix);
 
-  MonSession *session = m->get_session();
+  MonSession *session = op->get_session();
   if (!session) {
-    mon->reply_command(op, -EACCES, "access denied", get_last_committed());
+    mon.reply_command(op, -EACCES, "access denied", get_last_committed());
     return true;
   }
 
+  string format = cmd_getval_or<string>(cmdmap, "format", "plain");
+  boost::scoped_ptr<Formatter> f(Formatter::create(format));
+
   if (prefix == "mon stat") {
-    mon->monmap->print_summary(ss);
-    ss << ", election epoch " << mon->get_epoch() << ", quorum " << mon->get_quorum()
-       << " " << mon->get_quorum_names();
+    if (f) {
+      f->open_object_section("monmap");
+      mon.monmap->dump_summary(f.get());
+      f->dump_string("leader", mon.get_leader_name());
+      f->open_array_section("quorum");
+      for (auto rank: mon.get_quorum()) {
+        std::string name = mon.monmap->get_name(rank);
+        f->open_object_section("mon");
+        f->dump_int("rank", rank);
+        f->dump_string("name", name);
+        f->close_section();  // mon
+      }
+      f->close_section();  // quorum
+      f->close_section();  // monmap
+      f->flush(ss);
+    } else {
+      mon.monmap->print_summary(ss);
+      ss << ", election epoch " << mon.get_epoch() << ", leader "
+         << mon.get_leader() << " " << mon.get_leader_name()
+         << ", quorum " << mon.get_quorum()
+         << " " << mon.get_quorum_names();
+    }
+
     rdata.append(ss);
     ss.str("");
     r = 0;
@@ -236,11 +354,10 @@ bool MonmapMonitor::preprocess_command(MonOpRequestRef op)
              prefix == "mon dump") {
 
     epoch_t epoch;
-    int64_t epochnum;
-    cmd_getval(g_ceph_context, cmdmap, "epoch", epochnum, (int64_t)0);
+    int64_t epochnum = cmd_getval_or<int64_t>(cmdmap, "epoch", 0);
     epoch = epochnum;
 
-    MonMap *p = mon->monmap;
+    MonMap *p = mon.monmap;
     if (epoch) {
       bufferlist bl;
       r = get_version(epoch, bl);
@@ -248,29 +365,26 @@ bool MonmapMonitor::preprocess_command(MonOpRequestRef op)
         ss << "there is no map for epoch " << epoch;
         goto reply;
       }
-      assert(r == 0);
-      assert(bl.length() > 0);
+      ceph_assert(r == 0);
+      ceph_assert(bl.length() > 0);
       p = new MonMap;
       p->decode(bl);
     }
 
-    assert(p != NULL);
+    ceph_assert(p);
 
     if (prefix == "mon getmap") {
       p->encode(rdata, m->get_connection()->get_features());
       r = 0;
       ss << "got monmap epoch " << p->get_epoch();
     } else if (prefix == "mon dump") {
-      string format;
-      cmd_getval(g_ceph_context, cmdmap, "format", format, string("plain"));
       stringstream ds;
-      boost::scoped_ptr<Formatter> f(Formatter::create(format));
       if (f) {
         f->open_object_section("monmap");
         p->dump(f.get());
         f->open_array_section("quorum");
-        for (set<int>::iterator q = mon->get_quorum().begin();
-            q != mon->get_quorum().end(); ++q) {
+        for (set<int>::iterator q = mon.get_quorum().begin();
+            q != mon.get_quorum().end(); ++q) {
           f->dump_int("mon", *q);
         }
         f->close_section();
@@ -284,8 +398,78 @@ bool MonmapMonitor::preprocess_command(MonOpRequestRef op)
       rdata.append(ds);
       ss << "dumped monmap epoch " << p->get_epoch();
     }
-    if (p != mon->monmap)
+    if (p != mon.monmap) {
        delete p;
+       p = nullptr;
+    }
+
+  } else if (prefix == "mon feature ls") {
+   
+    bool list_with_value = false;
+    cmd_getval_compat_cephbool(cmdmap, "with_value", list_with_value);
+
+    MonMap *p = mon.monmap;
+
+    // list features
+    mon_feature_t supported = ceph::features::mon::get_supported();
+    mon_feature_t persistent = ceph::features::mon::get_persistent();
+    mon_feature_t required = p->get_required_features();
+
+    stringstream ds;
+    auto print_feature = [&](mon_feature_t& m_features, const char* m_str) {
+      if (f) {
+        if (list_with_value)
+          m_features.dump_with_value(f.get(), m_str);
+        else
+          m_features.dump(f.get(), m_str);
+      } else {
+        if (list_with_value)
+          m_features.print_with_value(ds);
+        else
+          m_features.print(ds);
+      }
+    };
+
+    if (f) {
+      f->open_object_section("features");
+
+      f->open_object_section("all");
+      print_feature(supported, "supported");
+      print_feature(persistent, "persistent");
+      f->close_section(); // all
+
+      f->open_object_section("monmap");
+      print_feature(p->persistent_features, "persistent");
+      print_feature(p->optional_features, "optional");
+      print_feature(required, "required");
+      f->close_section(); // monmap 
+
+      f->close_section(); // features
+      f->flush(ds);
+
+    } else {
+      ds << "all features" << std::endl
+        << "\tsupported: ";
+      print_feature(supported, nullptr);
+      ds << std::endl
+        << "\tpersistent: ";
+      print_feature(persistent, nullptr);
+      ds << std::endl
+        << std::endl;
+
+      ds << "on current monmap (epoch "
+         << p->get_epoch() << ")" << std::endl
+         << "\tpersistent: ";
+      print_feature(p->persistent_features, nullptr);
+      ds << std::endl
+        // omit optional features in plain-text
+        // makes it easier to read, and they're, currently, empty.
+	 << "\trequired: ";
+      print_feature(required, nullptr);
+      ds << std::endl;
+    }
+    rdata.append(ds);
+    r = 0;
   }
 
 reply:
@@ -293,7 +477,7 @@ reply:
     string rs;
     getline(ss, rs);
 
-    mon->reply_command(op, r, rs, rdata, get_last_committed());
+    mon.reply_command(op, r, rs, rdata, get_last_committed());
     return true;
   } else
     return false;
@@ -302,12 +486,18 @@ reply:
 
 bool MonmapMonitor::prepare_update(MonOpRequestRef op)
 {
-  PaxosServiceMessage *m = static_cast<PaxosServiceMessage*>(op->get_req());
-  dout(7) << "prepare_update " << *m << " from " << m->get_orig_source_inst() << dendl;
+  auto m = op->get_req<PaxosServiceMessage>();
+  dout(7) << __func__ << " " << *m << " from " << m->get_orig_source_inst() << dendl;
   
   switch (m->get_type()) {
   case MSG_MON_COMMAND:
-    return prepare_command(op);
+    try {
+      return prepare_command(op);
+    } catch (const bad_cmd_get& e) {
+      bufferlist bl;
+      mon.reply_command(op, -EINVAL, e.what(), bl, get_last_committed());
+      return false;
+    }
   case MSG_MON_JOIN:
     return prepare_join(op);
   default:
@@ -319,26 +509,11 @@ bool MonmapMonitor::prepare_update(MonOpRequestRef op)
 
 bool MonmapMonitor::prepare_command(MonOpRequestRef op)
 {
-  MMonCommand *m = static_cast<MMonCommand*>(op->get_req());
+  auto m = op->get_req<MMonCommand>();
   stringstream ss;
-  string rs;
-  int err = -EINVAL;
+  int err;
+  MonSession *session = nullptr;
 
-  map<string, cmd_vartype> cmdmap;
-  if (!cmdmap_from_json(m->cmd, &cmdmap, ss)) {
-    string rs = ss.str();
-    mon->reply_command(op, -EINVAL, rs, get_last_committed());
-    return true;
-  }
-
-  string prefix;
-  cmd_getval(g_ceph_context, cmdmap, "prefix", prefix);
-
-  MonSession *session = m->get_session();
-  if (!session) {
-    mon->reply_command(op, -EACCES, "access denied", get_last_committed());
-    return true;
-  }
 
   /* We should follow the following rules:
    *
@@ -368,9 +543,22 @@ bool MonmapMonitor::prepare_command(MonOpRequestRef op)
    * state, thus we are not bound by it.
    */
 
-  assert(mon->monmap);
-  MonMap &monmap = *mon->monmap;
+  ceph_assert(mon.monmap);
+  MonMap &monmap = *mon.monmap;
 
+  cmdmap_t cmdmap;
+  string prefix;
+  if (!cmdmap_from_json(m->cmd, &cmdmap, ss)) {
+    err = -EINVAL;
+    goto reply_no_propose;
+  }
+  cmd_getval(cmdmap, "prefix", prefix);
+
+  session = op->get_session();
+  if (!session) {
+    err = -EACCES;
+    goto reply_no_propose;
+  }
 
   /* Please note:
    *
@@ -390,25 +578,78 @@ bool MonmapMonitor::prepare_command(MonOpRequestRef op)
    */
 
 
-  bool propose = false;
   if (prefix == "mon add") {
     string name;
-    cmd_getval(g_ceph_context, cmdmap, "name", name);
+    cmd_getval(cmdmap, "name", name);
     string addrstr;
-    cmd_getval(g_ceph_context, cmdmap, "addr", addrstr);
+    cmd_getval(cmdmap, "addr", addrstr);
     entity_addr_t addr;
     bufferlist rdata;
 
-    if (!addr.parse(addrstr.c_str())) {
+    if (!addr.parse(addrstr)) {
       err = -EINVAL;
       ss << "addr " << addrstr << "does not parse";
-      goto reply;
+      goto reply_no_propose;
     }
 
-    if (addr.get_port() == 0) {
-      ss << "port defaulted to " << CEPH_MON_PORT;
-      addr.set_port(CEPH_MON_PORT);
+    vector<string> locationvec;
+    map<string, string> loc;
+    cmd_getval(cmdmap, "location", locationvec);
+    CrushWrapper::parse_loc_map(locationvec, &loc);
+    if (locationvec.size() &&
+	!mon.get_quorum_mon_features().contains_all(
+				        ceph::features::mon::FEATURE_PINGING)) {
+      err = -ENOTSUP;
+      ss << "Not all monitors support adding monitors with a location; please upgrade first!";
+      goto reply_no_propose;
     }
+    if (locationvec.size() && !loc.size()) {
+      ss << "We could not parse your input location to anything real; " << locationvec
+	 << " turned into an empty map!";
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+
+    dout(10) << "mon add setting location for " << name << " to " << loc << dendl;
+
+    // TODO: validate location in crush map
+    if (monmap.stretch_mode_enabled && !loc.size()) {
+      ss << "We are in stretch mode and new monitors must have a location, but "
+	 << "could not parse your input location to anything real; " << locationvec
+	 << " turned into an empty map!";
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+    // TODO: validate location against any existing stretch config
+
+    entity_addrvec_t addrs;
+    if (monmap.persistent_features.contains_all(
+	  ceph::features::mon::FEATURE_NAUTILUS)) {
+      if (addr.get_port() == CEPH_MON_PORT_IANA) {
+	addr.set_type(entity_addr_t::TYPE_MSGR2);
+      }
+      if (addr.get_port() == CEPH_MON_PORT_LEGACY) {
+	// if they specified the *old* default they probably don't care
+	addr.set_port(0);
+      }
+      if (addr.get_port()) {
+	addrs.v.push_back(addr);
+      } else {
+	addr.set_type(entity_addr_t::TYPE_MSGR2);
+	addr.set_port(CEPH_MON_PORT_IANA);
+	addrs.v.push_back(addr);
+	addr.set_type(entity_addr_t::TYPE_LEGACY);
+	addr.set_port(CEPH_MON_PORT_LEGACY);
+	addrs.v.push_back(addr);
+      }
+    } else {
+      if (addr.get_port() == 0) {
+	addr.set_port(CEPH_MON_PORT_LEGACY);
+      }
+      addr.set_type(entity_addr_t::TYPE_LEGACY);
+      addrs.v.push_back(addr);
+    }
+    dout(20) << __func__ << " addr " << addr << " -> addrs " << addrs << dendl;
 
     /**
      * If we have a monitor with the same name and different addr, then EEXIST
@@ -424,28 +665,32 @@ bool MonmapMonitor::prepare_command(MonOpRequestRef op)
 
     do {
       if (monmap.contains(name)) {
-        if (monmap.get_addr(name) == addr) {
+        if (monmap.get_addrs(name) == addrs) {
           // stable map contains monitor with the same name at the same address.
           // serialize before current pending map.
           err = 0; // for clarity; this has already been set above.
-          ss << "mon." << name << " at " << addr << " already exists";
-          goto reply;
+          ss << "mon." << name << " at " << addrs << " already exists";
+          goto reply_no_propose;
         } else {
           ss << "mon." << name
-             << " already exists at address " << monmap.get_addr(name);
+             << " already exists at address " << monmap.get_addrs(name);
         }
-      } else if (monmap.contains(addr)) {
+      } else if (monmap.contains(addrs)) {
         // we established on the previous branch that name is different
-        ss << "mon." << monmap.get_name(addr)
+        ss << "mon." << monmap.get_name(addrs)
            << " already exists at address " << addr;
       } else {
         // go ahead and add
         break;
       }
       err = -EEXIST;
-      goto reply;
+      goto reply_no_propose;
     } while (false);
 
+    if (pending_map.stretch_mode_enabled) {
+      
+    }
+    
     /* Given there's no delay between proposals on the MonmapMonitor (see
      * MonmapMonitor::should_propose()), there is no point in checking for
      * a mismatch between name and addr on pending_map.
@@ -454,28 +699,34 @@ bool MonmapMonitor::prepare_command(MonOpRequestRef op)
      * we can simply go ahead and add the monitor.
      */
 
-    pending_map.add(name, addr);
+    auto& info = pending_map.add(name, addrs);
+    info.crush_loc = loc;
     pending_map.last_changed = ceph_clock_now();
-    ss << "adding mon." << name << " at " << addr;
-    propose = true;
+    ss << "adding " << info;
     dout(0) << __func__ << " proposing new mon." << name << dendl;
 
   } else if (prefix == "mon remove" ||
              prefix == "mon rm") {
     string name;
-    cmd_getval(g_ceph_context, cmdmap, "name", name);
+    cmd_getval(cmdmap, "name", name);
     if (!monmap.contains(name)) {
       err = 0;
       ss << "mon." << name << " does not exist or has already been removed";
-      goto reply;
+      goto reply_no_propose;
     }
 
     if (monmap.size() == 1) {
       err = -EINVAL;
       ss << "error: refusing removal of last monitor " << name;
-      goto reply;
+      goto reply_no_propose;
     }
 
+    if (pending_map.stretch_mode_enabled &&
+	name == pending_map.tiebreaker_mon) {
+      err = -EINVAL;
+      ss << "you cannot remove stretch mode's tiebreaker monitor";
+      goto reply_no_propose;
+    }
     /* At the time of writing, there is no risk of races when multiple clients
      * attempt to use the same name. The reason is simple but may not be
      * obvious.
@@ -505,57 +756,887 @@ bool MonmapMonitor::prepare_command(MonOpRequestRef op)
      * introduced.
      */
 
-    entity_addr_t addr = pending_map.get_addr(name);
+    entity_addrvec_t addrs = pending_map.get_addrs(name);
     pending_map.remove(name);
+    pending_map.disallowed_leaders.erase(name);
     pending_map.last_changed = ceph_clock_now();
-    ss << "removing mon." << name << " at " << addr
-       << ", there will be " << pending_map.size() << " monitors" ;
-    propose = true;
-    err = 0;
+  } else if (prefix == "mon feature set") {
 
+    /* PLEASE NOTE:
+     *
+     * We currently only support setting/unsetting persistent features.
+     * This is by design, given at the moment we still don't have optional
+     * features, and, as such, there is no point introducing an interface
+     * to manipulate them. This allows us to provide a cleaner, more
+     * intuitive interface to the user, modifying solely persistent
+     * features.
+     *
+     * In the future we should consider adding another interface to handle
+     * optional features/flags; e.g., 'mon feature flag set/unset', or
+     * 'mon flag set/unset'.
+     */
+    string feature_name;
+    if (!cmd_getval(cmdmap, "feature_name", feature_name)) {
+      ss << "missing required feature name";
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+
+    mon_feature_t feature;
+    feature = ceph::features::mon::get_feature_by_name(feature_name);
+    if (feature == ceph::features::mon::FEATURE_NONE) {
+      ss << "unknown feature '" << feature_name << "'";
+      err = -ENOENT;
+      goto reply_no_propose;
+    }
+
+    bool sure = false;
+    cmd_getval(cmdmap, "yes_i_really_mean_it", sure);
+    if (!sure) {
+      ss << "please specify '--yes-i-really-mean-it' if you "
+         << "really, **really** want to set feature '"
+         << feature << "' in the monmap.";
+      err = -EPERM;
+      goto reply_no_propose;
+    }
+
+    if (!mon.get_quorum_mon_features().contains_all(feature)) {
+      ss << "current quorum does not support feature '" << feature
+         << "'; supported features: "
+         << mon.get_quorum_mon_features();
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+
+    ss << "setting feature '" << feature << "'";
+
+    if (monmap.persistent_features.contains_all(feature)) {
+      err = 0;
+      ss << " feature '" << feature << "' already set on monmap";
+      goto reply_no_propose;
+    }
+
+    pending_map.persistent_features.set_feature(feature);
+    pending_map.last_changed = ceph_clock_now();
+
+    dout(1) << __func__ << " " << ss.str() << "; new features will be: "
+            << "persistent = " << pending_map.persistent_features
+            // output optional nevertheless, for auditing purposes.
+            << ", optional = " << pending_map.optional_features << dendl;
+
+  } else if (prefix == "mon set-rank") {
+    string name;
+    int64_t rank;
+    if (!cmd_getval(cmdmap, "name", name) ||
+	!cmd_getval(cmdmap, "rank", rank)) {
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+    int oldrank = pending_map.get_rank(name);
+    if (oldrank < 0) {
+      ss << "mon." << name << " does not exist in monmap";
+      err = -ENOENT;
+      goto reply_no_propose;
+    }
+    pending_map.set_rank(name, rank);
+    pending_map.last_changed = ceph_clock_now();
+  } else if (prefix == "mon set-addrs") {
+    string name;
+    string addrs;
+    if (!cmd_getval(cmdmap, "name", name) ||
+	!cmd_getval(cmdmap, "addrs", addrs)) {
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+    if (!pending_map.contains(name)) {
+      ss << "mon." << name << " does not exist";
+      err = -ENOENT;
+      goto reply_no_propose;
+    }
+    entity_addrvec_t av;
+    if (!av.parse(addrs.c_str(), nullptr)) {
+      ss << "failed to parse addrs '" << addrs << "'";
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+    for (auto& a : av.v) {
+      a.set_nonce(0);
+      if (!a.get_port()) {
+	ss << "monitor must bind to a non-zero port, not " << a;
+	err = -EINVAL;
+        goto reply_no_propose;
+      }
+    }
+    pending_map.set_addrvec(name, av);
+    pending_map.last_changed = ceph_clock_now();
+  } else if (prefix == "mon set-weight") {
+    string name;
+    int64_t weight;
+    if (!cmd_getval(cmdmap, "name", name) ||
+        !cmd_getval(cmdmap, "weight", weight)) {
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+    if (!pending_map.contains(name)) {
+      ss << "mon." << name << " does not exist";
+      err = -ENOENT;
+      goto reply_no_propose;
+    }
+    pending_map.set_weight(name, weight);
+    pending_map.last_changed = ceph_clock_now();
+  } else if (prefix == "mon enable-msgr2") {
+    if (!monmap.get_required_features().contains_all(
+	  ceph::features::mon::FEATURE_NAUTILUS)) {
+      err = -EACCES;
+      ss << "all monitors must be running nautilus to enable v2";
+      goto reply_no_propose;
+    }
+    err = -EALREADY;
+    for (auto& i : pending_map.mon_info) {
+      if (i.second.public_addrs.v.size() == 1 &&
+	  i.second.public_addrs.front().is_legacy() &&
+	  i.second.public_addrs.front().get_port() == CEPH_MON_PORT_LEGACY) {
+	entity_addrvec_t av;
+	entity_addr_t a = i.second.public_addrs.front();
+	a.set_type(entity_addr_t::TYPE_MSGR2);
+	a.set_port(CEPH_MON_PORT_IANA);
+	av.v.push_back(a);
+	av.v.push_back(i.second.public_addrs.front());
+	dout(10) << " setting mon." << i.first
+		 << " addrs " << i.second.public_addrs
+		 << " -> " << av << dendl;
+	pending_map.set_addrvec(i.first, av);
+	pending_map.last_changed = ceph_clock_now();
+        err = 0;
+      }
+    }
+    if (err == -EALREADY) {
+      err = 0;
+      ss << "all monitors have already enabled msrg2";
+      goto reply_no_propose;
+    }
+  } else if (prefix == "mon set election_strategy") {
+    if (!mon.get_quorum_mon_features().contains_all(
+				        ceph::features::mon::FEATURE_PINGING)) {
+      err = -ENOTSUP;
+      ss << "Not all monitors support changing election strategies; please upgrade first!";
+      goto reply_no_propose;
+    }
+    string strat;
+    MonMap::election_strategy strategy;
+    if (!cmd_getval(cmdmap, "strategy", strat)) {
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+    if (pending_map.stretch_mode_enabled) {
+        err = -EINVAL;
+        ss << "Stretch mode is enabled, so you cannot change the election strategy; please disable stretch mode first!";
+        ceph_assert(pending_map.strategy == MonMap::CONNECTIVITY);
+        goto reply_no_propose;
+    }
+    if (strat == "classic") {
+      if (pending_map.strategy == MonMap::CLASSIC) {
+        err = 0;
+        ss << "You are already in classic election strategy";
+        goto reply_no_propose;
+      }
+      strategy = MonMap::CLASSIC;
+    } else if (strat == "disallow") {
+      if (pending_map.strategy == MonMap::DISALLOW) {
+          err = 0;
+          ss << "You are already in disallow election strategy";
+          goto reply_no_propose;
+      }
+      strategy = MonMap::DISALLOW;
+    } else if (strat == "connectivity") {
+      if (pending_map.strategy == MonMap::CONNECTIVITY) {
+        err = 0;
+        ss << "You are already in connectivity election strategy";
+        goto reply_no_propose;
+      }
+      strategy = MonMap::CONNECTIVITY;
+    } else {
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+    if (strategy == pending_map.strategy) {
+      err = 0;
+      goto reply_no_propose;
+    }
+    pending_map.strategy = strategy;
+    pending_map.last_changed = ceph_clock_now();
+  } else if (prefix == "mon add disallowed_leader") {
+    if (!mon.get_quorum_mon_features().contains_all(
+				        ceph::features::mon::FEATURE_PINGING)) {
+      err = -ENOTSUP;
+      ss << "Not all monitors support changing election strategies; please upgrade first!";
+      goto reply_no_propose;
+    }
+    string name;
+    if (!cmd_getval(cmdmap, "name", name)) {
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+    if (pending_map.strategy != MonMap::DISALLOW &&
+	pending_map.strategy != MonMap::CONNECTIVITY) {
+      ss << "You cannot disallow monitors in your current election mode";
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+    if (!pending_map.contains(name)) {
+      ss << "mon." << name << " does not exist";
+      err = -ENOENT;
+      goto reply_no_propose;
+    }
+    if (pending_map.disallowed_leaders.count(name)) {
+      ss << "mon." << name << " is already disallowed";
+      err = 0;
+      goto reply_no_propose;
+    }
+    if (pending_map.disallowed_leaders.size() == pending_map.size() - 1) {
+      ss << "mon." << name << " is the only remaining allowed leader!";
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+    pending_map.disallowed_leaders.insert(name);
+    pending_map.last_changed = ceph_clock_now();
+  } else if (prefix == "mon rm disallowed_leader") {
+    if (!mon.get_quorum_mon_features().contains_all(
+				        ceph::features::mon::FEATURE_PINGING)) {
+      err = -ENOTSUP;
+      ss << "Not all monitors support changing election strategies; please upgrade first!";
+      goto reply_no_propose;
+    }
+    string name;
+    if (!cmd_getval(cmdmap, "name", name)) {
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+    if (pending_map.strategy != MonMap::DISALLOW &&
+	pending_map.strategy != MonMap::CONNECTIVITY) {
+      ss << "You cannot disallow monitors in your current election mode";
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+    if (!pending_map.contains(name)) {
+      ss << "mon." << name << " does not exist";
+      err = -ENOENT;
+      goto reply_no_propose;
+    }
+    if (!pending_map.disallowed_leaders.count(name)) {
+      ss << "mon." << name << " is already allowed";
+      err = 0;
+      goto reply_no_propose;
+    }
+    pending_map.disallowed_leaders.erase(name);
+    pending_map.last_changed = ceph_clock_now();
+  } else if (prefix == "mon set_location") {
+    if (!mon.get_quorum_mon_features().contains_all(
+				        ceph::features::mon::FEATURE_PINGING)) {
+      err = -ENOTSUP;
+      ss << "Not all monitors support monitor locations; please upgrade first!";
+      goto reply_no_propose;
+    }
+    string name;
+    if (!cmd_getval(cmdmap, "name", name)) {
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+    if (!pending_map.contains(name)) {
+      ss << "mon." << name << " does not exist";
+      err = -ENOENT;
+      goto reply_no_propose;
+    }
+
+    vector<string> argvec;
+    map<string, string> loc;
+    cmd_getval(cmdmap, "args", argvec);
+    CrushWrapper::parse_loc_map(argvec, &loc);
+
+    dout(10) << "mon set_location for " << name << " to " << loc << dendl;
+
+    // TODO: validate location in crush map
+    if (!loc.size()) {
+      ss << "We could not parse your input location to anything real; " << argvec
+	 << " turned into an empty map!";
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+    // TODO: validate location against any existing stretch config
+    pending_map.mon_info[name].crush_loc = loc;
+    pending_map.last_changed = ceph_clock_now();
+  } else if (prefix == "mon set_new_tiebreaker") {
+    if (!pending_map.stretch_mode_enabled) {
+      err = -EINVAL;
+      ss << "Stretch mode is not enabled, so there is no tiebreaker";
+      goto reply_no_propose;
+    }
+    string name;
+    if (!cmd_getval(cmdmap, "name", name)) {
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+    bool sure = false;
+    cmd_getval(cmdmap, "yes_i_really_mean_it", sure);
+
+    const auto &existing_tiebreaker_info_i = pending_map.mon_info.find(pending_map.tiebreaker_mon);
+    const auto &new_tiebreaker_info_i = pending_map.mon_info.find(name);
+    if (new_tiebreaker_info_i == pending_map.mon_info.end()) {
+      ss << "mon." << name << " does not exist";
+      err = -ENOENT;
+      goto reply_no_propose;
+    }
+    const auto& new_info = new_tiebreaker_info_i->second;
+    if (new_info.crush_loc.empty()) {
+      ss << "mon." << name << " does not have a location specified";
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+
+    if (!mon.osdmon()->is_readable()) {
+      dout(10) << __func__
+	       << ": waiting for osdmon readable to inspect crush barrier"
+	       << dendl;
+      mon.osdmon()->wait_for_readable(op, new Monitor::C_RetryMessage(&mon, op));
+      return false;  /* do not propose, yet */
+    }
+    int32_t stretch_divider_id = mon.osdmon()->osdmap.stretch_mode_bucket;
+    string stretch_bucket_divider = mon.osdmon()->osdmap.crush->
+      get_type_name(stretch_divider_id);
+
+    const auto& new_loc_i = new_info.crush_loc.find(stretch_bucket_divider);
+    if (new_loc_i == new_info.crush_loc.end()) {
+      ss << "mon." << name << " has a specificed location, but not a "
+	 << stretch_bucket_divider << ", which is the stretch divider";
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+    const string& new_loc = new_loc_i->second;
+    set<string> matching_mons;
+    for (const auto& mii : pending_map.mon_info) {
+      const auto& other_loc_i = mii.second.crush_loc.find(stretch_bucket_divider);
+      if (mii.first == name) {
+	continue;
+      }
+      if (other_loc_i == mii.second.crush_loc.end()) { // huh
+	continue;
+      }
+      const string& other_loc = other_loc_i->second;
+      if (other_loc == new_loc &&
+	  mii.first != existing_tiebreaker_info_i->first) {
+	matching_mons.insert(mii.first);
+      }
+    }
+    if (!matching_mons.empty()) {
+      ss << "mon." << name << " has location " << new_loc_i->second
+	 << ", which matches mons " << matching_mons << " on the "
+	 << stretch_bucket_divider << " dividing bucket for stretch mode. "
+	"Pass --yes-i-really-mean-it if you're sure you want to do this."
+	"(You really don't.)";
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+    pending_map.tiebreaker_mon = name;
+    pending_map.disallowed_leaders.insert(name);
+    pending_map.last_changed = ceph_clock_now();
+  } else if (prefix == "mon enable_stretch_mode") {
+    if (!mon.osdmon()->is_writeable()) {
+      dout(10) << __func__
+	      << ":  waiting for osdmon writeable for stretch mode" << dendl;
+      mon.osdmon()->wait_for_writeable(op, new Monitor::C_RetryMessage(&mon, op));
+      return false;  /* do not propose, yet */
+    }
+    if (monmap.stretch_mode_enabled) {
+      ss << "stretch mode is already engaged";
+      err = 0;
+      goto reply_no_propose;
+    }
+    if (pending_map.stretch_mode_enabled) {
+      dout(10) << "stretch mode currently committing; "
+               << "waiting for commit before retrying command"
+               << dendl;
+      wait_for_commit(op, new Monitor::C_RetryMessage(&mon, op));
+      return false;
+    }
+    string new_crush_rule;
+    if (!cmd_getval(cmdmap, "new_crush_rule", new_crush_rule)) {
+      ss << "must specify a new crush rule that spreads out copies over multiple sites";
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+    string dividing_bucket;
+    if (!cmd_getval(cmdmap, "dividing_bucket", dividing_bucket)) {
+      ss << "must specify a dividing bucket";
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+    string tiebreaker_mon;
+    if (!cmd_getval(cmdmap, "tiebreaker_mon", tiebreaker_mon)) {
+      tiebreaker_mon = "";
+    }
+    //okay, initial arguments make sense, check pools and cluster state
+    err = mon.osdmon()->check_cluster_features(CEPH_FEATUREMASK_STRETCH_MODE, ss);
+    if (err) goto reply_no_propose;
+    
+    // Get pending CRUSH once for validation
+    CrushWrapper crush = mon.osdmon()->_get_pending_crush();
+    
+    set<pg_pool_t*> pools;
+    bool okay = false;
+    int errcode = 0;
+    struct Plugger {
+      // RAII helper to make sure no paxos commits during critical section.
+      // Auto unplug upon destruction.
+      public:
+        explicit Plugger(Paxos &p) : paxos(p) { paxos.plug(); }
+        ~Plugger() { paxos.unplug(); }
+        Plugger(const Plugger&) = delete; // prevent copying
+        Plugger& operator=(const Plugger&) = delete; // prevent object assignment
+      private:
+        Paxos &paxos;
+    };
+    Plugger plugger(paxos);
+    mon.osdmon()->try_enable_stretch_mode_pools(ss, &okay, &errcode,
+              &pools, new_crush_rule);
+    if (!okay) {
+      err = errcode;
+      goto reply_no_propose;
+    }
+    try_enable_stretch_mode(ss, &okay, &errcode, false,
+          tiebreaker_mon, dividing_bucket, crush);
+    if (!okay) {
+      err = errcode;
+      goto reply_no_propose;
+    }
+    mon.osdmon()->try_enable_stretch_mode(ss, &okay, &errcode, false,
+              dividing_bucket, 2, pools, new_crush_rule, crush);
+    if (!okay) {
+      err = errcode;
+      goto reply_no_propose;
+    }
+    // everything looks good, actually commit the changes!
+    try_enable_stretch_mode(ss, &okay, &errcode, true,
+          tiebreaker_mon, dividing_bucket, crush);
+    mon.osdmon()->try_enable_stretch_mode(ss, &okay, &errcode, true,
+              dividing_bucket,
+              2, // right now we only support 2 sites
+              pools, new_crush_rule, crush);
+    ceph_assert(okay == true);
+    request_proposal(mon.osdmon());
+  } else if (prefix == "mon disable_stretch_mode") {
+    if (!mon.osdmon()->is_writeable()) {
+      dout(10) << __func__
+        << ":  waiting for osdmon writeable for stretch mode" << dendl;
+      mon.osdmon()->wait_for_writeable(op, new Monitor::C_RetryMessage(&mon, op));
+      return false;  /* do not propose, yet */
+    }
+    bool sure = false;
+    bool okay = false;
+    int errcode = 0;
+    if (!pending_map.stretch_mode_enabled) {
+      ss << "stretch mode is already disabled";
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+    cmd_getval(cmdmap, "yes_i_really_mean_it", sure);
+    if (!sure) {
+      ss << " This command will disable stretch mode, "
+      "which means all your pools will be reverted back "
+      "to the default size, min_size and crush_rule. "
+      "Pass --yes-i-really-mean-it to proceed.";
+      err = -EPERM;
+      goto reply_no_propose;
+    }
+    string crush_rule = cmd_getval_or<string>(cmdmap, "crush_rule", string{});
+    mon.osdmon()->try_disable_stretch_mode(ss, &okay, &errcode, crush_rule);
+    if (!okay) {
+      err = errcode;
+      goto reply_no_propose;
+    }
+    pending_map.stretch_mode_enabled = false;
+    pending_map.tiebreaker_mon = "";
+    pending_map.disallowed_leaders.clear();
+    pending_map.stretch_marked_down_mons.clear();
+    pending_map.last_changed = ceph_clock_now();
+    request_proposal(mon.osdmon());
+  } else if (prefix == "mon set") {
+    std::string name;
+    cmd_getval(cmdmap, "name", name);
+    std::string value;
+    cmd_getval(cmdmap, "value", value);
+    if (name == "auth_service_cipher") {
+      int c = CryptoManager::get_key_type(value);
+      if (c < 0) {
+        err = -EINVAL;
+        goto reply_no_propose;
+      }
+      if (c == pending_map.auth_service_cipher) {
+        err = 0;
+        ss << "already set";
+        goto reply_no_propose;
+      }
+      if (c == CEPH_CRYPTO_AES256KRB5) {
+        if (!mon.get_quorum_mon_features().contains_all(ceph::features::mon::FEATURE_CEPHX_AUTH_AES256K)) {
+          ss << "all monitors must support FEATURE_CEPHX_AUTH_AES256K to use AES256KRB5";
+          err = -ENOTSUP;
+          goto reply_no_propose;
+        }
+      }
+      pending_map.auth_service_cipher = c;
+    } else if (name == "auth_allowed_ciphers") {
+      std::vector<std::string> v;
+      std::vector<int> ciphers;
+      get_str_vec(value, ", ", v);
+      for (auto& cipher : v) {
+        int c = CryptoManager::get_key_type(cipher);
+        if (c < 0) {
+          err = -EINVAL;
+          goto reply_no_propose;
+        }
+        if (c == CEPH_CRYPTO_AES256KRB5) {
+          if (!mon.get_quorum_mon_features().contains_all(ceph::features::mon::FEATURE_CEPHX_AUTH_AES256K)) {
+            ss << "all monitors must support FEATURE_CEPHX_AUTH_AES256K to use AES256KRB5";
+            err = -ENOTSUP;
+            goto reply_no_propose;
+          }
+        }
+        ciphers.push_back(c);
+      }
+      std::sort(ciphers.begin(), ciphers.end());
+      if (ciphers == pending_map.auth_allowed_ciphers) {
+        err = 0;
+        ss << "already set";
+        goto reply_no_propose;
+      }
+      pending_map.auth_allowed_ciphers = std::move(ciphers);
+    } else if (name == "auth_preferred_cipher") {
+      int c = CryptoManager::get_key_type(value);
+      if (c < 0) {
+        err = -EINVAL;
+        goto reply_no_propose;
+      }
+      if (c == pending_map.auth_preferred_cipher) {
+        err = 0;
+        ss << "already set";
+        goto reply_no_propose;
+      }
+      if (c == CEPH_CRYPTO_AES256KRB5) {
+        if (!mon.get_quorum_mon_features().contains_all(ceph::features::mon::FEATURE_CEPHX_AUTH_AES256K)) {
+          ss << "all monitors must support FEATURE_CEPHX_AUTH_AES256K to use AES256KRB5";
+          err = -ENOTSUP;
+          goto reply_no_propose;
+        }
+      }
+      pending_map.auth_preferred_cipher = c;
+    } else {
+      ss << "unknown name " << name;
+      err = -EINVAL;
+    }
   } else {
     ss << "unknown command " << prefix;
     err = -EINVAL;
+    goto reply_no_propose;
   }
 
-reply:
-  getline(ss, rs);
-  mon->reply_command(op, err, rs, get_last_committed());
-  // we are returning to the user; do not propose.
-  return propose;
+  err = 0;
+  goto reply_propose;
+
+reply_no_propose:
+  {
+    string rs;
+    getline(ss, rs);
+    if (err < 0 && rs.size() == 0)
+      rs = cpp_strerror(err);
+    mon.reply_command(op, err, rs, get_last_committed());
+    return false;
+  }
+
+reply_propose:
+  {
+    string rs;
+    getline(ss, rs);
+    wait_for_commit(op, new Monitor::C_Command(mon, op, err, rs, get_last_committed() + 1));
+    return true;
+  }
+}
+
+void MonmapMonitor::validate_and_enable_stretch_mode(
+    const MonMap& monmap, // passed as arg for unittest
+    MonMap& pending_map, // passed as arg for unittest
+    stringstream& ss, bool *okay,
+    int *errcode, bool commit,
+    string tiebreaker_mon,
+    const string& dividing_bucket,
+    const CrushWrapper& crush)
+{
+  /* A helper function so that we can unittest
+  *  the logic of going into stretch mode.
+  *  Validates against the current committed monmap state,
+  *  but modifies pending_map only when commit=true.
+  */
+  *okay = false;
+  MonMap::election_strategy strategy = pending_map.strategy;
+  if (strategy != MonMap::CONNECTIVITY) {
+    strategy = MonMap::CONNECTIVITY;
+  }
+  // Validate tiebreaker_mon only if explicitly specified
+  if (!tiebreaker_mon.empty() && !monmap.contains(tiebreaker_mon)) {
+    ss << "mon " << tiebreaker_mon << " does not seem to exist";
+    *errcode = -ENOENT;
+    return;
+  }
+  
+  // Get CRUSH subtrees and dividing_id
+  int dividing_id = *crush.get_validated_type_id(dividing_bucket);
+  vector<int> subtrees;
+  crush.get_subtree_of_type(dividing_id, &subtrees);
+  if (subtrees.size() != 2) {
+    ss << "there are " << subtrees.size() << " " << dividing_bucket
+       << "'s in the cluster but stretch mode currently only works with 2!";
+    *errcode = -EINVAL;
+    return;
+  }
+
+  // Get subtree names from CRUSH
+  set<string> subtree_names;
+  for (int subtree_id : subtrees) {
+    const char *subtree_name = crush.get_item_name(subtree_id);
+    if (subtree_name) {
+      subtree_names.insert(subtree_name);
+    }
+  }
+  
+  if (subtree_names.size() != 2) {
+    ss << "Could not get names for both CRUSH subtrees";
+    *errcode = -EINVAL;
+    return;
+  }
+  
+  // Build map of monitor names to their location at dividing_bucket level
+  map<string,string> mon_name_to_crush_loc;
+  for (const auto& [mon_name, mon_info] : monmap.mon_info) {
+    auto loc_it = mon_info.crush_loc.find(dividing_bucket);
+    if (loc_it == mon_info.crush_loc.end()) {
+      ss << "Could not find location entry for " << dividing_bucket
+	       << " on monitor " << mon_name;
+      *errcode = -EINVAL;
+      return;
+    }
+    mon_name_to_crush_loc.emplace(mon_name, loc_it->second);
+  }
+
+  // Identify the two data zones - they must match the CRUSH subtree names
+  map<string, set<string>> location_to_mons;
+  for (const auto& [mon_name, loc_name] : mon_name_to_crush_loc) {
+    location_to_mons[loc_name].insert(mon_name);
+  }
+
+  vector<string> data_zones;
+  for (const string& subtree_name : subtree_names) {
+    if (location_to_mons.count(subtree_name)) {
+      data_zones.push_back(subtree_name);
+    }
+  }
+
+  if (data_zones.size() != 2) {
+    ss << "Could not find monitors in both CRUSH subtrees (";
+    for (auto it = subtree_names.begin(); it != subtree_names.end(); ++it) {
+      if (it != subtree_names.begin()) ss << ", ";
+      ss << *it;
+    }
+    ss << "); found monitors only in: ";
+    for (size_t i = 0; i < data_zones.size(); ++i) {
+      if (i > 0) ss << ", ";
+      ss << data_zones[i];
+    }
+    *errcode = -EINVAL;
+    return;
+  }
+
+  string data_zone1 = data_zones[0];
+  string data_zone2 = data_zones[1];
+
+  // Verify each data zone has at least 1 monitor
+  size_t zone1_mon_count = location_to_mons[data_zone1].size();
+  size_t zone2_mon_count = location_to_mons[data_zone2].size();
+
+  if (zone1_mon_count == 0 || zone2_mon_count == 0) {
+    ss << "Each data zone must have at least 1 monitor; "
+       << data_zone1 << " has " << zone1_mon_count << ", "
+       << data_zone2 << " has " << zone2_mon_count;
+    *errcode = -EINVAL;
+    return;
+  }
+
+  // Auto-select tiebreaker monitor if not specified
+  if (tiebreaker_mon.empty()) {
+    // Find tiebreaker monitor(s) - must be exactly one monitor not in data zones
+    vector<string> tiebreaker_mons;
+    for (const auto& [mon_name, loc_name] : mon_name_to_crush_loc) {
+      if (loc_name != data_zone1 && loc_name != data_zone2) {
+        tiebreaker_mons.push_back(mon_name);
+      }
+    }
+
+    if (tiebreaker_mons.empty()) {
+      ss << "Could not auto-select a tiebreaker monitor; "
+         << "must have a monitor in a third " << dividing_bucket
+         << " location (found only " << data_zone1 << " and " << data_zone2 << ")";
+      *errcode = -EINVAL;
+      return;
+    }
+
+    if (tiebreaker_mons.size() > 1) {
+      ss << "Could not auto-select a tiebreaker monitor; "
+         << "found " << tiebreaker_mons.size() << " monitors (" << tiebreaker_mons
+         << ") not in the 2 data zones "
+         << data_zone1 << " and " << data_zone2 << ", need exactly 1";
+      *errcode = -EINVAL;
+      return;
+    }
+
+    // Exactly one tiebreaker monitor found
+    tiebreaker_mon = tiebreaker_mons[0];
+  } else {
+    // Validate explicitly specified tiebreaker monitor
+    auto tiebreaker_loc_it = mon_name_to_crush_loc.find(tiebreaker_mon);
+    if (tiebreaker_loc_it == mon_name_to_crush_loc.end()) {
+      // tiebreaker doesn't belong to any of the dividing_bucket locations
+      ss << "tiebreaker monitor " << tiebreaker_mon
+         << " does not have a location specified for " << dividing_bucket;
+      *errcode = -EINVAL;
+      return;
+    }
+
+    const string& tiebreaker_location = tiebreaker_loc_it->second;
+    if (tiebreaker_location == data_zone1 || tiebreaker_location == data_zone2) {
+      ss << "tiebreaker monitor " << tiebreaker_mon
+         << " is in " << tiebreaker_location
+         << ", which is one of the two data zones ("
+         << data_zone1 << ", " << data_zone2
+         << "); tiebreaker must be in a third location";
+      *errcode = -EINVAL;
+      return;
+    }
+  }
+
+  if (commit) {
+    pending_map.strategy = strategy;
+    pending_map.disallowed_leaders.insert(tiebreaker_mon);
+    pending_map.tiebreaker_mon = tiebreaker_mon;
+    pending_map.stretch_mode_enabled = true;
+  }
+  *okay = true;
+}
+
+void MonmapMonitor::try_enable_stretch_mode(stringstream& ss, bool *okay,
+					    int *errcode, bool commit,
+					    string tiebreaker_mon,
+					    const string& dividing_bucket,
+					    const CrushWrapper& crush)
+{
+  dout(20) << __func__ << dendl;
+  
+  // Check if monitors support connectivity election strategy if not already using it
+  if (pending_map.strategy != MonMap::CONNECTIVITY) {
+    if (!mon.get_quorum_mon_features().contains_all(
+        ceph::features::mon::FEATURE_PINGING)) {
+      *okay = false;
+      *errcode = -ENOTSUP;
+      ss << "Not all monitors support changing election strategies; please upgrade first!";
+      return;
+    }
+  }
+  
+  validate_and_enable_stretch_mode(*mon.monmap, pending_map, ss, okay, errcode, commit,
+                                     tiebreaker_mon, dividing_bucket, crush);
+
+  // Add debug logging if successful
+  if (*okay && !tiebreaker_mon.empty()) {
+    // Note: tiebreaker_mon may have been auto-selected, but we can't easily retrieve it here
+    // The validate_and_enable_stretch_mode function modifies it internally
+    dout(20) << __func__ << " stretch mode validation succeeded" << dendl;
+  }
+
+  if (!*okay) {
+    ceph_assert(!commit);
+  }
+}
+
+void MonmapMonitor::trigger_degraded_stretch_mode(const set<string>& dead_mons)
+{
+  dout(20) << __func__ << dendl;
+  pending_map.stretch_marked_down_mons.insert(dead_mons.begin(), dead_mons.end());
+  propose_pending();
+}
+
+void MonmapMonitor::trigger_healthy_stretch_mode()
+{
+  dout(20) << __func__ << dendl;
+  pending_map.stretch_marked_down_mons.clear();
+  propose_pending();
 }
 
 bool MonmapMonitor::preprocess_join(MonOpRequestRef op)
 {
-  MMonJoin *join = static_cast<MMonJoin*>(op->get_req());
-  dout(10) << "preprocess_join " << join->name << " at " << join->addr << dendl;
+  auto join = op->get_req<MMonJoin>();
+  dout(10) << __func__ << " " << join->name << " at " << join->addrs << dendl;
 
-  MonSession *session = join->get_session();
+  MonSession *session = op->get_session();
   if (!session ||
       !session->is_capable("mon", MON_CAP_W | MON_CAP_X)) {
     dout(10) << " insufficient caps" << dendl;
     return true;
   }
 
-  if (pending_map.contains(join->name) && !pending_map.get_addr(join->name).is_blank_ip()) {
+  const auto name_info_i = pending_map.mon_info.find(join->name);
+  if (name_info_i != pending_map.mon_info.end() &&
+      !name_info_i->second.public_addrs.front().is_blank_ip() &&
+      (!join->force_loc || join->crush_loc == name_info_i->second.crush_loc)) {
     dout(10) << " already have " << join->name << dendl;
     return true;
   }
-  if (pending_map.contains(join->addr) && pending_map.get_name(join->addr) == join->name) {
-    dout(10) << " already have " << join->addr << dendl;
+  string addr_name;
+  if (pending_map.contains(join->addrs)) {
+    addr_name = pending_map.get_name(join->addrs);
+  }
+  if (!addr_name.empty() &&
+      addr_name == join->name &&
+      (!join->force_loc || join->crush_loc.empty() ||
+       pending_map.mon_info[addr_name].crush_loc == join->crush_loc)) {
+    dout(10) << " already have " << join->addrs << dendl;
+    return true;
+  }
+  if (pending_map.stretch_mode_enabled &&
+      join->crush_loc.empty() &&
+      (addr_name.empty() ||
+       pending_map.mon_info[addr_name].crush_loc.empty())) {
+    dout(10) << "stretch mode engaged but no source of crush_loc" << dendl;
+    mon.clog->info() << join->name << " attempted to join from " << join->name
+		      << ' ' << join->addrs
+		      << "; but lacks a crush_location for stretch mode";
     return true;
   }
   return false;
 }
+
 bool MonmapMonitor::prepare_join(MonOpRequestRef op)
 {
-  MMonJoin *join = static_cast<MMonJoin*>(op->get_req());
-  dout(0) << "adding/updating " << join->name << " at " << join->addr << " to monitor cluster" << dendl;
+  auto join = op->get_req<MMonJoin>();
+  dout(0) << "adding/updating " << join->name
+	  << " at " << join->addrs << " to monitor cluster" << dendl;
+  map<string,string> existing_loc;
+  if (pending_map.contains(join->addrs)) {
+    string name = pending_map.get_name(join->addrs);
+    existing_loc = pending_map.mon_info[name].crush_loc;
+    pending_map.remove(name);
+  }
   if (pending_map.contains(join->name))
     pending_map.remove(join->name);
-  if (pending_map.contains(join->addr))
-    pending_map.remove(pending_map.get_name(join->addr));
-  pending_map.add(join->name, join->addr);
+  auto& mon_info = pending_map.add(join->name, join->addrs);
+  mon_info.crush_loc =
+    ((join->force_loc || existing_loc.empty()) ?
+     join->crush_loc : existing_loc);
   pending_map.last_changed = ceph_clock_now();
   return true;
 }
@@ -566,41 +1647,12 @@ bool MonmapMonitor::should_propose(double& delay)
   return true;
 }
 
-void MonmapMonitor::tick()
-{
-}
-
-void MonmapMonitor::get_health(list<pair<health_status_t, string> >& summary,
-			       list<pair<health_status_t, string> > *detail,
-			       CephContext *cct) const
-{
-  int max = mon->monmap->size();
-  int actual = mon->get_quorum().size();
-  if (actual < max) {
-    ostringstream ss;
-    ss << (max-actual) << " mons down, quorum " << mon->get_quorum() << " " << mon->get_quorum_names();
-    summary.push_back(make_pair(HEALTH_WARN, ss.str()));
-    if (detail) {
-      set<int> q = mon->get_quorum();
-      for (int i=0; i<max; i++) {
-	if (q.count(i) == 0) {
-	  ostringstream ss;
-	  ss << "mon." << mon->monmap->get_name(i) << " (rank " << i
-	     << ") addr " << mon->monmap->get_addr(i)
-	     << " is down (out of quorum)";
-	  detail->push_back(make_pair(HEALTH_WARN, ss.str()));
-	}
-      }
-    }
-  }
-}
-
 int MonmapMonitor::get_monmap(bufferlist &bl)
 {
   version_t latest_ver = get_last_committed();
   dout(10) << __func__ << " ver " << latest_ver << dendl;
 
-  if (!mon->store->exists(get_service_name(), stringify(latest_ver)))
+  if (!mon.store->exists(get_service_name(), stringify(latest_ver)))
     return -ENOENT;
 
   int err = get_version(latest_ver, bl);
@@ -615,25 +1667,77 @@ int MonmapMonitor::get_monmap(bufferlist &bl)
 void MonmapMonitor::check_subs()
 {
   const string type = "monmap";
-  auto subs = mon->session_map.subs.find(type);
-  if (subs == mon->session_map.subs.end())
-    return;
-  for (auto sub : *subs->second) {
-    check_sub(sub);
-  }
+  mon.with_session_map([this, &type](const MonSessionMap& session_map) {
+      auto subs = session_map.subs.find(type);
+      if (subs == session_map.subs.end())
+	return;
+      for (auto sub : *subs->second) {
+	check_sub(sub);
+      }
+    });
 }
 
 void MonmapMonitor::check_sub(Subscription *sub)
 {
-  const auto epoch = mon->monmap->get_epoch();
+  const auto epoch = mon.monmap->get_epoch();
   dout(10) << __func__
 	   << " monmap next " << sub->next
 	   << " have " << epoch << dendl;
   if (sub->next <= epoch) {
-    mon->send_latest_monmap(sub->session->con.get());
-    if (sub->onetime)
-      mon->session_map.remove_sub(sub);
-    else
+    mon.send_latest_monmap(sub->session->con.get());
+    if (sub->onetime) {
+      mon.with_session_map([sub](MonSessionMap& session_map) {
+	  session_map.remove_sub(sub);
+	});
+    } else {
       sub->next = epoch + 1;
+    }
   }
+}
+
+void MonmapMonitor::tick()
+{
+  if (!is_active() ||
+      !mon.is_leader()) {
+    return;
+  }
+
+  if (mon.monmap->created.is_zero()) {
+    dout(10) << __func__ << " detected empty created stamp" << dendl;
+    utime_t ctime;
+    for (version_t v = 1; v <= get_last_committed(); v++) {
+      bufferlist bl;
+      int r = get_version(v, bl);
+      if (r < 0) {
+	continue;
+      }
+      MonMap m;
+      auto p = bl.cbegin();
+      decode(m, p);
+      if (!m.last_changed.is_zero()) {
+	dout(10) << __func__ << " first monmap with last_changed is "
+		 << v << " with " << m.last_changed << dendl;
+	ctime = m.last_changed;
+	break;
+      }
+    }
+    if (ctime.is_zero()) {
+      ctime = ceph_clock_now();
+    }
+    dout(10) << __func__ << " updating created stamp to " << ctime << dendl;
+    pending_map.created = ctime;
+    propose_pending();
+  }
+}
+
+epoch_t MonmapMonitor::bump_auth_epoch(epoch_t e)
+{
+  ceph_assert(is_writeable());
+  if (unlikely(pending_map.auth_epoch == std::numeric_limits<epoch_t>::max())) {
+    dout(10) << __func__ << " repairing invalid auth_epoch " << pending_map.auth_epoch << " -> 0" << dendl;
+    pending_map.auth_epoch = 0;
+  }
+  ceph_assert(e >= pending_map.auth_epoch);
+  pending_map.auth_epoch = e;
+  return e;
 }

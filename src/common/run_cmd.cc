@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,17 +15,19 @@
 
 #include "common/errno.h"
 
-#include <errno.h>
+#ifndef _WIN32
 #include <sstream>
 #include <stdarg.h>
-#include <stdlib.h>
-#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
+#else
+#include "common/SubProcess.h"
+#endif /* _WIN32 */
 
 using std::ostringstream;
 
+#ifndef _WIN32
 std::string run_cmd(const char *cmd, ...)
 {
   std::vector <const char *> arr;
@@ -81,3 +84,25 @@ std::string run_cmd(const char *cmd, ...)
   oss << "run_cmd(" << cmd << "): terminated by unknown mechanism";
   return oss.str();
 }
+#else
+std::string run_cmd(const char *cmd, ...)
+{
+  SubProcess p(cmd, SubProcess::CLOSE, SubProcess::PIPE, SubProcess::CLOSE);
+
+  va_list ap;
+  va_start(ap, cmd);
+  const char *c = cmd;
+  c = va_arg(ap, const char*);
+  while (c != NULL) {
+    p.add_cmd_arg(c);
+    c = va_arg(ap, const char*);
+  }
+  va_end(ap);
+
+  if (p.spawn() == 0) {
+    p.join();
+  }
+
+  return p.err();
+}
+#endif /* _WIN32 */

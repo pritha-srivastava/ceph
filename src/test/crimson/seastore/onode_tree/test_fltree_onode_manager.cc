@@ -1,0 +1,353 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
+#include <boost/range/combine.hpp>
+
+#include "test/crimson/gtest_seastar.h"
+
+#include "test/crimson/seastore/transaction_manager_test_state.h"
+
+#include "crimson/os/seastore/onode_manager/staged-fltree/fltree_onode_manager.h"
+#include "crimson/os/seastore/onode_manager/staged-fltree/tree_utils.h"
+
+using namespace crimson;
+using namespace crimson::os;
+using namespace crimson::os::seastore;
+using namespace crimson::os::seastore::onode;
+using CTransaction = ceph::os::Transaction;
+using namespace std;
+
+namespace {
+  [[maybe_unused]] seastar::logger& logger() {
+    return crimson::get_logger(ceph_subsys_test);
+  }
+}
+
+struct onode_item_t {
+  uint32_t size;
+  uint64_t id;
+  uint64_t block_size;
+  uint32_t cnt_modify = 0;
+
+  void initialize(Transaction& t, Onode& value) const {
+    auto &ftvalue = static_cast<FLTreeOnode&>(value);
+    ftvalue.update_onode_size(t, size);
+    auto laddr = laddr_t::from_byte_offset(id << laddr_t::UNIT_SHIFT);
+    auto oroot = omap_root_t(laddr, cnt_modify,
+      value.get_metadata_hint(block_size), omap_type_t::OMAP);
+    ftvalue.update_omap_root(t, oroot);
+    validate(value);
+  }
+
+  void validate(Onode& value) const {
+    auto& layout = value.get_layout();
+    ceph_assert(uint64_t(layout.size) == uint64_t{size});
+    auto laddr = laddr_t::from_byte_offset(id << laddr_t::UNIT_SHIFT);
+    ceph_assert(layout.omap_root.get(value.get_metadata_hint(block_size)).addr == laddr);
+    ceph_assert(layout.omap_root.get(value.get_metadata_hint(block_size)).depth == cnt_modify);
+  }
+
+  void modify(Transaction& t, Onode& value) {
+    validate(value);
+    ++cnt_modify;
+    initialize(t, value);
+  }
+
+  static onode_item_t create(std::size_t size, std::size_t id, uint64_t block_size) {
+    ceph_assert(size <= std::numeric_limits<uint32_t>::max());
+    return {(uint32_t)size, id, block_size};
+  }
+};
+
+struct fltree_onode_manager_test_t
+    : public seastar_test_suite_t, TMTestState {
+  using iterator_t = typename KVPool<onode_item_t>::iterator_t;
+
+  collection_manager::FlatCollectionManagerRef collection_manager;
+  FLTreeOnodeManagerRef manager;
+  // the manager keys its trees by collection; this test uses a single one
+  const coll_t cid{spg_t{pg_t{0, 0}}};
+
+  seastar::future<> set_up_fut() final {
+    return tm_setup();
+  }
+
+  seastar::future<> tear_down_fut() final {
+    return tm_teardown();
+  }
+
+  virtual seastar::future<> _init() final {
+    return TMTestState::_init().then([this] {
+      collection_manager.reset(
+        new collection_manager::FlatCollectionManager(*tm));
+      manager.reset(new FLTreeOnodeManager(*tm, *collection_manager));
+    });
+  }
+
+  virtual seastar::future<> _destroy() final {
+    manager.reset();
+    collection_manager.reset();
+    return TMTestState::_destroy();
+  }
+
+  virtual FuturizedStore::mkfs_ertr::future<> _mkfs() final {
+    return TMTestState::_mkfs(
+    ).safe_then([this] {
+      return restart_fut();
+    }).safe_then([this] {
+      return repeat_eagain([this] {
+        return seastar::do_with(
+          create_mutate_transaction(),
+          coll_root_t(),
+          [this](auto &ref_t, auto &coll_root)
+        {
+          return with_trans_intr(*ref_t, [this, &coll_root](auto &t) {
+            // mirrors SeaStore::Shard::mkfs_managers() + _create_collection():
+            // meta's tree first, then the collection map, then register cid
+            // and mkfs its tree.
+            return manager->mkfs(t
+            ).si_then([this, &t] {
+              return collection_manager->mkfs(t);
+            }).si_then([this, &t, &coll_root](auto cr) {
+              coll_root = cr;
+              tm->write_collection_root(t, coll_root);
+              return collection_manager->create(
+                coll_root, t, cid, coll_info_t(0, L_ADDR_NULL));
+            }).si_then([this, &t, &coll_root] {
+              if (coll_root.must_update()) {
+                tm->write_collection_root(t, coll_root);
+              }
+              return manager->create_tree(t, cid);
+            }).si_then([this, &t] {
+              return submit_transaction_fut2(t);
+            });
+          });
+        });
+      });
+    }).handle_error(
+      crimson::ct_error::assert_all("Invalid error in _mkfs")
+    );
+  }
+
+  template <typename F>
+  void with_transaction(F&& f) {
+    auto t = create_mutate_transaction();
+    std::invoke(f, *t);
+    submit_transaction(std::move(t));
+  }
+
+  template <typename F>
+  void with_onode_write(iterator_t& it, F&& f) {
+    with_transaction([this, &it, f=std::move(f)] (auto& t) {
+      auto p_kv = *it;
+      auto onode = with_trans_intr(t, [&](auto &t) {
+        return manager->get_or_create_onode(t, cid, p_kv->key);
+      }).unsafe_get();
+      std::invoke(f, t, *onode, p_kv->value);
+    });
+  }
+
+  void validate_onode(iterator_t& it) {
+    with_transaction([this, &it] (auto& t) {
+      auto p_kv = *it;
+      auto onode = with_trans_intr(t, [&](auto &t) {
+        return manager->get_onode(t, cid, p_kv->key);
+      }).unsafe_get();
+      p_kv->value.validate(*onode);
+    });
+  }
+
+  void validate_erased(iterator_t& it) {
+    with_transaction([this, &it] (auto& t) {
+      auto p_kv = *it;
+      auto exist = with_trans_intr(t, [&](auto &t) {
+        return manager->contains_onode(t, cid, p_kv->key);
+      }).unsafe_get();
+      ceph_assert(exist == false);
+    });
+  }
+
+  template <typename F>
+  void with_onodes_process(
+      const iterator_t& start, const iterator_t& end, F&& f) {
+    std::vector<ghobject_t> oids;
+    std::vector<onode_item_t*> items;
+    auto it = start;
+    while(it != end) {
+      auto p_kv = *it;
+      oids.emplace_back(p_kv->key);
+      items.emplace_back(&p_kv->value);
+      ++it;
+    }
+    with_transaction([&oids, &items, f=std::move(f)] (auto& t) mutable {
+      std::invoke(f, t, oids, items);
+    });
+  }
+
+  template <typename F>
+  void with_onodes_write(
+      const iterator_t& start, const iterator_t& end, F&& f) {
+    with_onodes_process(start, end,
+        [this, f=std::move(f)] (auto& t, auto& oids, auto& items) {
+      auto onodes = with_trans_intr(t, [&](auto &t) {
+        return manager->get_or_create_onodes(t, cid, oids);
+      }).unsafe_get();
+      for (auto tup : boost::combine(onodes, items)) {
+        OnodeRef onode;
+        onode_item_t* p_item;
+        boost::tie(onode, p_item) = tup;
+        std::invoke(f, t, *onode, *p_item);
+      }
+    });
+  }
+
+  void validate_onodes(
+      const iterator_t& start, const iterator_t& end) {
+    with_onodes_process(start, end,
+        [this] (auto& t, auto& oids, auto& items) {
+      for (auto tup : boost::combine(oids, items)) {
+        ghobject_t oid;
+        onode_item_t* p_item;
+        boost::tie(oid, p_item) = tup;
+        auto onode = with_trans_intr(t, [&](auto &t) {
+          return manager->get_onode(t, cid, oid);
+        }).unsafe_get();
+        p_item->validate(*onode);
+      }
+    });
+  }
+
+  void validate_erased(
+      const iterator_t& start, const iterator_t& end) {
+    with_onodes_process(start, end,
+        [this] (auto& t, auto& oids, auto& items) {
+      for (auto& oid : oids) {
+        auto exist = with_trans_intr(t, [&](auto &t) {
+          return manager->contains_onode(t, cid, oid);
+        }).unsafe_get();
+        ceph_assert(exist == false);
+      }
+    });
+  }
+
+  static constexpr uint64_t LIST_LIMIT = 10;
+  void validate_list_onodes(KVPool<onode_item_t>& pool) {
+    with_onodes_process(pool.begin(), pool.end(),
+        [this] (auto& t, auto& oids, auto& items) {
+      std::vector<ghobject_t> listed_oids;
+      auto start = ghobject_t();
+      auto end = ghobject_t::get_max();
+      assert(start < end);
+      assert(start < oids[0]);
+      assert(oids[0] < end);
+      while (start != end) {
+        auto [list_ret, list_end] = with_trans_intr(t, [&](auto &t) {
+          return manager->list_onodes(t, cid, start, end, LIST_LIMIT);
+        }).unsafe_get();
+        listed_oids.insert(listed_oids.end(), list_ret.begin(), list_ret.end());
+        start = list_end;
+      }
+      ceph_assert(oids.size() == listed_oids.size());
+    });
+  }
+
+  fltree_onode_manager_test_t() {}
+};
+
+TEST_P(fltree_onode_manager_test_t, 1_single)
+{
+  run_async([this] {
+    uint64_t block_size = tm->get_block_size();
+    auto pool = KVPool<onode_item_t>::create_range({0, 1}, {128, 256}, block_size);
+    auto iter = pool.begin();
+    with_onode_write(iter, [](auto& t, auto& onode, auto& item) {
+      item.initialize(t, onode);
+    });
+    validate_onode(iter);
+
+    with_onode_write(iter, [](auto& t, auto& onode, auto& item) {
+      item.modify(t, onode);
+    });
+    validate_onode(iter);
+
+    validate_list_onodes(pool);
+
+    with_onode_write(iter, [this](auto& t, auto& onode, auto& item) {
+      OnodeRef onode_ref = &onode;
+      with_trans_intr(t, [&](auto &t) {
+        return manager->erase_onode(t, cid, onode_ref);
+      }).unsafe_get();
+    });
+    validate_erased(iter);
+  });
+}
+
+TEST_P(fltree_onode_manager_test_t, 2_synthetic)
+{
+  run_async([this] {
+    uint64_t block_size = tm->get_block_size();
+    auto pool = KVPool<onode_item_t>::create_range(
+        {0, 10000}, {32, 64, 128, 256, 512}, block_size);
+    auto start = pool.begin();
+    auto end = pool.end();
+    with_onodes_write(start, end,
+        [](auto& t, auto& onode, auto& item) {
+      item.initialize(t, onode);
+    });
+    restart();
+    validate_onodes(start, end);
+
+    validate_list_onodes(pool);
+
+    auto rd_start = pool.random_begin();
+    auto rd_end = rd_start + 50;
+    with_onodes_write(rd_start, rd_end,
+        [](auto& t, auto& onode, auto& item) {
+      item.modify(t, onode);
+    });
+    restart();
+    validate_onodes(start, end);
+
+    pool.shuffle();
+    rd_start = pool.random_begin();
+    rd_end = rd_start + 50;
+    with_onodes_write(rd_start, rd_end,
+        [](auto& t, auto& onode, auto& item) {
+      item.modify(t, onode);
+    });
+    restart();
+    validate_onodes(start, end);
+
+    pool.shuffle();
+    rd_start = pool.random_begin();
+    rd_end = rd_start + 50;
+    with_onodes_write(rd_start, rd_end,
+        [this](auto& t, auto& onode, auto& item) {
+      OnodeRef onode_ref = &onode;
+      with_trans_intr(t, [&](auto &t) {
+        return manager->erase_onode(t, cid, onode_ref);
+      }).unsafe_get();
+    });
+    restart();
+    validate_erased(rd_start, rd_end);
+    pool.erase_from_random(rd_start, rd_end);
+    start = pool.begin();
+    end = pool.end();
+    validate_onodes(start, end);
+
+    validate_list_onodes(pool);
+  });
+}
+
+INSTANTIATE_TEST_SUITE_P(
+  fltree_onode__manager_test,
+  fltree_onode_manager_test_t,
+  ::testing::Combine(
+    ::testing::Values (
+      "segmented",
+      "circularbounded"
+    ),
+    ::testing::Values(
+      integrity_check_t::FULL_CHECK)
+  )
+);

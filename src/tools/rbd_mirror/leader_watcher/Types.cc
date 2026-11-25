@@ -1,8 +1,8 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "Types.h"
-#include "include/assert.h"
+#include "include/ceph_assert.h"
 #include "include/stringify.h"
 #include "common/Formatter.h"
 
@@ -12,13 +12,14 @@ namespace leader_watcher {
 
 namespace {
 
-class EncodePayloadVisitor : public boost::static_visitor<void> {
+class EncodePayloadVisitor {
 public:
   explicit EncodePayloadVisitor(bufferlist &bl) : m_bl(bl) {}
 
   template <typename Payload>
   inline void operator()(const Payload &payload) const {
-    ::encode(static_cast<uint32_t>(Payload::NOTIFY_OP), m_bl);
+    using ceph::encode;
+    encode(static_cast<uint32_t>(Payload::NOTIFY_OP), m_bl);
     payload.encode(m_bl);
   }
 
@@ -26,9 +27,9 @@ private:
   bufferlist &m_bl;
 };
 
-class DecodePayloadVisitor : public boost::static_visitor<void> {
+class DecodePayloadVisitor {
 public:
-  DecodePayloadVisitor(__u8 version, bufferlist::iterator &iter)
+  DecodePayloadVisitor(__u8 version, bufferlist::const_iterator &iter)
     : m_version(version), m_iter(iter) {}
 
   template <typename Payload>
@@ -38,10 +39,10 @@ public:
 
 private:
   __u8 m_version;
-  bufferlist::iterator &m_iter;
+  bufferlist::const_iterator &m_iter;
 };
 
-class DumpPayloadVisitor : public boost::static_visitor<void> {
+class DumpPayloadVisitor {
 public:
   explicit DumpPayloadVisitor(Formatter *formatter) : m_formatter(formatter) {}
 
@@ -61,7 +62,7 @@ private:
 void HeartbeatPayload::encode(bufferlist &bl) const {
 }
 
-void HeartbeatPayload::decode(__u8 version, bufferlist::iterator &iter) {
+void HeartbeatPayload::decode(__u8 version, bufferlist::const_iterator &iter) {
 }
 
 void HeartbeatPayload::dump(Formatter *f) const {
@@ -70,7 +71,7 @@ void HeartbeatPayload::dump(Formatter *f) const {
 void LockAcquiredPayload::encode(bufferlist &bl) const {
 }
 
-void LockAcquiredPayload::decode(__u8 version, bufferlist::iterator &iter) {
+void LockAcquiredPayload::decode(__u8 version, bufferlist::const_iterator &iter) {
 }
 
 void LockAcquiredPayload::dump(Formatter *f) const {
@@ -79,17 +80,17 @@ void LockAcquiredPayload::dump(Formatter *f) const {
 void LockReleasedPayload::encode(bufferlist &bl) const {
 }
 
-void LockReleasedPayload::decode(__u8 version, bufferlist::iterator &iter) {
+void LockReleasedPayload::decode(__u8 version, bufferlist::const_iterator &iter) {
 }
 
 void LockReleasedPayload::dump(Formatter *f) const {
 }
 
 void UnknownPayload::encode(bufferlist &bl) const {
-  assert(false);
+  ceph_abort();
 }
 
-void UnknownPayload::decode(__u8 version, bufferlist::iterator &iter) {
+void UnknownPayload::decode(__u8 version, bufferlist::const_iterator &iter) {
 }
 
 void UnknownPayload::dump(Formatter *f) const {
@@ -97,15 +98,15 @@ void UnknownPayload::dump(Formatter *f) const {
 
 void NotifyMessage::encode(bufferlist& bl) const {
   ENCODE_START(1, 1, bl);
-  boost::apply_visitor(EncodePayloadVisitor(bl), payload);
+  std::visit(EncodePayloadVisitor(bl), payload);
   ENCODE_FINISH(bl);
 }
 
-void NotifyMessage::decode(bufferlist::iterator& iter) {
+void NotifyMessage::decode(bufferlist::const_iterator& iter) {
   DECODE_START(1, iter);
 
   uint32_t notify_op;
-  ::decode(notify_op, iter);
+  decode(notify_op, iter);
 
   // select the correct payload variant based upon the encoded op
   switch (notify_op) {
@@ -123,18 +124,20 @@ void NotifyMessage::decode(bufferlist::iterator& iter) {
     break;
   }
 
-  apply_visitor(DecodePayloadVisitor(struct_v, iter), payload);
+  std::visit(DecodePayloadVisitor(struct_v, iter), payload);
   DECODE_FINISH(iter);
 }
 
 void NotifyMessage::dump(Formatter *f) const {
-  apply_visitor(DumpPayloadVisitor(f), payload);
+  std::visit(DumpPayloadVisitor(f), payload);
 }
 
-void NotifyMessage::generate_test_instances(std::list<NotifyMessage *> &o) {
-  o.push_back(new NotifyMessage(HeartbeatPayload()));
-  o.push_back(new NotifyMessage(LockAcquiredPayload()));
-  o.push_back(new NotifyMessage(LockReleasedPayload()));
+std::list<NotifyMessage> NotifyMessage::generate_test_instances() {
+  std::list<NotifyMessage> o;
+  o.push_back(NotifyMessage(HeartbeatPayload()));
+  o.push_back(NotifyMessage(LockAcquiredPayload()));
+  o.push_back(NotifyMessage(LockReleasedPayload()));
+  return o;
 }
 
 std::ostream &operator<<(std::ostream &out, const NotifyOp &op) {

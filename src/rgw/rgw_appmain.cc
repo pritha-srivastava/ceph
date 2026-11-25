@@ -1,0 +1,894 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
+
+/*
+ * Ceph - scalable distributed file system
+ *
+ * Copyright (C) 2022 Red Hat, Inc
+ *
+ * This is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License version 2.1, as published by the Free Software
+ * Foundation.  See file COPYING.
+ *
+ */
+
+#include <condition_variable>
+#include <mutex>
+#include <set>
+#include <boost/intrusive/list.hpp>
+#include "global/global_init.h"
+#include "global/signal_handler.h"
+#include "common/admin_socket.h"
+#include "common/cmdparse.h"
+#include "common/config.h"
+#include "common/errno.h"
+#include "common/Timer.h"
+#include "common/TracepointProvider.h"
+#include "common/numa.h"
+#include "common/split.h"
+#include "include/compat.h"
+#include "include/str_list.h"
+#include "include/stringify.h"
+#include "perfglue/heap_profiler.h"
+#include "rgw_kms_cache.h"
+#include "rgw_main.h"
+#include "rgw_asio_thread.h"
+#include "rgw_common.h"
+#include "rgw_sal.h"
+#include "rgw_sal_config.h"
+#include "rgw_period_pusher.h"
+#include "rgw_realm_reloader.h"
+#include "rgw_rest.h"
+#include "rgw_rest_s3.h"
+#include "rgw_rest_swift.h"
+#include "rgw_rest_admin.h"
+#include "rgw_rest_info.h"
+#include "rgw_rest_usage.h"
+#include "rgw_rest_account.h"
+#include "rgw_rest_bucket.h"
+#include "rgw_rest_metadata.h"
+#ifdef WITH_RADOSGW_RADOS
+#include "rgw_rest_log.h"
+#endif
+#include "rgw_rest_config.h"
+#include "rgw_rest_realm.h"
+#include "rgw_rest_ratelimit.h"
+#include "rgw_rest_zero.h"
+#include "rgw_rest_restore.h"
+#include "rgw_swift_auth.h"
+#include "rgw_log.h"
+#include "rgw_lib.h"
+#include "rgw_frontend.h"
+#include "rgw_lib_frontend.h"
+#include "rgw_tools.h"
+#include "rgw_resolve.h"
+#include "rgw_process.h"
+#include "rgw_frontend.h"
+#include "rgw_http_client_curl.h"
+#include "rgw_kmip_client.h"
+#include "rgw_kmip_client_impl.h"
+#include "rgw_perf_counters.h"
+#include "rgw_signal.h"
+#ifdef WITH_ARROW_FLIGHT
+#include "rgw_flight_frontend.h"
+#endif
+#include "rgw_asio_frontend.h"
+#include "rgw_dmclock_scheduler_ctx.h"
+#include "rgw_lua.h"
+#ifdef WITH_RADOSGW_RADOS
+#include "rgw_dedup.h"
+#endif
+#ifdef WITH_RADOSGW_DBSTORE
+#include "rgw_sal_dbstore.h"
+#endif
+#include "rgw_lua_background.h"
+#include "services/svc_zone.h"
+#ifdef WITH_RADOSGW_LANCEDB
+#include "rgw_s3vector_background.h"
+#endif
+
+#ifdef HAVE_SYS_PRCTL_H
+#include <sys/prctl.h>
+#endif
+
+#define dout_subsys ceph_subsys_rgw
+
+using namespace std;
+using TOPNSPC::common::cmd_getval;
+
+namespace {
+  TracepointProvider::Traits rgw_op_tracepoint_traits(
+    "librgw_op_tp.so", "rgw_op_tracing");
+  TracepointProvider::Traits rgw_rados_tracepoint_traits(
+    "librgw_rados_tp.so", "rgw_rados_tracing");
+
+class RGWHeapProfilerHook : public AdminSocketHook {
+public:
+  int call(std::string_view command,
+	   const cmdmap_t& cmdmap,
+	   const ceph::buffer::list&,
+	   ceph::Formatter*,
+	   std::ostream& errss,
+	   ceph::buffer::list& out) override {
+    if (!ceph_using_tcmalloc()) {
+      errss << "not using tcmalloc";
+      return -EOPNOTSUPP;
+    }
+    string heapcmd;
+    if (!cmd_getval(cmdmap, "heapcmd", heapcmd)) {
+      errss << "unable to get value for command \"heap\"";
+      return -EINVAL;
+    }
+    vector<string> cmd_vec;
+    get_str_vec(heapcmd, cmd_vec);
+    string value;
+    if (cmd_getval(cmdmap, "value", value)) {
+      cmd_vec.push_back(value);
+    }
+    ostringstream ss;
+    ceph_heap_profiler_handle_command(cmd_vec, ss);
+    out.append(ss.str());
+    return 0;
+  }
+};
+
+} // anonymous namespace
+
+OpsLogFile* rgw::AppMain::ops_log_file;
+
+rgw::AppMain::AppMain(const DoutPrefixProvider* dpp) : dpp(dpp), context_pool(dpp) {}
+
+rgw::AppMain::~AppMain()
+{
+  unregister_heap_profiler_hook();
+}
+
+void rgw::AppMain::unregister_heap_profiler_hook()
+{
+  if (heap_profiler_hook) {
+    g_ceph_context->get_admin_socket()->unregister_commands(heap_profiler_hook);
+    delete heap_profiler_hook;
+    heap_profiler_hook = nullptr;
+  }
+}
+
+
+// Helper methods for instance and protocol handling
+bool rgw::AppMain::is_library_instance() const {
+  return instance_type == InstanceType::Library;
+}
+
+bool rgw::AppMain::is_http_protocol() const {
+  return protocol_type == ProtocolType::HTTP_S3;
+}
+
+std::string rgw::AppMain::get_config_prefix() const {
+  switch (protocol_type) {
+    case ProtocolType::NFS: return "rgw_nfs";
+    case ProtocolType::SMB: return "rgw_smb";
+    case ProtocolType::HTTP_S3:
+    default: return "rgw";
+  }
+}
+
+std::string rgw::AppMain::get_frontend_name() const {
+  switch (protocol_type) {
+    case ProtocolType::NFS: return "rgw-nfs";
+    case ProtocolType::SMB: return "rgw-smb";
+    case ProtocolType::HTTP_S3:
+    default: return "rgw";
+  }
+}
+
+
+void rgw::AppMain::init_frontends1(InstanceType inst_type, ProtocolType proto_type)
+{
+  this->instance_type = inst_type;
+  this->protocol_type = proto_type;
+
+  std::string fe_key = (protocol_type == ProtocolType::HTTP_S3)
+                       ? "rgw_frontends"
+                       : get_config_prefix() + "_frontends";
+
+  std::vector<std::string> frontends;
+  std::string rgw_frontends_str = g_conf().get_val<string>(fe_key);
+  g_conf().early_expand_meta(rgw_frontends_str, &cerr);
+  get_str_vec(rgw_frontends_str, ",", frontends);
+
+  /* default frontends */
+  if (is_library_instance()) {
+    std::string default_fe = get_frontend_name();
+    auto is_default = [&default_fe](const auto& s){return s == default_fe;};
+    if (std::find_if(frontends.begin(), frontends.end(), is_default) == frontends.end()) {
+      frontends.push_back(default_fe);
+    }
+  } else {
+    if (frontends.empty()) {
+      frontends.push_back("beast");
+    }
+  }
+
+  for (auto &f : frontends) {
+    if (f.find("beast") != string::npos) {
+      have_http_frontend = true;
+      if (f.find("port") != string::npos) {
+        // check for the most common ws problems
+        if ((f.find("port=") == string::npos) ||
+            (f.find("port= ") != string::npos)) {
+          derr <<
+    R"(WARNING: radosgw frontend config found unexpected spacing around 'port'
+    (ensure frontend port parameter has the form 'port=80' with no spaces
+    before or after '='))"
+               << dendl;
+        }
+      }
+    } else {
+      if (f.find("civetweb") != string::npos) {
+        have_http_frontend = true;
+      }
+    } /* fe !beast */
+
+    RGWFrontendConfig *config = new RGWFrontendConfig(f);
+    int r = config->init();
+    if (r < 0) {
+      delete config;
+      cerr << "ERROR: failed to init config: " << f << std::endl;
+      continue;
+    }
+
+    fe_configs.push_back(config);
+    fe_map.insert(
+        pair<string, RGWFrontendConfig *>(config->get_framework(), config));
+  } /* for each frontend */
+
+  // maintain existing region root pool for new multisite objects
+  if (!g_conf()->rgw_region_root_pool.empty()) {
+    const char *root_pool = g_conf()->rgw_region_root_pool.c_str();
+    if (g_conf()->rgw_zonegroup_root_pool.empty()) {
+      g_conf().set_val_or_die("rgw_zonegroup_root_pool", root_pool);
+    }
+    if (g_conf()->rgw_period_root_pool.empty()) {
+      g_conf().set_val_or_die("rgw_period_root_pool", root_pool);
+    }
+    if (g_conf()->rgw_realm_root_pool.empty()) {
+      g_conf().set_val_or_die("rgw_realm_root_pool", root_pool);
+    }
+  }
+
+  // for region -> zonegroup conversion (must happen before
+  // common_init_finish())
+  if (!g_conf()->rgw_region.empty() && g_conf()->rgw_zonegroup.empty()) {
+    g_conf().set_val_or_die("rgw_zonegroup", g_conf()->rgw_region.c_str());
+  }
+} /* init_frontends1 */
+
+void rgw::AppMain::init_numa()
+{
+  if (is_library_instance()) {
+    return;
+  }
+
+  int numa_node = g_conf().get_val<int64_t>("rgw_numa_node");
+  size_t numa_cpu_set_size = 0;
+  cpu_set_t numa_cpu_set;
+
+  if (numa_node >= 0) {
+    int r = get_numa_node_cpu_set(numa_node, &numa_cpu_set_size, &numa_cpu_set);
+    if (r < 0) {
+      dout(1) << __func__ << " unable to determine rgw numa node " << numa_node
+              << " CPUs" << dendl;
+      numa_node = -1;
+    } else {
+      r = set_cpu_affinity_all_threads(numa_cpu_set_size, &numa_cpu_set);
+      if (r < 0) {
+        derr << __func__ << " failed to set numa affinity: " << cpp_strerror(r)
+        << dendl;
+      }
+    }
+  } else {
+    dout(1) << __func__ << " not setting numa affinity" << dendl;
+  }
+} /* init_numa */
+
+int rgw::AppMain::init_storage()
+{
+  auto config_store_type = g_conf().get_val<std::string>("rgw_config_store");
+  cfgstore = DriverManager::create_config_store(dpp, config_store_type);
+  if (!cfgstore) {
+    return -EIO;
+  }
+  env.cfgstore = cfgstore.get();
+
+  int r = site.load(dpp, null_yield, cfgstore.get());
+  if (r < 0) {
+    return r;
+  }
+  env.site = &site;
+
+  // Helper lambda to get thread config flag based on protocol type
+  auto get_thread_flag = [this](const char* thread_type) -> bool {
+    if (protocol_type == ProtocolType::HTTP_S3) {
+      return true;  // HTTP/S3 always runs threads if enabled
+    }
+
+    if (protocol_type == ProtocolType::NFS) {
+      if (strcmp(thread_type, "gc") == 0) return g_conf()->rgw_nfs_run_gc_threads;
+      if (strcmp(thread_type, "lc") == 0) return g_conf()->rgw_nfs_run_lc_threads;
+      if (strcmp(thread_type, "restore") == 0) return g_conf()->rgw_nfs_run_restore_threads;
+      if (strcmp(thread_type, "quota") == 0) return g_conf()->rgw_nfs_run_quota_threads;
+      if (strcmp(thread_type, "sync") == 0) return g_conf()->rgw_nfs_run_sync_thread;
+      return false;
+    } else if (protocol_type == ProtocolType::SMB) {
+      if (strcmp(thread_type, "gc") == 0) return g_conf()->rgw_smb_run_gc_threads;
+      if (strcmp(thread_type, "lc") == 0) return g_conf()->rgw_smb_run_lc_threads;
+      if (strcmp(thread_type, "restore") == 0) return g_conf()->rgw_smb_run_restore_threads;
+      if (strcmp(thread_type, "quota") == 0) return g_conf()->rgw_smb_run_quota_threads;
+      if (strcmp(thread_type, "sync") == 0) return g_conf()->rgw_smb_run_sync_thread;
+      return false;
+    }
+    return true;  // Default to true
+  };
+
+  auto run_gc = g_conf()->rgw_enable_gc_threads && get_thread_flag("gc");
+  auto run_lc = g_conf()->rgw_enable_lc_threads && get_thread_flag("lc");
+  auto run_restore = g_conf()->rgw_enable_restore_threads && get_thread_flag("restore");
+  auto run_quota = g_conf()->rgw_enable_quota_threads && get_thread_flag("quota");
+  auto run_sync = g_conf()->rgw_run_sync_thread && get_thread_flag("sync");
+
+  DriverManager::Config cfg = DriverManager::get_config(false, g_ceph_context);
+  env.driver = DriverManager::get_storage(dpp, dpp->get_cct(),
+          cfg,
+          *context_pool,
+          site,
+          run_gc,
+          run_lc,
+          run_restore,
+          run_quota,
+          run_sync,
+          g_conf().get_val<bool>("rgw_dynamic_resharding"),
+          true, // run notification thread
+          true, // run bucket-logging thread
+          true, null_yield, env.cfgstore,
+          g_conf()->rgw_cache_enabled);
+  if (!env.driver) {
+    return -EIO;
+  }
+  return 0;
+} /* init_storage */
+
+void rgw::AppMain::init_perfcounters()
+{
+  (void) rgw_perf_start(dpp->get_cct());
+
+  ceph_heap_profiler_init();
+  unregister_heap_profiler_hook();
+  heap_profiler_hook = new RGWHeapProfilerHook();
+  int r = g_ceph_context->get_admin_socket()->register_command(
+    "heap "
+    "name=heapcmd,type=CephChoices,strings="
+    "dump|start_profiler|stop_profiler|release|get_release_rate|set_release_rate|stats "
+    "name=value,type=CephString,req=false",
+    heap_profiler_hook,
+    "show heap usage info (available only if compiled with tcmalloc)");
+  if (r < 0) {
+    delete heap_profiler_hook;
+    heap_profiler_hook = nullptr;
+  }
+} /* init_perfcounters */
+
+void rgw::AppMain::init_heap_release()
+{
+  if (!ceph_using_tcmalloc()) {
+    return;
+  }
+  heap_releaser = std::jthread([dpp = dpp] (std::stop_token stop) {
+    ceph_pthread_setname("rgw_heap_rel");
+    std::mutex mutex;
+    std::condition_variable_any cond;
+    std::unique_lock lock{mutex};
+    while (!stop.stop_requested()) {
+      // re-read every pass so it can be changed at runtime; 0 disables
+      const auto interval = g_conf().get_val<std::chrono::seconds>(
+          "rgw_heap_release_interval");
+      if (interval.count()) {
+        const uint64_t bytes = g_conf().get_val<Option::size_t>(
+            "rgw_heap_release_bytes");
+        // memory handed back to the OS has to be faulted in again when it is
+        // reused, so only make a pass once a full pass's worth is free
+        size_t free_bytes = 0;
+        if (bytes &&
+            ceph_heap_get_numeric_property("tcmalloc.pageheap_free_bytes",
+                                           &free_bytes) &&
+            free_bytes < bytes) {
+          ldpp_dout(dpp, 20) << "not releasing tcmalloc memory: " << free_bytes
+                             << " bytes free in page heap, below "
+                             << bytes << dendl;
+        } else {
+          ldpp_dout(dpp, 20) << "releasing free tcmalloc memory, "
+                             << free_bytes << " bytes free in page heap"
+                             << dendl;
+          if (bytes) {
+            ceph_heap_release_to_system(bytes);
+          } else {
+            ceph_heap_release_free_memory();
+          }
+        }
+      }
+      cond.wait_for(lock, stop, std::max(interval, std::chrono::seconds(1)),
+                    [] { return false; });
+    }
+  });
+}
+
+void rgw::AppMain::init_http_clients()
+{
+  rgw_init_resolver();
+  rgw::curl::setup_curl(fe_map);
+  rgw_http_client_init(dpp->get_cct());
+  rgw_kmip_client_init(*new RGWKMIPManagerImpl(dpp->get_cct()));
+} /* init_http_clients */
+
+void rgw::AppMain::cond_init_apis() 
+{
+   rgw_rest_init(g_ceph_context, env.driver->get_zone()->get_zonegroup());
+
+  if (have_http_frontend) {
+    const auto apis = ceph::split(g_conf()->rgw_enable_apis);
+
+    std::set<std::string> apis_set;
+    apis_set.insert(apis.begin(), apis.end());
+
+    /* warn about insecure keystone secret config options */
+    if (!g_ceph_context->_conf->rgw_keystone_admin_password.empty()) {
+      dout(0)
+          << "WARNING: The use of rgw_keystone_admin_password should be avoided as "
+             "it can expose the plaintext password. Prefer the rgw_keystone_admin_password_path "
+             "option which read the password from a file."
+          << dendl;
+    }
+
+    // S3 website mode is a specialization of S3
+    const bool s3website_enabled = apis_set.contains("s3website");
+    const bool s3control_enabled = apis_set.contains("s3control");
+    const bool sts_enabled = apis_set.contains("sts");
+    const bool iam_enabled = apis_set.contains("iam");
+    const bool pubsub_enabled =
+        apis_set.contains("pubsub") || apis_set.contains("notifications");
+    const bool s3vectors_enabled = apis_set.contains("s3vectors");
+    // Swift API entrypoint could placed in the root instead of S3
+    const bool swift_at_root = g_conf()->rgw_swift_url_prefix == "/";
+    if (apis_set.contains("s3") || s3website_enabled) {
+      if (!swift_at_root) {
+        rest.register_default_mgr(set_logging(
+            rest_filter(env.driver, RGW_REST_S3,
+                        new RGWRESTMgr_S3(s3control_enabled, s3website_enabled, sts_enabled,
+                                          iam_enabled, pubsub_enabled, s3vectors_enabled))));
+      } else {
+        derr << "Cannot have the S3 or S3 Website enabled together with "
+             << "Swift API placed in the root of hierarchy" << dendl;
+      }
+    }
+
+    if (apis_set.contains("swift")) {
+      RGWRESTMgr_SWIFT* const swift_resource = new RGWRESTMgr_SWIFT;
+
+      if (! g_conf()->rgw_cross_domain_policy.empty()) {
+        swift_resource->register_resource("crossdomain.xml",
+                            set_logging(new RGWRESTMgr_SWIFT_CrossDomain));
+      }
+
+      swift_resource->register_resource("healthcheck",
+                            set_logging(new RGWRESTMgr_SWIFT_HealthCheck));
+
+      swift_resource->register_resource("info",
+                            set_logging(new RGWRESTMgr_SWIFT_Info));
+
+      if (! swift_at_root) {
+        rest.register_resource(g_conf()->rgw_swift_url_prefix,
+                            set_logging(rest_filter(env.driver, RGW_REST_SWIFT,
+                                                    swift_resource)));
+      } else {
+        if (env.driver->get_zone()->get_zonegroup().get_zone_count() > 1) {
+          derr << "Placing Swift API in the root of URL hierarchy while running"
+              << " multi-site configuration requires another instance of RadosGW"
+              << " with S3 API enabled!" << dendl;
+        }
+
+        rest.register_default_mgr(set_logging(swift_resource));
+      }
+    }
+
+    if (apis_set.contains("swift_auth")) {
+      rest.register_resource(g_conf()->rgw_swift_auth_entry,
+                set_logging(new RGWRESTMgr_SWIFT_Auth));
+    }
+
+    if (apis_set.contains("admin")) {
+      RGWRESTMgr_Admin *admin_resource = new RGWRESTMgr_Admin;
+      admin_resource->register_resource("info", new RGWRESTMgr_Info);
+      admin_resource->register_resource("usage", new RGWRESTMgr_Usage);
+      admin_resource->register_resource("account", new RGWRESTMgr_Account);
+      admin_resource->register_resource("restore", new RGWRESTMgr_Restore);
+      /* Register driver-specific admin APIs */
+      env.driver->register_admin_apis(admin_resource);
+      rest.register_resource(g_conf()->rgw_admin_entry, admin_resource);
+    }
+
+    if (apis_set.contains("zero")) {
+      rest.register_resource("zero", new rgw::RESTMgr_Zero());
+    }
+  } /* have_http_frontend */
+} /* init_apis */
+
+void rgw::AppMain::init_ldap()
+{
+  CephContext* cct = env.driver->ctx();
+  const string &ldap_uri = cct->_conf->rgw_ldap_uri;
+  const string &ldap_binddn = cct->_conf->rgw_ldap_binddn;
+  const string &ldap_searchdn = cct->_conf->rgw_ldap_searchdn;
+  const string &ldap_searchfilter = cct->_conf->rgw_ldap_searchfilter;
+  const string &ldap_dnattr = cct->_conf->rgw_ldap_dnattr;
+  std::string ldap_bindpw = parse_rgw_ldap_bindpw(cct);
+
+  if (ldap_uri.empty()) {
+    return;
+  }
+
+  ldh.reset(new rgw::LDAPHelper(ldap_uri, ldap_binddn,
+            ldap_bindpw.c_str(), ldap_searchdn, ldap_searchfilter, ldap_dnattr));
+  ldh->init();
+  ldh->bind();
+} /* init_ldap */
+
+void rgw::AppMain::init_opslog()
+{
+  rgw_log_usage_init(dpp->get_cct(), env.driver);
+
+  OpsLogManifold *olog_manifold = new OpsLogManifold();
+  if (!g_conf()->rgw_ops_log_socket_path.empty()) {
+    OpsLogSocket *olog_socket =
+        new OpsLogSocket(g_ceph_context, g_conf()->rgw_ops_log_data_backlog);
+    olog_socket->init(g_conf()->rgw_ops_log_socket_path);
+    olog_manifold->add_sink(olog_socket);
+  }
+  if (!g_conf()->rgw_ops_log_file_path.empty()) {
+    ops_log_file =
+        new OpsLogFile(g_ceph_context, g_conf()->rgw_ops_log_file_path,
+                       g_conf()->rgw_ops_log_data_backlog);
+    ops_log_file->start();
+    olog_manifold->add_sink(ops_log_file);
+  }
+  olog_manifold->add_sink(new OpsLogRados(env.driver));
+  env.olog.reset(olog_manifold);
+} /* init_opslog */
+
+int rgw::AppMain::init_frontends2(RGWLib* rgwlib)
+{
+  int r{0};
+  vector<string> frontends_def;
+  std::string frontend_defs_str =
+    g_conf().get_val<string>("rgw_frontend_defaults");
+  get_str_vec(frontend_defs_str, ",", frontends_def);
+
+  service_map_meta["pid"] = stringify(getpid());
+
+  std::map<std::string, std::unique_ptr<RGWFrontendConfig> > fe_def_map;
+  for (auto& f : frontends_def) {
+    RGWFrontendConfig *config = new RGWFrontendConfig(f);
+    int r = config->init();
+    if (r < 0) {
+      delete config;
+      cerr << "ERROR: failed to init default config: " << f << std::endl;
+      continue;
+    }
+    fe_def_map[config->get_framework()].reset(config);
+  }
+
+  /* Initialize the registry of auth strategies which will coordinate
+   * the dynamic reconfiguration. */
+  implicit_tenant_context.reset(new rgw::auth::ImplicitTenants{g_conf()});
+  g_conf().add_observer(implicit_tenant_context.get());
+
+  /* allocate a mime table (you'd never guess that from the name) */
+  rgw_tools_init(dpp, dpp->get_cct());
+
+  /* Header custom behavior */
+  rest.register_x_headers(g_conf()->rgw_log_http_headers);
+
+  sched_ctx.reset(new rgw::dmclock::SchedulerCtx{dpp->get_cct()});
+  ratelimiter.reset(new ActiveRateLimiter{dpp->get_cct()});
+  ratelimiter->start();
+
+  // initialize RGWProcessEnv
+  env.rest = &rest;
+  env.auth_registry = rgw::auth::StrategyRegistry::create(
+      dpp->get_cct(), *implicit_tenant_context, env.driver);
+  env.ratelimiting = ratelimiter.get();
+
+  int fe_count = 0;
+  for (multimap<string, RGWFrontendConfig *>::iterator fiter = fe_map.begin();
+       fiter != fe_map.end(); ++fiter, ++fe_count) {
+    RGWFrontendConfig *config = fiter->second;
+    string framework = config->get_framework();
+
+    auto def_iter = fe_def_map.find(framework);
+    if (def_iter != fe_def_map.end()) {
+      config->set_default_config(*def_iter->second);
+    }
+
+    RGWFrontend* fe = nullptr;
+
+    if (framework == "loadgen") {
+      fe = new RGWLoadGenFrontend(env, config);
+    }
+    else if (framework == "beast") {
+      fe = new RGWAsioFrontend(env, config, *sched_ctx, *context_pool);
+      if (g_conf()->rgw_crypt_s3_kms_cache_enabled) {
+        env.kms_cache->initialize_ttl_reaper(
+            g_conf()->rgw_beast_enable_async
+            ? std::optional(context_pool->get_executor())
+                : nullopt);
+      }
+    }
+    else if ((framework == "rgw-nfs") || (framework == "rgw-smb")) {
+      fe = new RGWLibFrontend(env, config);
+      if (rgwlib) {
+        rgwlib->set_fe(static_cast<RGWLibFrontend*>(fe));
+      }
+    }
+    else if (framework == "arrow_flight") {
+#ifdef WITH_ARROW_FLIGHT
+      int port;
+      config->get_val("port", 8077, &port);
+      fe = new rgw::flight::FlightFrontend(env, config, port);
+#else
+      derr << "WARNING: arrow_flight frontend requested, but not included in build; skipping" << dendl;
+      continue;
+#endif
+    }
+
+    service_map_meta["frontend_type#" + stringify(fe_count)] = framework;
+    service_map_meta["frontend_config#" + stringify(fe_count)] = config->get_config();
+
+    if (! fe) {
+      dout(0) << "WARNING: skipping unknown framework: " << framework << dendl;
+      continue;
+    }
+
+    dout(0) << "starting handler: " << fiter->first << dendl;
+    int r = fe->init();
+    if (r < 0) {
+      derr << "ERROR: failed initializing frontend" << dendl;
+      return -r;
+    }
+    r = fe->run();
+    if (r < 0) {
+      derr << "ERROR: failed run" << dendl;
+      return -r;
+    }
+
+    fes.push_back(fe);
+  }
+
+  std::string fe_name = get_frontend_name();
+  r = env.driver->register_to_service_map(dpp, fe_name, service_map_meta);
+  if (r < 0) {
+    derr << "ERROR: failed to register to service map: " << cpp_strerror(-r) << dendl;
+    /* ignore error */
+  }
+#ifdef WITH_RADOSGW_RADOS
+  if (env.driver->get_name() == "rados") {
+    // add a watcher to respond to realm configuration changes
+    // if we're part of a realm, add a watcher to respond to configuration changes
+    if (const auto& realm = env.site->get_realm(); realm) {
+      realm_watcher = env.cfgstore->create_realm_watcher(dpp, null_yield, *realm);
+    }
+    if (realm_watcher) {
+      pusher = std::make_unique<RGWPeriodPusher>(dpp, env.driver, env.cfgstore, null_yield);
+      realm_watcher->add_watcher(RGWRealmNotify::ZonesNeedPeriod, *pusher);
+
+      fe_pauser = std::make_unique<RGWFrontendPauser>(fes, pusher.get());
+      rgw_pauser = std::make_unique<RGWPauser>();
+      rgw_pauser->add_pauser(fe_pauser.get());
+      if (env.lua.background) {
+        rgw_pauser->add_pauser(env.lua.background);
+      }
+    if (dedup_background) {
+      rgw_pauser->add_pauser(dedup_background.get());
+    }
+#ifdef WITH_RADOSGW_LANCEDB
+    if (s3vector_pauser) {
+      rgw_pauser->add_pauser(s3vector_pauser.get());
+    }
+#endif
+      reloader = std::make_unique<RGWRealmReloader>(
+          env, *implicit_tenant_context, service_map_meta, rgw_pauser.get(), *context_pool);
+      realm_watcher->add_watcher(RGWRealmNotify::Reload, *reloader);
+    }
+  }
+#endif
+
+  return r;
+} /* init_frontends2 */
+
+void rgw::AppMain::init_tracepoints()
+{
+  TracepointProvider::initialize<rgw_rados_tracepoint_traits>(dpp->get_cct());
+  TracepointProvider::initialize<rgw_op_tracepoint_traits>(dpp->get_cct());
+  tracing::rgw::tracer.init(dpp->get_cct(), "rgw");
+} /* init_tracepoints() */
+
+void rgw::AppMain::init_lua()
+{
+  if (!g_conf().get_val<bool>("rgw_lua_enable"))
+    return;
+  rgw::sal::Driver* driver = env.driver;
+  std::string install_dir;
+#ifdef WITH_RADOSGW_LUA_PACKAGES
+  rgw::lua::packages_t failed_packages;
+  int r = rgw::lua::install_packages(dpp, driver, null_yield, g_conf().get_val<std::string>("rgw_luarocks_location"),
+                                     failed_packages, install_dir);
+  if (r < 0) {
+    ldpp_dout(dpp, 5) << "WARNING: failed to install Lua packages from allowlist. error: " << r
+            << dendl;
+  }
+  for (const auto &p : failed_packages) {
+    ldpp_dout(dpp, 5) << "WARNING: failed to install Lua package: " << p
+            << " from allowlist" << dendl;
+  }
+#endif
+
+  env.lua.manager = env.driver->get_lua_manager(install_dir);
+#ifdef WITH_RADOSGW_RADOS
+  if (driver->get_name() == "rados") { /* Supported for only RadosStore */
+    lua_background = std::make_unique<
+      rgw::lua::Background>(dpp->get_cct(), env.lua.manager.get());
+    lua_background->start();
+    env.lua.background = lua_background.get();
+    static_cast<rgw::sal::RadosLuaManager*>(env.lua.manager.get())->watch_reload(dpp);
+    env.lua.manager.get()->set_lua_background(lua_background.get());
+  }
+#endif
+} /* init_lua */
+
+#ifdef WITH_RADOSGW_RADOS
+void rgw::AppMain::init_dedup()
+{
+  // Helper lambda to get dedup thread config flag based on protocol type
+  auto get_dedup_flag = [this]() -> bool {
+    if (protocol_type == ProtocolType::HTTP_S3) {
+      return true;  // HTTP/S3 always runs dedup threads if enabled
+    }
+
+    if (protocol_type == ProtocolType::NFS) {
+      return g_conf()->rgw_nfs_run_dedup_threads;
+    } else if (protocol_type == ProtocolType::SMB) {
+      return g_conf()->rgw_smb_run_dedup_threads;
+    }
+    return true;  // Default to true
+  };
+
+  auto run_dedup = g_conf()->rgw_enable_dedup_threads && get_dedup_flag();
+
+  if (!run_dedup) {
+    return;
+  }
+
+  rgw::sal::Driver* driver = env.driver;
+  if (driver->get_name() == "rados") { /* Supported for only RadosStore */
+    try {
+      dedup_background = std::make_unique<rgw::dedup::Background>(driver, dpp->get_cct());
+      dedup_background->start();
+      dedup_background->watch_reload(dpp);
+    }
+    catch (const std::runtime_error&) {
+      ldpp_dout(dpp, 0) << __func__ << "::failed create dedup background job" << dendl;
+    }
+  }
+}
+#endif
+
+void rgw::AppMain::init_kms_cache()
+{
+  if (!g_conf().get_val<bool>("rgw_crypt_s3_kms_cache_enabled")) {
+    return;
+  }
+  env.kms_cache = std::make_unique<rgw::kms::KMSCache>(
+      dpp->get_cct(), Keyring::get_best());
+}
+
+#ifdef WITH_RADOSGW_LANCEDB
+void rgw::AppMain::init_s3vector()
+{
+  s3vector::init(dpp, env.driver);
+  s3vector_pauser = std::make_unique<S3VectorPauser>(dpp);
+}
+#endif
+
+void rgw::AppMain::shutdown(std::function<void(void)> finalize_async_signals)
+{
+  // stop the realm reloader
+  rgw_pauser.reset();
+  fe_pauser.reset();
+  realm_watcher.reset();
+  reloader.reset();
+#ifdef WITH_RADOSGW_RADOS
+  pusher.reset();
+  if (env.driver->get_name() == "rados") {
+    if (g_conf().get_val<bool>("rgw_lua_enable"))
+      static_cast<rgw::sal::RadosLuaManager*>(env.lua.manager.get())->
+          unwatch_reload(dpp);
+
+    if (dedup_background) {
+      dedup_background->unwatch_reload(dpp);
+    }
+  }
+#endif
+
+  for (auto& fe : fes) {
+    fe->stop();
+  }
+
+  if (env.kms_cache) {
+    env.kms_cache->stop_ttl_reaper();
+  }
+  ldh.reset(nullptr); // deletes ldap helper if it was created
+  rgw_log_usage_finalize();
+
+#ifdef WITH_RADOSGW_RADOS
+  if (dedup_background) {
+    dedup_background->shutdown();
+  }
+#endif
+
+  if (lua_background) {
+    lua_background->shutdown();
+  }
+
+#ifdef WITH_RADOSGW_LANCEDB
+  s3vector::shutdown();
+  s3vector_pauser.reset();
+#endif
+
+  env.driver->shutdown();
+  // Do this before closing storage so requests don't try to call into
+  // closed storage.
+  context_pool->finish();
+
+  cfgstore.reset(); // deletes
+  DriverManager::close_storage(env.driver);
+
+  // Fe can't be deleted until nobody's exeucting `io_context::run`
+  for (auto& fe : fes) {
+    fe->join();
+    delete fe;
+  }
+
+  for (auto& fec : fe_configs) {
+    delete fec;
+  }
+
+  finalize_async_signals(); // callback
+
+  rgw_tools_cleanup();
+  rgw_shutdown_resolver();
+  rgw_http_client_cleanup();
+  rgw_kmip_client_cleanup();
+  rgw::curl::cleanup_curl();
+  g_conf().remove_observer(implicit_tenant_context.get());
+  implicit_tenant_context.reset(); // deletes
+  heap_releaser = std::jthread{};
+  unregister_heap_profiler_hook();
+  rgw_perf_stop(g_ceph_context);
+  ratelimiter.reset(); // deletes--ensure this happens before we destruct
+} /* AppMain::shutdown */
+
+ceph::async::io_context_pool& rgw::AppMain::IOContextPoolHolder::get() {
+  if (!pool_) {
+    pool_.emplace(
+        dpp_->get_cct()->_conf->rgw_thread_pool_size,
+        [] { is_asio_thread = true; });
+  }
+  return *pool_;
+}

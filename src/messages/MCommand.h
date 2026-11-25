@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,27 +16,28 @@
 #ifndef CEPH_MCOMMAND_H
 #define CEPH_MCOMMAND_H
 
+#include <string>
 #include <vector>
 
 #include "msg/Message.h"
 
-class MCommand : public Message {
- public:
+class MCommand final : public Message {
+public:
   uuid_d fsid;
-  std::vector<string> cmd;
+  std::vector<std::string> cmd;
 
   MCommand()
-    : Message(MSG_MON_COMMAND) {}
+    : Message{MSG_COMMAND} {}
   MCommand(const uuid_d &f)
-    : Message(MSG_COMMAND),
+    : Message{MSG_COMMAND},
       fsid(f) { }
 
 private:
-  ~MCommand() {}
+  ~MCommand() final {}
 
-public:  
-  const char *get_type_name() const { return "command"; }
-  void print(ostream& o) const {
+public:
+  std::string_view get_type_name() const override { return "command"; }
+  void print(std::ostream& o) const override {
     o << "command(tid " << get_tid() << ": ";
     for (unsigned i=0; i<cmd.size(); i++) {
       if (i) o << ' ';
@@ -44,14 +46,16 @@ public:
     o << ")";
   }
   
-  void encode_payload(uint64_t features) {
-    ::encode(fsid, payload);
-    ::encode(cmd, payload);
+  void encode_payload(uint64_t features) override {
+    using ceph::encode;
+    encode(fsid, payload);
+    encode(cmd, payload);
   }
-  void decode_payload() {
-    bufferlist::iterator p = payload.begin();
-    ::decode(fsid, p);
-    ::decode(cmd, p);
+  void decode_payload() override {
+    using ceph::decode;
+    auto p = payload.cbegin();
+    decode(fsid, p);
+    decode(cmd, p);
   }
 };
 

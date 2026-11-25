@@ -1,66 +1,27 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "cls/rbd/cls_rbd_types.h"
-#include "librbd/WatchNotifyTypes.h"
-#include "librbd/watcher/Types.h"
-#include "include/assert.h"
-#include "include/stringify.h"
 #include "common/Formatter.h"
+#include "include/ceph_assert.h"
+#include "include/stringify.h"
+#include "librbd/WatchNotifyTypes.h"
+
+#include <map>
 
 namespace librbd {
 namespace watch_notify {
 
-namespace {
-
-class CheckForRefreshVisitor  : public boost::static_visitor<bool> {
-public:
-  template <typename Payload>
-  inline bool operator()(const Payload &payload) const {
-    return Payload::CHECK_FOR_REFRESH;
-  }
-};
-
-class DumpPayloadVisitor : public boost::static_visitor<void> {
-public:
-  explicit DumpPayloadVisitor(Formatter *formatter) : m_formatter(formatter) {}
-
-  template <typename Payload>
-  inline void operator()(const Payload &payload) const {
-    NotifyOp notify_op = Payload::NOTIFY_OP;
-    m_formatter->dump_string("notify_op", stringify(notify_op));
-    payload.dump(m_formatter);
-  }
-
-private:
-  ceph::Formatter *m_formatter;
-};
-
-} // anonymous namespace
-
-void ClientId::encode(bufferlist &bl) const {
-  ::encode(gid, bl);
-  ::encode(handle, bl);
-}
-
-void ClientId::decode(bufferlist::iterator &iter) {
-  ::decode(gid, iter);
-  ::decode(handle, iter);
-}
-
-void ClientId::dump(Formatter *f) const {
-  f->dump_unsigned("gid", gid);
-  f->dump_unsigned("handle", handle);
-}
-
 void AsyncRequestId::encode(bufferlist &bl) const {
-  ::encode(client_id, bl);
-  ::encode(request_id, bl);
+  using ceph::encode;
+  encode(client_id, bl);
+  encode(request_id, bl);
 }
 
-void AsyncRequestId::decode(bufferlist::iterator &iter) {
-  ::decode(client_id, iter);
-  ::decode(request_id, iter);
+void AsyncRequestId::decode(bufferlist::const_iterator &iter) {
+  using ceph::decode;
+  decode(client_id, iter);
+  decode(request_id, iter);
 }
 
 void AsyncRequestId::dump(Formatter *f) const {
@@ -71,12 +32,14 @@ void AsyncRequestId::dump(Formatter *f) const {
 }
 
 void AcquiredLockPayload::encode(bufferlist &bl) const {
-  ::encode(client_id, bl);
+  using ceph::encode;
+  encode(client_id, bl);
 }
 
-void AcquiredLockPayload::decode(__u8 version, bufferlist::iterator &iter) {
+void AcquiredLockPayload::decode(__u8 version, bufferlist::const_iterator &iter) {
+  using ceph::decode;
   if (version >= 2) {
-    ::decode(client_id, iter);
+    decode(client_id, iter);
   }
 }
 
@@ -87,12 +50,14 @@ void AcquiredLockPayload::dump(Formatter *f) const {
 }
 
 void ReleasedLockPayload::encode(bufferlist &bl) const {
-  ::encode(client_id, bl);
+  using ceph::encode;
+  encode(client_id, bl);
 }
 
-void ReleasedLockPayload::decode(__u8 version, bufferlist::iterator &iter) {
+void ReleasedLockPayload::decode(__u8 version, bufferlist::const_iterator &iter) {
+  using ceph::decode;
   if (version >= 2) {
-    ::decode(client_id, iter);
+    decode(client_id, iter);
   }
 }
 
@@ -103,16 +68,18 @@ void ReleasedLockPayload::dump(Formatter *f) const {
 }
 
 void RequestLockPayload::encode(bufferlist &bl) const {
-  ::encode(client_id, bl);
-  ::encode(force, bl);
+  using ceph::encode;
+  encode(client_id, bl);
+  encode(force, bl);
 }
 
-void RequestLockPayload::decode(__u8 version, bufferlist::iterator &iter) {
+void RequestLockPayload::decode(__u8 version, bufferlist::const_iterator &iter) {
+  using ceph::decode;
   if (version >= 2) {
-    ::decode(client_id, iter);
+    decode(client_id, iter);
   }
   if (version >= 3) {
-    ::decode(force, iter);
+    decode(force, iter);
   }
 }
 
@@ -126,18 +93,20 @@ void RequestLockPayload::dump(Formatter *f) const {
 void HeaderUpdatePayload::encode(bufferlist &bl) const {
 }
 
-void HeaderUpdatePayload::decode(__u8 version, bufferlist::iterator &iter) {
+void HeaderUpdatePayload::decode(__u8 version, bufferlist::const_iterator &iter) {
 }
 
 void HeaderUpdatePayload::dump(Formatter *f) const {
 }
 
 void AsyncRequestPayloadBase::encode(bufferlist &bl) const {
-  ::encode(async_request_id, bl);
+  using ceph::encode;
+  encode(async_request_id, bl);
 }
 
-void AsyncRequestPayloadBase::decode(__u8 version, bufferlist::iterator &iter) {
-  ::decode(async_request_id, iter);
+void AsyncRequestPayloadBase::decode(__u8 version, bufferlist::const_iterator &iter) {
+  using ceph::decode;
+  decode(async_request_id, iter);
 }
 
 void AsyncRequestPayloadBase::dump(Formatter *f) const {
@@ -147,15 +116,17 @@ void AsyncRequestPayloadBase::dump(Formatter *f) const {
 }
 
 void AsyncProgressPayload::encode(bufferlist &bl) const {
+  using ceph::encode;
   AsyncRequestPayloadBase::encode(bl);
-  ::encode(offset, bl);
-  ::encode(total, bl);
+  encode(offset, bl);
+  encode(total, bl);
 }
 
-void AsyncProgressPayload::decode(__u8 version, bufferlist::iterator &iter) {
+void AsyncProgressPayload::decode(__u8 version, bufferlist::const_iterator &iter) {
+  using ceph::decode;
   AsyncRequestPayloadBase::decode(version, iter);
-  ::decode(offset, iter);
-  ::decode(total, iter);
+  decode(offset, iter);
+  decode(total, iter);
 }
 
 void AsyncProgressPayload::dump(Formatter *f) const {
@@ -165,13 +136,15 @@ void AsyncProgressPayload::dump(Formatter *f) const {
 }
 
 void AsyncCompletePayload::encode(bufferlist &bl) const {
+  using ceph::encode;
   AsyncRequestPayloadBase::encode(bl);
-  ::encode(result, bl);
+  encode(result, bl);
 }
 
-void AsyncCompletePayload::decode(__u8 version, bufferlist::iterator &iter) {
+void AsyncCompletePayload::decode(__u8 version, bufferlist::const_iterator &iter) {
+  using ceph::decode;
   AsyncRequestPayloadBase::decode(version, iter);
-  ::decode(result, iter);
+  decode(result, iter);
 }
 
 void AsyncCompletePayload::dump(Formatter *f) const {
@@ -180,217 +153,318 @@ void AsyncCompletePayload::dump(Formatter *f) const {
 }
 
 void ResizePayload::encode(bufferlist &bl) const {
+  using ceph::encode;
+  encode(size, bl);
   AsyncRequestPayloadBase::encode(bl);
-  ::encode(size, bl);
-  ::encode(allow_shrink, bl);
+  encode(allow_shrink, bl);
 }
 
-void ResizePayload::decode(__u8 version, bufferlist::iterator &iter) {
+void ResizePayload::decode(__u8 version, bufferlist::const_iterator &iter) {
+  using ceph::decode;
+  decode(size, iter);
   AsyncRequestPayloadBase::decode(version, iter);
-  ::decode(size, iter);
 
   if (version >= 4) {
-    ::decode(allow_shrink, iter);
+    decode(allow_shrink, iter);
   }
 }
 
 void ResizePayload::dump(Formatter *f) const {
+  AsyncRequestPayloadBase::dump(f);
   f->dump_unsigned("size", size);
   f->dump_bool("allow_shrink", allow_shrink);
-  AsyncRequestPayloadBase::dump(f);
 }
 
 void SnapPayloadBase::encode(bufferlist &bl) const {
-  ::encode(snap_name, bl);
+  using ceph::encode;
+  encode(snap_name, bl);
+  encode(snap_namespace, bl);
+  encode(async_request_id, bl);
 }
 
-void SnapPayloadBase::decode(__u8 version, bufferlist::iterator &iter) {
-  ::decode(snap_name, iter);
+void SnapPayloadBase::decode(__u8 version, bufferlist::const_iterator &iter) {
+  using ceph::decode;
+  decode(snap_name, iter);
+  if (version >= 6) {
+    decode(snap_namespace, iter);
+  }
+  if (version >= 7) {
+    decode(async_request_id, iter);
+  }
 }
 
 void SnapPayloadBase::dump(Formatter *f) const {
+  AsyncRequestPayloadBase::dump(f);
   f->dump_string("snap_name", snap_name);
+  snap_namespace.dump(f);
 }
 
 void SnapCreatePayload::encode(bufferlist &bl) const {
+  using ceph::encode;
   SnapPayloadBase::encode(bl);
-  ::encode(cls::rbd::SnapshotNamespaceOnDisk(snap_namespace), bl);
+  encode(flags, bl);
 }
 
-void SnapCreatePayload::decode(__u8 version, bufferlist::iterator &iter) {
+void SnapCreatePayload::decode(__u8 version, bufferlist::const_iterator &iter) {
+  using ceph::decode;
   SnapPayloadBase::decode(version, iter);
-  if (version >= 5) {
-    cls::rbd::SnapshotNamespaceOnDisk sn;
-    ::decode(sn, iter);
-    snap_namespace = sn.snapshot_namespace;
+  if (version == 5) {
+    decode(snap_namespace, iter);
+  }
+  if (version >= 7) {
+    decode(flags, iter);
   }
 }
 
 void SnapCreatePayload::dump(Formatter *f) const {
   SnapPayloadBase::dump(f);
-  cls::rbd::SnapshotNamespaceOnDisk sn(snap_namespace);
-  sn.dump(f);
+  f->dump_unsigned("flags", flags);
 }
 
 void SnapRenamePayload::encode(bufferlist &bl) const {
-  ::encode(snap_id, bl);
+  using ceph::encode;
+  encode(snap_id, bl);
   SnapPayloadBase::encode(bl);
 }
 
-void SnapRenamePayload::decode(__u8 version, bufferlist::iterator &iter) {
-  ::decode(snap_id, iter);
+void SnapRenamePayload::decode(__u8 version, bufferlist::const_iterator &iter) {
+  using ceph::decode;
+  decode(snap_id, iter);
   SnapPayloadBase::decode(version, iter);
 }
 
 void SnapRenamePayload::dump(Formatter *f) const {
-  f->dump_unsigned("src_snap_id", snap_id);
   SnapPayloadBase::dump(f);
+  f->dump_unsigned("src_snap_id", snap_id);
 }
 
 void RenamePayload::encode(bufferlist &bl) const {
-  ::encode(image_name, bl);
+  using ceph::encode;
+  encode(image_name, bl);
+  encode(async_request_id, bl);
 }
 
-void RenamePayload::decode(__u8 version, bufferlist::iterator &iter) {
-  ::decode(image_name, iter);
+void RenamePayload::decode(__u8 version, bufferlist::const_iterator &iter) {
+  using ceph::decode;
+  decode(image_name, iter);
+  if (version >= 7) {
+    decode(async_request_id, iter);
+  }
 }
 
 void RenamePayload::dump(Formatter *f) const {
+  AsyncRequestPayloadBase::dump(f);
   f->dump_string("image_name", image_name);
 }
 
 void UpdateFeaturesPayload::encode(bufferlist &bl) const {
-  ::encode(features, bl);
-  ::encode(enabled, bl);
+  using ceph::encode;
+  encode(features, bl);
+  encode(enabled, bl);
+  encode(async_request_id, bl);
 }
 
-void UpdateFeaturesPayload::decode(__u8 version, bufferlist::iterator &iter) {
-  ::decode(features, iter);
-  ::decode(enabled, iter);
+void UpdateFeaturesPayload::decode(__u8 version, bufferlist::const_iterator &iter) {
+  using ceph::decode;
+  decode(features, iter);
+  decode(enabled, iter);
+  if (version >= 7) {
+    decode(async_request_id, iter);
+  }
 }
 
 void UpdateFeaturesPayload::dump(Formatter *f) const {
+  AsyncRequestPayloadBase::dump(f);
   f->dump_unsigned("features", features);
   f->dump_bool("enabled", enabled);
 }
 
-void UnknownPayload::encode(bufferlist &bl) const {
-  assert(false);
+void SparsifyPayload::encode(bufferlist &bl) const {
+  using ceph::encode;
+  AsyncRequestPayloadBase::encode(bl);
+  encode(sparse_size, bl);
 }
 
-void UnknownPayload::decode(__u8 version, bufferlist::iterator &iter) {
+void SparsifyPayload::decode(__u8 version, bufferlist::const_iterator &iter) {
+  using ceph::decode;
+  AsyncRequestPayloadBase::decode(version, iter);
+  decode(sparse_size, iter);
+}
+
+void SparsifyPayload::dump(Formatter *f) const {
+  AsyncRequestPayloadBase::dump(f);
+  f->dump_unsigned("sparse_size", sparse_size);
+}
+
+void MetadataUpdatePayload::encode(bufferlist &bl) const {
+  using ceph::encode;
+  encode(key, bl);
+  encode(value, bl);
+  encode(async_request_id, bl);
+}
+
+void MetadataUpdatePayload::decode(__u8 version, bufferlist::const_iterator &iter) {
+  using ceph::decode;
+  decode(key, iter);
+  decode(value, iter);
+  if (version >= 7) {
+    decode(async_request_id, iter);
+  }
+}
+
+void MetadataUpdatePayload::dump(Formatter *f) const {
+  AsyncRequestPayloadBase::dump(f);
+  f->dump_string("key", key);
+  f->dump_string("value", *value);
+}
+
+void UnknownPayload::encode(bufferlist &bl) const {
+  ceph_abort();
+}
+
+void UnknownPayload::decode(__u8 version, bufferlist::const_iterator &iter) {
 }
 
 void UnknownPayload::dump(Formatter *f) const {
 }
 
 bool NotifyMessage::check_for_refresh() const {
-  return boost::apply_visitor(CheckForRefreshVisitor(), payload);
+  return payload->check_for_refresh();
 }
 
 void NotifyMessage::encode(bufferlist& bl) const {
-  ENCODE_START(5, 1, bl);
-  boost::apply_visitor(watcher::EncodePayloadVisitor(bl), payload);
+  ENCODE_START(7, 1, bl);
+  encode(static_cast<uint32_t>(payload->get_notify_op()), bl);
+  payload->encode(bl);
   ENCODE_FINISH(bl);
 }
 
-void NotifyMessage::decode(bufferlist::iterator& iter) {
+void NotifyMessage::decode(bufferlist::const_iterator& iter) {
   DECODE_START(1, iter);
 
   uint32_t notify_op;
-  ::decode(notify_op, iter);
+  decode(notify_op, iter);
 
   // select the correct payload variant based upon the encoded op
   switch (notify_op) {
   case NOTIFY_OP_ACQUIRED_LOCK:
-    payload = AcquiredLockPayload();
+    payload.reset(new AcquiredLockPayload());
     break;
   case NOTIFY_OP_RELEASED_LOCK:
-    payload = ReleasedLockPayload();
+    payload.reset(new ReleasedLockPayload());
     break;
   case NOTIFY_OP_REQUEST_LOCK:
-    payload = RequestLockPayload();
+    payload.reset(new RequestLockPayload());
     break;
   case NOTIFY_OP_HEADER_UPDATE:
-    payload = HeaderUpdatePayload();
+    payload.reset(new HeaderUpdatePayload());
     break;
   case NOTIFY_OP_ASYNC_PROGRESS:
-    payload = AsyncProgressPayload();
+    payload.reset(new AsyncProgressPayload());
     break;
   case NOTIFY_OP_ASYNC_COMPLETE:
-    payload = AsyncCompletePayload();
+    payload.reset(new AsyncCompletePayload());
     break;
   case NOTIFY_OP_FLATTEN:
-    payload = FlattenPayload();
+    payload.reset(new FlattenPayload());
     break;
   case NOTIFY_OP_RESIZE:
-    payload = ResizePayload();
+    payload.reset(new ResizePayload());
     break;
   case NOTIFY_OP_SNAP_CREATE:
-    payload = SnapCreatePayload();
+    payload.reset(new SnapCreatePayload());
     break;
   case NOTIFY_OP_SNAP_REMOVE:
-    payload = SnapRemovePayload();
+    payload.reset(new SnapRemovePayload());
     break;
   case NOTIFY_OP_SNAP_RENAME:
-    payload = SnapRenamePayload();
+    payload.reset(new SnapRenamePayload());
     break;
   case NOTIFY_OP_SNAP_PROTECT:
-    payload = SnapProtectPayload();
+    payload.reset(new SnapProtectPayload());
     break;
   case NOTIFY_OP_SNAP_UNPROTECT:
-    payload = SnapUnprotectPayload();
+    payload.reset(new SnapUnprotectPayload());
     break;
   case NOTIFY_OP_REBUILD_OBJECT_MAP:
-    payload = RebuildObjectMapPayload();
+    payload.reset(new RebuildObjectMapPayload());
     break;
   case NOTIFY_OP_RENAME:
-    payload = RenamePayload();
+    payload.reset(new RenamePayload());
     break;
   case NOTIFY_OP_UPDATE_FEATURES:
-    payload = UpdateFeaturesPayload();
+    payload.reset(new UpdateFeaturesPayload());
     break;
-  default:
-    payload = UnknownPayload();
+  case NOTIFY_OP_MIGRATE:
+    payload.reset(new MigratePayload());
+    break;
+  case NOTIFY_OP_SPARSIFY:
+    payload.reset(new SparsifyPayload());
+    break;
+  case NOTIFY_OP_QUIESCE:
+    payload.reset(new QuiescePayload());
+    break;
+  case NOTIFY_OP_UNQUIESCE:
+    payload.reset(new UnquiescePayload());
+    break;
+  case NOTIFY_OP_METADATA_UPDATE:
+    payload.reset(new MetadataUpdatePayload());
     break;
   }
 
-  apply_visitor(watcher::DecodePayloadVisitor(struct_v, iter), payload);
+  payload->decode(struct_v, iter);
   DECODE_FINISH(iter);
 }
 
 void NotifyMessage::dump(Formatter *f) const {
-  apply_visitor(DumpPayloadVisitor(f), payload);
+  payload->dump(f);
 }
 
-void NotifyMessage::generate_test_instances(std::list<NotifyMessage *> &o) {
-  o.push_back(new NotifyMessage(AcquiredLockPayload(ClientId(1, 2))));
-  o.push_back(new NotifyMessage(ReleasedLockPayload(ClientId(1, 2))));
-  o.push_back(new NotifyMessage(RequestLockPayload(ClientId(1, 2), true)));
-  o.push_back(new NotifyMessage(HeaderUpdatePayload()));
-  o.push_back(new NotifyMessage(AsyncProgressPayload(AsyncRequestId(ClientId(0, 1), 2), 3, 4)));
-  o.push_back(new NotifyMessage(AsyncCompletePayload(AsyncRequestId(ClientId(0, 1), 2), 3)));
-  o.push_back(new NotifyMessage(FlattenPayload(AsyncRequestId(ClientId(0, 1), 2))));
-  o.push_back(new NotifyMessage(ResizePayload(123, true, AsyncRequestId(ClientId(0, 1), 2))));
-  o.push_back(new NotifyMessage(SnapCreatePayload("foo",
-						  cls::rbd::UserSnapshotNamespace())));
-  o.push_back(new NotifyMessage(SnapRemovePayload("foo")));
-  o.push_back(new NotifyMessage(SnapProtectPayload("foo")));
-  o.push_back(new NotifyMessage(SnapUnprotectPayload("foo")));
-  o.push_back(new NotifyMessage(RebuildObjectMapPayload(AsyncRequestId(ClientId(0, 1), 2))));
-  o.push_back(new NotifyMessage(RenamePayload("foo")));
-  o.push_back(new NotifyMessage(UpdateFeaturesPayload(1, true)));
+NotifyOp NotifyMessage::get_notify_op() const {
+  return payload->get_notify_op();
+}
+
+std::list<NotifyMessage> NotifyMessage::generate_test_instances() {
+  std::list<NotifyMessage> o;
+  o.push_back(NotifyMessage(new AcquiredLockPayload(ClientId(1, 2))));
+  o.push_back(NotifyMessage(new ReleasedLockPayload(ClientId(1, 2))));
+  o.push_back(NotifyMessage(new RequestLockPayload(ClientId(1, 2), true)));
+  o.push_back(NotifyMessage(new HeaderUpdatePayload()));
+  o.push_back(NotifyMessage(new AsyncProgressPayload(AsyncRequestId(ClientId(0, 1), 2), 3, 4)));
+  o.push_back(NotifyMessage(new AsyncCompletePayload(AsyncRequestId(ClientId(0, 1), 2), 3)));
+  o.push_back(NotifyMessage(new FlattenPayload(AsyncRequestId(ClientId(0, 1), 2))));
+  o.push_back(NotifyMessage(new ResizePayload(AsyncRequestId(ClientId(0, 1), 2), 123, true)));
+  o.push_back(NotifyMessage(new SnapCreatePayload(AsyncRequestId(ClientId(0, 1), 2),
+						  cls::rbd::UserSnapshotNamespace(),
+						  "foo", 1)));
+  o.push_back(NotifyMessage(new SnapRemovePayload(AsyncRequestId(ClientId(0, 1), 2),
+						  cls::rbd::UserSnapshotNamespace(), "foo")));
+  o.push_back(NotifyMessage(new SnapProtectPayload(AsyncRequestId(ClientId(0, 1), 2),
+						   cls::rbd::UserSnapshotNamespace(), "foo")));
+  o.push_back(NotifyMessage(new SnapUnprotectPayload(AsyncRequestId(ClientId(0, 1), 2),
+						     cls::rbd::UserSnapshotNamespace(), "foo")));
+  o.push_back(NotifyMessage(new RebuildObjectMapPayload(AsyncRequestId(ClientId(0, 1), 2))));
+  o.push_back(NotifyMessage(new RenamePayload(AsyncRequestId(ClientId(0, 1), 2), "foo")));
+  o.push_back(NotifyMessage(new UpdateFeaturesPayload(AsyncRequestId(ClientId(0, 1), 2),
+						      1, true)));
+  o.push_back(NotifyMessage(new MigratePayload(AsyncRequestId(ClientId(0, 1), 2))));
+  o.push_back(NotifyMessage(new SparsifyPayload(AsyncRequestId(ClientId(0, 1), 2), 1)));
+  o.push_back(NotifyMessage(new QuiescePayload(AsyncRequestId(ClientId(0, 1), 2))));
+  o.push_back(NotifyMessage(new UnquiescePayload(AsyncRequestId(ClientId(0, 1), 2))));
+  o.push_back(NotifyMessage(new MetadataUpdatePayload(AsyncRequestId(ClientId(0, 1), 2),
+						      "foo", std::optional<std::string>{"xyz"})));
+  return o;
 }
 
 void ResponseMessage::encode(bufferlist& bl) const {
   ENCODE_START(1, 1, bl);
-  ::encode(result, bl);
+  encode(result, bl);
   ENCODE_FINISH(bl);
 }
 
-void ResponseMessage::decode(bufferlist::iterator& iter) {
+void ResponseMessage::decode(bufferlist::const_iterator& iter) {
   DECODE_START(1, iter);
-  ::decode(result, iter);
+  decode(result, iter);
   DECODE_FINISH(iter);
 }
 
@@ -398,12 +472,11 @@ void ResponseMessage::dump(Formatter *f) const {
   f->dump_int("result", result);
 }
 
-void ResponseMessage::generate_test_instances(std::list<ResponseMessage *> &o) {
-  o.push_back(new ResponseMessage(1));
+std::list<ResponseMessage> ResponseMessage::generate_test_instances() {
+  std::list<ResponseMessage> o;
+  o.push_back(ResponseMessage(1));
+  return o;
 }
-
-} // namespace watch_notify
-} // namespace librbd
 
 std::ostream &operator<<(std::ostream &out,
                          const librbd::watch_notify::NotifyOp &op) {
@@ -458,16 +531,25 @@ std::ostream &operator<<(std::ostream &out,
   case NOTIFY_OP_UPDATE_FEATURES:
     out << "UpdateFeatures";
     break;
+  case NOTIFY_OP_MIGRATE:
+    out << "Migrate";
+    break;
+  case NOTIFY_OP_SPARSIFY:
+    out << "Sparsify";
+    break;
+  case NOTIFY_OP_QUIESCE:
+    out << "Quiesce";
+    break;
+  case NOTIFY_OP_UNQUIESCE:
+    out << "Unquiesce";
+    break;
+  case NOTIFY_OP_METADATA_UPDATE:
+    out << "MetadataUpdate";
+    break;
   default:
     out << "Unknown (" << static_cast<uint32_t>(op) << ")";
     break;
   }
-  return out;
-}
-
-std::ostream &operator<<(std::ostream &out,
-                         const librbd::watch_notify::ClientId &client_id) {
-  out << "[" << client_id.gid << "," << client_id.handle << "]";
   return out;
 }
 
@@ -477,3 +559,5 @@ std::ostream &operator<<(std::ostream &out,
       << request.request_id << "]";
   return out;
 }
+} // namespace watch_notify
+} // namespace librbd

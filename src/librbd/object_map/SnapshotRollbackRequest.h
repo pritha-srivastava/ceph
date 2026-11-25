@@ -1,10 +1,11 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_OBJECT_MAP_SNAPSHOT_ROLLBACK_REQUEST_H
 #define CEPH_LIBRBD_OBJECT_MAP_SNAPSHOT_ROLLBACK_REQUEST_H
 
 #include "include/int_types.h"
+#include "include/rados.h" // for CEPH_NOSNAP
 #include "librbd/object_map/Request.h"
 
 class Context;
@@ -47,16 +48,16 @@ public:
                           Context *on_finish)
     : Request(image_ctx, CEPH_NOSNAP, on_finish),
       m_snap_id(snap_id), m_ret_val(0) {
-    assert(snap_id != CEPH_NOSNAP);
+    ceph_assert(snap_id != CEPH_NOSNAP);
   }
 
-  virtual void send();
+  void send() override;
 
 protected:
-  virtual bool should_complete(int r);
+  bool should_complete(int r) override;
 
 private:
-  State m_state;
+  State m_state = STATE_READ_MAP;
   uint64_t m_snap_id;
   int m_ret_val;
 

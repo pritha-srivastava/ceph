@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_OPERATION_SNAPSHOT_RENAME_REQUEST_H
 #define CEPH_LIBRBD_OPERATION_SNAPSHOT_RENAME_REQUEST_H
@@ -41,11 +41,11 @@ public:
   SnapshotRenameRequest(ImageCtxT &image_ctx, Context *on_finish,
                         uint64_t snap_id, const std::string &snap_name);
 
-  virtual journal::Event create_event(uint64_t op_tid) const;
+  journal::Event create_event(uint64_t op_tid) const override;
 
 protected:
-  virtual void send_op();
-  virtual bool should_complete(int r);
+  void send_op() override;
+  bool should_complete(int r) override;
 
 private:
   uint64_t m_snap_id;

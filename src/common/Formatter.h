@@ -1,20 +1,19 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #ifndef CEPH_FORMATTER_H
 #define CEPH_FORMATTER_H
 
-#include "include/int_types.h"
-
-#include <deque>
-#include <iosfwd>
-#include <list>
-#include <vector>
-#include <sstream>
-#include <stdarg.h>
-#include <string>
-#include <map>
-
 #include "include/buffer_fwd.h"
+
+#include <cstdarg>
+#include <cstdint>
+#include <functional>
+#include <list>
+#include <memory>
+#include <string>
+
+#include "common/fmt_common.h"
 
 namespace ceph {
 
@@ -26,20 +25,172 @@ namespace ceph {
 
   class Formatter {
   public:
-    static Formatter *create(const std::string& type,
-			     const std::string& default_type,
-			     const std::string& fallback);
-    static Formatter *create(const std::string& type,
-			     const std::string& default_type) {
+    class ObjectSection {
+      Formatter& formatter;
+
+    public:
+      ObjectSection(Formatter& f, std::string_view name) : formatter(f) {
+        formatter.open_object_section(name);
+      }
+      ObjectSection(Formatter& f, std::string_view name, const char *ns) : formatter(f) {
+        formatter.open_object_section_in_ns(name, ns);
+      }
+      ~ObjectSection() {
+        formatter.close_section();
+      }
+    };
+    class ArraySection {
+      Formatter& formatter;
+
+    public:
+      ArraySection(Formatter& f, std::string_view name) : formatter(f) {
+        formatter.open_array_section(name);
+      }
+      ArraySection(Formatter& f, std::string_view name, const char *ns) : formatter(f) {
+        formatter.open_array_section_in_ns(name, ns);
+      }
+      ~ArraySection() {
+        formatter.close_section();
+      }
+    };
+
+    /// Helper to check if a type is a map for our purpose
+    /// (based on fmt code)
+    template <typename T> class is_map {
+      template <typename U> static auto check(U*) -> typename U::mapped_type;
+      template <typename> static void check(...);
+    public:
+      static constexpr const bool value =
+        !std::is_void<decltype(check<T>(nullptr))>::value;
+    };
+
+    /**
+     * with_array_section()
+     * Opens an array section and calls 'fn' on each element in the container.
+     * Two overloads are provided:
+     * 1. for maps, where the function takes a key and a value, and
+     * 2. for other types of containers, where the function takes just an
+     *    element.
+     */
+
+    // for maps
+    template <
+	typename M,     //!< a map<K, V>
+	typename FN,    //!< a callable to be applied to each element
+	typename K = std::remove_cvref_t<M>::key_type,
+	typename V = std::remove_cvref_t<M>::mapped_type>
+      requires(
+	  is_map<M>::value && (
+          std::is_invocable_v<FN, Formatter&, const K&, const V&, std::string_view> ||
+          std::is_invocable_v<FN, Formatter&, const K&, const V&>))
+    void with_array_section(std::string_view txt, const M& m, FN&& fn) {
+      Formatter::ArraySection as(*this, txt);
+      for (const auto& [k, v] : m) {
+        if constexpr (std::is_invocable_v<FN, Formatter&, const K&, const V&, std::string_view>) {
+	  std::invoke(std::forward<FN>(fn), *this, k, v, txt);
+        } else {
+          std::invoke(std::forward<FN>(fn), *this, k, v);
+        }
+      }
+    }
+
+    // for other types of containers
+    template <
+	typename M,
+	typename FN,
+	typename V = std::remove_cvref_t<M>::value_type>
+      requires(
+	  !is_map<M>::value && (
+          std::is_invocable_r_v<void, FN, Formatter&, const V&,
+	       std::string_view> ||
+	  std::is_invocable_r_v<void, FN, Formatter&, const V&>))
+    void with_array_section(std::string_view txt, const M& m, FN&& fn) {
+      Formatter::ArraySection as(*this, txt);
+      for (const auto& v : m) {
+	if constexpr (std::is_invocable_v<
+			  FN, Formatter&, const V&, std::string_view>) {
+	  std::invoke(std::forward<FN>(fn), *this, v, txt);
+	} else {
+	  std::invoke(std::forward<FN>(fn), *this, v);
+	}
+      }
+    }
+
+    /**
+     * with_obj_array_section()
+     * Opens an array section, then - iterates over the container
+     * (which can be a map or a vector) and creates an object section
+     * for each element in the container. The provided function 'fn' is
+     * called on each element in the container.
+     *
+     * Two overloads are provided:
+     * 1. for maps, where the function takes a key and a value, and
+     * 2. for other types of containers, where the function is only
+     *    handed the object (value) in the container.
+     */
+
+    template <
+	typename M,     //!< a map<K, V>
+	typename FN,    //!< a callable to be applied to each element
+	typename K = std::remove_cvref_t<M>::key_type,
+	typename V = std::remove_cvref_t<M>::mapped_type>
+      requires(
+	  is_map<M>::value && (
+          std::is_invocable_v<FN, Formatter&, const K&, const V&, std::string_view> ||
+          std::is_invocable_v<FN, Formatter&, const K&, const V&>))
+    void with_obj_array_section(std::string_view txt, const M& m, FN&& fn) {
+      Formatter::ArraySection as(*this, txt);
+      for (const auto& [k, v] : m) {
+	Formatter::ObjectSection os(*this, txt);
+        if constexpr (std::is_invocable_v<FN, Formatter&, const K&, const V&, std::string_view>) {
+            std::invoke(std::forward<FN>(fn), *this, k, v, txt);
+        } else {
+            std::invoke(std::forward<FN>(fn), *this, k, v);
+        }
+      }
+    }
+
+    template <
+	typename M,  //!< a container (which is not a map) of 'V's
+	typename FN,
+	typename V = std::remove_cvref_t<M>::value_type>
+      requires(
+	  (!is_map<M>::value) && (
+          std::is_invocable_v<FN, Formatter&, const V&, std::string_view> ||
+          std::is_invocable_v<FN, Formatter&, const V&>))
+    void with_obj_array_section(std::string_view txt, const M& m, FN&& fn) {
+      Formatter::ArraySection as(*this, txt);
+      for (const auto& v : m) {
+	Formatter::ObjectSection os(*this, txt);
+        if constexpr (std::is_invocable_v<FN, Formatter&, const V&, std::string_view>) {
+            std::invoke(std::forward<FN>(fn), *this, v, txt);
+        } else {
+            std::invoke(std::forward<FN>(fn), *this, v);
+        }
+      }
+    }
+
+    static Formatter *create(std::string_view type,
+			     std::string_view default_type,
+			     std::string_view fallback);
+    static Formatter *create(std::string_view type,
+			     std::string_view default_type) {
       return create(type, default_type, "");
     }
-    static Formatter *create(const std::string& type) {
+    static Formatter *create(std::string_view type) {
       return create(type, "json-pretty", "");
     }
+    template <typename... Params>
+    static std::unique_ptr<Formatter> create_unique(Params &&...params)
+    {
+      return std::unique_ptr<Formatter>(
+	  Formatter::create(std::forward<Params>(params)...));
+    }
 
-    Formatter();
-    virtual ~Formatter();
+    Formatter() = default;
+    virtual ~Formatter() = default;
 
+    virtual void enable_line_break() = 0;
     virtual void flush(std::ostream& os) = 0;
     void flush(bufferlist &bl);
     virtual void reset() = 0;
@@ -48,187 +199,61 @@ namespace ceph {
     virtual void output_header() = 0;
     virtual void output_footer() = 0;
 
-    virtual void open_array_section(const char *name) = 0;
-    virtual void open_array_section_in_ns(const char *name, const char *ns) = 0;
-    virtual void open_object_section(const char *name) = 0;
-    virtual void open_object_section_in_ns(const char *name, const char *ns) = 0;
+    virtual void open_array_section(std::string_view name) = 0;
+    virtual void open_array_section_in_ns(std::string_view name, const char *ns) = 0;
+    virtual void open_object_section(std::string_view name) = 0;
+    virtual void open_object_section_in_ns(std::string_view name, const char *ns) = 0;
     virtual void close_section() = 0;
-    virtual void dump_unsigned(const char *name, uint64_t u) = 0;
-    virtual void dump_int(const char *name, int64_t s) = 0;
-    virtual void dump_float(const char *name, double d) = 0;
-    virtual void dump_string(const char *name, const std::string& s) = 0;
-    virtual void dump_bool(const char *name, bool b)
+    virtual void dump_null(std::string_view name) = 0;
+    virtual void dump_unsigned(std::string_view name, uint64_t u) = 0;
+    virtual void dump_int(std::string_view name, int64_t s) = 0;
+    virtual void dump_float(std::string_view name, double d) = 0;
+    virtual void dump_string(std::string_view name, std::string_view s) = 0;
+    virtual void dump_bool(std::string_view name, bool b)
     {
       dump_format_unquoted(name, "%s", (b ? "true" : "false"));
     }
     template<typename T>
-    void dump_object(const char *name, const T& foo) {
+    void dump_object(std::string_view name, const T& foo) {
       open_object_section(name);
       foo.dump(this);
       close_section();
     }
-    virtual std::ostream& dump_stream(const char *name) = 0;
-    virtual void dump_format_va(const char *name, const char *ns, bool quoted, const char *fmt, va_list ap) = 0;
-    virtual void dump_format(const char *name, const char *fmt, ...);
-    virtual void dump_format_ns(const char *name, const char *ns, const char *fmt, ...);
-    virtual void dump_format_unquoted(const char *name, const char *fmt, ...);
+    virtual std::ostream& dump_stream(std::string_view name) = 0;
+    virtual void dump_format_va(std::string_view name, const char *ns, bool quoted, const char *fmt, va_list ap) = 0;
+    virtual void dump_format(std::string_view name, const char *fmt, ...);
+    virtual void dump_format_ns(std::string_view name, const char *ns, const char *fmt, ...);
+    virtual void dump_format_unquoted(std::string_view name, const char *fmt, ...);
     virtual int get_len() const = 0;
     virtual void write_raw_data(const char *data) = 0;
     /* with attrs */
-    virtual void open_array_section_with_attrs(const char *name, const FormatterAttrs& attrs)
+    virtual void open_array_section_with_attrs(std::string_view name, const FormatterAttrs& attrs)
     {
       open_array_section(name);
     }
-    virtual void open_object_section_with_attrs(const char *name, const FormatterAttrs& attrs)
+    virtual void open_object_section_with_attrs(std::string_view name, const FormatterAttrs& attrs)
     {
       open_object_section(name);
     }
-    virtual void dump_string_with_attrs(const char *name, const std::string& s, const FormatterAttrs& attrs)
+    virtual void dump_string_with_attrs(std::string_view name, std::string_view s, const FormatterAttrs& attrs)
     {
       dump_string(name, s);
     }
+
+    virtual void *get_external_feature_handler(const std::string& feature) {
+      return nullptr;
+    }
+    virtual void write_bin_data(const char* buff, int buf_len);
+
+    template <typename... Args>
+    void dump_named_fmt(std::string_view name, fmt::format_string<Args...> fmtformat, Args&&... args)
+    {
+      dump_string(name, fmt::format(fmtformat, std::forward<Args>(args)...));
+    }
   };
 
-  class JSONFormatter : public Formatter {
-  public:
-    explicit JSONFormatter(bool p = false);
-
-    virtual void set_status(int status, const char* status_name) {};
-    virtual void output_header() {};
-    virtual void output_footer() {};
-    void flush(std::ostream& os);
-    using Formatter::flush; // don't hide Formatter::flush(bufferlist &bl)
-    void reset();
-    virtual void open_array_section(const char *name);
-    void open_array_section_in_ns(const char *name, const char *ns);
-    void open_object_section(const char *name);
-    void open_object_section_in_ns(const char *name, const char *ns);
-    void close_section();
-    void dump_unsigned(const char *name, uint64_t u);
-    void dump_int(const char *name, int64_t u);
-    void dump_float(const char *name, double d);
-    void dump_string(const char *name, const std::string& s);
-    std::ostream& dump_stream(const char *name);
-    void dump_format_va(const char *name, const char *ns, bool quoted, const char *fmt, va_list ap);
-    int get_len() const;
-    void write_raw_data(const char *data);
-
-  private:
-
-    struct json_formatter_stack_entry_d {
-      int size;
-      bool is_array;
-      json_formatter_stack_entry_d() : size(0), is_array(false) { }
-    };
-
-    bool m_pretty;
-    void open_section(const char *name, bool is_array);
-    void print_quoted_string(const std::string& s);
-    void print_name(const char *name);
-    void print_comma(json_formatter_stack_entry_d& entry);
-    void finish_pending_string();
-
-    std::stringstream m_ss, m_pending_string;
-    std::list<json_formatter_stack_entry_d> m_stack;
-    bool m_is_pending_string;
-  };
-
-  class XMLFormatter : public Formatter {
-  public:
-    static const char *XML_1_DTD;
-    XMLFormatter(bool pretty = false, bool lowercased = false, bool underscored = true);
-
-    virtual void set_status(int status, const char* status_name) {}
-    virtual void output_header();
-    virtual void output_footer();
-
-    void flush(std::ostream& os);
-    using Formatter::flush; // don't hide Formatter::flush(bufferlist &bl)
-    void reset();
-    void open_array_section(const char *name);
-    void open_array_section_in_ns(const char *name, const char *ns);
-    void open_object_section(const char *name);
-    void open_object_section_in_ns(const char *name, const char *ns);
-    void close_section();
-    void dump_unsigned(const char *name, uint64_t u);
-    void dump_int(const char *name, int64_t u);
-    void dump_float(const char *name, double d);
-    void dump_string(const char *name, const std::string& s);
-    std::ostream& dump_stream(const char *name);
-    void dump_format_va(const char *name, const char *ns, bool quoted, const char *fmt, va_list ap);
-    int get_len() const;
-    void write_raw_data(const char *data);
-
-    /* with attrs */
-    void open_array_section_with_attrs(const char *name, const FormatterAttrs& attrs);
-    void open_object_section_with_attrs(const char *name, const FormatterAttrs& attrs);
-    void dump_string_with_attrs(const char *name, const std::string& s, const FormatterAttrs& attrs);
-
-  protected:
-    void open_section_in_ns(const char *name, const char *ns, const FormatterAttrs *attrs);
-    void finish_pending_string();
-    void print_spaces();
-    static std::string escape_xml_str(const char *str);
-    void get_attrs_str(const FormatterAttrs *attrs, std::string& attrs_str);
-    char to_lower_underscore(char c) const;
-
-    std::stringstream m_ss, m_pending_string;
-    std::deque<std::string> m_sections;
-    const bool m_pretty;
-    const bool m_lowercased;
-    const bool m_underscored;
-    std::string m_pending_string_name;
-    bool m_header_done;
-  };
-
-  class TableFormatter : public Formatter {
-  public:
-    explicit TableFormatter(bool keyval = false);
-
-    virtual void set_status(int status, const char* status_name) {};
-    virtual void output_header() {};
-    virtual void output_footer() {};
-    void flush(std::ostream& os);
-    using Formatter::flush; // don't hide Formatter::flush(bufferlist &bl)
-    void reset();
-    virtual void open_array_section(const char *name);
-    void open_array_section_in_ns(const char *name, const char *ns);
-    void open_object_section(const char *name);
-    void open_object_section_in_ns(const char *name, const char *ns);
-
-    void open_array_section_with_attrs(const char *name, const FormatterAttrs& attrs);
-    void open_object_section_with_attrs(const char *name, const FormatterAttrs& attrs);
-
-    void close_section();
-    void dump_unsigned(const char *name, uint64_t u);
-    void dump_int(const char *name, int64_t u);
-    void dump_float(const char *name, double d);
-    void dump_string(const char *name, const std::string& s);
-    void dump_format_va(const char *name, const char *ns, bool quoted, const char *fmt, va_list ap);
-    void dump_string_with_attrs(const char *name, const std::string& s, const FormatterAttrs& attrs);
-    std::ostream& dump_stream(const char *name);
-
-    int get_len() const;
-    void write_raw_data(const char *data);
-    void get_attrs_str(const FormatterAttrs *attrs, std::string& attrs_str);
-
-  private:
-    void open_section_in_ns(const char *name, const char *ns, const FormatterAttrs *attrs);
-    std::vector< std::vector<std::pair<std::string, std::string> > > m_vec;
-    std::stringstream m_ss;
-    size_t m_vec_index(const char* name);
-    std::string get_section_name(const char* name);
-    void finish_pending_string();
-    std::string m_pending_name;
-    bool m_keyval;
-
-    int m_section_open;
-    std::vector< std::string > m_section;
-    std::map<std::string, int> m_section_cnt;
-    std::vector<size_t> m_column_size;
-    std::vector< std::string > m_column_name;
-  };
-
-
+  std::string fixed_to_string(int64_t num, int scale);
+  std::string fixed_u_to_string(uint64_t num, int scale);
 }
 #endif
+

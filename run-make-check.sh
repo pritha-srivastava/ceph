@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Ceph distributed storage system
 #
@@ -13,60 +13,61 @@
 #
 
 #
-# Return MAX(1, (number of processors / 2)) by default or NPROC
+# To just look at what this script will do, run it like this:
 #
-function get_processors() {
-    if test -n "$NPROC" ; then
-        echo $NPROC
-    else
-        if test $(nproc) -ge 2 ; then
-            expr $(nproc) / 2
-        else
-            echo 1
-        fi
-    fi
+# $ DRY_RUN=echo ./run-make-check.sh
+#
+
+source src/script/run-make.sh
+
+set -e
+
+function gen_ctest_resource_file() {
+    local file_name=$(mktemp /tmp/ctest-resource-XXXXXX)
+    # Usable CPU ids for this process: excludes offline cores and honors cgroup/
+    # taskset limits. Not necessarily contiguous 0..nproc-1, so a crimson seastar
+    # unittest could otherwise get an offline id in --cpuset and abort.
+    local ids=$(python3 -c 'import os; print(*sorted(os.sched_getaffinity(0)))')
+    jq -n '$ARGS.positional | map({id:., slots:1}) | {cpus:.} | {version: {major:1, minor:0}, local:[.]}' \
+        --args $ids > $file_name
+    echo "$file_name"
 }
 
-DEFAULT_MAKEOPTS=${DEFAULT_MAKEOPTS:--j$(get_processors)}
-BUILD_MAKEOPTS=${BUILD_MAKEOPTS:-$DEFAULT_MAKEOPTS}
-CHECK_MAKEOPTS=${CHECK_MAKEOPTS:-$DEFAULT_MAKEOPTS}
-
 function run() {
-    local install_cmd
-    if test -f /etc/redhat-release ; then
-        source /etc/os-release
-        if ! type bc > /dev/null 2>&1 ; then
-            echo "Please install bc and re-run." 
-            exit 1
-        fi
-        if test "$(echo "$VERSION_ID >= 22" | bc)" -ne 0; then
-            install_cmd="dnf -y install"
-        else
-            install_cmd="yum install -y"
-        fi
+    # to prevent OSD EMFILE death on tests, make sure ulimit >= 1024
+    $DRY_RUN ulimit -n $(ulimit -Hn)
+    if [ $(ulimit -n) -lt 1024 ];then
+        echo "***ulimit -n too small, better bigger than 1024 for test***"
+        return 1
     fi
 
-    type apt-get > /dev/null 2>&1 && install_cmd="apt-get install -y"
-    type zypper > /dev/null 2>&1 && install_cmd="zypper --gpg-auto-import-keys --non-interactive install"
-
-    if ! type sudo > /dev/null 2>&1 ; then
-        echo "Please install sudo and re-run. This script assumes it is running"
-        echo "as a normal user with the ability to run commands as root via sudo." 
-        exit 1
+    # increase the aio-max-nr, which is by default 65536. we could reach this
+    # limit while running seastar tests and bluestore tests.
+    local m=16
+    local procs="$(($(get_processors) * 2))"
+    if [ "${procs}" -gt $m ]; then
+        m="${procs}"
     fi
-    if [ -n "$install_cmd" ]; then
-        $DRY_RUN sudo $install_cmd ccache jq
+    local aiomax="$((65536 * procs))"
+    if [ "$(/sbin/sysctl -n fs.aio-max-nr )" -lt "${aiomax}" ]; then
+        wrap_sudo
+        $DRY_RUN $SUDO /sbin/sysctl -q -w fs.aio-max-nr="${aiomax}" || true
+    fi
+
+    CHECK_MAKEOPTS=${CHECK_MAKEOPTS:-$DEFAULT_MAKEOPTS}
+    CTEST_RESOURCE_FILE=$(gen_ctest_resource_file)
+    CHECK_MAKEOPTS+=" --resource-spec-file ${CTEST_RESOURCE_FILE}"
+    if in_jenkins; then
+        if ! ctest $CHECK_MAKEOPTS --no-compress-output --output-on-failure --test-output-size-failed 1024000 -T Test; then
+            # do not return failure, as the jenkins publisher will take care of this
+            rm -fr ${TMPDIR:-/tmp}/ceph-asok.* ${CTEST_RESOURCE_FILE}
+        fi
     else
-        echo "WARNING: Don't know how to install packages" >&2
+        if ! $DRY_RUN ctest $CHECK_MAKEOPTS --output-on-failure; then
+            rm -fr ${TMPDIR:-/tmp}/ceph-asok.* ${CTEST_RESOURCE_FILE}
+            return 1
+        fi
     fi
-
-    if test -f ./install-deps.sh ; then
-	$DRY_RUN ./install-deps.sh || return 1
-    fi
-    $DRY_RUN ./do_cmake.sh $@ || return 1
-    $DRY_RUN cd build
-    $DRY_RUN make $BUILD_MAKEOPTS tests || return 1
-    $DRY_RUN ctest $CHECK_MAKEOPTS --output-on-failure || return 1
 }
 
 function main() {
@@ -75,21 +76,22 @@ function main() {
         echo "with the ability to run commands as root via sudo."
     fi
     echo -n "Checking hostname sanity... "
-    if hostname --fqdn >/dev/null 2>&1 ; then
+    if $DRY_RUN hostname --fqdn >/dev/null 2>&1 ; then
         echo "OK"
     else
         echo "NOT OK"
         echo "Please fix 'hostname --fqdn', otherwise 'make check' will fail"
         return 1
     fi
-    if run "$@" ; then
-        rm -fr ${CEPH_BUILD_VIRTUALENV:-/tmp}/*virtualenv*
-        echo "cmake check: successful run on $(git rev-parse HEAD)"
-        return 0
-    else
-        rm -fr ${CEPH_BUILD_VIRTUALENV:-/tmp}/*virtualenv*
-        return 1
-    fi
+    # uses run-make.sh to install-deps
+    FOR_MAKE_CHECK=1 prepare
+    configure "$@"
+    in_jenkins && echo "CI_DEBUG: Running 'build tests'"
+    build tests
+    echo "make check: successful build on $(git rev-parse HEAD)"
+    FOR_MAKE_CHECK=1 run
 }
 
-main "$@"
+if [ "$0" = "$BASH_SOURCE" ]; then
+    main "$@"
+fi

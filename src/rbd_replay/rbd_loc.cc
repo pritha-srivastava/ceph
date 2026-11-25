@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -13,7 +14,7 @@
  */
 
 #include "rbd_loc.hpp"
-#include "include/assert.h"
+#include "include/ceph_assert.h"
 
 
 using namespace std;
@@ -23,7 +24,7 @@ using namespace rbd_replay;
 rbd_loc::rbd_loc() {
 }
 
-rbd_loc::rbd_loc(string pool, string image, string snap)
+rbd_loc::rbd_loc(const string &pool, const string &image, const string &snap)
   : pool(pool),
     image(image),
     snap(snap) {
@@ -41,7 +42,7 @@ bool rbd_loc::parse(string name_string) {
       if (read_slash || read_at) {
 	return false;
       }
-      assert(field == 0);
+      ceph_assert(field == 0);
       field++;
       read_slash = true;
       break;
@@ -49,7 +50,7 @@ bool rbd_loc::parse(string name_string) {
       if (read_at) {
 	return false;
       }
-      assert(field < 2);
+      ceph_assert(field < 2);
       field++;
       read_at = true;
       break;

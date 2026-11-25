@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -11,11 +12,11 @@
  * Foundation.  See file COPYING.
  *
  */
-#include <string>
 
 #ifndef CEPH_LIBRADOS_LISTOBJECTIMPL_H
 #define CEPH_LIBRADOS_LISTOBJECTIMPL_H
 
+#include <string>
 #include <include/rados/librados.hpp>
 
 namespace librados {
@@ -28,19 +29,17 @@ struct ListObjectImpl {
   ListObjectImpl(std::string n, std::string o, std::string l):
       nspace(n), oid(o), locator(l) {}
 
+  auto operator<=>(const ListObjectImpl&) const = default;
+
   const std::string& get_nspace() const { return nspace; }
   const std::string& get_oid() const { return oid; }
   const std::string& get_locator() const { return locator; }
 };
-WRITE_EQ_OPERATORS_3(ListObjectImpl, nspace, oid, locator)
-WRITE_CMP_OPERATORS_3(ListObjectImpl, nspace, oid, locator)
 inline std::ostream& operator<<(std::ostream& out, const struct ListObjectImpl& lop) {
   out << (lop.nspace.size() ? lop.nspace + "/" : "") << lop.oid
       << (lop.locator.size() ? "@" + lop.locator : "");
   return out;
 }
-
-struct ObjListCtx;
 
 class NObjectIteratorImpl {
   public:
@@ -56,10 +55,6 @@ class NObjectIteratorImpl {
     NObjectIteratorImpl &operator++(); // Preincrement
     NObjectIteratorImpl operator++(int); // Postincrement
     const ListObject *get_listobjectp() { return &cur_obj; }
-    friend class IoCtx;
-    friend struct ListObjectImpl;
-    //friend class ListObject;
-    friend class NObjectIterator;
 
     /// get current hash position of the iterator, rounded to the current pg
     uint32_t get_pg_hash_position() const;
@@ -67,12 +62,17 @@ class NObjectIteratorImpl {
     /// move the iterator to a given hash position.  this may (will!) be rounded to the nearest pg.
     uint32_t seek(uint32_t pos);
 
+    /// move the iterator to a given cursor position
+    uint32_t seek(const librados::ObjectCursor& cursor);
+
+    /// get current cursor position
+    librados::ObjectCursor get_cursor();
+
     void set_filter(const bufferlist &bl);
 
-  private:
     NObjectIteratorImpl(ObjListCtx *ctx_);
     void get_next();
-    ceph::shared_ptr < ObjListCtx > ctx;
+    std::shared_ptr < ObjListCtx > ctx;
     ListObject cur_obj;
 };
 

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,40 +16,49 @@
 #ifndef CEPH_MCOMMANDREPLY_H
 #define CEPH_MCOMMANDREPLY_H
 
+#include <string>
+#include <string_view>
+
+#include "include/errorcode32.h"
 #include "msg/Message.h"
 #include "MCommand.h"
 
-class MCommandReply : public Message {
- public:
+class MCommandReply final : public Message {
+public:
   errorcode32_t r;
-  string rs;
+  std::string rs;
   
   MCommandReply()
-    : Message(MSG_COMMAND_REPLY) {}
+    : Message{MSG_COMMAND_REPLY} {}
   MCommandReply(MCommand *m, int _r)
-    : Message(MSG_COMMAND_REPLY), r(_r) {
+    : Message{MSG_COMMAND_REPLY}, r(_r) {
     header.tid = m->get_tid();
   }
-  MCommandReply(int _r, string s)
-    : Message(MSG_COMMAND_REPLY),
+  // MDS now uses host errors, as defined in errno.cc, for current platform.
+  // errorcode32_t is converting, internally, the error code from host to ceph, when encoding, and vice versa,
+  // when decoding, resulting having LINUX codes on the wire, and HOST code on the receiver.
+  MCommandReply(int _r, std::string_view s)
+    : Message{MSG_COMMAND_REPLY},
       r(_r), rs(s) { }
 private:
-  ~MCommandReply() {}
+  ~MCommandReply() final {}
 
 public:
-  const char *get_type_name() const { return "command_reply"; }
-  void print(ostream& o) const {
+  std::string_view get_type_name() const override { return "command_reply"; }
+  void print(std::ostream& o) const override {
     o << "command_reply(tid " << get_tid() << ": " << r << " " << rs << ")";
   }
   
-  void encode_payload(uint64_t features) {
-    ::encode(r, payload);
-    ::encode(rs, payload);
+  void encode_payload(uint64_t features) override {
+    using ceph::encode;
+    encode(r, payload);
+    encode(rs, payload);
   }
-  void decode_payload() {
-    bufferlist::iterator p = payload.begin();
-    ::decode(r, p);
-    ::decode(rs, p);
+  void decode_payload() override {
+    using ceph::decode;
+    auto p = payload.cbegin();
+    decode(r, p);
+    decode(rs, p);
   }
 };
 

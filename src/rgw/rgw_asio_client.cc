@@ -1,122 +1,116 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/asio/write.hpp>
 
 #include "rgw_asio_client.h"
+#include "rgw_perf_counters.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
 
-#undef dout_prefix
-#define dout_prefix (*_dout << "asio: ")
+using namespace rgw::asio;
 
-
-RGWAsioClientIO::RGWAsioClientIO(tcp::socket&& socket,
-                                 request_type&& request)
-  : socket(std::move(socket)),
-    request(std::move(request)),
-    txbuf(*this) {
+ClientIO::ClientIO(parser_type& parser, bool is_ssl,
+                   const endpoint_type& local_endpoint,
+                   const endpoint_type& remote_endpoint)
+  : parser(parser), is_ssl(is_ssl),
+    local_endpoint(local_endpoint),
+    remote_endpoint(remote_endpoint),
+    txbuf(*this),
+    keepalive(parser.keep_alive()),
+    expect100continue(parser.get()[beast::http::field::expect] == "100-continue")
+{
 }
 
-RGWAsioClientIO::~RGWAsioClientIO() = default;
+ClientIO::~ClientIO() = default;
 
-void RGWAsioClientIO::init_env(CephContext *cct)
+int ClientIO::init_env(CephContext *cct)
 {
   env.init(cct);
-  body_iter = request.body.begin();
 
-  const auto& headers = request.headers;
+  perfcounter->inc(l_rgw_qlen);
+  perfcounter->inc(l_rgw_qactive);
+
+  const auto& request = parser.get();
+  const auto& headers = request;
   for (auto header = headers.begin(); header != headers.end(); ++header) {
-    const auto& name = header->name();
+    const auto& field = header->name(); // enum type for known headers
+    const auto& name = header->name_string();
     const auto& value = header->value();
 
-    if (boost::algorithm::iequals(name, "content-length")) {
-      env.set("CONTENT_LENGTH", value);
+    if (field == beast::http::field::content_length) {
+      env.set("CONTENT_LENGTH", std::string(value));
       continue;
     }
-    if (boost::algorithm::iequals(name, "content-type")) {
-      env.set("CONTENT_TYPE", value);
+    if (field == beast::http::field::content_type) {
+      env.set("CONTENT_TYPE", std::string(value));
       continue;
     }
-    if (boost::algorithm::iequals(name, "connection")) {
-      conn_keepalive = boost::algorithm::iequals(value, "keep-alive");
-      conn_close = boost::algorithm::iequals(value, "close");
-    }
 
-    static const boost::string_ref HTTP_{"HTTP_"};
+    static constexpr std::string_view HTTP_{"HTTP_"};
 
-    char buf[name.size() + HTTP_.size() + 1];
-    auto dest = std::copy(std::begin(HTTP_), std::end(HTTP_), buf);
-    for (auto src = name.begin(); src != name.end(); ++src, ++dest) {
-      if (*src == '-') {
-        *dest = '_';
-      } else {
-        *dest = std::toupper(*src);
-      }
-    }
-    *dest = '\0';
-
-    env.set(buf, value);
+    std::string key{HTTP_};
+    key.reserve(name.size() + HTTP_.size());
+    uppercase_dash_transform(name, std::back_inserter(key), true);
+    env.set(std::move(key), std::string(value));
   }
 
-  env.set("REQUEST_METHOD", request.method);
+  int major = request.version() / 10;
+  int minor = request.version() % 10;
+  env.set("HTTP_VERSION", std::to_string(major) + '.' + std::to_string(minor));
+
+  env.set("REQUEST_METHOD", std::string(request.method_string()));
 
   // split uri from query
-  auto url = boost::string_ref{request.url};
-  auto pos = url.find('?');
-  auto query = url.substr(pos + 1);
-  url = url.substr(0, pos);
+  auto uri = request.target();
+  auto pos = uri.find('?');
+  if (pos != uri.npos) {
+    auto query = uri.substr(pos + 1);
+    env.set("QUERY_STRING", std::string(query));
+    uri = uri.substr(0, pos);
+  }
+  env.set("SCRIPT_URI", std::string(uri));
 
-  env.set("REQUEST_URI", url);
-  env.set("QUERY_STRING", query);
-  env.set("SCRIPT_URI", url); /* FIXME */
+  env.set("REQUEST_URI", std::string(request.target()));
 
   char port_buf[16];
-  snprintf(port_buf, sizeof(port_buf), "%d", socket.local_endpoint().port());
+  snprintf(port_buf, sizeof(port_buf), "%d", local_endpoint.port());
   env.set("SERVER_PORT", port_buf);
-  // TODO: set SERVER_PORT_SECURE if using ssl
-  // TODO: set REMOTE_USER if authenticated
-}
-
-size_t RGWAsioClientIO::write_data(const char* const buf,
-                                   const size_t len)
-{
-  boost::system::error_code ec;
-  auto bytes = boost::asio::write(socket, boost::asio::buffer(buf, len), ec);
-  if (ec) {
-    derr << "write_data failed: " << ec.message() << dendl;
-    throw rgw::io::Exception(ec.value(), std::system_category());
-  } else {
-    /* According to the documentation of boost::asio::write if there is
-     * no error (signalised by ec), then bytes == len. We don't need to
-     * take care of partial writes in such situation. */
-    return bytes;
+  if (is_ssl) {
+    env.set("SERVER_PORT_SECURE", port_buf);
   }
-}
-
-size_t RGWAsioClientIO::read_data(char* const buf, const size_t max)
-{
-  // read data from the body's bufferlist
-  auto bytes = std::min<unsigned>(max, body_iter.get_remaining());
-  body_iter.copy(bytes, buf);
-  return bytes;
-}
-
-size_t RGWAsioClientIO::complete_request()
-{
+  env.set("REMOTE_ADDR", remote_endpoint.address().to_string());
+  // TODO: set REMOTE_USER if authenticated
   return 0;
 }
 
-void RGWAsioClientIO::flush()
+size_t ClientIO::complete_request()
+{
+  perfcounter->inc(l_rgw_qlen, -1);
+  perfcounter->inc(l_rgw_qactive, -1);
+  return 0;
+}
+
+void ClientIO::flush()
 {
   txbuf.pubsync();
 }
 
-size_t RGWAsioClientIO::send_status(const int status,
-                                    const char* const status_name)
+size_t ClientIO::send_status(int status, const char* status_name)
 {
+  if (expect100continue && !sent100continue) {
+    // a client expecting 100-continue is not required to wait for the
+    // '100 Continue' response before sending the request body. if we
+    // complete the request before sending 100 Continue (for example, due
+    // to an authorization error), we don't know whether any following
+    // bytes on this connection correspond to this request's body or the
+    // next request's header. so we must disable keepalive and require the
+    // client to use a new tcp connection for any subsequent requests
+    keepalive = false;
+  }
+
   static constexpr size_t STATUS_BUF_SIZE = 128;
 
   char statusbuf[STATUS_BUF_SIZE];
@@ -126,12 +120,13 @@ size_t RGWAsioClientIO::send_status(const int status,
   return txbuf.sputn(statusbuf, statuslen);
 }
 
-size_t RGWAsioClientIO::send_100_continue()
+size_t ClientIO::send_100_continue()
 {
-  const char HTTTP_100_CONTINUE[] = "HTTP/1.1 100 CONTINUE\r\n\r\n";
-  const size_t sent = txbuf.sputn(HTTTP_100_CONTINUE,
-                                  sizeof(HTTTP_100_CONTINUE) - 1);
+  const char HTTP_100_CONTINUE[] = "HTTP/1.1 100 CONTINUE\r\n\r\n";
+  const size_t sent = txbuf.sputn(HTTP_100_CONTINUE,
+                                  sizeof(HTTP_100_CONTINUE) - 1);
   flush();
+  sent100continue = true;
   return sent;
 }
 
@@ -148,7 +143,7 @@ static size_t dump_date_header(char (&timestr)[TIME_BUF_SIZE])
                   "Date: %a, %d %b %Y %H:%M:%S %Z\r\n", tmp);
 }
 
-size_t RGWAsioClientIO::complete_header()
+size_t ClientIO::complete_header()
 {
   size_t sent = 0;
 
@@ -157,10 +152,10 @@ size_t RGWAsioClientIO::complete_header()
     sent += txbuf.sputn(timestr, strlen(timestr));
   }
 
-  if (conn_keepalive) {
+  if (keep_alive()) {
     constexpr char CONN_KEEP_ALIVE[] = "Connection: Keep-Alive\r\n";
     sent += txbuf.sputn(CONN_KEEP_ALIVE, sizeof(CONN_KEEP_ALIVE) - 1);
-  } else if (conn_close) {
+  } else {
     constexpr char CONN_KEEP_CLOSE[] = "Connection: close\r\n";
     sent += txbuf.sputn(CONN_KEEP_CLOSE, sizeof(CONN_KEEP_CLOSE) - 1);
   }
@@ -172,8 +167,8 @@ size_t RGWAsioClientIO::complete_header()
   return sent;
 }
 
-size_t RGWAsioClientIO::send_header(const boost::string_ref& name,
-                                    const boost::string_ref& value)
+size_t ClientIO::send_header(const std::string_view& name,
+                             const std::string_view& value)
 {
   static constexpr char HEADER_SEP[] = ": ";
   static constexpr char HEADER_END[] = "\r\n";
@@ -188,7 +183,7 @@ size_t RGWAsioClientIO::send_header(const boost::string_ref& name,
   return sent;
 }
 
-size_t RGWAsioClientIO::send_content_length(const uint64_t len)
+size_t ClientIO::send_content_length(uint64_t len)
 {
   static constexpr size_t CONLEN_BUF_SIZE = 128;
 

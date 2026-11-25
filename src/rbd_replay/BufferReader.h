@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_RBD_REPLAY_BUFFER_READER_H
 #define CEPH_RBD_REPLAY_BUFFER_READER_H
@@ -17,14 +17,14 @@ public:
   BufferReader(int fd, size_t min_bytes = DEFAULT_MIN_BYTES,
                size_t max_bytes = DEFAULT_MAX_BYTES);
 
-  int fetch(bufferlist::iterator **it);
+  int fetch(bufferlist::const_iterator **it);
 
 private:
   int m_fd;
   size_t m_min_bytes;
   size_t m_max_bytes;
   bufferlist m_bl;
-  bufferlist::iterator m_bl_it;
+  bufferlist::const_iterator m_bl_it;
   bool m_eof_reached;
 
 };

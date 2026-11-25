@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Simple script which performs a HTTP and rsync check on
 # all Ceph mirrors over IPv4 and IPv6 to see if they are online
@@ -6,7 +6,7 @@
 # Requires IPv4, IPv6, rsync and curl
 #
 # Example usage:
-# - ./test-mirrors.sh eu.ceph.com,de.ceph.com,hk.ceph.com
+# - ./test-mirrors.sh eu.ceph.com,de.ceph.com,au.ceph.com
 # - cat MIRRORS |cut -d ':' -f 1|xargs -n 1 ./test-mirrors.sh
 #
 

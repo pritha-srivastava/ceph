@@ -1,12 +1,11 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_OPERATION_REQUEST_H
 #define CEPH_LIBRBD_OPERATION_REQUEST_H
 
 #include "librbd/AsyncRequest.h"
 #include "include/Context.h"
-#include "common/RWLock.h"
 #include "librbd/Utils.h"
 #include "librbd/Journal.h"
 
@@ -22,10 +21,10 @@ public:
   Request(ImageCtxT &image_ctx, Context *on_finish,
           uint64_t journal_op_tid = 0);
 
-  virtual void send();
+  void send();
 
 protected:
-  virtual void finish(int r) override;
+  void finish(int r) override;
   virtual void send_op() = 0;
 
   virtual bool can_affect_io() const {
@@ -37,9 +36,8 @@ protected:
   bool append_op_event(T *request) {
     ImageCtxT &image_ctx = this->m_image_ctx;
 
-    assert(can_affect_io());
-    RWLock::RLocker owner_locker(image_ctx.owner_lock);
-    RWLock::RLocker snap_locker(image_ctx.snap_lock);
+    ceph_assert(can_affect_io());
+    std::scoped_lock locker{image_ctx.owner_lock, image_ctx.image_lock};
     if (image_ctx.journal != nullptr) {
       if (image_ctx.journal->is_journal_replaying()) {
         Context *ctx = util::create_context_callback<T, MF>(request);
@@ -58,7 +56,7 @@ protected:
 
   // NOTE: temporary until converted to new state machine format
   Context *create_context_finisher(int r);
-  virtual void finish_and_destroy(int r) override;
+  void finish_and_destroy(int r) override;
 
 private:
   struct C_AppendOpEvent : public Context {
@@ -67,7 +65,7 @@ private:
     C_AppendOpEvent(Request *request, Context *on_safe)
       : request(request), on_safe(on_safe) {
     }
-    virtual void finish(int r) override {
+    void finish(int r) override {
       if (r >= 0) {
         request->m_appended_op_event = true;
       }
@@ -81,7 +79,7 @@ private:
     C_CommitOpEvent(Request *request, int ret_val)
       : request(request), ret_val(ret_val) {
     }
-    virtual void finish(int r) override {
+    void finish(int r) override {
       request->handle_commit_op_event(r, ret_val);
       delete request;
     }

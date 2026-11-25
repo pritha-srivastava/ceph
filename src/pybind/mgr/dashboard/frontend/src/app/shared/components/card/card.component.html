@@ -1,0 +1,46 @@
+<div
+  class="card flex-fill"
+  [ngClass]="{
+    'border-0': removeBorder,
+    'bg-color': cardType === 'Sync Status Card',
+    shadow: shadow,
+    'shadow-sm': !shadow && cardType !== 'syncCards',
+    'h-100': fullHeight
+  }"
+>
+  @if (cardType !== 'zone') {
+    <h4 class="card-title mt-4 ms-4 mb-0">
+      @if (cardType === '') {
+        <span>{{ cardTitle }}</span>
+      }
+    </h4>
+  }
+  @if (cardType === 'zone') {
+    <h4 class="text-center mt-4 mb-0">
+      <svg
+        [cdsIcon]="icons.deploy"
+        [size]="icons.size20"
+      ></svg>
+      <cds-tag class="tag-info">{{ cardTitle }}</cds-tag>
+    </h4>
+  }
+  @if (cardType === 'syncCards') {
+    <h5 class="text-center card-title">
+      {{ cardTitle }}
+    </h5>
+  }
+  <div
+    class="card-body ps-0 pe-0"
+    [ngClass]="{
+      'd-flex align-items-center': alignItemsCenter,
+      'justify-content-center': justifyContentCenter
+    }"
+  >
+    <ng-content></ng-content>
+  </div>
+  @if (cardFooter) {
+    <div class="card-footer p-0 bg-white">
+      <ng-content select=".footer"></ng-content>
+    </div>
+  }
+</div>

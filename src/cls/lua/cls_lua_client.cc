@@ -1,10 +1,7 @@
-#include <errno.h>
 #include <string>
 #include <vector>
 #include "include/encoding.h"
-#include "include/rados.h"
-#include "include/rados/librados.h"
-#include "include/types.h"
+#include "include/rados/librados.hpp"  // for IoCtx
 #include "cls_lua_client.h"
 #include "cls_lua_ops.h"
 
@@ -12,6 +9,8 @@ using std::string;
 using std::vector;
 using librados::IoCtx;
 using librados::bufferlist;
+
+using namespace cls::lua;
 
 namespace cls_lua_client {
   /*
@@ -30,8 +29,11 @@ namespace cls_lua_client {
     op.input = input;
 
     bufferlist inbl;
-    ::encode(op, inbl);
+    encode(op, inbl);
 
-    return ioctx.exec(oid, "lua", "eval_bufferlist", inbl, output);
+    librados::ObjectWriteOperation wop;
+    int rval;
+    wop.exec(method::eval_bufferlist, inbl, &output, &rval);
+    return ioctx.operate(oid, &wop);
   }
 }

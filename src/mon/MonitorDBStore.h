@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
 * Ceph - scalable distributed file system
 *
@@ -13,8 +14,8 @@
 #ifndef CEPH_MONITOR_DB_STORE_H
 #define CEPH_MONITOR_DB_STORE_H
 
-#include "include/types.h"
-#include "include/buffer.h"
+#include <algorithm>
+#include <filesystem>
 #include <set>
 #include <map>
 #include <string>
@@ -23,23 +24,31 @@
 #include <fstream>
 #include "kv/KeyValueDB.h"
 
-#include "include/assert.h"
-#include "common/Formatter.h"
+#include "include/buffer.h"
+#include "include/ceph_assert.h"
+#include "include/Context.h"
+#include "include/types.h" // for version_t
+#include "common/JSONFormatter.h"
 #include "common/Finisher.h"
 #include "common/errno.h"
+#include "common/Clock.h"
 #include "common/debug.h"
 #include "common/safe_io.h"
+#include "common/strtol.h"
+#include "common/blkdev.h"
+#include "common/PriorityCache.h"
+#include "common/version.h"
 
 #define dout_context g_ceph_context
 
 class MonitorDBStore
 {
-  string path;
+  std::string path;
   boost::scoped_ptr<KeyValueDB> db;
   bool do_dump;
   int dump_fd_binary;
   std::ofstream dump_fd_json;
-  JSONFormatter dump_fmt;
+  ceph::JSONFormatter dump_fmt;
   
 
   Finisher io_work;
@@ -48,135 +57,179 @@ class MonitorDBStore
 
  public:
 
+  std::string get_devname() {
+    char devname[4096] = {0}, partition[4096];
+    get_device_by_path(path.c_str(), partition, devname,
+		       sizeof(devname));
+    return devname;
+  }
+
+  std::string get_path() {
+    return path;
+  }
+
+  // returns the database store path
+  static std::string get_store_path(const std::string& path) {
+    return (std::filesystem::path(path) / "store.db").string();
+  }
+
+  std::shared_ptr<PriorityCache::PriCache> get_priority_cache() const {
+    return db->get_priority_cache();
+  }
+
   struct Op {
     uint8_t type;
-    string prefix;
-    string key, endkey;
-    bufferlist bl;
+    std::string prefix;
+    std::string key, endkey;
+    ceph::buffer::list bl;
 
     Op()
       : type(0) { }
-    Op(int t, string p, string k)
+    Op(int t, const std::string& p, const std::string& k)
       : type(t), prefix(p), key(k) { }
-    Op(int t, const string& p, string k, bufferlist& b)
+    Op(int t, const std::string& p, const std::string& k, const ceph::buffer::list& b)
       : type(t), prefix(p), key(k), bl(b) { }
-    Op(int t, const string& p, string start, string end)
+    Op(int t, const std::string& p, const std::string& start, const std::string& end)
       : type(t), prefix(p), key(start), endkey(end) { }
 
-    void encode(bufferlist& encode_bl) const {
+    void encode(ceph::buffer::list& encode_bl) const {
       ENCODE_START(2, 1, encode_bl);
-      ::encode(type, encode_bl);
-      ::encode(prefix, encode_bl);
-      ::encode(key, encode_bl);
-      ::encode(bl, encode_bl);
-      ::encode(endkey, encode_bl);
+      encode(type, encode_bl);
+      encode(prefix, encode_bl);
+      encode(key, encode_bl);
+      encode(bl, encode_bl);
+      encode(endkey, encode_bl);
       ENCODE_FINISH(encode_bl);
     }
 
-    void decode(bufferlist::iterator& decode_bl) {
+    void decode(ceph::buffer::list::const_iterator& decode_bl) {
       DECODE_START(2, decode_bl);
-      ::decode(type, decode_bl);
-      ::decode(prefix, decode_bl);
-      ::decode(key, decode_bl);
-      ::decode(bl, decode_bl);
+      decode(type, decode_bl);
+      decode(prefix, decode_bl);
+      decode(key, decode_bl);
+      decode(bl, decode_bl);
       if (struct_v >= 2)
-	::decode(endkey, decode_bl);
+	decode(endkey, decode_bl);
       DECODE_FINISH(decode_bl);
     }
 
-    void dump(Formatter *f) const {
+    void dump(ceph::Formatter *f) const {
       f->dump_int("type", type);
       f->dump_string("prefix", prefix);
       f->dump_string("key", key);
-      if (endkey.length())
+      if (endkey.length()) {
 	f->dump_string("endkey", endkey);
+      }
     }
 
-    static void generate_test_instances(list<Op*>& ls) {
-      ls.push_back(new Op);
+    int approx_size() const {
+      return 6 + 1 +
+	4 + prefix.size() +
+	4 + key.size() +
+	4 + endkey.size() +
+	4 + bl.length();
+    }
+
+    static std::list<Op> generate_test_instances() {
+      std::list<Op> ls;
+      ls.emplace_back();
       // we get coverage here from the Transaction instances
+      return ls;
     }
   };
 
   struct Transaction;
-  typedef ceph::shared_ptr<Transaction> TransactionRef;
+  typedef std::shared_ptr<Transaction> TransactionRef;
   struct Transaction {
-    list<Op> ops;
+    std::list<Op> ops;
     uint64_t bytes, keys;
 
-    Transaction() : bytes(0), keys(0) {}
+    Transaction() : bytes(6 + 4 + 8*2), keys(0) {}
 
     enum {
       OP_PUT	= 1,
       OP_ERASE	= 2,
       OP_COMPACT = 3,
+      OP_ERASE_RANGE = 4,
     };
 
-    void put(string prefix, string key, bufferlist& bl) {
+    void put(const std::string& prefix, const std::string& key, const ceph::buffer::list& bl) {
       ops.push_back(Op(OP_PUT, prefix, key, bl));
       ++keys;
-      bytes += prefix.length() + key.length() + bl.length();
+      bytes += ops.back().approx_size();
     }
 
-    void put(string prefix, version_t ver, bufferlist& bl) {
-      ostringstream os;
+    void put(const std::string& prefix, version_t ver, const ceph::buffer::list& bl) {
+      std::ostringstream os;
       os << ver;
       put(prefix, os.str(), bl);
     }
 
-    void put(string prefix, string key, version_t ver) {
-      bufferlist bl;
-      ::encode(ver, bl);
+    void put(const std::string& prefix, const std::string& key, version_t ver) {
+      using ceph::encode;
+      ceph::buffer::list bl;
+      encode(ver, bl);
       put(prefix, key, bl);
     }
 
-    void erase(string prefix, string key) {
+    void erase(const std::string& prefix, const std::string& key) {
       ops.push_back(Op(OP_ERASE, prefix, key));
       ++keys;
-      bytes += prefix.length() + key.length();
+      bytes += ops.back().approx_size();
     }
 
-    void erase(string prefix, version_t ver) {
-      ostringstream os;
+    void erase(const std::string& prefix, version_t ver) {
+      std::ostringstream os;
       os << ver;
       erase(prefix, os.str());
     }
 
-    void compact_prefix(string prefix) {
-      ops.push_back(Op(OP_COMPACT, prefix, string()));
+    void erase_range(const std::string& prefix, const std::string& begin,
+		     const std::string& end) {
+      ops.push_back(Op(OP_ERASE_RANGE, prefix, begin, end));
+      ++keys;
+      bytes += ops.back().approx_size();
     }
 
-    void compact_range(string prefix, string start, string end) {
+    void compact_prefix(const std::string& prefix) {
+      ops.push_back(Op(OP_COMPACT, prefix, {}));
+    }
+
+    void compact_range(const std::string& prefix, const std::string& start,
+		       const std::string& end) {
       ops.push_back(Op(OP_COMPACT, prefix, start, end));
     }
 
-    void encode(bufferlist& bl) const {
+    void encode(ceph::buffer::list& bl) const {
       ENCODE_START(2, 1, bl);
-      ::encode(ops, bl);
-      ::encode(bytes, bl);
-      ::encode(keys, bl);
+      encode(ops, bl);
+      encode(bytes, bl);
+      encode(keys, bl);
       ENCODE_FINISH(bl);
     }
 
-    void decode(bufferlist::iterator& bl) {
+    void decode(ceph::buffer::list::const_iterator& bl) {
       DECODE_START(2, bl);
-      ::decode(ops, bl);
+      decode(ops, bl);
       if (struct_v >= 2) {
-	::decode(bytes, bl);
-	::decode(keys, bl);
+	decode(bytes, bl);
+	decode(keys, bl);
       }
       DECODE_FINISH(bl);
     }
 
-    static void generate_test_instances(list<Transaction*>& ls) {
-      ls.push_back(new Transaction);
-      ls.push_back(new Transaction);
-      bufferlist bl;
+    static std::list<Transaction> generate_test_instances() {
+      std::list<Transaction> ls;
+      ls.emplace_back();
+      ls.emplace_back();
+      ceph::buffer::list bl;
       bl.append("value");
-      ls.back()->put("prefix", "key", bl);
-      ls.back()->erase("prefix2", "key2");
-      ls.back()->compact_prefix("prefix3");
-      ls.back()->compact_range("prefix4", "from", "to");
+      ls.back().put("prefix", "key", bl);
+      ls.back().erase("prefix2", "key2");
+      ls.back().erase_range("prefix3", "key3", "key4");
+      ls.back().compact_prefix("prefix3");
+      ls.back().compact_range("prefix4", "from", "to");
+      return ls;
     }
 
     void append(TransactionRef other) {
@@ -185,9 +238,9 @@ class MonitorDBStore
       bytes += other->bytes;
     }
 
-    void append_from_encoded(bufferlist& bl) {
+    void append_from_encoded(ceph::buffer::list& bl) {
       auto other(std::make_shared<Transaction>());
-      bufferlist::iterator it = bl.begin();
+      auto it = bl.cbegin();
       other->decode(it);
       append(other);
     }
@@ -209,9 +262,8 @@ class MonitorDBStore
     void dump(ceph::Formatter *f, bool dump_val=false) const {
       f->open_object_section("transaction");
       f->open_array_section("ops");
-      list<Op>::const_iterator it;
       int op_num = 0;
-      for (it = ops.begin(); it != ops.end(); ++it) {
+      for (auto it = ops.begin(); it != ops.end(); ++it) {
 	const Op& op = *it;
 	f->open_object_section("op");
 	f->dump_int("op_num", op_num++);
@@ -223,7 +275,7 @@ class MonitorDBStore
 	    f->dump_string("key", op.key);
 	    f->dump_unsigned("length", op.bl.length());
 	    if (dump_val) {
-	      ostringstream os;
+	      std::ostringstream os;
 	      op.bl.hexdump(os);
 	      f->dump_string("bl", os.str());
 	    }
@@ -234,6 +286,14 @@ class MonitorDBStore
 	    f->dump_string("type", "ERASE");
 	    f->dump_string("prefix", op.prefix);
 	    f->dump_string("key", op.key);
+	  }
+	  break;
+	case OP_ERASE_RANGE:
+	  {
+	    f->dump_string("type", "ERASE_RANGE");
+	    f->dump_string("prefix", op.prefix);
+	    f->dump_string("start", op.key);
+	    f->dump_string("end", op.endkey);
 	  }
 	  break;
 	case OP_COMPACT:
@@ -264,8 +324,8 @@ class MonitorDBStore
     KeyValueDB::Transaction dbt = db->get_transaction();
 
     if (do_dump) {
-      if (!g_conf->mon_debug_dump_json) {
-        bufferlist bl;
+      if (!g_conf()->mon_debug_dump_json) {
+        ceph::buffer::list bl;
         t->encode(bl);
         bl.write_fd(dump_fd_binary);
       } else {
@@ -275,10 +335,8 @@ class MonitorDBStore
       }
     }
 
-    list<pair<string, pair<string,string> > > compact;
-    for (list<Op>::const_iterator it = t->ops.begin();
-	 it != t->ops.end();
-	 ++it) {
+    std::list<std::pair<std::string, std::pair<std::string,std::string>>> compact;
+    for (auto it = t->ops.begin(); it != t->ops.end(); ++it) {
       const Op& op = *it;
       switch (op.type) {
       case Transaction::OP_PUT:
@@ -286,6 +344,9 @@ class MonitorDBStore
 	break;
       case Transaction::OP_ERASE:
 	dbt->rmkey(op.prefix, op.key);
+	break;
+      case Transaction::OP_ERASE_RANGE:
+	dbt->rm_range_keys(op.prefix, op.key, op.endkey);
 	break;
       case Transaction::OP_COMPACT:
 	compact.push_back(make_pair(op.prefix, make_pair(op.key, op.endkey)));
@@ -299,15 +360,15 @@ class MonitorDBStore
     int r = db->submit_transaction_sync(dbt);
     if (r >= 0) {
       while (!compact.empty()) {
-	if (compact.front().second.first == string() &&
-	    compact.front().second.second == string())
+	if (compact.front().second.first == std::string() &&
+	    compact.front().second.second == std::string())
 	  db->compact_prefix_async(compact.front().first);
 	else
 	  db->compact_range_async(compact.front().first, compact.front().second.first, compact.front().second.second);
 	compact.pop_front();
       }
     } else {
-      assert(0 == "failed to write to db");
+      ceph_abort_msg("failed to write to db");
     }
     return r;
   }
@@ -320,7 +381,7 @@ class MonitorDBStore
 		    Context *f)
       : store(s), t(t), oncommit(f)
     {}
-    void finish(int r) {
+    void finish(int r) override {
       /* The store serializes writes.  Each transaction is handled
        * sequentially by the io_work Finisher.  If a transaction takes longer
        * to apply its state to permanent storage, then no other transaction
@@ -329,10 +390,10 @@ class MonitorDBStore
        * We will now randomly inject random delays.  We can safely sleep prior
        * to applying the transaction as it won't break the model.
        */
-      double delay_prob = g_conf->mon_inject_transaction_delay_probability;
+      double delay_prob = g_conf()->mon_inject_transaction_delay_probability;
       if (delay_prob && (rand() % 10000 < delay_prob * 10000.0)) {
         utime_t delay;
-        double delay_max = g_conf->mon_inject_transaction_delay_max;
+        double delay_max = g_conf()->mon_inject_transaction_delay_max;
         delay.set_from_double(delay_max * (double)(rand() % 10000) / 10000.0);
         lsubdout(g_ceph_context, mon, 1)
           << "apply_transaction will be delayed for " << delay
@@ -365,76 +426,45 @@ class MonitorDBStore
   class StoreIteratorImpl {
   protected:
     bool done;
-    pair<string,string> last_key;
-    bufferlist crc_bl;
+    std::pair<std::string,std::string> last_key;
+    ceph::buffer::list crc_bl;
 
     StoreIteratorImpl() : done(false) { }
     virtual ~StoreIteratorImpl() { }
-
-    bool add_chunk_entry(TransactionRef tx,
-			 string &prefix,
-			 string &key,
-			 bufferlist &value,
-			 uint64_t max) {
-      auto tmp(std::make_shared<Transaction>());
-      bufferlist tmp_bl;
-      tmp->put(prefix, key, value);
-      tmp->encode(tmp_bl);
-
-      bufferlist tx_bl;
-      tx->encode(tx_bl);
-
-      size_t len = tx_bl.length() + tmp_bl.length();
-
-      if (!tx->empty() && (len > max)) {
-	return false;
-      }
-
-      tx->append(tmp);
-      last_key.first = prefix;
-      last_key.second = key;
-
-      if (g_conf->mon_sync_debug) {
-	::encode(prefix, crc_bl);
-	::encode(key, crc_bl);
-	::encode(value, crc_bl);
-      }
-
-      return true;
-    }
 
     virtual bool _is_valid() = 0;
 
   public:
     __u32 crc() {
-      if (g_conf->mon_sync_debug)
+      if (g_conf()->mon_sync_debug)
 	return crc_bl.crc32c(0);
       return 0;
     }
-    pair<string,string> get_last_key() {
+    std::pair<std::string,std::string> get_last_key() {
       return last_key;
     }
     virtual bool has_next_chunk() {
       return !done && _is_valid();
     }
-    virtual void get_chunk_tx(TransactionRef tx, uint64_t max) = 0;
-    virtual pair<string,string> get_next_key() = 0;
+    virtual void get_chunk_tx(TransactionRef tx, uint64_t max_bytes,
+			      uint64_t max_keys) = 0;
+    virtual std::pair<std::string,std::string> get_next_key() = 0;
   };
-  typedef ceph::shared_ptr<StoreIteratorImpl> Synchronizer;
+  typedef std::shared_ptr<StoreIteratorImpl> Synchronizer;
 
   class WholeStoreIteratorImpl : public StoreIteratorImpl {
     KeyValueDB::WholeSpaceIterator iter;
-    set<string> sync_prefixes;
+    std::set<std::string> sync_prefixes;
 
   public:
     WholeStoreIteratorImpl(KeyValueDB::WholeSpaceIterator iter,
-			   set<string> &prefixes)
+			   std::set<std::string> &prefixes)
       : StoreIteratorImpl(),
 	iter(iter),
 	sync_prefixes(prefixes)
     { }
 
-    virtual ~WholeStoreIteratorImpl() { }
+    ~WholeStoreIteratorImpl() override { }
 
     /**
      * Obtain a chunk of the store
@@ -445,59 +475,78 @@ class MonitorDBStore
      *			    differ from the one passed on to the function)
      * @param last_key[out] Last key in the chunk
      */
-    virtual void get_chunk_tx(TransactionRef tx, uint64_t max) {
-      assert(done == false);
-      assert(iter->valid() == true);
+    void get_chunk_tx(TransactionRef tx, uint64_t max_bytes,
+		      uint64_t max_keys) override {
+      using ceph::encode;
+      ceph_assert(done == false);
+      ceph_assert(iter->valid() == true);
 
       while (iter->valid()) {
-	string prefix(iter->raw_key().first);
-	string key(iter->raw_key().second);
+	std::string prefix(iter->raw_key().first);
+	std::string key(iter->raw_key().second);
 	if (sync_prefixes.count(prefix)) {
-	  bufferlist value = iter->value();
-	  if (!add_chunk_entry(tx, prefix, key, value, max))
+	  ceph::buffer::list value = iter->value();
+	  if (tx->empty() ||
+	      (tx->get_bytes() + value.length() + key.size() +
+	       prefix.size() < max_bytes &&
+	       tx->get_keys() < max_keys)) {
+	    // NOTE: putting every key in a separate transaction is
+	    // questionable as far as efficiency goes
+	    auto tmp(std::make_shared<Transaction>());
+	    tmp->put(prefix, key, value);
+	    tx->append(tmp);
+	    if (g_conf()->mon_sync_debug) {
+	      encode(prefix, crc_bl);
+	      encode(key, crc_bl);
+	      encode(value, crc_bl);
+	    }
+	  } else {
+	    last_key.first = prefix;
+	    last_key.second = key;
 	    return;
+	  }
 	}
 	iter->next();
       }
-      assert(iter->valid() == false);
+      ceph_assert(iter->valid() == false);
       done = true;
     }
 
-    virtual pair<string,string> get_next_key() {
-      assert(iter->valid());
+    std::pair<std::string,std::string> get_next_key() override {
+      ceph_assert(iter->valid());
 
       for (; iter->valid(); iter->next()) {
-        pair<string,string> r = iter->raw_key();
+	std::pair<std::string,std::string> r = iter->raw_key();
         if (sync_prefixes.count(r.first) > 0) {
           iter->next();
           return r;
         }
       }
-      return pair<string,string>();
+      return std::pair<std::string,std::string>();
     }
 
-    virtual bool _is_valid() {
+    bool _is_valid() override {
       return iter->valid();
     }
   };
 
-  Synchronizer get_synchronizer(pair<string,string> &key,
-				set<string> &prefixes) {
+  Synchronizer get_synchronizer(std::pair<std::string,std::string> &key,
+				std::set<std::string> &prefixes) {
     KeyValueDB::WholeSpaceIterator iter;
-    iter = db->get_iterator();
+    iter = db->get_wholespace_iterator();
 
     if (!key.first.empty() && !key.second.empty())
       iter->upper_bound(key.first, key.second);
     else
       iter->seek_to_first();
 
-    return ceph::shared_ptr<StoreIteratorImpl>(
+    return std::shared_ptr<StoreIteratorImpl>(
 	new WholeStoreIteratorImpl(iter, prefixes)
     );
   }
 
-  KeyValueDB::Iterator get_iterator(const string &prefix) {
-    assert(!prefix.empty());
+  KeyValueDB::Iterator get_iterator(const std::string &prefix) {
+    ceph_assert(!prefix.empty());
     KeyValueDB::Iterator iter = db->get_iterator(prefix);
     iter->seek_to_first();
     return iter;
@@ -505,24 +554,25 @@ class MonitorDBStore
 
   KeyValueDB::WholeSpaceIterator get_iterator() {
     KeyValueDB::WholeSpaceIterator iter;
-    iter = db->get_iterator();
+    iter = db->get_wholespace_iterator();
     iter->seek_to_first();
     return iter;
   }
 
-  int get(const string& prefix, const string& key, bufferlist& bl) {
-    assert(bl.length() == 0);
+  int get(const std::string& prefix, const std::string& key, ceph::buffer::list& bl) {
+    ceph_assert(bl.length() == 0);
     return db->get(prefix, key, &bl);
   }
 
-  int get(const string& prefix, const version_t ver, bufferlist& bl) {
-    ostringstream os;
+  int get(const std::string& prefix, const version_t ver, ceph::buffer::list& bl) {
+    std::ostringstream os;
     os << ver;
     return get(prefix, os.str(), bl);
   }
 
-  version_t get(const string& prefix, const string& key) {
-    bufferlist bl;
+  version_t get(const std::string& prefix, const std::string& key) {
+    using ceph::decode;
+    ceph::buffer::list bl;
     int err = get(prefix, key, bl);
     if (err < 0) {
       if (err == -ENOENT) // if key doesn't exist, assume its value is 0
@@ -532,17 +582,17 @@ class MonitorDBStore
       generic_dout(0) << "MonitorDBStore::get() error obtaining"
                       << " (" << prefix << ":" << key << "): "
                       << cpp_strerror(err) << dendl;
-      assert(0 == "error obtaining key");
+      ceph_abort_msg("error obtaining key");
     }
 
-    assert(bl.length());
+    ceph_assert(bl.length());
     version_t ver;
-    bufferlist::iterator p = bl.begin();
-    ::decode(ver, p);
+    auto p = bl.cbegin();
+    decode(ver, p);
     return ver;
   }
 
-  bool exists(const string& prefix, const string& key) {
+  bool exists(const std::string& prefix, const std::string& key) {
     KeyValueDB::Iterator it = db->get_iterator(prefix);
     int err = it->lower_bound(key);
     if (err < 0)
@@ -551,46 +601,45 @@ class MonitorDBStore
     return (it->valid() && it->key() == key);
   }
 
-  bool exists(const string& prefix, version_t ver) {
-    ostringstream os;
+  bool exists(const std::string& prefix, version_t ver) {
+    std::ostringstream os;
     os << ver;
     return exists(prefix, os.str());
   }
 
-  string combine_strings(const string& prefix, const string& value) {
-    string out = prefix;
+  std::string combine_strings(const std::string& prefix, const std::string& value) {
+    std::string out = prefix;
     out.push_back('_');
     out.append(value);
     return out;
   }
 
-  string combine_strings(const string& prefix, const version_t ver) {
-    ostringstream os;
+  std::string combine_strings(const std::string& prefix, const version_t ver) {
+    std::ostringstream os;
     os << ver;
     return combine_strings(prefix, os.str());
   }
 
-  void clear(set<string>& prefixes) {
-    set<string>::iterator iter;
+  int clear_key(const std::string& prefix, const std::string& key) {
+    ceph_assert(!prefix.empty());
+    ceph_assert(!key.empty());
+    KeyValueDB::Transaction dbt = db->get_transaction();
+    dbt->rmkey(prefix, key);
+    return db->submit_transaction_sync(dbt);
+  }
+
+  void clear(std::set<std::string>& prefixes) {
     KeyValueDB::Transaction dbt = db->get_transaction();
 
-    for (iter = prefixes.begin(); iter != prefixes.end(); ++iter) {
+    for (auto iter = prefixes.begin(); iter != prefixes.end(); ++iter) {
       dbt->rmkeys_by_prefix((*iter));
     }
     int r = db->submit_transaction_sync(dbt);
-    assert(r >= 0);
+    ceph_assert(r >= 0);
   }
 
-  void _open(string kv_type) {
-    string::const_reverse_iterator rit;
-    int pos = 0;
-    for (rit = path.rbegin(); rit != path.rend(); ++rit, ++pos) {
-      if (*rit != '/')
-	break;
-    }
-    ostringstream os;
-    os << path.substr(0, path.size() - pos) << "/store.db";
-    string full_path = os.str();
+  void _open(const std::string& kv_type) {
+    std::string full_path = get_store_path(path);
 
     KeyValueDB *db_ptr = KeyValueDB::create(g_ceph_context,
 					    kv_type,
@@ -599,15 +648,15 @@ class MonitorDBStore
       derr << __func__ << " error initializing "
 	   << kv_type << " db back storage in "
 	   << full_path << dendl;
-      assert(0 == "MonitorDBStore: error initializing keyvaluedb back storage");
+      ceph_abort_msg("MonitorDBStore: error initializing keyvaluedb back storage");
     }
     db.reset(db_ptr);
 
-    if (g_conf->mon_debug_dump_transactions) {
-      if (!g_conf->mon_debug_dump_json) {
+    if (g_conf()->mon_debug_dump_transactions) {
+      if (!g_conf()->mon_debug_dump_json) {
         dump_fd_binary = ::open(
-          g_conf->mon_debug_dump_location.c_str(),
-          O_CREAT|O_APPEND|O_WRONLY, 0644);
+          g_conf()->mon_debug_dump_location.c_str(),
+          O_CREAT|O_APPEND|O_WRONLY|O_CLOEXEC, 0644);
         if (dump_fd_binary < 0) {
           dump_fd_binary = -errno;
           derr << "Could not open log file, got "
@@ -616,38 +665,64 @@ class MonitorDBStore
       } else {
         dump_fmt.reset();
         dump_fmt.open_array_section("dump");
-        dump_fd_json.open(g_conf->mon_debug_dump_location.c_str());
+        dump_fd_json.open(g_conf()->mon_debug_dump_location.c_str());
       }
       do_dump = true;
     }
     if (kv_type == "rocksdb")
-      db->init(g_conf->mon_rocksdb_options);
+      db->init(g_conf()->mon_rocksdb_options);
     else
       db->init();
+
+
   }
 
-  int open(ostream &out) {
-    string kv_type;
+  int open(std::ostream &out) {
+    std::string kv_type;
     int r = read_meta("kv_backend", &kv_type);
-    if (r < 0 || kv_type.length() == 0)
-      kv_type = "leveldb";
-
+    if (r < 0 || kv_type.empty()) {
+      // assume old monitors that did not mark the type were RocksDB.
+      kv_type = "rocksdb";
+      r = write_meta("kv_backend", kv_type);
+      if (r < 0)
+	return r;
+    }
     _open(kv_type);
     r = db->open(out);
     if (r < 0)
       return r;
+
+    // Monitors are few in number, so the resource cost of exposing
+    // very detailed stats is low: ramp up the priority of all the
+    // KV store's perf counters.  Do this after open, because backend may
+    // not have constructed PerfCounters earlier.
+    if (db->get_perf_counters()) {
+      db->get_perf_counters()->set_prio_adjust(
+          PerfCountersBuilder::PRIO_USEFUL - PerfCountersBuilder::PRIO_DEBUGONLY);
+    }
+
     io_work.start();
     is_open = true;
     return 0;
   }
 
-  int create_and_open(ostream &out) {
+  int create_and_open(std::ostream &out) {
+    int r = write_meta("ceph_version_when_created", pretty_version_to_str());
+    if (r < 0)
+      return r;
+
+    std::ostringstream created_at;
+    utime_t now = ceph_clock_now();
+    now.gmtime(created_at);
+    r = write_meta("created_at", created_at.str());
+    if (r < 0)
+      return r;
+
     // record the type before open
-    string kv_type;
-    int r = read_meta("kv_backend", &kv_type);
+    std::string kv_type;
+    r = read_meta("kv_backend", &kv_type);
     if (r < 0) {
-      // assume old monitors that did not mark the type were leveldb.
-      kv_type = "leveldb";
+      kv_type = g_conf()->mon_keyvaluedb;
       r = write_meta("kv_backend", kv_type);
       if (r < 0)
 	return r;
@@ -663,20 +738,219 @@ class MonitorDBStore
 
   void close() {
     // there should be no work queued!
+    ceph_assert(io_work.is_empty());
     io_work.stop();
     is_open = false;
     db.reset(NULL);
+  }
+
+  /// @brief Creates a backup of the database under mon_backup_path.
+  /// @return stats describing the created backup
+  KeyValueDB::BackupStats backup() {
+    auto backup_path = g_conf().get_val<std::string>("mon_backup_path");
+    auto stats = db->backup(backup_path);
+    if (!stats.error) {
+      // Stash the mon keyring alongside the rocksdb backup, keyed by
+      // backup id, so a restore of an older version is paired with the
+      // keyring of that vintage. The [mon.] secret can rotate; using a
+      // single fixed filename would break authentication after restore.
+      std::error_code ec;
+      auto dest = backup_path + "/keyring." + std::to_string(stats.id);
+      std::filesystem::copy_file(
+        path + "/keyring", dest,
+        std::filesystem::copy_options::overwrite_existing, ec);
+      if (!ec) {
+        std::filesystem::permissions(dest,
+          std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+          std::filesystem::perm_options::replace, ec);
+      }
+      if (ec) {
+        // Best-effort: a rocksdb backup without a stashed keyring is still
+        // valid; the operator can supply a keyring out-of-band on restore.
+        derr << __func__ << " failed to stash keyring at "
+             << dest << ": " << ec.message() << dendl;
+      }
+    }
+    return stats;
+  }
+
+  /// @brief Remove old backups in mon_backup_path according to the retention config.
+  /// @return stats describing what was kept, deleted, and freed
+  KeyValueDB::BackupCleanupStats backup_cleanup() {
+    auto backup_path = g_conf().get_val<std::string>("mon_backup_path");
+    auto stats = db->backup_cleanup(
+      backup_path,
+      g_conf().get_val<uint64_t>("mon_backup_keep_last"),
+      g_conf().get_val<uint64_t>("mon_backup_keep_hourly"),
+      g_conf().get_val<uint64_t>("mon_backup_keep_daily"));
+    if (stats.error) {
+      return stats;
+    }
+    // Remove keyring.<id> files for backup ids the kv layer just dropped.
+    std::string kv_type;
+    if (read_meta("kv_backend", &kv_type) < 0 || kv_type.empty()) {
+      kv_type = "rocksdb";
+    }
+    std::set<uint64_t> surviving;
+    auto remaining = KeyValueDB::list_backups(g_ceph_context, kv_type, backup_path);
+    if (!remaining) {
+      return stats;
+    }
+    for (const auto& b : *remaining) {
+      surviving.insert(b.id);
+    }
+    std::error_code ec;
+    for (auto it = std::filesystem::directory_iterator(backup_path, ec);
+         it != std::filesystem::directory_iterator();
+         it.increment(ec)) {
+      auto name = it->path().filename().string();
+      if (name.compare(0, 8, "keyring.") != 0) {
+        continue;
+      }
+      std::string idstr = name.substr(8);
+      std::string parse_err;
+      long long id = strict_strtoll(idstr.c_str(), 10, &parse_err);
+      if (!parse_err.empty() || id < 0) {
+        continue;
+      }
+      if (surviving.count(static_cast<uint64_t>(id))) {
+        continue;
+      }
+      std::error_code rm_ec;
+      std::filesystem::remove(it->path(), rm_ec);
+    }
+    return stats;
+  }
+
+  /// @brief List all backup versions at backup_path.
+  /// @param cct ceph context
+  /// @param path path to the local mon data dir (used to discover the kv backend)
+  /// @param backup_path path to the backup location
+  /// @return list of BackupStats, one per backup
+  static std::optional<std::vector<KeyValueDB::BackupStats>> list_backups(
+    CephContext *cct, const std::string &path, const std::string &backup_path) {
+    std::string kv_type;
+    int r = read_meta_path("kv_backend", &kv_type, path);
+    if (r < 0 || kv_type.empty()) {
+      // Disaster recovery: mon_data may be empty or absent. We only ship
+      // a rocksdb kv backend today, so default to it for enumeration.
+      kv_type = "rocksdb";
+    }
+    return KeyValueDB::list_backups(cct, kv_type, backup_path);
+  }
+
+
+  /// @brief Restore the backup with the given version from backup_path into path.
+  /// @param cct ceph context
+  /// @param path path to the local mon data dir to restore into
+  /// @param backup_path path to the backup location
+  /// @param version version of the backup to restore (nullopt for latest)
+  /// @return true on success
+  static bool restore_backup(CephContext *cct, const std::string &path,
+                             const std::string &backup_path,
+                             const std::optional<uint32_t> &version) {
+    std::string kv_type;
+    int r = read_meta_path("kv_backend", &kv_type, path);
+    if (r < 0 || kv_type.empty()) {
+      // Disaster recovery: mon_data is empty or freshly initialized, so
+      // there is no kv_backend marker. Default to rocksdb and stamp the
+      // file back so the subsequent open() finds it.
+      kv_type = "rocksdb";
+      std::error_code ec;
+      std::filesystem::create_directories(path, ec);
+      if (ec) {
+        lderr(cct) << __func__ << " failed to create " << path
+                   << ": " << ec.message() << dendl;
+        return false;
+      }
+      std::filesystem::permissions(path,
+        std::filesystem::perms::owner_all,
+        std::filesystem::perm_options::replace, ec);
+      const std::string v = kv_type + "\n";
+      if (safe_write_file(path.c_str(), "kv_backend",
+                          v.c_str(), v.length(), 0600) < 0) {
+        lderr(cct) << __func__ << " failed to write kv_backend in "
+                   << path << dendl;
+        return false;
+      }
+    }
+    std::string store_path = get_store_path(path);
+
+    // Resolve "latest" up front so we know which versioned keyring to
+    // rehydrate alongside the rocksdb restore. Pick by BackupEngine id
+    // (monotonic per rocksdb) rather than timestamp, so a clock skew
+    // between backups cannot make the default restore pick a stale one.
+    uint32_t resolved_version;
+    if (version) {
+      resolved_version = *version;
+    } else {
+      auto backups = KeyValueDB::list_backups(cct, kv_type, backup_path);
+      if (!backups || backups->empty()) {
+        lderr(cct) << __func__ << " no backups found at " << backup_path << dendl;
+        return false;
+      }
+      resolved_version = std::max_element(
+        backups->begin(), backups->end(),
+        [](const auto& a, const auto& b) { return a.id < b.id; })->id;
+    }
+
+    if (!KeyValueDB::restore_backup(cct, kv_type, store_path, backup_path,
+                                    resolved_version)) {
+      return false;
+    }
+
+    // Rehydrate the matching keyring (skipped silently if the operator
+    // keeps the keyring out-of-band).
+    std::error_code ec;
+    auto keyring_src = backup_path + "/keyring." + std::to_string(resolved_version);
+    if (std::filesystem::exists(keyring_src, ec)) {
+      std::filesystem::copy_file(
+        keyring_src,
+        path + "/keyring",
+        std::filesystem::copy_options::overwrite_existing,
+        ec);
+      if (ec) {
+        lderr(cct) << __func__ << " failed to restore keyring from "
+                   << keyring_src << ": " << ec.message() << dendl;
+        return false;
+      }
+    }
+
+    // The mon store holds auth, config-key and dm-crypt secrets;
+    // tighten everything we just restored to owner-only.
+    std::filesystem::permissions(path,
+      std::filesystem::perms::owner_all,
+      std::filesystem::perm_options::replace, ec);
+    for (auto it = std::filesystem::recursive_directory_iterator(path, ec);
+         it != std::filesystem::recursive_directory_iterator();
+         it.increment(ec)) {
+      std::error_code ec_chmod;
+      auto perms = it->is_directory(ec_chmod)
+        ? std::filesystem::perms::owner_all
+        : (std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
+      std::filesystem::permissions(it->path(), perms,
+        std::filesystem::perm_options::replace, ec_chmod);
+      if (ec_chmod) {
+        lderr(cct) << __func__ << " failed to chmod " << it->path()
+                   << ": " << ec_chmod.message() << dendl;
+      }
+    }
+    return true;
   }
 
   void compact() {
     db->compact();
   }
 
-  void compact_prefix(const string& prefix) {
+  void compact_async() {
+    db->compact_async();
+  }
+
+  void compact_prefix(const std::string& prefix) {
     db->compact_prefix(prefix);
   }
 
-  uint64_t get_estimated_size(map<string, uint64_t> &extras) {
+  uint64_t get_estimated_size(std::map<std::string, uint64_t> &extras) {
     return db->get_estimated_size(extras);
   }
 
@@ -696,10 +970,11 @@ class MonitorDBStore
    */
   int write_meta(const std::string& key,
 		 const std::string& value) const {
-    string v = value;
+    std::string v = value;
     v += "\n";
     int r = safe_write_file(path.c_str(), key.c_str(),
-			    v.c_str(), v.length());
+			    v.c_str(), v.length(),
+			    0600);
     if (r < 0)
       return r;
     return 0;
@@ -708,7 +983,7 @@ class MonitorDBStore
   /**
    * read_meta - read a simple configuration key out-of-band
    *
-   * Read a simple key value to an unopened/mounted store.
+   * Read a simple key value from an unopened/unmounted store.
    *
    * Trailing whitespace is stripped off.
    *
@@ -718,6 +993,24 @@ class MonitorDBStore
    */
   int read_meta(const std::string& key,
 		std::string *value) const {
+    return read_meta_path(key, value, path);
+  }
+
+  /**
+   * read_meta_path - read a simple configuration key out-of-band
+   *
+   * Read a simple key value from a specified path store.
+   *
+   * Trailing whitespace is stripped off.
+   *
+   * @param key key name
+   * @param value pointer to value string
+   * @param path path to directory
+   * @returns 0 for success, or an error code
+   */
+  static int read_meta_path(const std::string& key,
+                            std::string *value,
+                            const std::string& path) {
     char buf[4096];
     int r = safe_read_file(path.c_str(), key.c_str(),
 			   buf, sizeof(buf));
@@ -727,11 +1020,11 @@ class MonitorDBStore
     while (r && isspace(buf[r-1])) {
       --r;
     }
-    *value = string(buf, r);
+    *value = std::string(buf, r);
     return 0;
   }
 
-  explicit MonitorDBStore(const string& path)
+  explicit MonitorDBStore(const std::string& path)
     : path(path),
       db(0),
       do_dump(false),
@@ -741,9 +1034,9 @@ class MonitorDBStore
       is_open(false) {
   }
   ~MonitorDBStore() {
-    assert(!is_open);
+    ceph_assert(!is_open);
     if (do_dump) {
-      if (!g_conf->mon_debug_dump_json) {
+      if (!g_conf()->mon_debug_dump_json) {
         ::close(dump_fd_binary);
       } else {
         dump_fmt.close_section();

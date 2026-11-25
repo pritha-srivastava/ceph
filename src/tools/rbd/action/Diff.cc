@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "tools/rbd/ArgumentTypes.h"
 #include "tools/rbd/Shell.h"
@@ -35,7 +35,7 @@ static int diff_cb(uint64_t ofs, size_t len, int exists, void *arg)
     om->f->dump_string("exists", exists ? "true" : "false");
     om->f->close_section();
   } else {
-    assert(om->t);
+    ceph_assert(om->t);
     *(om->t) << ofs << len << (exists ? "data" : "zero") << TextTable::endrow;
   }
   return 0;
@@ -86,14 +86,16 @@ void get_arguments(po::options_description *positional,
   at::add_format_options(options);
 }
 
-int execute(const po::variables_map &vm) {
+int execute(const po::variables_map &vm,
+            const std::vector<std::string> &ceph_global_init_args) {
   size_t arg_index = 0;
   std::string pool_name;
+  std::string namespace_name;
   std::string image_name;
   std::string snap_name;
   int r = utils::get_pool_image_snapshot_names(
-    vm, at::ARGUMENT_MODIFIER_NONE, &arg_index, &pool_name, &image_name,
-    &snap_name, utils::SNAPSHOT_PRESENCE_PERMITTED,
+    vm, at::ARGUMENT_MODIFIER_NONE, &arg_index, &pool_name, &namespace_name,
+    &image_name, &snap_name, true, utils::SNAPSHOT_PRESENCE_PERMITTED,
     utils::SPEC_VALIDATION_NONE);
   if (r < 0) {
     return r;
@@ -115,8 +117,8 @@ int execute(const po::variables_map &vm) {
   librados::Rados rados;
   librados::IoCtx io_ctx;
   librbd::Image image;
-  r = utils::init_and_open_image(pool_name, image_name, snap_name, true,
-                                 &rados, &io_ctx, &image);
+  r = utils::init_and_open_image(pool_name, namespace_name, image_name, "",
+                                 snap_name, true, &rados, &io_ctx, &image);
   if (r < 0) {
     return r;
   }
@@ -130,7 +132,6 @@ int execute(const po::variables_map &vm) {
   return 0;
 }
 
-Shell::SwitchArguments switched_arguments({at::WHOLE_OBJECT});
 Shell::Action action(
   {"diff"}, {},
   "Print extents that differ since a previous snap, or image creation.", "",

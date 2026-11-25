@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,12 +15,20 @@
 
 #ifndef MON_OPREQUEST_H_
 #define MON_OPREQUEST_H_
+
 #include <iosfwd>
+#include <string>
+
 #include <stdint.h>
 
+#include <boost/intrusive_ptr.hpp>
+
+#include "common/Formatter.h"
+#include "common/RefCountedObj.h"
 #include "common/TrackedOp.h"
-#include "include/memory.h"
+#include "include/Context.h"
 #include "mon/Session.h"
+#include "msg/Connection.h"
 #include "msg/Message.h"
 
 struct MonOpRequest : public TrackedOp {
@@ -39,28 +48,28 @@ struct MonOpRequest : public TrackedOp {
     forwarded_to_leader = true;
   }
 
-  void mark_svc_event(const string &service, const string &event) {
-    string s = service;
+  void mark_svc_event(const std::string &service, const std::string &event) {
+    std::string s = service;
     s.append(":").append(event);
-    mark_event_string(s);
+    mark_event(s);
   }
 
-  void mark_logmon_event(const string &event) {
+  void mark_logmon_event(const std::string &event) {
     mark_svc_event("logm", event);
   }
-  void mark_osdmon_event(const string &event) {
+  void mark_osdmon_event(const std::string &event) {
     mark_svc_event("osdmap", event);
   }
-  void mark_pgmon_event(const string &event) {
+  void mark_pgmon_event(const std::string &event) {
     mark_svc_event("pgmap", event);
   }
-  void mark_mdsmon_event(const string &event) {
+  void mark_mdsmon_event(const std::string &event) {
     mark_svc_event("mdsmap", event);
   }
-  void mark_authmon_event(const string &event) {
+  void mark_authmon_event(const std::string &event) {
     mark_svc_event("auth", event);
   }
-  void mark_paxos_event(const string &event) {
+  void mark_paxos_event(const std::string &event) {
     mark_svc_event("paxos", event);
   }
 
@@ -80,7 +89,7 @@ struct MonOpRequest : public TrackedOp {
 private:
   Message *request;
   utime_t dequeued_time;
-  MonSession *session;
+  RefCountedPtr session;
   ConnectionRef con;
   bool forwarded_to_leader;
   op_type_t op_type;
@@ -88,33 +97,39 @@ private:
   MonOpRequest(Message *req, OpTracker *tracker) :
     TrackedOp(tracker,
       req->get_recv_stamp().is_zero() ?
-      req->get_recv_stamp() : ceph_clock_now()),
+      ceph_clock_now() : req->get_recv_stamp()),
     request(req),
-    session(NULL),
     con(NULL),
     forwarded_to_leader(false),
     op_type(OP_TYPE_NONE)
   {
-    mark_event("header_read", request->get_recv_stamp());
-    mark_event("throttled", request->get_throttle_stamp());
-    mark_event("all_read", request->get_recv_complete_stamp());
-    mark_event("dispatched", request->get_dispatch_stamp());
-
     if (req) {
       con = req->get_connection();
       if (con) {
-        session = static_cast<MonSession*>(con->get_priv());
+        session = con->get_priv();
       }
     }
   }
 
-  void _dump(Formatter *f) const {
+  void _dump(ceph::Formatter *f) const override {
     {
       f->open_array_section("events");
-      Mutex::Locker l(lock);
-      for (auto& i : events) {
-	f->dump_object("event", i);
+      std::lock_guard l(lock);
+    for (auto i = events.begin(); i != events.end(); ++i) {
+      f->open_object_section("event");
+      f->dump_string("event", i->str);
+      f->dump_stream("time") << i->stamp;
+
+      auto i_next = i + 1;
+
+      if (i_next < events.end()) {
+	f->dump_float("duration", i_next->stamp - i->stamp);
+      } else {
+	f->dump_float("duration", events.rbegin()->stamp - get_initiated());
       }
+
+      f->close_section();
+    }
       f->close_section();
       f->open_object_section("info");
       f->dump_int("seq", seq);
@@ -126,22 +141,17 @@ private:
   }
 
 protected:
-  void _dump_op_descriptor_unlocked(ostream& stream) const {
+  void _dump_op_descriptor(std::ostream& stream) const override {
     get_req()->print(stream);
   }
 
 public:
-  ~MonOpRequest() {
+  ~MonOpRequest() override {
     request->put();
-    // certain ops may not have a session (e.g., AUTH or PING)
-    if (session)
-      session->put();
   }
 
   MonSession *get_session() const {
-    if (!session)
-      return NULL;
-    return session;
+    return static_cast<MonSession*>(session.get());
   }
 
   template<class T>
@@ -158,16 +168,7 @@ public:
   ConnectionRef get_connection() { return con; }
 
   void set_session(MonSession *s) {
-    if (session) {
-      // we will be rewriting the existing session; drop the ref.
-      session->put();
-    }
-
-    if (s == NULL) {
-      session = NULL;
-    } else {
-      session = static_cast<MonSession*>(s->get());
-    }
+    session.reset(s);
   }
 
   bool is_src_mon() const {
@@ -188,7 +189,7 @@ public:
   void set_type_paxos() {
     set_op_type(OP_TYPE_PAXOS);
   }
-  void set_type_election() {
+  void set_type_election_or_ping() {
     set_op_type(OP_TYPE_ELECTION);
   }
   void set_type_command() {
@@ -208,7 +209,7 @@ public:
   bool is_type_paxos() {
     return (get_op_type() == OP_TYPE_PAXOS);
   }
-  bool is_type_election() {
+  bool is_type_election_or_ping() {
     return (get_op_type() == OP_TYPE_ELECTION);
   }
   bool is_type_command() {
@@ -217,5 +218,31 @@ public:
 };
 
 typedef MonOpRequest::Ref MonOpRequestRef;
+
+struct C_MonOp : public Context
+{
+  MonOpRequestRef op;
+
+  explicit C_MonOp(MonOpRequestRef o) :
+    op(o) { }
+
+  void finish(int r) override {
+    if (op && r == -ECANCELED) {
+      op->mark_event("callback canceled");
+    } else if (op && r == -EAGAIN) {
+      op->mark_event("callback retry");
+    } else if (op && r == 0) {
+      op->mark_event("callback finished");
+    }
+    _finish(r);
+  }
+
+  void mark_op_event(const std::string &event) {
+    if (op)
+      op->mark_event(event);
+  }
+
+  virtual void _finish(int r) = 0;
+};
 
 #endif /* MON_OPREQUEST_H_ */

@@ -1,12 +1,13 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #include "common/ContextCompletion.h"
 
 namespace ceph
 {
 
 ContextCompletion::ContextCompletion(Context *ctx, bool ignore_enoent)
-  : m_lock("ceph::ContextCompletion::m_lock"), m_ctx(ctx),
+  : m_ctx(ctx),
     m_ignore_enoent(ignore_enoent), m_ret(0), m_building(true), m_current_ops(0)
 {
 }
@@ -14,7 +15,7 @@ ContextCompletion::ContextCompletion(Context *ctx, bool ignore_enoent)
 void ContextCompletion::finish_adding_requests() {
   bool complete;
   {
-    Mutex::Locker l(m_lock);
+    std::lock_guard l(m_lock);
     m_building = false;
     complete = (m_current_ops == 0);
   }
@@ -25,14 +26,14 @@ void ContextCompletion::finish_adding_requests() {
 }
 
 void ContextCompletion::start_op() {
-  Mutex::Locker l(m_lock);
+  std::lock_guard l(m_lock);
   ++m_current_ops;
 }
 
 void ContextCompletion::finish_op(int r) {
   bool complete;
   {
-    Mutex::Locker l(m_lock);
+    std::lock_guard l(m_lock);
     if (r < 0 && m_ret == 0 && (!m_ignore_enoent || r != -ENOENT)) {
       m_ret = r;
     }

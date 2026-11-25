@@ -1,0 +1,1794 @@
+from typing import (
+    Any,
+    Collection,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    Type,
+    Union,
+    cast,
+)
+
+import contextlib
+import dataclasses
+import fnmatch
+import logging
+import time
+
+import ceph.smb.constants
+from ceph.deployment.service_spec import (
+    SMBExternalCephCluster,
+    SMBSpec,
+    SSLParameters,
+)
+from ceph.fs.earmarking import EarmarkTopScope
+
+from . import config_store, external, resources, rgw
+from .enums import (
+    ACLSupportPolicy,
+    AuthMode,
+    CephFSStorageProvider,
+    HostAccess,
+    JoinSourceType,
+    KeyBridgePeerPolicy,
+    KeyBridgeScopeType,
+    LoginAccess,
+    LoginCategory,
+    State,
+    UserGroupSourceType,
+)
+from .internal import (
+    ClusterEntry,
+    CommonResourceEntry,
+    ExternalCephClusterEntry,
+    JoinAuthEntry,
+    RGWCredentialEntry,
+    ShareEntry,
+    TLSCredentialEntry,
+    UsersAndGroupsEntry,
+    map_resource_entry,
+)
+from .proto import (
+    AccessAuthorizer,
+    ConfigEntry,
+    ConfigStore,
+    EarmarkResolver,
+    MonCommandIssuer,
+    OrchSubmitter,
+    PathResolver,
+    Self,
+    Simplified,
+)
+from .resources import SMBResource
+from .results import ErrorResult, ResourceResult, Result, ResultGroup
+from .rgw_auth import RGWAuthorizer
+from .staging import (
+    CrossCheckToolbox,
+    Staging,
+    auth_refs,
+    cross_check_resource,
+    ext_cluster_refs,
+    rgw_credential_refs,
+    tls_refs,
+    ug_refs,
+)
+from .utils import checked, ynbool
+
+ClusterRef = Union[resources.Cluster, resources.RemovedCluster]
+ShareRef = Union[resources.Share, resources.RemovedShare]
+
+_DOMAIN = 'domain'
+_CLUSTERED = 'clustered'
+_CEPHFS_PROXY = 'cephfs-proxy'
+_REMOTE_CONTROL = 'remote-control'
+_KEYBRIDGE = 'keybridge'
+_ACL_XATTR = 'acl_xattr'
+log = logging.getLogger(__name__)
+
+
+class InvalidResourceMatch(ValueError):
+    pass
+
+
+class ClusterChangeGroup:
+    """A bag of holding for items being modified and thus needing synchronizing
+    with the external stores & components.
+    """
+
+    def __init__(
+        self,
+        cluster: ClusterRef,
+        shares: List[resources.Share],
+        join_auths: List[resources.JoinAuth],
+        users_and_groups: List[resources.UsersAndGroups],
+        tls_credentials: List[resources.TLSCredential],
+        rgw_credentials: List[resources.RGWCredential],
+        ext_ceph_clusters: List[resources.ExternalCephCluster],
+    ):
+        self.cluster = cluster
+        self.shares = shares
+        self.join_auths = join_auths
+        self.users_and_groups = users_and_groups
+        self.tls_credentials = tls_credentials
+        self.rgw_credentials = rgw_credentials
+        self.ext_ceph_clusters = ext_ceph_clusters
+        # a cache for modified entries
+        self.cache = config_store.EntryCache()
+
+    def cache_updated_entry(self, entry: ConfigEntry) -> None:
+        self.cache[entry.full_key] = entry
+
+
+class _FakePathResolver:
+    """A stub PathResolver for unit testing."""
+
+    _result_resolve_case_sensitivity = (False, False)
+
+    def resolve(
+        self, volume: str, subvolumegroup: str, subvolume: str, path: str
+    ) -> str:
+        path = path.lstrip('/')
+        if subvolumegroup or subvolume:
+            import uuid
+
+            # mimic the uuid found in a real ceph subvolume path
+            # by deriving a uuid from the existing values we have
+            vid = str(
+                uuid.uuid3(
+                    uuid.NAMESPACE_URL,
+                    f'cephfs+{volume}:{subvolumegroup}:{subvolume}',
+                )
+            )
+            subvolumegroup = subvolumegroup or '_nogroup'
+            return f'/volumes/{subvolumegroup}/{subvolume}/{vid}/{path}'
+        return f'/{path}'
+
+    resolve_exists = resolve
+
+    def resolve_case_sensitivity(
+        self, volume: str, subvolumegroup: str, subvolume: str, path: str
+    ) -> Tuple[bool, bool]:
+        return self._result_resolve_case_sensitivity
+
+
+class ExoResolver:
+    def __init__(self, cluster: resources.Cluster) -> None:
+        self._cluster = cluster
+
+    def resolve(
+        self, volume: str, subvolumegroup: str, subvolume: str, path: str
+    ) -> str:
+        assert not subvolumegroup
+        assert not subvolume
+        return path
+
+    resolve_exists = resolve
+
+
+class _FakeEarmarkResolver:
+    """A stub EarmarkResolver for unit testing."""
+
+    def __init__(self) -> None:
+        self._earmarks: Dict[Tuple[str, str], str] = {}
+
+    def get_earmark(self, path: str, volume: str) -> Optional[str]:
+        return None
+
+    def set_earmark(self, path: str, volume: str, earmark: str) -> None:
+        pass
+
+    def check_earmark(
+        self, earmark: str, top_level_scope: EarmarkTopScope
+    ) -> bool:
+        return True
+
+
+class _FakeAuthorizer:
+    """A stub AccessAuthorizer for unit testing."""
+
+    def authorize_entity(
+        self, volume: str, entity: str, caps: str = ''
+    ) -> None:
+        pass
+
+
+class _FakeMonCommandIssuer:
+    """A stub MonCommandIssuer for unit testing."""
+
+    def mon_command(
+        self, cmd_dict: dict, inbuf: Optional[str] = None
+    ) -> Tuple[int, str, str]:
+        return (0, '', '')
+
+
+class _Matcher:
+    _match_resources = (
+        resources.Cluster,
+        resources.Share,
+        resources.JoinAuth,
+        resources.UsersAndGroups,
+        resources.TLSCredential,
+        resources.RGWCredential,
+        resources.ExternalCephCluster,
+    )
+
+    def __init__(self) -> None:
+        self._contents: Set[Any] = set()
+        self._inputs: Set[str] = set()
+        self._wildcards: Set[tuple[Any, ...]] = set()
+
+    def __str__(self) -> str:
+        if not self._contents:
+            return 'match-all'
+        return 'match-resources:' + ','.join(self._inputs)
+
+    def __contains__(self, value: Any) -> bool:
+        if not self._contents:
+            return True
+        if not isinstance(value, tuple):
+            return value in self._contents
+        assert len(value) > 1
+        return (
+            # match a specific resource id
+            value in self._contents
+            # match all ids of a given resource type
+            or (value[0], None) in self._contents
+            # match a all partial ids (shares only)
+            or (
+                len(value) == 3
+                and (value[0], value[1], None) in self._contents
+            )
+            or self._wildmatch(value)
+        )
+
+    def _wildmatch(self, value: tuple[Any]) -> bool:
+        if not self._wildcards:
+            return False
+        if not value:
+            return False
+        head, tail = value[:-1], value[-1]
+        return any(
+            fnmatch.fnmatch(tail, wild[-1])
+            for wild in self._wildcards
+            if head == wild[:-1]
+        )
+
+    def parse(self, txt: str, *, wildcard: bool = False) -> None:
+        rtypes: Dict[str, Any] = {
+            cast(Any, r).resource_type: r for r in self._match_resources
+        }
+        if txt in rtypes:
+            resource_cls = rtypes[txt]
+            self._contents.add(resource_cls)
+            self._contents.add((resource_cls, None))
+            self._inputs.add(txt)
+            return
+        try:
+            prefix, id_a = txt.rsplit('.', 1)
+            resource_cls = rtypes[prefix]
+            self._inputs.add(txt)
+            self._contents.add(resource_cls)
+            if wildcard:
+                self._wildcards.add((resource_cls, id_a))
+            else:
+                self._contents.add((resource_cls, id_a))
+                self._contents.add((resource_cls, id_a, None))
+            return
+        except (ValueError, KeyError):
+            pass
+        try:
+            prefix, id_a, id_b = txt.rsplit('.', 2)
+            resource_cls = rtypes[prefix]
+            self._inputs.add(txt)
+            self._contents.add(resource_cls)
+            if wildcard:
+                self._wildcards.add((resource_cls, id_a, id_b))
+            else:
+                self._contents.add((resource_cls, id_a, id_b))
+            return
+        except (ValueError, KeyError):
+            pass
+        raise InvalidResourceMatch(
+            f'{txt!r} does not match a valid resource type'
+        )
+
+    def resources(self) -> List[Type[SMBResource]]:
+        return list(self._match_resources)
+
+
+class ClusterConfigHandler:
+    """The central class for ingesting and handling smb configuration change
+    requests.
+
+    The ClusterConfigHandler works in roughly three phases:
+    1. Validation - for the resources being updated makes sure they're valid
+                    internally and also performs basic consistency checks.
+    2. Update     - updates the internal configuration store to persist the
+                    new resource objects
+    3. Sync'ing   - convert internal resources to externally usable data and
+                    update external components as needed.
+                    (see also "reconciliation")
+
+    It makes use of three data stores.
+    * internal_store: items that belong to the smb module. Generally, our
+      own saved resource types.
+    * public_store: A public store that is meant for sharing configuration data
+      with other processes. It is intended for non-sensitive general
+      configuration data
+    * priv_store: A priv(ate/ileged) store that is also meant for sharing data
+      with other processes. But unlike public store this data might be
+      sensitive.
+
+    Note that these stores are permitted to overlap. A public_store and
+    priv_store could use the exact same store object if the caller configures
+    the ClusterConfigHandler that way. This is very much expected when
+    executed in unit/other tests. Do NOT assume the keys in stores are mutually
+    exclusive!
+
+    This class also exposes some extra functionality for reading/iterating
+    the internal store so that the mgr module can be largely encapsulated
+    away from the store(s).
+    """
+
+    def __init__(
+        self,
+        *,
+        internal_store: ConfigStore,
+        public_store: ConfigStore,
+        priv_store: ConfigStore,
+        path_resolver: Optional[PathResolver] = None,
+        authorizer: Optional[AccessAuthorizer] = None,
+        mon_cmd_issuer: Optional[MonCommandIssuer] = None,
+        orch: Optional[OrchSubmitter] = None,
+        earmark_resolver: Optional[EarmarkResolver] = None,
+        tool_execer: 'rgw.ToolExecer',
+    ) -> None:
+        self.internal_store = internal_store
+        self.public_store = public_store
+        self.priv_store = priv_store
+        if path_resolver is None:
+            path_resolver = _FakePathResolver()
+        self._path_resolver: PathResolver = path_resolver
+        if authorizer is None:
+            authorizer = _FakeAuthorizer()
+        self._authorizer: AccessAuthorizer = authorizer
+        if mon_cmd_issuer is None:
+            mon_cmd_issuer = _FakeMonCommandIssuer()
+        self._mon_cmd_issuer: MonCommandIssuer = mon_cmd_issuer
+        self._orch = orch  # if None, disables updating the spec via orch
+        if earmark_resolver is None:
+            earmark_resolver = cast(EarmarkResolver, _FakeEarmarkResolver())
+        self._earmark_resolver = earmark_resolver
+        self._tool_execer = tool_execer
+        log.info(
+            'Initialized new ClusterConfigHandler with'
+            f' internal store {self.internal_store!r},'
+            f' public store {self.public_store!r},'
+            f' priv store {self.priv_store!r},'
+            f' path resolver {self._path_resolver!r},'
+            f' authorizer {self._authorizer!r},'
+            f' orch {self._orch!r},'
+            f' earmark resolver {self._earmark_resolver!r}'
+        )
+
+    def apply(
+        self, inputs: Iterable[SMBResource], *, create_only: bool = False
+    ) -> ResultGroup:
+        """Apply resource configuration changes.
+        Set `create_only` to disable changing existing resource values.
+        """
+        log.debug('applying changes to internal data store')
+        results = ResultGroup()
+        staging = Staging(self.internal_store, self._tool_execer)
+        try:
+            incoming = order_resources(inputs)
+            for resource in incoming:
+                staging.stage(resource)
+            with _store_transaction(staging.destination_store):
+                for resource in incoming:
+                    results.append(
+                        self._check(
+                            resource, staging, create_only=create_only
+                        )
+                    )
+        except ErrorResult as err:
+            results.append(err)
+        except Exception as err:
+            log.exception("error updating resource")
+            msg = str(err)
+            if not msg:
+                # handle the case where the exception has no text
+                msg = f"error updating resource: {type(err)} (see logs for details)"
+            result = ErrorResult(resource, msg=msg)
+            results.append(result)
+        if results.success:
+            log.debug(
+                'successfully updated %s resources. syncing changes to public stores',
+                len(list(results)),
+            )
+            with _store_transaction(staging.destination_store):
+                db_results = staging.save()
+                db_results.merge(results)
+                results = db_results
+                staging.prune_linked_entries()
+            _reconcile_store(staging.destination_store)
+            with _store_transaction(staging.destination_store):
+                self._sync_modified(results)
+        return results
+
+    def cluster_ids(self) -> List[str]:
+        return list(ClusterEntry.ids(self.internal_store))
+
+    def share_ids(self) -> List[Tuple[str, str]]:
+        return list(ShareEntry.ids(self.internal_store))
+
+    def share_ids_by_cluster(self) -> Dict[str, List[str]]:
+        out: Dict[str, List[str]] = {}
+        for cluster_id, share_id in ShareEntry.ids(self.internal_store):
+            out.setdefault(cluster_id, []).append(share_id)
+        return out
+
+    def join_auth_ids(self) -> List[str]:
+        return list(JoinAuthEntry.ids(self.internal_store))
+
+    def user_and_group_ids(self) -> List[str]:
+        return list(UsersAndGroupsEntry.ids(self.internal_store))
+
+    def rgw_credential_ids(self) -> List[str]:
+        return list(RGWCredentialEntry.ids(self.internal_store))
+
+    def all_resources(self) -> List[SMBResource]:
+        with _store_transaction(self.internal_store):
+            return self._search_resources(_Matcher())
+
+    def matching_resources(
+        self, names: List[str], *, wildcard: bool = False
+    ) -> List[SMBResource]:
+        matcher = _Matcher()
+        for name in names:
+            matcher.parse(name, wildcard=wildcard)
+        with _store_transaction(self.internal_store):
+            return self._search_resources(matcher)
+
+    def _search_resources(self, matcher: _Matcher) -> List[SMBResource]:
+        log.debug("performing search with matcher: %s", matcher)
+        out: List[SMBResource] = []
+        # clusters and shares (with parent-child relationship)
+        if resources.Cluster in matcher or resources.Share in matcher:
+            log.debug("searching for clusters and/or shares")
+            cluster_shares = self.share_ids_by_cluster()
+            for cluster_id in self.cluster_ids():
+                if (resources.Cluster, cluster_id) in matcher:
+                    out.append(self._cluster_entry(cluster_id).get_cluster())
+                for share_id in cluster_shares.get(cluster_id, []):
+                    if (resources.Share, cluster_id, share_id) in matcher:
+                        out.append(
+                            self._share_entry(
+                                cluster_id, share_id
+                            ).get_share()
+                        )
+        # other common top-level resources
+        for rtype in matcher.resources():
+            if rtype in (resources.Cluster, resources.Share):
+                continue  # already handled above
+            if rtype not in matcher:
+                continue
+            log.debug("searching for %s", cast(Any, rtype).resource_type)
+            ecls = map_resource_entry(rtype)
+            assert issubclass(ecls, CommonResourceEntry)
+            for rid in ecls.ids(self.internal_store):
+                if (rtype, rid) in matcher:
+                    entry = ecls.from_store(self.internal_store, rid)
+                    res = entry.get_resource_type(rtype)
+                    out.append(cast(SMBResource, res))
+        log.debug("search found %d resources", len(out))
+        return out
+
+    def _check(
+        self,
+        resource: SMBResource,
+        staging: Staging,
+        *,
+        create_only: bool = False,
+    ) -> Result:
+        """Check/validate a staged resource."""
+        log.debug('staging resource: %r', resource)
+        if create_only:
+            if not staging.is_new(resource):
+                return ErrorResult(
+                    resource,
+                    msg='a resource with the same ID already exists',
+                )
+        try:
+            path_resolver = self._choose_path_resolver(resource, staging)
+            earmark_resolver = self._choose_earmark_resolver(
+                resource, staging
+            )
+            pending_result = ResourceResult.pending(resource)
+            cross_check_resource(
+                resource,
+                staging,
+                toolbox=CrossCheckToolbox(
+                    path_resolver=path_resolver,
+                    earmark_resolver=earmark_resolver,
+                    recorder=pending_result,
+                ),
+            )
+        except ErrorResult as err:
+            log.debug('rejected resource: %r', resource)
+            return err
+        log.debug('checked resource: %r', resource)
+        return ResourceResult.checked_from_result(pending_result)
+
+    def _choose_path_resolver(
+        self, resource: SMBResource, staging: Staging
+    ) -> PathResolver:
+        if isinstance(resource, resources.Share):
+            cluster = staging.get_cluster(resource.cluster_id)
+            if refs := ext_cluster_refs(cluster):
+                log.debug(
+                    "Selected external resolver for %s (ext refs: %r)",
+                    resource,
+                    refs,
+                )
+                return ExoResolver(cluster)
+        log.debug("Selected default path resolver for %s", resource)
+        return self._path_resolver
+
+    def _choose_earmark_resolver(
+        self, resource: SMBResource, staging: Staging
+    ) -> EarmarkResolver:
+        if isinstance(resource, resources.Share):
+            cluster = staging.get_cluster(resource.cluster_id)
+            if ext_cluster_refs(cluster):
+                return _FakeEarmarkResolver()
+        return self._earmark_resolver
+
+    def _sync_clusters(
+        self, modified_cluster_ids: Optional[Collection[str]] = None
+    ) -> None:
+        """Trigger synchronization for all the clusters listed in
+        `modified_cluster_ids` or all clusters if None.
+        """
+        share_ids = self.share_ids()
+        present_cluster_ids = set()
+        removed_cluster_ids = set()
+        change_groups = []
+        cluster_ids = modified_cluster_ids or ClusterEntry.ids(
+            self.internal_store
+        )
+        log.debug(
+            'syncing %s clusters: %s',
+            'all' if not modified_cluster_ids else 'selected',
+            ' '.join(cluster_ids),
+        )
+        for cluster_id in cluster_ids:
+            entry = self._cluster_entry(cluster_id)
+            try:
+                cluster = entry.get_cluster()
+            except KeyError:
+                removed_cluster_ids.add(cluster_id)
+                continue
+            present_cluster_ids.add(cluster_id)
+            cluster_shares = [
+                self._share_entry(cid, shid).get_share()
+                for cid, shid in share_ids
+                if cid == cluster_id
+            ]
+            change_group = ClusterChangeGroup(
+                cluster,
+                cluster_shares,
+                [
+                    self._join_auth_entry(_id).get_join_auth()
+                    for _id in auth_refs(cluster)
+                ],
+                [
+                    self._users_and_groups_entry(_id).get_users_and_groups()
+                    for _id in ug_refs(cluster)
+                ],
+                [
+                    TLSCredentialEntry.from_store(
+                        self.internal_store, _id
+                    ).get_tls_credential()
+                    for _id in tls_refs(cluster)
+                ],
+                [
+                    RGWCredentialEntry.from_store(
+                        self.internal_store, _id
+                    ).get_rgw_credential()
+                    for _id in rgw_credential_refs(cluster_shares)
+                ],
+                [
+                    ExternalCephClusterEntry.from_store(
+                        self.internal_store, _id
+                    ).get_external_ceph_cluster()
+                    for _id in ext_cluster_refs(cluster)
+                ],
+            )
+            change_groups.append(change_group)
+        for change_group in change_groups:
+            self._save_cluster_settings(change_group)
+
+        # if there are clusters in the public store, that don't exist
+        # in the internal store, we need to clean them up.
+        if not modified_cluster_ids:
+            ext_ids = set(
+                external.stored_cluster_ids(
+                    self.public_store, self.priv_store
+                )
+            )
+            removed_cluster_ids = ext_ids - set(cluster_ids)
+        for cluster_id in removed_cluster_ids:
+            self._remove_cluster(cluster_id)
+
+    def _sync_modified(self, updated: ResultGroup) -> None:
+        cluster_ids = self._find_modifications(updated)
+        self._sync_clusters(cluster_ids)
+
+    def _find_modifications(self, updated: ResultGroup) -> Collection[str]:
+        """Given a ResultGroup tracking what was recently updated in the
+        internal store, return all cluster_ids that may need external syncing.
+        """
+        # this initial version is going to take a simplistic approach and try
+        # to broadly collect anything that could be a change.
+        # Later, this function can be refined to trigger fewer changes by looking
+        # at the objects in more detail any only producing a change group for
+        # something that really has been modified.
+        chg_cluster_ids: Set[str] = set()
+        chg_join_ids: Set[str] = set()
+        chg_ug_ids: Set[str] = set()
+        chg_tls_ids: Set[str] = set()
+        chg_rgw_cred_ids: Set[str] = set()
+        chg_extc_ids: Set[str] = set()
+        for result in updated.resources():
+            state = (result.status or {}).get('state', None)
+            if state in (State.PRESENT, State.NOT_PRESENT):
+                # these are the no-change states. we can ignore them
+                continue
+            if isinstance(
+                result.src, (resources.Cluster, resources.RemovedCluster)
+            ):
+                chg_cluster_ids.add(result.src.cluster_id)
+            elif isinstance(
+                result.src, (resources.Share, resources.RemovedShare)
+            ):
+                # shares always belong to one cluster
+                chg_cluster_ids.add(result.src.cluster_id)
+            elif isinstance(result.src, resources.JoinAuth):
+                chg_join_ids.add(result.src.auth_id)
+            elif isinstance(result.src, resources.UsersAndGroups):
+                chg_ug_ids.add(result.src.users_groups_id)
+            elif isinstance(result.src, resources.TLSCredential):
+                chg_tls_ids.add(result.src.tls_credential_id)
+            elif isinstance(result.src, resources.RGWCredential):
+                chg_rgw_cred_ids.add(result.src.rgw_credential_id)
+            elif isinstance(result.src, resources.ExternalCephCluster):
+                chg_extc_ids.add(result.src.external_ceph_cluster_id)
+
+        # rgw credentials are referenced by shares, not clusters, so
+        # narrowing this would mean reading every share in the store.
+        # not worth it for an infrequent change. Keeping the broad regen
+        # until we find a better approach for rgw credentials.
+        if chg_rgw_cred_ids:
+            chg_cluster_ids.update(ClusterEntry.ids(self.internal_store))
+        elif chg_join_ids or chg_ug_ids or chg_tls_ids or chg_extc_ids:
+            # these resource types can be shared by >1 cluster. only pick
+            # clusters that actually reference a changed one.
+            for cluster_id in ClusterEntry.ids(self.internal_store):
+                try:
+                    cluster = self._cluster_entry(cluster_id).get_cluster()
+                except KeyError:
+                    continue
+                if (
+                    set(auth_refs(cluster)) & chg_join_ids
+                    or set(ug_refs(cluster)) & chg_ug_ids
+                    or set(tls_refs(cluster)) & chg_tls_ids
+                    or set(ext_cluster_refs(cluster)) & chg_extc_ids
+                ):
+                    chg_cluster_ids.add(cluster_id)
+
+        return chg_cluster_ids
+
+    def _save_cluster_settings(
+        self, change_group: ClusterChangeGroup
+    ) -> None:
+        """Save the external facing objects. Tickle the external components."""
+        log.debug(
+            'saving external store for cluster: %s',
+            change_group.cluster.cluster_id,
+        )
+        cluster = change_group.cluster
+        ssl_certificates: Dict[str, SSLParameters] = {}
+        assert isinstance(cluster, resources.Cluster)
+        # vols: hold the cephfs volumes our shares touch. some operations are
+        # disabled/skipped unless we touch volumes.
+        vols = {
+            share.checked_cephfs.volume
+            for share in change_group.shares
+            if share.cephfs is not None
+        }
+        # rgw_buckets: hold the RGW buckets our shares touch
+        rgw_buckets = {
+            share.rgw.bucket
+            for share in change_group.shares
+            if share.rgw is not None
+        }
+        # save the various object types
+        previous_info = _swap_pending_cluster_info(
+            self.public_store,
+            change_group,
+            orch_needed=bool((vols or rgw_buckets) and self._orch),
+        )
+        _save_pending_join_auths(self.priv_store, change_group)
+        _save_pending_users_and_groups(self.priv_store, change_group)
+        _save_pending_tls_credentials(self.priv_store, change_group)
+        # Create RGW authorizer for this cluster configuration
+        rgw_authorizer = RGWAuthorizer(self._mon_cmd_issuer)
+        cluster_conf = _ClusterConf.assemble(
+            change_group,
+            self._path_resolver,
+            self._authorizer,
+            rgw_authorizer,
+        )
+        _save_pending_config(self.public_store, cluster_conf)
+        _save_pending_rgw_config(self.priv_store, cluster_conf)
+        # remove any stray objects
+        external.rm_other_in_ns(
+            self.priv_store,
+            change_group.cluster.cluster_id,
+            set(change_group.cache),
+        )
+
+        # build a service spec for smb cluster
+        config_entries = [
+            change_group.cache[external.config_key(cluster.cluster_id)],
+            self.public_store[
+                external.config_key(cluster.cluster_id, override=True)
+            ],
+        ]
+        join_source_entries = [
+            change_group.cache[(cluster.cluster_id, key)]
+            for key in external.stored_join_source_keys(
+                change_group.cache, cluster.cluster_id
+            )
+        ]
+        user_source_entries = [
+            change_group.cache[(cluster.cluster_id, key)]
+            for key in external.stored_usergroup_source_keys(
+                change_group.cache, cluster.cluster_id
+            )
+        ]
+        tls_credential_entries = {
+            tc.tls_credential_id: change_group.cache[
+                external.tls_credential_key(
+                    cluster.cluster_id,
+                    tc.tls_credential_id,
+                    checked(tc.credential_type),
+                )
+            ]
+            for tc in change_group.tls_credentials
+        }
+        ext_ceph_cluster = None
+        if change_group.ext_ceph_clusters:
+            assert len(change_group.ext_ceph_clusters) == 1
+            ext_ceph_cluster = change_group.ext_ceph_clusters[0]
+
+        smb_spec = _generate_smb_service_spec(
+            cluster,
+            config_entries=config_entries,
+            join_source_entries=join_source_entries,
+            user_source_entries=user_source_entries,
+            tls_credential_entries=tls_credential_entries,
+            user_entities=cluster_conf.user_entities,
+            needs_proxy=_has_proxied_vfs(change_group),
+            ext_ceph_cluster=ext_ceph_cluster,
+            ssl_certificates=ssl_certificates,
+        )
+        _save_pending_spec_backup(self.public_store, change_group, smb_spec)
+        # if orch was ever needed in the past we must "re-orch", but if we have
+        # no volumes and never orch'ed before wait until we have something to
+        # share before orchestrating the smb cluster. This is done because we
+        # need volumes in order to have cephx keys that we pass to the services
+        # via orch.  This differs from NFS because ganesha embeds the cephx
+        # keys directly in each export definition block while samba needs the
+        # ceph keyring to load keys.
+        # For RGW shares, we don't need CephFS volumes but still need orchestration.
+        previous_orch = previous_info.get('orch_needed', False)
+        if self._orch and (vols or rgw_buckets or previous_orch):
+            log.debug(
+                'Submitting SMB service spec for cluster %s: '
+                'shares=%d (cephfs_vols=%d, rgw_buckets=%d), '
+                'previous_orch=%s',
+                cluster.cluster_id,
+                len(change_group.shares),
+                len(vols),
+                len(rgw_buckets),
+                previous_orch,
+            )
+            self._orch.submit_smb_spec(smb_spec)
+        else:
+            log.debug(
+                'Skipping SMB service orchestration for cluster %s: '
+                'orch_enabled=%s, shares=%d, cephfs_vols=%d, rgw_buckets=%d, previous_orch=%s',
+                cluster.cluster_id,
+                bool(self._orch),
+                len(change_group.shares),
+                len(vols),
+                len(rgw_buckets),
+                previous_orch,
+            )
+
+    def _remove_cluster(self, cluster_id: str) -> None:
+        log.info('Removing cluster: %s', cluster_id)
+        spec_key = external.spec_backup_key(cluster_id)
+        if self.public_store[spec_key].exists() and self._orch:
+            service_name = f'smb.{cluster_id}'
+            log.debug('Removing smb orch service: %r', service_name)
+            self._orch.remove_smb_service(service_name)
+        external.rm_cluster(self.priv_store, cluster_id)
+        external.rm_cluster(self.public_store, cluster_id)
+
+    def _cluster_entry(self, cluster_id: str) -> ClusterEntry:
+        return ClusterEntry.from_store(self.internal_store, cluster_id)
+
+    def _share_entry(self, cluster_id: str, share_id: str) -> ShareEntry:
+        return ShareEntry.from_store(
+            self.internal_store, cluster_id, share_id
+        )
+
+    def _join_auth_entry(self, auth_id: str) -> JoinAuthEntry:
+        return JoinAuthEntry.from_store(self.internal_store, auth_id)
+
+    def _users_and_groups_entry(self, ug_id: str) -> UsersAndGroupsEntry:
+        return UsersAndGroupsEntry.from_store(self.internal_store, ug_id)
+
+
+def order_resources(
+    resource_objs: Iterable[SMBResource],
+) -> List[SMBResource]:
+    """Sort resource objects by type so that the user can largely input
+    objects freely but that references map out cleanly.
+    """
+
+    def _keyfunc(r: SMBResource) -> int:
+        if isinstance(r, resources.RemovedShare):
+            return -2
+        if isinstance(r, resources.RemovedCluster):
+            return -1
+        if isinstance(r, resources.Share):
+            return 2
+        if isinstance(r, resources.Cluster):
+            return 1
+        return 0
+
+    return sorted(resource_objs, key=_keyfunc)
+
+
+@dataclasses.dataclass(frozen=True)
+class _ShareConf:
+    resource: resources.Share
+    cluster: resources.Cluster
+    resolver: PathResolver
+    cephx_entity: str
+    ceph_cluster: str
+    rgw_entity: str = ''
+
+    @property
+    def acl_support(self) -> ACLSupportPolicy:
+        if self.resource.acl_support is not None:
+            return self.resource.acl_support
+        if sd := self.cluster.share_defaults:
+            if sd.acl_support is not None:
+                return sd.acl_support
+        return ACLSupportPolicy.DEFAULT
+
+
+@dataclasses.dataclass(frozen=True)
+class _ClusterConf:
+    resource: resources.Cluster
+    shares: Iterable[_ShareConf]
+    change_group: ClusterChangeGroup
+    user_entities: List[str]
+
+    @classmethod
+    def assemble(
+        cls,
+        change_group: ClusterChangeGroup,
+        default_resolver: PathResolver,
+        authorizer: AccessAuthorizer,
+        rgw_authorizer: RGWAuthorizer,
+    ) -> Self:
+        extcc = None
+        assert isinstance(change_group.cluster, resources.Cluster)
+        if change_group.ext_ceph_clusters:
+            assert len(change_group.ext_ceph_clusters) == 1
+            extcc = change_group.ext_ceph_clusters[0]
+
+        resolver = default_resolver
+        cephx_entity = ''  # default to no entity for data access
+        cephfs_entity = ''  # CephFS-specific entity
+        rgw_entity = ''  # RGW-specific entity
+        cephadm_data_entities: List[
+            str
+        ] = []  # passed to cephadm service spec
+        ceph_cluster = ''  # empty string means local cluster
+
+        has_cephfs_shares = any(
+            s.cephfs is not None for s in change_group.shares
+        )
+        has_rgw_shares = any(s.rgw is not None for s in change_group.shares)
+
+        if extcc:
+            log.debug('external ceph cluster')
+            resolver = ExoResolver(change_group.cluster)
+            ceph_cluster = 'exo'
+
+            # Handle CephFS user if available and needed
+            if has_cephfs_shares:
+                if not extcc.cluster or not extcc.cluster.cephfs_user:
+                    raise ValueError(
+                        'External cluster must have cephfs_user configured for CephFS shares'
+                    )
+
+                cephx_entity = extcc.cluster.cephfs_user.name
+                cephfs_entity = cephx_entity
+            # Handle RGW user if available and needed
+            if has_rgw_shares:
+                if not extcc.cluster or not extcc.cluster.rgw_user:
+                    raise ValueError(
+                        'External cluster must have rgw_user configured for RGW shares'
+                    )
+                log.debug('external ceph cluster with RGW shares')
+                rgw_entity = extcc.cluster.rgw_user.name
+        elif change_group.shares:
+            if has_cephfs_shares:
+                log.debug('local ceph cluster with CephFS shares')
+                cephfs_entity = _cephx_data_entity(change_group.cluster)
+                # ensure an entity exists with access to the volumes (CephFS only)
+                for share in change_group.shares:
+                    if share.cephfs:
+                        authorizer.authorize_entity(
+                            share.checked_cephfs.volume, cephfs_entity
+                        )
+                cephx_entity = cephfs_entity
+                cephadm_data_entities.append(cephfs_entity)
+            if has_rgw_shares:
+                log.debug('local ceph cluster with RGW shares')
+                # RGW shares need a CephX entity for RADOS access
+                rgw_entity = _cephx_rgw_entity(change_group.cluster)
+                # Authorize the entity using the provided RGW authorizer
+                rgw_authorizer.authorize_entity(rgw_entity)
+                cephadm_data_entities.append(rgw_entity)
+        else:
+            log.debug('local cluster without shares: skipping ceph auth')
+        return cls(
+            change_group.cluster,
+            [
+                _ShareConf(
+                    s,
+                    change_group.cluster,
+                    resolver,
+                    cephfs_entity,
+                    ceph_cluster,
+                    rgw_entity=rgw_entity,
+                )
+                for s in change_group.shares
+            ],
+            change_group,
+            cephadm_data_entities,
+        )
+
+
+def _generate_rgw_share(
+    conf: _ShareConf,
+    cred_map: Dict[str, resources.RGWCredential],
+) -> Dict[str, Dict[str, str]]:
+    """Generate Samba configuration for an RGW-backed share."""
+    share = conf.resource
+    rgw = share.rgw
+    assert rgw is not None, "RGW storage configuration missing"
+
+    # Get user_id from credential (credential_ref is guaranteed by validation)
+    assert rgw.credential_ref is not None
+    cred = cred_map.get(rgw.credential_ref)
+    if cred is None:
+        log.error(
+            "share %r references missing RGW credential %r",
+            share.name,
+            rgw.credential_ref,
+        )
+        user_id = ""
+    else:
+        user_id = cred.user_id or ""
+
+    modules = []
+    if conf.acl_support is ACLSupportPolicy.DEFAULT:
+        modules.append(_ACL_XATTR)
+    modules.append('ceph_rgw')
+
+    cfg = {
+        # smb.conf options
+        'options': {
+            'path': '/',
+            'vfs objects': ' '.join(modules),
+            'ceph_rgw:bucket': rgw.bucket,
+            'ceph_rgw:user_id': user_id,
+            # Credential values are left empty here; they are injected at
+            # deploy time via a config:merge stub in the private store so
+            # they never appear in the public RADOS config.
+            'ceph_rgw:access_key': '',
+            'ceph_rgw:secret_access_key': '',
+            'ceph_rgw:debug': 'off',
+            'read only': ynbool(share.readonly),
+            'browseable': ynbool(share.browseable),
+            'kernel share modes': 'no',
+            'smbd profiling share': 'yes',
+        }
+    }
+
+    if _ACL_XATTR in modules:
+        cfg['options']['acl_xattr:security_acl_name'] = 'user.NTACL'
+    if share.comment is not None:
+        cfg['options']['comment'] = share.comment
+    if share.max_connections is not None:
+        cfg['options']['max connections'] = str(share.max_connections)
+
+    # extend share with user+group login access lists
+    _generate_share_login_control(share, cfg)
+    _generate_share_hosts_access(share, cfg)
+    # extend share with custom options
+    custom_opts = share.cleaned_custom_smb_share_options
+    if custom_opts:
+        cfg['options'].update(custom_opts)
+        cfg['options']['x:ceph:has_custom_options'] = 'yes'
+    return cfg
+
+
+def cephx_stripped_entity(cephx_entity: str) -> str:
+    # very annoyingly, samba's ceph module absolutely must NOT have the
+    # "client." bit in front. JJM has been tripped up by this multiple times -
+    # seemingly every time this module is touched.
+    _prefix = 'client.'
+    plen = len(_prefix)
+    if cephx_entity.startswith(_prefix):
+        cephx_entity = cephx_entity[plen:]
+    return cephx_entity
+
+
+def _generate_share(conf: _ShareConf) -> Dict[str, Dict[str, str]]:
+    share = conf.resource
+    cephx_entity = conf.cephx_entity
+    cephfs = share.checked_cephfs
+    assert cephfs.provider.is_vfs(), "not a vfs provider"
+    assert cephx_entity, "cephx entity name missing"
+    cephx_entity = cephx_stripped_entity(cephx_entity)
+    path = conf.resolver.resolve(
+        cephfs.volume,
+        cephfs.subvolumegroup,
+        cephfs.subvolume,
+        cephfs.path,
+    )
+    try:
+        ceph_vfs, proxy_val = {
+            CephFSStorageProvider.SAMBA_VFS_CLASSIC: ('ceph', ''),
+            CephFSStorageProvider.SAMBA_VFS_NEW: ('ceph_new', 'no'),
+            CephFSStorageProvider.SAMBA_VFS_PROXIED: ('ceph_new', 'yes'),
+        }[cephfs.provider.expand()]
+    except KeyError:
+        raise ValueError(f'unsupported provider: {cephfs.provider}')
+    ceph_config_file = (
+        f'/etc/ceph/{conf.ceph_cluster}.ceph.conf'
+        if conf.ceph_cluster
+        else '/etc/ceph/ceph.conf'
+    )
+    # Build VFS modules list based on cluster configuration
+    modules = []
+    # Add macOS support modules if enabled
+    if conf.cluster.is_macos_compatibility_enabled:
+        modules.extend(["fruit", "streams_xattr"])
+    if conf.acl_support is ACLSupportPolicy.DEFAULT:
+        modules.append(_ACL_XATTR)
+    modules.append("ceph_snapshots")
+
+    if qos := cephfs.qos:
+        vfs_rl = "aio_ratelimit"
+        modules.extend([vfs_rl, ceph_vfs])
+    else:
+        modules.append(ceph_vfs)
+
+    cfg = {
+        # smb.conf options
+        'options': {
+            'path': path,
+            "vfs objects": " ".join(modules),
+            f'{ceph_vfs}:config_file': ceph_config_file,
+            f'{ceph_vfs}:filesystem': cephfs.volume,
+            f'{ceph_vfs}:user_id': cephx_entity,
+            'read only': ynbool(share.readonly),
+            'browseable': ynbool(share.browseable),
+            'kernel share modes': 'no',
+            'x:ceph:id': f'{share.cluster_id}.{share.share_id}',
+            'smbd profiling share': 'yes',
+            'posix locking': 'no',
+        }
+    }
+
+    if _ACL_XATTR in modules:
+        cfg['options']['acl_xattr:security_acl_name'] = 'user.NTACL'
+    if qos:
+        opts = cfg["options"]
+        for field in (
+            "read_iops_limit",
+            "read_bw_limit",
+            "read_burst_mult",
+            "write_iops_limit",
+            "write_bw_limit",
+            "write_burst_mult",
+        ):
+            if value := getattr(qos, field):
+                opts[f"{vfs_rl}:{field}"] = str(value)
+    if share.comment is not None:
+        cfg['options']['comment'] = share.comment
+    if share.max_connections is not None:
+        cfg['options']['max connections'] = str(share.max_connections)
+    if proxy_val:
+        cfg['options'][f'{ceph_vfs}:proxy'] = proxy_val
+    if cephfs.fscrypt_key:
+        # enable fscrypt + keybridge
+        opts = cfg['options']
+        opts[f'{ceph_vfs}:keybridge socket'] = 'unix:/run/keybridge.s'
+        opts[f'{ceph_vfs}:keybridge scope'] = str(
+            cephfs.fscrypt_key.scope_identity().qualified()
+        )
+        opts[f'{ceph_vfs}:keybridge name'] = str(cephfs.fscrypt_key.name)
+        opts[f'{ceph_vfs}:keybridge kind'] = 'B64'
+        opts[f'{ceph_vfs}:fscrypt'] = 'keybridge'
+    # extend share with user+group login access lists
+    _generate_share_login_control(share, cfg)
+    _generate_share_hosts_access(share, cfg)
+    # extend share with custom options
+    custom_opts = share.cleaned_custom_smb_share_options
+    if custom_opts:
+        cfg['options'].update(custom_opts)
+        cfg['options']['x:ceph:has_custom_options'] = 'yes'
+    return cfg
+
+
+def _generate_share_login_control(
+    share: resources.Share, cfg: Simplified
+) -> None:
+    valid_users: List[str] = []
+    invalid_users: List[str] = []
+    read_list: List[str] = []
+    write_list: List[str] = []
+    admin_users: List[str] = []
+    for entry in share.login_control or []:
+        if entry.category == LoginCategory.GROUP:
+            name = f'@{entry.name}'
+        else:
+            name = entry.name
+        if entry.access == LoginAccess.NONE:
+            invalid_users.append(name)
+            continue
+        elif entry.access == LoginAccess.ADMIN:
+            admin_users.append(name)
+        elif entry.access == LoginAccess.READ_ONLY:
+            read_list.append(name)
+        elif entry.access == LoginAccess.READ_WRITE:
+            write_list.append(name)
+        if share.restrict_access:
+            valid_users.append(name)
+    if valid_users:
+        cfg['options']['valid users'] = ' '.join(valid_users)
+    if invalid_users:
+        cfg['options']['invalid users'] = ' '.join(invalid_users)
+    if read_list:
+        cfg['options']['read list'] = ' '.join(read_list)
+    if write_list:
+        cfg['options']['write list'] = ' '.join(write_list)
+    if admin_users:
+        cfg['options']['admin users'] = ' '.join(admin_users)
+
+
+def _generate_share_hosts_access(
+    share: resources.Share, cfg: Simplified
+) -> None:
+    if not share.hosts_access:
+        return
+    default_access = HostAccess.ALLOW
+    hosts_allow: List[str] = []
+    hosts_deny: List[str] = []
+    for entry in share.hosts_access:
+        if entry.access is HostAccess.DENY:
+            hosts_deny.append(entry.normalized_value)
+        elif entry.access is HostAccess.ALLOW:
+            hosts_allow.append(entry.normalized_value)
+            default_access = HostAccess.DENY
+        else:
+            raise ValueError(f'invalid access type: {entry.access!r}')
+    if default_access is HostAccess.DENY:
+        hosts_deny.append('ALL')
+    if hosts_allow:
+        cfg['options']['hosts allow'] = ', '.join(hosts_allow)
+    if hosts_deny:
+        cfg['options']['hosts deny'] = ', '.join(hosts_deny)
+
+
+def _generate_config(conf: _ClusterConf) -> Dict[str, Any]:
+    cluster_global_opts = {}
+    cluster = conf.resource
+    if cluster.auth_mode == AuthMode.ACTIVE_DIRECTORY:
+        assert cluster.domain_settings is not None
+        cluster_global_opts['security'] = 'ads'
+        cluster_global_opts['realm'] = cluster.domain_settings.realm
+        # TODO: support alt. workgroup values
+        wg = cluster.domain_settings.realm.upper().split('.')[0]
+        cluster_global_opts['workgroup'] = wg
+        cluster_global_opts['idmap config * : backend'] = 'autorid'
+        cluster_global_opts['idmap config * : range'] = '2000-9999999'
+    cluster_global_opts['smb ports'] = str(_smb_port(cluster))
+    _set_debug_level(cluster_global_opts, conf)
+
+    # Disable NFS ACE handling for macOS compatibility
+    # See https://tracker.ceph.com/issues/78052 for rationale and follow-up.
+    if cluster.is_macos_compatibility_enabled:
+        cluster_global_opts['fruit:nfs_aces'] = 'no'
+
+    # Check if cluster has RGW shares and add global RGW options
+    has_rgw_shares = any(share.resource.rgw for share in conf.shares)
+    if has_rgw_shares:
+        # Get pre-calculated stripped RGW entity from first RGW share
+        rgw_entity = next(
+            (share.rgw_entity for share in conf.shares if share.resource.rgw),
+            '',
+        )
+        if rgw_entity:
+            # Check if this is an external cluster
+            is_external_cluster = any(
+                share.ceph_cluster == 'exo'
+                for share in conf.shares
+                if share.resource.rgw
+            )
+
+            if is_external_cluster:
+                cluster_global_opts[
+                    'ceph_rgw:config_file'
+                ] = '/etc/ceph/exo.ceph.conf'
+                cluster_global_opts[
+                    'ceph_rgw:keyring_file'
+                ] = '/etc/ceph/exo.ceph.keyring'
+            else:
+                cluster_global_opts[
+                    'ceph_rgw:config_file'
+                ] = '/etc/ceph/ceph.conf'
+                cluster_global_opts[
+                    'ceph_rgw:keyring_file'
+                ] = '/etc/ceph/keyring'
+
+            cluster_global_opts['ceph_rgw:id'] = cephx_stripped_entity(
+                rgw_entity
+            )
+
+    cred_map = {
+        c.rgw_credential_id: c for c in conf.change_group.rgw_credentials
+    }
+
+    share_configs = {
+        share.resource.name: (
+            _generate_rgw_share(share, cred_map)
+            if share.resource.rgw
+            else _generate_share(share)
+        )
+        for share in conf.shares
+    }
+
+    instance_features = []
+    if cluster.is_clustered():
+        instance_features.append('ctdb')
+    cfg: Dict[str, Any] = {
+        'samba-container-config': 'v0',
+        'configs': {
+            cluster.cluster_id: {
+                'instance_name': cluster.cluster_id,
+                'instance_features': instance_features,
+                'globals': ['default', cluster.cluster_id],
+                'shares': list(share_configs.keys()),
+            },
+        },
+        'globals': {
+            'default': {
+                'options': {
+                    'load printers': 'No',
+                    'printing': 'bsd',
+                    'printcap name': '/dev/null',
+                    'disable spoolss': 'Yes',
+                    'smbd profiling level': 'on',
+                }
+            },
+            cluster.cluster_id: {
+                'options': cluster_global_opts,
+            },
+        },
+        'shares': share_configs,
+    }
+    if cluster.keybridge_is_enabled:
+        _kb_default = 'default-keybridge'  # typically only have one
+        cfg['configs'][cluster.cluster_id]['keybridge_config'] = _kb_default
+        cfg['keybridge'] = {_kb_default: _generate_keybridge_config(cluster)}
+    # insert global custom options
+    custom_opts = cluster.cleaned_custom_smb_global_options
+    if custom_opts:
+        # isolate custom config opts into a section for cleanliness
+        gname = f'{cluster.cluster_id}_custom'
+        cfg['configs'][cluster.cluster_id]['globals'].append(gname)
+        cfg['globals'][gname] = {'options': dict(custom_opts)}
+    return cfg
+
+
+def _generate_smb_service_spec(
+    cluster: resources.Cluster,
+    *,
+    config_entries: List[ConfigEntry],
+    join_source_entries: List[ConfigEntry],
+    user_source_entries: List[ConfigEntry],
+    tls_credential_entries: Dict[str, ConfigEntry],
+    user_entities: List[str],
+    needs_proxy: bool = False,
+    ext_ceph_cluster: Optional[resources.ExternalCephCluster],
+    ssl_certificates: Dict[str, SSLParameters],
+) -> SMBSpec:
+    features = []
+    if cluster.auth_mode == AuthMode.ACTIVE_DIRECTORY:
+        features.append(_DOMAIN)
+    if cluster.is_clustered():
+        features.append(_CLUSTERED)
+    if needs_proxy:
+        features.append(_CEPHFS_PROXY)
+    if cluster.remote_control_is_enabled:
+        assert cluster.remote_control is not None
+        features.extend(cluster.remote_control.enabled_features())
+    if cluster.keybridge_is_enabled:
+        features.append(_KEYBRIDGE)
+    # only one config uri can be used, the input list should be
+    # ordered from lowest to highest priority and the highest priority
+    # item that exists in the store will be used.
+    config_uri = ''
+    for entry in config_entries:
+        if entry.exists():
+            config_uri = entry.uri
+    if not config_uri:
+        raise ValueError('no samba container configuration available')
+    # collect the the uris for the join sources
+    join_sources: List[str] = []
+    for entry in join_source_entries:
+        # if entry.exists():
+        join_sources.append(entry.uri)
+    # collect the uris for the user sources
+    user_sources: List[str] = []
+    for entry in user_source_entries:
+        user_sources.append(entry.uri)
+
+    rc_cert = rc_key = rc_ca_cert = None
+    if cluster.is_feature_enabled(_REMOTE_CONTROL):
+        assert cluster.remote_control
+        rc_cert = _tls_uri(
+            cluster.remote_control.cert, tls_credential_entries
+        )
+        rc_key = _tls_uri(cluster.remote_control.key, tls_credential_entries)
+        rc_ca_cert = _tls_uri(
+            cluster.remote_control.ca_cert, tls_credential_entries
+        )
+        feature = ceph.smb.constants.FEATURE_FILE_NAMES.get(_REMOTE_CONTROL)
+        if feature is not None:
+            ssl_certificates[feature] = SSLParameters(
+                enabled=bool(rc_cert and rc_key),
+                ssl_cert=rc_cert,
+                ssl_key=rc_key,
+                ssl_ca_cert=rc_ca_cert,
+                certificate_source='uri',
+            )
+
+    kb_cert = kb_key = kb_ca_cert = None
+    if cluster.is_feature_enabled(_KEYBRIDGE):
+        assert cluster.keybridge  # type narrow
+        # TODO: current all KMIP scopes must share the same tls creds
+        # and that sucks. need to update keybridge to fetch cert URIs directly
+        # and stop shoveling this all through cephadm.
+        # This is especially important if we ever add non-kmip scopes that
+        # use (m)TLS.
+        kmip_scopes = [
+            s
+            for s in checked(cluster.keybridge.scopes)
+            if s.scope_identity().scope_type == KeyBridgeScopeType.KMIP
+        ]
+        if kmip_scopes:
+            kmip_scope = kmip_scopes[0]
+            kb_cert = _tls_uri(kmip_scope.kmip_cert, tls_credential_entries)
+            kb_key = _tls_uri(kmip_scope.kmip_key, tls_credential_entries)
+            kb_ca_cert = _tls_uri(
+                kmip_scope.kmip_ca_cert, tls_credential_entries
+            )
+            feature = ceph.smb.constants.FEATURE_FILE_NAMES.get(_KEYBRIDGE)
+            if feature is not None:
+                ssl_certificates[feature] = SSLParameters(
+                    enabled=bool(kb_cert and kb_key),
+                    ssl_cert=kb_cert,
+                    ssl_key=kb_key,
+                    ssl_ca_cert=kb_ca_cert,
+                    certificate_source='uri',
+                )
+
+    ceph_cluster_configs = None
+    if ext_ceph_cluster:
+        exo = checked(ext_ceph_cluster.cluster)
+
+        rgw_user = None
+        rgw_key = None
+        cephfs_user = None
+        cephfs_key = None
+
+        if exo.rgw_user:
+            rgw_user = exo.rgw_user.name
+            rgw_key = exo.rgw_user.key
+        if exo.cephfs_user:
+            cephfs_user = exo.cephfs_user.name
+            cephfs_key = exo.cephfs_user.key
+
+        ceph_cluster_configs = [
+            SMBExternalCephCluster(
+                alias='exo',
+                fsid=exo.fsid,
+                mon_host=exo.mon_host,
+                user=cephfs_user,
+                key=cephfs_key,
+                rgw_user=rgw_user,
+                rgw_key=rgw_key,
+            )
+        ]
+    return SMBSpec(
+        service_id=cluster.cluster_id,
+        placement=cluster.placement,
+        cluster_id=cluster.cluster_id,
+        features=features,
+        config_uri=config_uri,
+        join_sources=join_sources,
+        user_sources=user_sources,
+        custom_dns=cluster.custom_dns,
+        include_ceph_users=user_entities,
+        cluster_public_addrs=cluster.service_spec_public_addrs(),
+        custom_ports=cluster.custom_ports,
+        bind_addrs=cluster.service_spec_bind_addrs(),
+        ssl_certificates=ssl_certificates or None,
+        ceph_cluster_configs=ceph_cluster_configs,
+        tunables=_service_spec_tunables(cluster),
+    )
+
+
+def _generate_keybridge_config(cluster: resources.Cluster) -> Dict[str, Any]:
+    """generate the keybridge subsection for the sambacc config."""
+    # NOTE: the tls credentials are handled by cephadm and are passed
+    # to the keybridge server command line (by path). That's why they are
+    # not mentioned here. This could change in the future.
+    scopes: List[Simplified] = []
+    for scope in checked(cluster.keybridge).scopes or []:
+        kbsi = scope.scope_identity()
+        scope_config: Simplified = {'name': str(kbsi.qualified())}
+        if kbsi.scope_type is KeyBridgeScopeType.KMIP:
+            scope_config['hostnames'] = checked(scope.kmip_hosts)
+            if scope.kmip_port:
+                scope_config['port'] = checked(scope.kmip_port)
+        scopes.append(scope_config)
+    cfg: Simplified = {'scopes': scopes}
+    if (
+        checked(cluster.keybridge).use_peer_policy
+        is KeyBridgePeerPolicy.RESTRICTED
+    ):
+        cfg['verify_peer'] = {
+            "check_pid": "1+",
+            "check_uid": "0",
+            "check_gid": "0",
+        }
+    return cfg
+
+
+def _swap_pending_cluster_info(
+    store: ConfigStore,
+    change_group: ClusterChangeGroup,
+    orch_needed: bool,
+) -> Simplified:
+    # TODO: its not just a  placeholder any more. rename the key func!
+    pentry = store[
+        external.cluster_placeholder_key(change_group.cluster.cluster_id)
+    ]
+    try:
+        existing = pentry.get()
+    except KeyError:
+        existing = {}
+    pentry.set(
+        {
+            'cluster_id': change_group.cluster.cluster_id,
+            'timestamp': int(time.time()),
+            'orch_needed': orch_needed,
+        }
+    )
+    change_group.cache_updated_entry(pentry)
+    return existing
+
+
+def _save_pending_join_auths(
+    store: ConfigStore,
+    change_group: ClusterChangeGroup,
+) -> None:
+    cluster = change_group.cluster
+    assert isinstance(cluster, resources.Cluster)
+    # save each join auth source in the priv store
+    if cluster.auth_mode != AuthMode.ACTIVE_DIRECTORY:
+        return
+    arefs = {j.auth_id: j for j in change_group.join_auths}
+    for idx, src in enumerate(checked(cluster.domain_settings).join_sources):
+        if src.source_type == JoinSourceType.RESOURCE:
+            javalues = checked(arefs[src.ref].auth)
+        else:
+            raise ValueError(
+                f'unsupported join source type: {src.source_type}'
+            )
+        jentry = store[external.join_source_key(cluster.cluster_id, str(idx))]
+        jentry.set(javalues.to_simplified())
+        change_group.cache_updated_entry(jentry)
+
+
+def _save_pending_users_and_groups(
+    store: ConfigStore,
+    change_group: ClusterChangeGroup,
+) -> None:
+    cluster = change_group.cluster
+    assert isinstance(cluster, resources.Cluster)
+    # save each users-and-groups settings in the priv store
+    if cluster.auth_mode != AuthMode.USER:
+        return
+    augs = {ug.users_groups_id: ug for ug in change_group.users_and_groups}
+    for idx, ugsv in enumerate(checked(cluster.user_group_settings)):
+        if ugsv.source_type == UserGroupSourceType.RESOURCE:
+            ugvalues = augs[ugsv.ref].values
+            assert ugvalues
+        elif ugsv.source_type == UserGroupSourceType.EMPTY:
+            continue
+        else:
+            raise ValueError(
+                f'unsupported users/groups source type: {ugsv.source_type}'
+            )
+        ugentry = store[
+            external.users_and_groups_key(cluster.cluster_id, str(idx))
+        ]
+        ugsimple = ugvalues.to_simplified()
+        ug_config: Simplified = {'samba-container-config': 'v0'}
+        if 'users' in ugsimple:
+            ug_config['users'] = {'all_entries': ugsimple['users']}
+        if 'groups' in ugsimple:
+            ug_config['groups'] = {'all_entries': ugsimple['groups']}
+        ugentry.set(ug_config)
+        change_group.cache_updated_entry(ugentry)
+
+
+def _save_pending_tls_credentials(
+    store: ConfigStore,
+    change_group: ClusterChangeGroup,
+) -> None:
+    cluster = change_group.cluster
+    assert isinstance(cluster, resources.Cluster)
+    refs = tls_refs(cluster)
+    tls_creds = {t.tls_credential_id: t for t in change_group.tls_credentials}
+    for ref in refs:
+        tc = tls_creds[ref]
+        ext_key = external.tls_credential_key(
+            cluster.cluster_id, ref, str(tc.credential_type)
+        )
+        tc_entry = store[ext_key]
+        if hasattr(tc_entry, 'set_data'):
+            tc_entry.set_data(tc.value)
+        else:
+            raise ValueError('store does not support raw entries')
+        change_group.cache_updated_entry(tc_entry)
+
+
+def _save_pending_config(
+    store: ConfigStore,
+    cluster_conf: _ClusterConf,
+) -> None:
+    # generate the cluster configuration and save it in the public store
+    cconfig = _generate_config(cluster_conf)
+    centry = store[external.config_key(cluster_conf.resource.cluster_id)]
+    centry.set(cconfig)
+    cluster_conf.change_group.cache_updated_entry(centry)
+
+
+def _save_pending_rgw_config(
+    store: ConfigStore,
+    cluster_conf: _ClusterConf,
+) -> None:
+    """Save an RGW credential stub to the private store for RGW clusters.
+
+    Writes a stub using sambacc's config:merge mechanism, which merges the
+    provided JSON on top of the primary config at load time.  The mgr
+    populates the stub with only the RGW credential fields here; everything else
+    stays in the public RADOS config.  The stub URI is passed to the container
+    via extra_config_uris so credentials never appear in the public pool.
+    """
+    cluster_id = cluster_conf.resource.cluster_id
+    rgw_shares = [s for s in cluster_conf.shares if s.resource.rgw]
+    centry = store[external.rgw_config_key(cluster_id)]
+    if not rgw_shares and not centry.exists():
+        # cluster never had RGW shares, so no stub needed
+        return
+    cred_map = {
+        c.rgw_credential_id: c
+        for c in cluster_conf.change_group.rgw_credentials
+    }
+    merge_shares: Dict[str, Any] = {}
+    for sc in rgw_shares:
+        rgw = sc.resource.rgw
+        assert rgw is not None
+        assert rgw.credential_ref is not None
+        cred = cred_map.get(rgw.credential_ref)
+        if cred is None:
+            log.error(
+                "share %r references missing RGW credential %r",
+                sc.resource.name,
+                rgw.credential_ref,
+            )
+            continue
+        access_key = cred.access_key_id or ''
+        secret_key = cred.secret_access_key or ''
+        merge_shares[sc.resource.name] = {
+            'options': {
+                'ceph_rgw:access_key': access_key,
+                'ceph_rgw:secret_access_key': secret_key,
+            }
+        }
+    stub = {
+        'samba-container-config': 'v0',
+        'config:merge': {'shares': merge_shares},
+    }
+    centry.set(stub)
+    cluster_conf.change_group.cache_updated_entry(centry)
+
+
+def _save_pending_spec_backup(
+    store: ConfigStore, change_group: ClusterChangeGroup, smb_spec: SMBSpec
+) -> None:
+    ssentry = store[external.spec_backup_key(change_group.cluster.cluster_id)]
+    ssentry.set(smb_spec.to_json())
+    change_group.cache_updated_entry(ssentry)
+
+
+def _cephx_data_entity(cluster: resources.Cluster) -> str:
+    """Generate a name for the (default?) cephx key that a cluster (smbd) will
+    use for data access.
+    """
+    if cluster.external_ceph_cluster:
+        return ''
+    return f'client.smb.fs.cluster.{cluster.cluster_id}'
+
+
+def _cephx_rgw_entity(cluster: resources.Cluster) -> str:
+    """Generate a name for the cephx key that a cluster (smbd) will
+    use for RGW data access.
+    """
+    if cluster.external_ceph_cluster:
+        return ''
+    return f'client.smb.rgw.cluster.{cluster.cluster_id}'
+
+
+@contextlib.contextmanager
+def _store_transaction(store: ConfigStore) -> Iterator[None]:
+    transaction = getattr(store, 'transaction', None)
+    if not transaction:
+        log.debug("No transaction support for store")
+        yield None
+        return
+    log.debug("Using store transaction")
+    with transaction():
+        yield None
+
+
+def _reconcile_store(store: ConfigStore) -> None:
+    """Fix any mismatches between the store and its mirror copy, if the
+    store supports it.
+    """
+    reconcile = getattr(store, 'reconcile', None)
+    if not reconcile:
+        log.debug("No reconcile support for store")
+        return
+    log.debug("Reconciling store")
+    try:
+        reconcile()
+    except Exception:
+        log.exception("reconcile() failed; continuing")
+
+
+def _has_proxied_vfs(change_group: ClusterChangeGroup) -> bool:
+    """Return true if any CephFS-backed shares in the change group use the
+    new vfs module with the proxied cephfs library.
+    """
+    return any(
+        s.cephfs is not None
+        and s.checked_cephfs.provider.expand()
+        == CephFSStorageProvider.SAMBA_VFS_PROXIED
+        for s in change_group.shares
+    )
+
+
+def _smb_port(cluster: resources.Cluster, default: int = 445) -> int:
+    return (cluster.custom_ports or {}).get("smb", default)
+
+
+def _tls_uri(
+    src: Optional[resources.TLSSource],
+    tls_credential_entries: Dict[str, ConfigEntry],
+) -> Optional[str]:
+    if src is None:
+        return None
+    uri = tls_credential_entries[src.ref].uri
+    return f'URI:{uri}'
+
+
+def _get_log_level(cluster: resources.Cluster, key: str) -> str:
+    if not cluster.debug_level:
+        return ''
+    return str(cluster.debug_level.get(key) or '').upper()
+
+
+def _smb_log_level(cluster: resources.Cluster) -> str:
+    level = orig = _get_log_level(cluster, 'samba')
+    if not level:
+        return ''
+    if level.isdigit():
+        return level
+    # tier mapping
+    for word, low, hi in ceph.smb.constants.DEBUG_LEVEL_TIERS:
+        if level == word:
+            level = str(hi)
+    if not level:
+        level = '1'
+    log.info('Mapped debug level %s to %s', orig, level)
+    return level
+
+
+def _ctdb_log_level(cluster: resources.Cluster) -> str:
+    level = orig = _get_log_level(cluster, 'ctdb')
+    if not level:
+        return ''
+    if level in ceph.smb.constants.DEBUG_LEVEL_TERMS:
+        return level
+    # tier mapping
+    for word, low, hi in ceph.smb.constants.DEBUG_LEVEL_TIERS:
+        try:
+            lval = int(level)
+        except ValueError:
+            continue
+        if lval in range(low, hi + 1):
+            level = word
+    if not level:
+        level = 'INFO'
+    log.info('Mapped debug level %s to %s', orig, level)
+    return level
+
+
+def _set_debug_level(opts: Dict[str, Any], conf: _ClusterConf) -> None:
+    level = _smb_log_level(conf.resource)
+    if not level:
+        return
+    opts['log level'] = level
+
+
+def _service_spec_tunables(
+    cluster: resources.Cluster,
+) -> Optional[Dict[str, str]]:
+    level = _ctdb_log_level(cluster)
+    if not level:
+        return None
+    return {'log_level.ctdb': level}

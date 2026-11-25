@@ -1,4 +1,4 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
 /*
  * This file is open source software, licensed to you under the terms
  * of the Apache License, Version 2.0 (the "License").  See the NOTICE file
@@ -18,19 +18,6 @@
  */
 /*
  * Copyright (C) 2014 Cloudius Systems, Ltd.
- *
- */
-/*
- * Ceph - scalable distributed file system
- *
- * Copyright (C) 2015 XSky <haomai@xsky.com>
- *
- * Author: Haomai Wang <haomaiwang@gmail.com>
- *
- * This is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License version 2.1, as published by the Free Software
- * Foundation.  See file COPYING.
  *
  */
 
@@ -98,7 +85,7 @@ class arp {
   ethernet_address l2self() { return _netif->hw_address(); }
   int process_packet(Packet p, ethernet_address from);
   bool forward(forward_hash& out_hash_data, Packet& p, size_t off);
-  Tub<l3_protocol::l3packet> get_packet();
+  std::optional<l3_protocol::l3packet> get_packet();
   template <class l3_proto>
   friend class arp_for;
 };
@@ -161,7 +148,7 @@ class arp_for : public arp_for_protocol {
    public:
     C_handle_arp_timeout(arp_for *a, l3addr addr, bool first):
         arp(a), paddr(addr), first_request(first) {}
-    void do_request(int r) {
+    void do_request(uint64_t r) {
       arp->send_query(paddr);
       auto &res = arp->_in_progress[paddr];
 

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,16 +18,15 @@
 #define CEPH_INOTABLE_H
 
 #include "MDSTable.h"
+#include "include/fs_types.h" // for inodeno_t
 #include "include/interval_set.h"
 
 class MDSRank;
 
 class InoTable : public MDSTable {
-  interval_set<inodeno_t> free;   // unused ids
-  interval_set<inodeno_t> projected_free;
-
  public:
-  explicit InoTable(MDSRank *m) : MDSTable(m, "inotable", true) { }
+  explicit InoTable(MDSRank *m) : MDSTable(m, "inotable", true) {}
+  InoTable() : MDSTable(NULL, "inotable", true) {}
 
   inodeno_t project_alloc_id(inodeno_t id=0);
   void apply_alloc_id(inodeno_t id);
@@ -34,8 +34,8 @@ class InoTable : public MDSTable {
   void project_alloc_ids(interval_set<inodeno_t>& inos, int want);
   void apply_alloc_ids(interval_set<inodeno_t>& inos);
 
-  void project_release_ids(interval_set<inodeno_t>& inos);
-  void apply_release_ids(interval_set<inodeno_t>& inos);
+  void project_release_ids(const interval_set<inodeno_t>& inos);
+  void apply_release_ids(const interval_set<inodeno_t>& inos);
 
   void replay_alloc_id(inodeno_t ino);
   void replay_alloc_ids(interval_set<inodeno_t>& inos);
@@ -43,30 +43,32 @@ class InoTable : public MDSTable {
   void replay_reset();
   bool repair(inodeno_t id);
   bool is_marked_free(inodeno_t id) const;
+  bool intersects_free(
+      const interval_set<inodeno_t> &other,
+      interval_set<inodeno_t> *intersection);
 
   void reset_state() override;
   void encode_state(bufferlist& bl) const override {
     ENCODE_START(2, 2, bl);
-    ::encode(free, bl);
+    encode(free, bl);
     ENCODE_FINISH(bl);
   }
-  void decode_state(bufferlist::iterator& bl) override {
+  void decode_state(bufferlist::const_iterator& bl) override {
     DECODE_START_LEGACY_COMPAT_LEN(2, 2, 2, bl);
-    ::decode(free, bl);
+    decode(free, bl);
     projected_free = free;
     DECODE_FINISH(bl);
   }
 
   // To permit enc/decoding in isolation in dencoder
-  InoTable() : MDSTable(NULL, "inotable", true) {}
   void encode(bufferlist& bl) const {
     encode_state(bl);
   }
-  void decode(bufferlist::iterator& bl) {
+  void decode(bufferlist::const_iterator& bl) {
     decode_state(bl);
   }
   void dump(Formatter *f) const;
-  static void generate_test_instances(list<InoTable*>& ls);
+  static std::list<InoTable> generate_test_instances();
 
   void skip_inos(inodeno_t i);
 
@@ -93,19 +95,11 @@ class InoTable : public MDSTable {
    *
    * @return true if the table was modified
    */
-  bool force_consume_to(inodeno_t ino)
-  {
-    if (free.contains(ino)) {
-      inodeno_t min = free.begin().get_start();
-      std::cerr << "Erasing 0x" << std::hex << min << " to 0x" << ino << std::dec << std::endl;
-      free.erase(min, ino - min + 1);
-      projected_free = free;
-      projected_version = ++version;
-      return true;
-    } else {
-      return false;
-    }
-  }
+  bool force_consume_to(inodeno_t ino);
+
+ private:
+  interval_set<inodeno_t> free;   // unused ids
+  interval_set<inodeno_t> projected_free;
 };
 WRITE_CLASS_ENCODER(InoTable)
 

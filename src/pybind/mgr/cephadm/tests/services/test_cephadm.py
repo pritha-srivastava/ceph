@@ -1,0 +1,198 @@
+
+import pytest
+from typing import Dict, List
+from unittest.mock import MagicMock
+
+from cephadm.services.service_registry import service_registry
+from cephadm.services.monitoring import GrafanaService
+from cephadm.services.cephadmservice import CephadmService, CephService, DaemonDeployContext
+from orchestrator import OrchestratorError
+
+
+class FakeInventory:
+    def get_addr(self, name: str) -> str:
+        return '1.2.3.4'
+
+
+class FakeMgr:
+    def __init__(self):
+        self.config = ''
+        self.set_mon_crush_locations: Dict[str, List[str]] = {}
+        self.check_mon_command = MagicMock(side_effect=self._check_mon_command)
+        self.mon_command = MagicMock(side_effect=self._check_mon_command)
+        self.template = MagicMock()
+        self.log = MagicMock()
+        self.cert_mgr = MagicMock()
+        self.inventory = FakeInventory()
+
+    def _check_mon_command(self, cmd_dict, inbuf=None):
+        prefix = cmd_dict.get('prefix')
+        if prefix == 'get-cmd':
+            return 0, self.config, ''
+        if prefix == 'set-cmd':
+            self.config = cmd_dict.get('value')
+            return 0, 'value set', ''
+        if prefix in ['auth get']:
+            return 0, '[foo]\nkeyring = asdf\n', ''
+        if prefix == 'quorum_status':
+            # actual quorum status output from testing
+            # note in this output all of the mons have blank crush locations
+            return 0, """{"election_epoch": 14, "quorum": [0, 1, 2], "quorum_names": ["vm-00", "vm-01", "vm-02"], "quorum_leader_name": "vm-00", "quorum_age": 101, "features": {"quorum_con": "4540138322906710015", "quorum_mon": ["kraken", "luminous", "mimic", "osdmap-prune", "nautilus", "octopus", "pacific", "elector-pinging", "quincy", "reef"]}, "monmap": {"epoch": 3, "fsid": "9863e1b8-6f24-11ed-8ad8-525400c13ad2", "modified": "2022-11-28T14:00:29.972488Z", "created": "2022-11-28T13:57:55.847497Z", "min_mon_release": 18, "min_mon_release_name": "reef", "election_strategy": 1, "disallowed_leaders: ": "", "stretch_mode": false, "tiebreaker_mon": "", "features": {"persistent": ["kraken", "luminous", "mimic", "osdmap-prune", "nautilus", "octopus", "pacific", "elector-pinging", "quincy", "reef"], "optional": []}, "mons": [{"rank": 0, "name": "vm-00", "public_addrs": {"addrvec": [{"type": "v2", "addr": "192.168.122.61:3300", "nonce": 0}, {"type": "v1", "addr": "192.168.122.61:6789", "nonce": 0}]}, "addr": "192.168.122.61:6789/0", "public_addr": "192.168.122.61:6789/0", "priority": 0, "weight": 0, "crush_location": "{}"}, {"rank": 1, "name": "vm-01", "public_addrs": {"addrvec": [{"type": "v2", "addr": "192.168.122.63:3300", "nonce": 0}, {"type": "v1", "addr": "192.168.122.63:6789", "nonce": 0}]}, "addr": "192.168.122.63:6789/0", "public_addr": "192.168.122.63:6789/0", "priority": 0, "weight": 0, "crush_location": "{}"}, {"rank": 2, "name": "vm-02", "public_addrs": {"addrvec": [{"type": "v2", "addr": "192.168.122.82:3300", "nonce": 0}, {"type": "v1", "addr": "192.168.122.82:6789", "nonce": 0}]}, "addr": "192.168.122.82:6789/0", "public_addr": "192.168.122.82:6789/0", "priority": 0, "weight": 0, "crush_location": "{}"}]}}""", ''
+        if prefix == 'mon set_location':
+            self.set_mon_crush_locations[cmd_dict.get('name')] = cmd_dict.get('args')
+            return 0, '', ''
+        return -1, '', 'error'
+
+    def get_minimal_ceph_conf(self) -> str:
+        return ''
+
+    def get_mgr_ip(self) -> str:
+        return '1.2.3.4'
+
+
+class ServiceWithDependencies(CephadmService):
+    @classmethod
+    def _get_service_dependencies(
+        cls,
+        mgr,
+        spec=None,
+        daemon_type=None,
+    ):
+        return ['service-specific']
+
+
+class CephServiceWithDependencies(CephService):
+    TYPE = 'test'
+
+    @classmethod
+    def _get_service_dependencies(
+        cls,
+        mgr,
+        spec=None,
+        daemon_type=None,
+    ):
+        return ['service-specific']
+
+    def get_config_and_keyring(self, *args, **kwargs):
+        return {}
+
+
+class ServiceWithConfig(CephadmService):
+    TYPE = 'test'
+
+    def generate_config(self, deploy_ctx):
+        self.seen_ctx = deploy_ctx
+        return {}, []
+
+
+class TestCephadmService:
+    def test_get_dependencies_combines_service_and_common_dependencies(self):
+        mgr = FakeMgr()
+        spec = MagicMock()
+        spec.ssl = True
+        spec.certificate_source = 'inline'
+        spec.ssl_cert = 'CERT'
+        spec.ssl_key = 'KEY'
+        spec.ssl_ca_cert = 'CA'
+
+        deps = ServiceWithDependencies.get_dependencies(mgr, spec)
+
+        from cephadm import utils
+        assert deps == sorted([
+            'certificate_source: inline',
+            'service-specific',
+            f'ssl_cert: {utils.config_hash("CERT")}',
+            f'ssl_key: {utils.config_hash("KEY")}',
+            f'ssl_ca_cert: {utils.config_hash("CA")}',
+        ])
+
+    def test_registered_services_use_common_dependency_handler(self):
+        mgr = FakeMgr()
+        service_registry.init_services(mgr)
+
+        for service in service_registry.get_all_services():
+            assert 'get_dependencies' not in service.__class__.__dict__
+
+    def test_prepare_create_passes_context_to_generate_config(self):
+        mgr = FakeMgr()
+        service = ServiceWithConfig(mgr)
+        deploy_ctx = DaemonDeployContext(MagicMock(), MagicMock())
+
+        service.prepare_create(deploy_ctx)
+
+        assert service.seen_ctx is deploy_ctx
+
+    def test_generate_config_uses_canonical_dependencies(self):
+        mgr = FakeMgr()
+        service = CephServiceWithDependencies(mgr)
+        daemon_spec = MagicMock()
+        daemon_spec.daemon_type = 'test'
+        daemon_spec.daemon_id = 'a'
+        daemon_spec.host = 'host1'
+        daemon_spec.keyring = None
+        daemon_spec.ceph_conf = None
+        daemon_spec.config_get_files.return_value = {}
+        spec = MagicMock()
+        spec.ssl = True
+        spec.certificate_source = 'cephadm-signed'
+        spec.ssl_cert = None
+        spec.ssl_key = None
+        spec.ssl_ca_cert = None
+
+        _, deps = service.generate_config(DaemonDeployContext(daemon_spec, spec))
+
+        assert deps == ['certificate_source: cephadm-signed', 'service-specific']
+
+    def test_set_value_on_dashboard(self):
+        # pylint: disable=protected-access
+        mgr = FakeMgr()
+        service_url = 'http://svc:1000'
+        service = GrafanaService(mgr)
+        service._set_value_on_dashboard('svc', 'get-cmd', 'set-cmd', service_url)
+        assert mgr.config == service_url
+
+        # set-cmd should not be called if value doesn't change
+        mgr.check_mon_command.reset_mock()
+        service._set_value_on_dashboard('svc', 'get-cmd', 'set-cmd', service_url)
+        mgr.check_mon_command.assert_called_once_with({'prefix': 'get-cmd'})
+
+    def test_get_auth_entity(self):
+        mgr = FakeMgr()
+        service_registry.init_services(mgr)
+
+        for daemon_type in ['rgw', 'rbd-mirror', 'nfs', "iscsi"]:
+            assert "client.%s.id1" % (daemon_type) == \
+                service_registry.get_service(daemon_type).get_auth_entity("id1", "host")
+            assert "client.%s.id1" % (daemon_type) == \
+                service_registry.get_service(daemon_type).get_auth_entity("id1", "")
+            assert "client.%s.id1" % (daemon_type) == \
+                service_registry.get_service(daemon_type).get_auth_entity("id1")
+
+        assert "client.crash.host" == \
+            service_registry.get_service('crash').get_auth_entity("id1", "host")
+        with pytest.raises(OrchestratorError):
+            service_registry.get_service('crash').get_auth_entity("id1", "")
+            service_registry.get_service('crash').get_auth_entity("id1")
+
+        assert "mon." == service_registry.get_service('mon').get_auth_entity("id1", "host")
+        assert "mon." == service_registry.get_service('mon').get_auth_entity("id1", "")
+        assert "mon." == service_registry.get_service('mon').get_auth_entity("id1")
+
+        assert "mgr.id1" == service_registry.get_service('mgr').get_auth_entity("id1", "host")
+        assert "mgr.id1" == service_registry.get_service('mgr').get_auth_entity("id1", "")
+        assert "mgr.id1" == service_registry.get_service('mgr').get_auth_entity("id1")
+
+        for daemon_type in ["osd", "mds"]:
+            assert "%s.id1" % daemon_type == \
+                service_registry.get_service(daemon_type).get_auth_entity("id1", "host")
+            assert "%s.id1" % daemon_type == \
+                service_registry.get_service(daemon_type).get_auth_entity("id1", "")
+            assert "%s.id1" % daemon_type == \
+                service_registry.get_service(daemon_type).get_auth_entity("id1")
+
+        # services based on CephadmService shouldn't have get_auth_entity
+        with pytest.raises(AttributeError):
+            for daemon_type in ['grafana', 'alertmanager', 'prometheus', 'node-exporter', 'loki', 'promtail', 'alloy']:
+                service_registry.get_service(daemon_type).get_auth_entity("id1", "host")
+                service_registry.get_service(daemon_type).get_auth_entity("id1", "")
+                service_registry.get_service(daemon_type).get_auth_entity("id1")

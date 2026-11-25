@@ -1,6 +1,7 @@
 
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
 * Ceph - scalable distributed file system
 *
@@ -59,7 +60,7 @@ public:
   {
   }
 
-  ~StRadosOpenPool()
+  ~StRadosOpenPool() override
   {
   }
 
@@ -81,10 +82,11 @@ public:
     rados_pool_create(cl, m_pool_name.c_str());
     rados_ioctx_t io_ctx;
     printf("%s: rados_ioctx_create.\n", get_id_str());
-    RETURN1_IF_NOT_VAL(0, rados_ioctx_create(cl, m_pool_name.c_str(), &io_ctx));
+    RETURN1_IF_NONZERO(rados_ioctx_create(cl, m_pool_name.c_str(), &io_ctx));
     if (m_open_pool_sem)
       m_open_pool_sem->post();
     rados_ioctx_destroy(io_ctx);
+    rados_pool_delete(cl, m_pool_name.c_str());
     rados_shutdown(cl);
     return 0;
   }

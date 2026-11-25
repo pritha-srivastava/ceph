@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -21,18 +22,18 @@
 class EOpen : public LogEvent {
 public:
   EMetaBlob metablob;
-  vector<inodeno_t> inos;
-  vector<vinodeno_t> snap_inos;
+  std::vector<inodeno_t> inos;
+  std::vector<vinodeno_t> snap_inos;
 
   EOpen() : LogEvent(EVENT_OPEN) { }
   explicit EOpen(MDLog *mdlog) :
-    LogEvent(EVENT_OPEN), metablob(mdlog) { }
+    LogEvent(EVENT_OPEN) { }
 
-  void print(ostream& out) const {
+  void print(std::ostream& out) const override {
     out << "EOpen " << metablob << ", " << inos.size() << " open files";
   }
 
-  EMetaBlob *get_metablob() { return &metablob; }
+  EMetaBlob *get_metablob() override { return &metablob; }
 
   void add_clean_inode(CInode *in) {
     if (!in->is_base()) {
@@ -48,13 +49,13 @@ public:
     inos.push_back(ino);
   }
 
-  void encode(bufferlist& bl, uint64_t features) const;
-  void decode(bufferlist::iterator& bl);
-  void dump(Formatter *f) const;
-  static void generate_test_instances(list<EOpen*>& ls);
+  void encode(bufferlist& bl, uint64_t features) const override;
+  void decode(bufferlist::const_iterator& bl) override;
+  void dump(Formatter *f) const override;
+  static std::list<EOpen> generate_test_instances();
 
-  void update_segment();
-  void replay(MDSRank *mds);
+  void update_segment() override;
+  void replay(MDSRank *mds) override;
 };
 WRITE_CLASS_ENCODER_FEATURES(EOpen)
 

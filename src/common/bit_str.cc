@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -13,8 +14,9 @@
  */
 #include "common/bit_str.h"
 #include "common/Formatter.h"
-#include "include/assert.h"
-#include "common/debug.h"
+#include "include/ceph_assert.h"
+
+#include <iostream>
 
 static void _dump_bit_str(
     uint64_t bits,
@@ -38,7 +40,7 @@ static void _dump_bit_str(
           *out << "(" << r << ")";
         }
       } else {
-        assert(f != NULL);
+        ceph_assert(f != NULL);
         if (dump_bit_val) {
           f->dump_stream("bit_flag") << func(r)
                                      << "(" << r << ")";
@@ -57,7 +59,7 @@ static void _dump_bit_str(
 void print_bit_str(
     uint64_t bits,
     std::ostream &out,
-    std::function<const char*(uint64_t)> func,
+    const std::function<const char*(uint64_t)> &func,
     bool dump_bit_val)
 {
   _dump_bit_str(bits, &out, NULL, func, dump_bit_val);
@@ -66,7 +68,7 @@ void print_bit_str(
 void dump_bit_str(
     uint64_t bits,
     ceph::Formatter *f,
-    std::function<const char*(uint64_t)> func,
+    const std::function<const char*(uint64_t)> &func,
     bool dump_bit_val)
 {
   _dump_bit_str(bits, NULL, f, func, dump_bit_val);

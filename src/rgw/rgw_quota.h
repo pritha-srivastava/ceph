@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,85 +13,16 @@
  *
  */
 
-#ifndef CEPH_RGW_QUOTA_H
-#define CEPH_RGW_QUOTA_H
-
+#pragma once
 
 #include "include/utime.h"
-#include "include/atomic.h"
+#include "common/config_fwd.h"
 #include "common/lru_map.h"
 
-static inline int64_t rgw_rounded_kb(int64_t bytes)
-{
-  return (bytes + 1023) / 1024;
-}
-
-class RGWRados;
-class JSONObj;
-
-struct RGWQuotaInfo {
-  template<class T> friend class RGWQuotaCache;
-protected:
-  /* The quota thresholds after which comparing against cached storage stats
-   * is disallowed. Those fields may be accessed only by the RGWQuotaCache.
-   * They are not intended as tunables but rather as a mean to store results
-   * of repeating calculations in the quota cache subsystem. */
-  int64_t max_size_soft_threshold;
-  int64_t max_objs_soft_threshold;
-
-public:
-  int64_t max_size;
-  int64_t max_objects;
-  bool enabled;
-  /* Do we want to compare with raw, not rounded RGWStorageStats::size (true)
-   * or maybe rounded-to-4KiB RGWStorageStats::size_rounded (false)? */
-  bool check_on_raw;
-
-  RGWQuotaInfo()
-    : max_size_soft_threshold(-1),
-      max_objs_soft_threshold(-1),
-      max_size(-1),
-      max_objects(-1),
-      enabled(false),
-      check_on_raw(false) {
-  }
-
-  void encode(bufferlist& bl) const {
-    ENCODE_START(3, 1, bl);
-    if (max_size < 0) {
-      ::encode(-rgw_rounded_kb(abs(max_size)), bl);
-    } else {
-      ::encode(rgw_rounded_kb(max_size), bl);
-    }
-    ::encode(max_objects, bl);
-    ::encode(enabled, bl);
-    ::encode(max_size, bl);
-    ::encode(check_on_raw, bl);
-    ENCODE_FINISH(bl);
-  }
-  void decode(bufferlist::iterator& bl) {
-    DECODE_START_LEGACY_COMPAT_LEN(3, 1, 1, bl);
-    int64_t max_size_kb;
-    ::decode(max_size_kb, bl);
-    ::decode(max_objects, bl);
-    ::decode(enabled, bl);
-    if (struct_v < 2) {
-      max_size = max_size_kb * 1024;
-    } else {
-      ::decode(max_size, bl);
-    }
-    if (struct_v >= 3) {
-      ::decode(check_on_raw, bl);
-    }
-    DECODE_FINISH(bl);
-  }
-
-  void dump(Formatter *f) const;
-
-  void decode_json(JSONObj *obj);
-
-};
-WRITE_CLASS_ENCODER(RGWQuotaInfo)
+#include "rgw/rgw_quota_types.h"
+#include "rgw/rgw_user_types.h"
+#include "common/async/yield_context.h"
+#include "rgw_sal_fwd.h"
 
 struct rgw_bucket;
 
@@ -99,14 +31,17 @@ public:
   RGWQuotaHandler() {}
   virtual ~RGWQuotaHandler() {
   }
-  virtual int check_quota(const rgw_user& bucket_owner, rgw_bucket& bucket,
-                          RGWQuotaInfo& user_quota, RGWQuotaInfo& bucket_quota,
-			  uint64_t num_objs, uint64_t size) = 0;
+  virtual int check_quota(const DoutPrefixProvider *dpp, const rgw_owner& bucket_owner,
+                          const rgw_bucket& bucket, const RGWQuota& quota,
+			  uint64_t num_objs, uint64_t size, optional_yield y) = 0;
 
-  virtual void update_stats(const rgw_user& bucket_owner, rgw_bucket& bucket, int obj_delta, uint64_t added_bytes, uint64_t removed_bytes) = 0;
+  virtual void update_stats(const rgw_owner& bucket_owner, rgw_bucket& bucket, int obj_delta, uint64_t added_bytes, uint64_t removed_bytes) = 0;
 
-  static RGWQuotaHandler *generate_handler(RGWRados *store, bool quota_threads);
+  static RGWQuotaHandler *generate_handler(rgw::sal::Driver* driver, bool quota_threads);
   static void free_handler(RGWQuotaHandler *handler);
 };
 
-#endif
+// apply default quotas from configuration
+void rgw_apply_default_bucket_quota(RGWQuotaInfo& quota, const ConfigProxy& conf);
+void rgw_apply_default_user_quota(RGWQuotaInfo& quota, const ConfigProxy& conf);
+void rgw_apply_default_account_quota(RGWQuotaInfo& quota, const ConfigProxy& conf);

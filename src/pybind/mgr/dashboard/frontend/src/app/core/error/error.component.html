@@ -1,0 +1,115 @@
+<head>
+  <title>Error Page</title>
+  <base target="_blank" />
+</head>
+<div class="container h-75">
+  <div class="row h-100 justify-content-center align-items-center">
+    <div class="blank-page">
+      @if (header && message) {
+        <div>
+          <svg
+            [cdsIcon]="icon"
+            class="cds-info-color cds-icon--size-10"
+          ></svg>
+          <div class="mt-4 text-center">
+            <h3>
+              <b>{{ header }}</b>
+            </h3>
+            @if (header !== message) {
+              <h4 class="mt-3">
+                {{ message }}
+              </h4>
+            }
+            @if (section) {
+              <h4 i18n>
+                Please consult the&nbsp;<a href="{{ docUrl }}">documentation</a>&nbsp;on how to
+                configure and enable the {{ sectionInfo }} management functionality.
+              </h4>
+            }
+          </div>
+        </div>
+      } @else {
+        <cd-icon
+          type="warningAltFilled"
+          customClass="mx-auto d-block text-danger"
+          size="32"
+        ></cd-icon>
+        <div class="mt-4 text-center">
+          <h3 i18n><b>Page not Found</b></h3>
+          <h4
+            class="mt-4"
+            i18n
+          >
+            Sorry, we couldn’t find what you were looking for. The page you requested may have been
+            changed or moved.
+          </h4>
+        </div>
+      }
+
+      <div class="mt-4">
+        @if ((buttonName && buttonRoute) || uiConfig) {
+          <div class="text-center">
+            @if (!uiConfig) {
+              <button
+                class="btn btn-primary ms-1"
+                [routerLink]="buttonRoute"
+                type="button"
+                i18n
+              >
+                {{ buttonName }}
+              </button>
+            } @else {
+              @if (uiConfig) {
+                <button
+                  class="btn btn-primary"
+                  (click)="doConfigure()"
+                  [attr.title]="buttonTitle"
+                  type="button"
+                  i18n
+                >
+                  {{ buttonName }}
+                </button>
+              }
+            }
+            @if (secondaryButtonName && secondaryButtonRoute) {
+              <button
+                class="btn btn-light ms-1"
+                [routerLink]="secondaryButtonRoute"
+                type="button"
+                i18n
+              >
+                {{ secondaryButtonName }}
+              </button>
+            }
+          </div>
+        } @else {
+          @if (!module_name) {
+            <div class="mt-4 text-center">
+              <button
+                class="btn btn-primary"
+                [routerLink]="'/overview'"
+                type="button"
+                i18n
+              >
+                Go To Overview
+              </button>
+            </div>
+          } @else {
+            @if (module_name && !(buttonName && buttonRoute)) {
+              <div class="mt-4 text-center">
+                <button
+                  class="btn btn-primary"
+                  (click)="enableModule()"
+                  type="button"
+                  i18n
+                >
+                  Enable {{ module_name | upperFirst }} module
+                </button>
+              </div>
+            }
+          }
+        }
+      </div>
+    </div>
+  </div>
+</div>

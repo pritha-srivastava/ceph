@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,6 +16,12 @@
 #ifndef CEPH_MMDSBEACON_H
 #define CEPH_MMDSBEACON_H
 
+#include <map>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "msg/Message.h"
 #include "messages/PaxosServiceMessage.h"
 
 #include "include/types.h"
@@ -40,8 +47,78 @@ enum mds_metric_t {
   MDS_HEALTH_DAMAGE,
   MDS_HEALTH_READ_ONLY,
   MDS_HEALTH_SLOW_REQUEST,
-  MDS_HEALTH_CACHE_OVERSIZED
+  MDS_HEALTH_CACHE_OVERSIZED,
+  MDS_HEALTH_SLOW_METADATA_IO,
+  MDS_HEALTH_CLIENTS_LAGGY,
+  MDS_HEALTH_CLIENTS_LAGGY_MANY,
+  MDS_HEALTH_CLIENTS_BROKEN_ROOTSQUASH,
+  MDS_HEALTH_ESTIMATED_REPLAY_TIME,
+  MDS_HEALTH_DUMMY, // not a real health warning, for testing
 };
+
+inline const char *mds_metric_name(mds_metric_t m)
+{
+  switch (m) {
+  case MDS_HEALTH_TRIM: return "MDS_TRIM";
+  case MDS_HEALTH_CLIENT_RECALL: return "MDS_CLIENT_RECALL";
+  case MDS_HEALTH_CLIENT_LATE_RELEASE: return "MDS_CLIENT_LATE_RELEASE";
+  case MDS_HEALTH_CLIENT_RECALL_MANY: return "MDS_CLIENT_RECALL_MANY";
+  case MDS_HEALTH_CLIENT_LATE_RELEASE_MANY: return "MDS_CLIENT_LATE_RELEASE_MANY";
+  case MDS_HEALTH_CLIENT_OLDEST_TID: return "MDS_CLIENT_OLDEST_TID";
+  case MDS_HEALTH_CLIENT_OLDEST_TID_MANY: return "MDS_CLIENT_OLDEST_TID_MANY";
+  case MDS_HEALTH_DAMAGE: return "MDS_DAMAGE";
+  case MDS_HEALTH_READ_ONLY: return "MDS_READ_ONLY";
+  case MDS_HEALTH_SLOW_REQUEST: return "MDS_SLOW_REQUEST";
+  case MDS_HEALTH_CACHE_OVERSIZED: return "MDS_CACHE_OVERSIZED";
+  case MDS_HEALTH_SLOW_METADATA_IO: return "MDS_SLOW_METADATA_IO";
+  case MDS_HEALTH_CLIENTS_LAGGY: return "MDS_CLIENTS_LAGGY";
+  case MDS_HEALTH_CLIENTS_LAGGY_MANY: return "MDS_CLIENTS_LAGGY_MANY";
+  case MDS_HEALTH_CLIENTS_BROKEN_ROOTSQUASH: return "MDS_CLIENTS_BROKEN_ROOTSQUASH";
+  case MDS_HEALTH_ESTIMATED_REPLAY_TIME: return "MDS_ESTIMATED_REPLAY_TIME";
+  case MDS_HEALTH_DUMMY: return "MDS_DUMMY";
+  default:
+    return "???";
+  }
+}
+
+inline const char *mds_metric_summary(mds_metric_t m)
+{
+  switch (m) {
+  case MDS_HEALTH_TRIM:
+    return "%num% MDSs behind on trimming";
+  case MDS_HEALTH_CLIENT_RECALL:
+    return "%num% clients failing to respond to cache pressure";
+  case MDS_HEALTH_CLIENT_LATE_RELEASE:
+    return "%num% clients failing to respond to capability release";
+  case MDS_HEALTH_CLIENT_RECALL_MANY:
+    return "%num% MDSs have many clients failing to respond to cache pressure";
+  case MDS_HEALTH_CLIENT_LATE_RELEASE_MANY:
+    return "%num% MDSs have many clients failing to respond to capability "
+      "release";
+  case MDS_HEALTH_CLIENT_OLDEST_TID:
+    return "%num% clients failing to advance oldest client/flush tid";
+  case MDS_HEALTH_CLIENT_OLDEST_TID_MANY:
+    return "%num% MDSs have clients failing to advance oldest client/flush tid";
+  case MDS_HEALTH_DAMAGE:
+    return "%num% MDSs report damaged metadata";
+  case MDS_HEALTH_READ_ONLY:
+    return "%num% MDSs are read only";
+  case MDS_HEALTH_SLOW_REQUEST:
+    return "%num% MDSs report slow requests";
+  case MDS_HEALTH_CACHE_OVERSIZED:
+    return "%num% MDSs report oversized cache";
+  case MDS_HEALTH_SLOW_METADATA_IO:
+    return "%num% MDSs report slow metadata IOs";
+  case MDS_HEALTH_CLIENTS_LAGGY:
+    return "%num% client(s) laggy due to laggy OSDs";  
+  case MDS_HEALTH_CLIENTS_BROKEN_ROOTSQUASH:
+    return "%num% MDS report clients with broken root_squash implementation";
+  case MDS_HEALTH_ESTIMATED_REPLAY_TIME:
+    return "%num% estimated journal replay time";
+  default:
+    return "???";
+  }
+}
 
 /**
  * This structure is designed to allow some flexibility in how we emit health
@@ -62,24 +139,49 @@ struct MDSHealthMetric
   std::string message;
   std::map<std::string, std::string> metadata;
 
-  void encode(bufferlist& bl) const {
+  void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
-    assert(type != MDS_HEALTH_NULL);
-    ::encode((uint16_t)type, bl);
-    ::encode((uint8_t)sev, bl);
-    ::encode(message, bl);
-    ::encode(metadata, bl);
+    ceph_assert(type != MDS_HEALTH_NULL);
+    encode((uint16_t)type, bl);
+    encode((uint8_t)sev, bl);
+    encode(message, bl);
+    encode(metadata, bl);
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::iterator& bl) {
+  void decode(ceph::buffer::list::const_iterator& bl) {
     DECODE_START(1, bl);
-    ::decode((uint16_t&)type, bl);
-    assert(type != MDS_HEALTH_NULL);
-    ::decode((uint8_t&)sev, bl);
-    ::decode(message, bl);
-    ::decode(metadata, bl);
+    uint16_t raw_type;
+    decode(raw_type, bl);
+    type = (mds_metric_t)raw_type;
+    ceph_assert(type != MDS_HEALTH_NULL);
+    uint8_t raw_sev;
+    decode(raw_sev, bl);
+    sev = (health_status_t)raw_sev;
+    decode(message, bl);
+    decode(metadata, bl);
     DECODE_FINISH(bl);
+  }
+
+  void dump(ceph::Formatter *f) const {
+    f->dump_string("type", mds_metric_name(type));
+    f->dump_stream("sev") << sev;
+    f->dump_string("message", message);
+    f->open_object_section("metadata");
+    for (auto& i : metadata) {
+      f->dump_string(i.first.c_str(), i.second);
+    }
+    f->close_section();
+  }
+
+  static std::list<MDSHealthMetric> generate_test_instances() {
+    std::list<MDSHealthMetric> ls;
+    ls.push_back(MDSHealthMetric());
+    ls.back().type = MDS_HEALTH_CACHE_OVERSIZED;
+    ls.push_back(MDSHealthMetric(MDS_HEALTH_TRIM, HEALTH_WARN, "MDS is behind on trimming"));
+    ls.back().metadata["mds"] = "a";
+    ls.back().metadata["num"] = "1";
+    return ls;
   }
 
   bool operator==(MDSHealthMetric const &other) const
@@ -88,7 +190,7 @@ struct MDSHealthMetric
   }
 
   MDSHealthMetric() : type(MDS_HEALTH_NULL), sev(HEALTH_OK) {}
-  MDSHealthMetric(mds_metric_t type_, health_status_t sev_, std::string const &message_)
+  MDSHealthMetric(mds_metric_t type_, health_status_t sev_, std::string_view message_)
     : type(type_), sev(sev_), message(message_) {}
 };
 WRITE_CLASS_ENCODER(MDSHealthMetric)
@@ -100,18 +202,37 @@ WRITE_CLASS_ENCODER(MDSHealthMetric)
  */
 struct MDSHealth
 {
-  std::list<MDSHealthMetric> metrics;
+  std::vector<MDSHealthMetric> metrics;
 
-  void encode(bufferlist& bl) const {
+  void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
-    ::encode(metrics, bl);
+    encode(metrics, bl);
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::iterator& bl) {
+  void decode(ceph::buffer::list::const_iterator& bl) {
     DECODE_START(1, bl);
-    ::decode(metrics, bl);
+    decode(metrics, bl);
     DECODE_FINISH(bl);
+  }
+
+  void dump(ceph::Formatter *f) const {
+    f->open_array_section("metrics");
+    for (auto& i : metrics) {
+      f->open_object_section("metric");
+      i.dump(f);
+      f->close_section();
+    }
+    f->close_section();
+  }
+
+  static std::list<MDSHealth> generate_test_instances() {
+    std::list<MDSHealth> ls;
+    ls.emplace_back();
+    ls.emplace_back();
+    ls.back().metrics.push_back(MDSHealthMetric(MDS_HEALTH_TRIM, HEALTH_WARN,
+             "MDS is behind on trimming"));
+    return ls;
   }
 
   bool operator==(MDSHealth const &other) const
@@ -122,59 +243,51 @@ struct MDSHealth
 WRITE_CLASS_ENCODER(MDSHealth)
 
 
-class MMDSBeacon : public PaxosServiceMessage {
+class MMDSBeacon final : public PaxosServiceMessage {
+private:
 
-  static const int HEAD_VERSION = 7;
-  static const int COMPAT_VERSION = 2;
+  static constexpr int HEAD_VERSION = 8;
+  static constexpr int COMPAT_VERSION = 6;
 
   uuid_d fsid;
-  mds_gid_t global_id;
-  string name;
+  mds_gid_t global_id = MDS_GID_NONE;
+  std::string name;
 
-  MDSMap::DaemonState state;
-  version_t seq;
-
-  mds_rank_t      standby_for_rank;
-  string          standby_for_name;
-  fs_cluster_id_t standby_for_fscid;
-  bool            standby_replay;
+  MDSMap::DaemonState state = MDSMap::STATE_NULL;
+  version_t seq = 0;
 
   CompatSet compat;
 
   MDSHealth health;
 
-  map<string, string> sys_info;
+  std::map<std::string, std::string> sys_info;
 
-  uint64_t mds_features;
+  uint64_t mds_features = 0;
 
- public:
-  MMDSBeacon()
-    : PaxosServiceMessage(MSG_MDS_BEACON, 0, HEAD_VERSION, COMPAT_VERSION),
-    global_id(0), state(MDSMap::STATE_NULL), standby_for_rank(MDS_RANK_NONE),
-    standby_for_fscid(FS_CLUSTER_ID_NONE), standby_replay(false),
-    mds_features(0)
-  { }
-  MMDSBeacon(const uuid_d &f, mds_gid_t g, string& n, epoch_t les, MDSMap::DaemonState st, version_t se, uint64_t feat) :
+  std::string fs;
+
+protected:
+  MMDSBeacon() : PaxosServiceMessage(MSG_MDS_BEACON, 0, HEAD_VERSION, COMPAT_VERSION)
+  {
+    set_priority(CEPH_MSG_PRIO_HIGH);
+  }
+  MMDSBeacon(const uuid_d &f, mds_gid_t g, const std::string& n, epoch_t les,
+	     MDSMap::DaemonState st, version_t se, uint64_t feat) :
     PaxosServiceMessage(MSG_MDS_BEACON, les, HEAD_VERSION, COMPAT_VERSION),
     fsid(f), global_id(g), name(n), state(st), seq(se),
-    standby_for_rank(MDS_RANK_NONE), standby_for_fscid(FS_CLUSTER_ID_NONE),
-    standby_replay(false), mds_features(feat) {
+    mds_features(feat) {
+    set_priority(CEPH_MSG_PRIO_HIGH);
   }
-private:
-  ~MMDSBeacon() {}
+  ~MMDSBeacon() final {}
 
 public:
-  uuid_d& get_fsid() { return fsid; }
-  mds_gid_t get_global_id() { return global_id; }
-  string& get_name() { return name; }
-  epoch_t get_last_epoch_seen() { return version; }
-  MDSMap::DaemonState get_state() { return state; }
-  version_t get_seq() { return seq; }
-  const char *get_type_name() const { return "mdsbeacon"; }
-  mds_rank_t get_standby_for_rank() { return standby_for_rank; }
-  const string& get_standby_for_name() { return standby_for_name; }
-  const fs_cluster_id_t& get_standby_for_fscid() { return standby_for_fscid; }
-  bool get_standby_replay() const { return standby_replay; }
+  const uuid_d& get_fsid() const { return fsid; }
+  mds_gid_t get_global_id() const { return global_id; }
+  const std::string& get_name() const { return name; }
+  epoch_t get_last_epoch_seen() const { return version; }
+  MDSMap::DaemonState get_state() const { return state; }
+  version_t get_seq() const { return seq; }
+  std::string_view get_type_name() const override { return "mdsbeacon"; }
   uint64_t get_mds_features() const { return mds_features; }
 
   CompatSet const& get_compat() const { return compat; }
@@ -183,74 +296,89 @@ public:
   MDSHealth const& get_health() const { return health; }
   void set_health(const MDSHealth &h) { health = h; }
 
-  void set_standby_for_rank(mds_rank_t r) { standby_for_rank = r; }
-  void set_standby_for_name(string& n) { standby_for_name = n; }
-  void set_standby_for_name(const char* c) { standby_for_name.assign(c); }
-  void set_standby_for_fscid(fs_cluster_id_t f) { standby_for_fscid = f; }
-  void set_standby_replay(bool r) { standby_replay = r; }
+  const std::string& get_fs() const { return fs; }
+  void set_fs(std::string_view s) { fs = s; }
 
-  const map<string, string>& get_sys_info() const { return sys_info; }
-  void set_sys_info(const map<string, string>& i) { sys_info = i; }
+  const std::map<std::string, std::string>& get_sys_info() const { return sys_info; }
+  void set_sys_info(const std::map<std::string, std::string>& i) { sys_info = i; }
 
-  void print(ostream& out) const {
-    out << "mdsbeacon(" << global_id << "/" << name << " " << ceph_mds_state_name(state) 
-	<< " seq " << seq << " v" << version << ")";
+  void print(std::ostream& out) const override {
+    out << "mdsbeacon(" << global_id << "/" << name
+	<< " " << ceph_mds_state_name(state);
+    if (fs.size()) {
+      out << " fs=" << fs;
+    }
+    out << " seq=" << seq << " v" << version << ")";
   }
 
-  void encode_payload(uint64_t features) {
+  void encode_payload(uint64_t features) override {
+    using ceph::encode;
     paxos_encode();
-    ::encode(fsid, payload);
-    ::encode(global_id, payload);
-    ::encode((__u32)state, payload);
-    ::encode(seq, payload);
-    ::encode(name, payload);
-    ::encode(standby_for_rank, payload);
-    ::encode(standby_for_name, payload);
-    ::encode(compat, payload);
-    ::encode(health, payload);
+    encode(fsid, payload);
+    encode(global_id, payload);
+    encode((__u32)state, payload);
+    encode(seq, payload);
+    encode(name, payload);
+    encode(MDS_RANK_NONE, payload);
+    encode(std::string(), payload);
+    encode(compat, payload);
+    encode(health, payload);
     if (state == MDSMap::STATE_BOOT) {
-      ::encode(sys_info, payload);
+      encode(sys_info, payload);
     }
-    ::encode(mds_features, payload);
-    ::encode(standby_for_fscid, payload);
-    ::encode(standby_replay, payload);
+    encode(mds_features, payload);
+    encode(FS_CLUSTER_ID_NONE, payload);
+    encode(false, payload);
+    encode(fs, payload);
   }
-  void decode_payload() {
-    bufferlist::iterator p = payload.begin();
+  void decode_payload() override {
+    using ceph::decode;
+    auto p = payload.cbegin();
     paxos_decode(p);
-    ::decode(fsid, p);
-    ::decode(global_id, p);
-    ::decode((__u32&)state, p);
-    ::decode(seq, p);
-    ::decode(name, p);
-    ::decode(standby_for_rank, p);
-    ::decode(standby_for_name, p);
-    if (header.version >= 2)
-      ::decode(compat, p);
-    if (header.version >= 3) {
-      ::decode(health, p);
+    decode(fsid, p);
+    decode(global_id, p);
+    __u32 raw_state;
+    decode(raw_state, p);
+    state = (MDSMap::DaemonState)raw_state;
+    decode(seq, p);
+    decode(name, p);
+    {
+      mds_rank_t standby_for_rank;
+      decode(standby_for_rank, p);
     }
-    if (state == MDSMap::STATE_BOOT &&
-	header.version >= 4) {
-      ::decode(sys_info, p);
+    {
+      std::string standby_for_name;
+      decode(standby_for_name, p);
     }
-    if (header.version >= 5) {
-      ::decode(mds_features, p);
+    decode(compat, p);
+    decode(health, p);
+    if (state == MDSMap::STATE_BOOT) {
+      decode(sys_info, p);
     }
-    if (header.version >= 6) {
-      ::decode(standby_for_fscid, p);
+    decode(mds_features, p);
+    {
+      fs_cluster_id_t standby_for_fscid;
+      decode(standby_for_fscid, p);
     }
     if (header.version >= 7) {
-      ::decode(standby_replay, p);
+      bool standby_replay;
+      decode(standby_replay, p);
     }
 
     if (header.version < 7  && state == MDSMap::STATE_STANDBY_REPLAY) {
       // Old MDS daemons request the state, instead of explicitly
       // advertising that they are configured as a replay daemon.
-      standby_replay = true;
       state = MDSMap::STATE_STANDBY;
     }
+    if (header.version >= 8) {
+      decode(fs, p);
+    }
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
+  template<class T, typename... Args>
+  friend MURef<T> crimson::make_message(Args&&... args);
 };
 
 #endif

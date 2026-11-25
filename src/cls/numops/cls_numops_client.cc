@@ -12,13 +12,14 @@
  *
  */
 
-#include "objclass/objclass.h"
 #include "cls/numops/cls_numops_client.h"
 #include "include/encoding.h"
+#include "include/rados/librados.hpp"
 
-#include <cstdlib>
 #include <errno.h>
 #include <sstream>
+
+using namespace rados::cls::numops;
 
 namespace rados {
   namespace cls {
@@ -29,15 +30,18 @@ namespace rados {
               const std::string& key,
               double value_to_add)
       {
-        bufferlist in, out;
-        ::encode(key, in);
+        bufferlist in;
+        encode(key, in);
 
         std::stringstream stream;
         stream << value_to_add;
 
-        ::encode(stream.str(), in);
+        encode(stream.str(), in);
 
-        return ioctx->exec(oid, "numops", "add", in, out);
+        librados::ObjectWriteOperation op;
+        op.exec(method::add, in);
+
+        return ioctx->operate(oid, &op);
       }
 
       int sub(librados::IoCtx *ioctx,
@@ -54,14 +58,17 @@ namespace rados {
               double value_to_multiply)
       {
         bufferlist in, out;
-        ::encode(key, in);
+        encode(key, in);
 
         std::stringstream stream;
         stream << value_to_multiply;
 
-        ::encode(stream.str(), in);
+        encode(stream.str(), in);
 
-        return ioctx->exec(oid, "numops", "mul", in, out);
+        librados::ObjectWriteOperation op;
+        op.exec(method::mul, in);
+
+        return ioctx->operate(oid, &op);
       }
 
       int div(librados::IoCtx *ioctx,

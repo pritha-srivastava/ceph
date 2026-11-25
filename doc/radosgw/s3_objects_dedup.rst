@@ -1,0 +1,287 @@
+.. _radosgw-s3-dedup:
+
+=====================
+Full RGW Object Dedup
+=====================
+
+Full RGW object deduplication adds ``radosgw-admin`` commands to deduplicate
+RGW tail RADOS objects and to collect and report statistics.
+
+These operations are also available through the :ref:`Admin Ops API <radosgw-adminops-dedup>`
+under ``/{admin}/dedup``.
+
+
+Admin Commands
+==============
+
+- ``radosgw-admin dedup estimate``:
+   Starts a new dedup estimate session, first ending any existing session.
+   No changes are made to the existing system; statistics will be
+   collected and reported.
+- ``radosgw-admin dedup exec --yes-i-really-mean-it``:
+   Starts a new dedup session, first cancelling any existing session.
+   Performs a full pass, finding and deduplicating identical RADOS tail objects.
+
+   This is an experimental feature under active development.
+   As of this documentation's release, This command can lead to **data loss**
+   and should not be used on production data as of the release containing
+   this documentation. Note the URL of this page: if you are running a
+   newer release, consult that release's updated documentation. Running
+   this command on a Ceph release in which it is not yet production-ready
+   may irreversibly lose precious data.
+- ``radosgw-admin dedup pause``:
+   Pauses an active dedup session (dedup resources are not released).
+- ``radosgw-admin dedup resume``:
+   Resumes a paused dedup session.
+- ``radosgw-admin dedup abort``:
+   Aborts an active dedup session, releasing all resources used by it.
+- ``radosgw-admin dedup stats``:
+   Collects and displays dedup statistics.
+- ``radosgw-admin dedup throttle --max-bucket-index-ops=<count>``:
+   Specifies maximum allowed bucket index read requests per second per
+   RGW daemon during dedup, ``0`` means unlimited.
+- ``radosgw-admin dedup throttle --stat``:
+   Displays dedup throttle setting.
+
+The ``dedup estimate`` and ``dedup exec`` commands also accept filter options:
+
+- ``--allow-bucket-list <file>``:
+   Path to a file listing bucket names to include (allowlist mode).
+   Only buckets listed in the file will be processed.
+   Mutually exclusive with ``--deny-bucket-list``.
+
+- ``--deny-bucket-list <file>``:
+   Path to a file listing bucket names to exclude (denylist mode).
+   All buckets except those listed in the file will be processed.
+   Mutually exclusive with ``--allow-bucket-list``.
+
+- ``--allow-storage-class-list <file>``:
+   Path to a file listing storage class names to include (allowlist mode).
+   Mutually exclusive with ``--deny-storage-class-list``.
+
+- ``--deny-storage-class-list <file>``:
+   Path to a file listing storage class names to exclude (denylist mode).
+   Mutually exclusive with ``--allow-storage-class-list``.
+
+**File format:** One name per line. Lines starting with or containing ``#``
+are treated as comments. Whitespace is ignored. The file must contain at least
+one valid name; an empty or all-comment file is rejected.
+
+
+Configuration
+=============
+
+The dedup background thread must be enabled on at least one RGW daemon in each
+zone for dedup operations to function. Having the thread enabled on multiple
+RGW processes within the same zone spreads the dedup work between them.
+
+:confval:`rgw_enable_dedup_threads`
+
+This setting is evaluated at RGW startup. Changing it requires a daemon
+restart.
+
+When running RGW as an NFS-Ganesha gateway (``librgw``), the dedup thread is
+disabled by default. To enable it in NFS mode, also set:
+
+.. confval:: rgw_nfs_run_dedup_threads
+
+
+Skipped Objects
+===============
+
+The dedup estimate process skips the following RGW objects:
+
+- Objects smaller than :confval:`rgw_dedup_min_obj_size_for_dedup` (unless they
+  are multipart)
+- Objects with different placement rules
+- Objects in different RADOS pools
+- Objects with different RGW storage classes
+- On EC pools without ``allow_ec_overwrites``: non-multipart objects smaller
+  than :confval:`rgw_max_chunk_size` in the default storage class (these require
+  split-head which is unavailable on such pools)
+
+The full dedup process skips all of the above and additionally skips
+**user-encrypted** objects and objects written with AppendObject.  Server-side
+**compressed** objects can optionally be skipped by setting
+:confval:`rgw_dedup_skip_compressed`.
+
+The minimum RGW object size to be deduplicated is controlled by the following
+configuration option:
+
+.. confval:: rgw_dedup_min_obj_size_for_dedup
+
+Compressed objects are deduplicated by default.  To skip them:
+
+.. confval:: rgw_dedup_skip_compressed
+
+
+Estimate Processing
+===================
+
+The dedup estimate process collects all needed information directly from
+the bucket indexes, reading one full bucket index object a thousand entries at
+a time.
+
+Bucket index objects are sharded between the participating members so each
+is read exactly one time. The sharding allows processing to
+scale almost linearly, splitting the load evenly among participating
+daemons.
+
+The dedup estimate process does not access the object payload
+data, which means that processing time won't be significantly affected by the
+underlying media (SSD/HDD) storing the objects. Best practice places bucket
+index pools on fast storage: SSDs
+:ref:`are recommended <hardware-storage-devices>` and they are cached heavily
+in memory.
+
+Administrators can throttle the estimate process by setting a limit on the
+number of bucket index reads per second per RGW daemon. Each operation
+reads 1000 object entries:
+
+.. prompt:: bash #
+
+   radosgw-admin dedup throttle --max-bucket-index-ops=<count>
+
+A typical RGW server performs about 100 bucket index reads per second and thus
+100,000 object entries. For example, setting ``count`` to 50 would then
+typically slow down the estimate process by half.
+
+
+Full Dedup Processing
+=====================
+
+The full dedup process begins by constructing a dedup table from the bucket
+indexes in a fashion similar to the estimate process described above.
+
+This table is then scanned linearly to exclude RADOS objects without
+duplicates, leaving only dedup candidates.
+
+Next, it iterates through these dedup candidate objects, reading their complete
+information from the object metadata, a per-object RADOS operation. During
+this step, **user-encrypted** objects are removed from consideration.
+
+Dedup source selection
+----------------------
+
+When several objects share the same dedup key (MD5 etag and logical size), dedup
+chooses one as the **source** (SRC). All other copies become **targets** that
+will share the source tail objects. Source selection uses the dedup table built
+from bucket indices and updated as object metadata is read:
+
+#. An object that is already a source from a prior dedup cycle (marked with a
+   shared manifest) is never replaced.
+#. Otherwise, prefer objects whose server-side compression matches the
+   compression type configured on the tail **placement rule** (exact match).
+#. If no exact match exists, prefer objects that are compressed with a
+   different algorithm over uncompressed objects (partial match).
+#. Otherwise keep the first valid candidate.
+
+The placement compression type is taken from the zone's **current** placement
+configuration, not from the setting in effect when each object was uploaded.
+
+Next, we iterate through these dedup candidate objects, reading their complete
+information from the object metadata (a per-object RADOS operation). During
+this step, we filter out **user-encrypted** objects.
+
+At this point, the dedup candidates are objects whose MD5 hash and size are
+identical -- the likelihood of a false positive is vanishingly small for
+naturally occurring data. To provide a cryptographic guarantee and guard
+against crafted MD5 collisions ensuring that dedup candidates are indeed perfect
+matches, we calculate a strong hash (Blake3) over the
+full object data. This requires reading the entire object, with cost
+proportional to object size -- but the potential dedup savings also grow with
+size, and at this stage deduplication is almost certain to succeed.
+
+For compressed objects the hash is calculated on the uncompressed data -- each
+compression block is decompressed on-the-fly and fed to the hasher, so memory
+usage stays bounded regardless of object size. This adds CPU cost for
+decompression, though at this stage deduplication is almost certain to succeed
+and the savings will justify the overhead. To skip compressed objects entirely,
+set ``rgw_dedup_skip_compressed = true`` in the configuration.
+
+If the objects' strong hash matches, we proceed with the deduplication:
+
+- Increment the reference count on the source tail objects one by one.
+- Replace the target manifest and tail objects entirely with the source's
+  (the target's previous tail layout is freed).
+- Mirror the compression attribute (``RGW_ATTR_COMPRESSION``) from source to
+  target: if the source is compressed the attribute is copied to the target;
+  if the source is uncompressed the attribute is removed from the target.
+- Remove all tail objects on the target.
+
+Cross-mode compression
+----------------------
+
+Compressed and uncompressed copies of the same logical content can land in the
+same dedup candidate set because dedup keys use **logical** (uncompressed) size
+from the bucket index, not on-disk compressed size.
+
+When dedup succeeds between mixed compression states, each target adopts the
+source manifest, tail objects, and compression attribute. Because source
+selection prefers objects that match **current** placement compression, all
+deduped copies typically converge on the compression state implied by the
+zone's placement policy at dedup time -- not on the mode each object had when
+it was uploaded. For example, if placement compression was disabled and later
+re-enabled, dedup may rewrite older uncompressed copies to share compressed
+tail objects from a source that matches the current placement.
+
+In incremental dedup, a source established in an earlier cycle keeps shared-
+manifest priority even when newer copies would match current placement
+compression more closely.
+
+Split Head Mode
+===============
+
+The dedup code can split a head object into two objects:
+
+- one with attributes and no data, and
+- a new tail object with only data.
+
+The new tail object will be deduplicated, unlike head objects, which cannot
+be deduplicated.
+
+.. confval:: rgw_dedup_split_obj_head
+
+   Setting this option to ``false`` disables split-head entirely.
+
+.. note::
+   Split-head is automatically disabled on erasure-coded (EC) data pools
+   that do not have ``allow_ec_overwrites`` enabled. EC pools are
+   append-only and reject the truncate operation required by split-head.
+   On such pools, non-multipart default-storage-class objects smaller
+   than ``rgw_max_chunk_size`` are skipped during the bucket-index scan
+   since they cannot be deduped without split-head.
+   Non-default storage-class objects and multipart objects have an empty
+   head and remain dedupable without split-head.
+
+
+Memory Usage
+============
+
+ +------------------+----------+
+ | RGW Object Count |  Memory  |
+ +==================+==========+
+ |      1M          |    8 MB  |
+ +------------------+----------+
+ |      4M          |   16 MB  |
+ +------------------+----------+
+ |     16M          |   32 MB  |
+ +------------------+----------+
+ |     64M          |   64 MB  |
+ +------------------+----------+
+ |    256M          |  128 MB  |
+ +------------------+----------+
+ |   1024M   (1G)   |  256 MB  |
+ +------------------+----------+
+ |   4096M   (4G)   |  512 MB  |
+ +------------------+----------+
+ |  16384M  (16G)   | 1024 MB  |
+ +------------------+----------+
+ |  65536M  (64G)   | 2048 MB  |
+ +------------------+----------+
+ | 262144M (256G)   | 4096 MB  |
+ +------------------+----------+
+
+ .. note::
+     Pools with more than ~213 billion user objects (256B with headroom) exceed the
+     dedup system's maximum capacity and will be rejected at startup.

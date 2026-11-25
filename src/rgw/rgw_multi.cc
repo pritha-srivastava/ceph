@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include <string.h>
 
@@ -10,11 +10,12 @@
 
 #include "rgw_xml.h"
 #include "rgw_multi.h"
+#include "rgw_op.h"
+#include "rgw_sal.h"
 
 #define dout_subsys ceph_subsys_rgw
 
 using namespace std;
-
 
 bool RGWMultiPart::xml_end(const char *el)
 {
@@ -48,10 +49,13 @@ bool RGWMultiCompleteUpload::xml_end(const char *el) {
   return true;
 }
 
+RGWMultiXMLParser::~RGWMultiXMLParser() {}
 
 XMLObj *RGWMultiXMLParser::alloc_obj(const char *el) {
   XMLObj *obj = NULL;
+  // CompletedMultipartUpload is incorrect but some versions of some libraries use it, see PR #41700
   if (strcmp(el, "CompleteMultipartUpload") == 0 ||
+      strcmp(el, "CompletedMultipartUpload") == 0 ||
       strcmp(el, "MultipartUpload") == 0) {
     obj = new RGWMultiCompleteUpload();
   } else if (strcmp(el, "Part") == 0) {
@@ -63,5 +67,36 @@ XMLObj *RGWMultiXMLParser::alloc_obj(const char *el) {
   }
 
   return obj;
+}
+
+bool is_v2_upload_id(const string& upload_id)
+{
+  const char *uid = upload_id.c_str();
+
+  return (strncmp(uid, MULTIPART_UPLOAD_ID_PREFIX, sizeof(MULTIPART_UPLOAD_ID_PREFIX) - 1) == 0) ||
+         (strncmp(uid, MULTIPART_UPLOAD_ID_PREFIX_LEGACY, sizeof(MULTIPART_UPLOAD_ID_PREFIX_LEGACY) - 1) == 0);
+}
+
+list<RGWUploadPartInfo> RGWUploadPartInfo::generate_test_instances()
+{
+  list<RGWUploadPartInfo> o;
+  RGWUploadPartInfo i;
+  i.num = 1;
+  i.size = 10 * 1024 * 1024;
+  i.etag = "etag";
+  o.push_back(std::move(i));
+  o.emplace_back();
+  return o;
+}
+
+void RGWUploadPartInfo::dump(Formatter *f) const
+{
+  encode_json("num", num, f);
+  encode_json("size", size, f);
+  encode_json("etag", etag, f);
+  utime_t ut(modified);
+  encode_json("modified", ut, f);
+  encode_json("past_prefixes", past_prefixes, f);
+  encode_json("crypt_salt", crypt_salt, f);
 }
 

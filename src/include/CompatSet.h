@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,33 +15,40 @@
 
 #ifndef CEPH_COMPATSET_H
 #define CEPH_COMPATSET_H
+
+#include <iosfwd>
+#include <map>
+#include <string>
+
 #include "include/buffer.h"
-#include "common/Formatter.h"
+#include "include/encoding.h"
+
+namespace ceph { class Formatter; }
 
 struct CompatSet {
 
   struct Feature {
     uint64_t id;
-    string name;
+    std::string_view name;
 
-    Feature(uint64_t _id, const string& _name) : id(_id), name(_name) {}
+    constexpr Feature(uint64_t _id, const std::string_view _name) : id(_id), name(_name) {}
   };
 
   class FeatureSet {
-    uint64_t mask;
-    map <uint64_t,string> names;
+    uint64_t mask = 1;
+    std::map<uint64_t, std::string> names;
 
   public:
     friend struct CompatSet;
     friend class CephCompatSet_AllSet_Test;
     friend class CephCompatSet_other_Test;
     friend class CephCompatSet_merge_Test;
-    friend ostream& operator<<(ostream& out, const CompatSet::FeatureSet& fs);
-    friend ostream& operator<<(ostream& out, const CompatSet& compat);
-    FeatureSet() : mask(1), names() {}
+    friend std::ostream& operator<<(std::ostream& out, const CompatSet::FeatureSet& fs);
+    friend std::ostream& operator<<(std::ostream& out, const CompatSet& compat);
+
     void insert(const Feature& f) {
-      assert(f.id > 0);
-      assert(f.id < 64);
+      ceph_assert(f.id > 0);
+      ceph_assert(f.id < 64);
       mask |= ((uint64_t)1<<f.id);
       names[f.id] = f.name;
     }
@@ -54,9 +62,9 @@ struct CompatSet {
     /**
      * Getter instead of using name[] to be const safe
      */
-    std::string get_name(uint64_t const f) const {
+    std::string_view get_name(uint64_t const f) const noexcept {
       std::map<uint64_t, std::string>::const_iterator i = names.find(f);
-      assert(i != names.end());
+      ceph_assert(i != names.end());
       return i->second;
     }
 
@@ -70,49 +78,10 @@ struct CompatSet {
       remove(f.id);
     }
 
-    void encode(bufferlist& bl) const {
-      /* See below, mask always has the lowest bit set in memory, but
-       * unset in the encoding */
-      ::encode(mask & (~(uint64_t)1), bl);
-      ::encode(names, bl);
-    }
+    void encode(ceph::buffer::list& bl) const;
+    void decode(ceph::buffer::list::const_iterator& bl);
 
-    void decode(bufferlist::iterator& bl) {
-      ::decode(mask, bl);
-      ::decode(names, bl);
-      /**
-       * Previously, there was a bug where insert did
-       * mask |= f.id rather than mask |= (1 << f.id).
-       * In FeatureSets from those version, mask always
-       * has the lowest bit set.  Since then, masks always
-       * have the lowest bit unset.
-       *
-       * When we encounter such a FeatureSet, we have to
-       * reconstruct the mask from the names map.
-       */
-      if (mask & 1) {
-	mask = 1;
-	map<uint64_t, string> temp_names;
-	temp_names.swap(names);
-	for (map<uint64_t, string>::iterator i = temp_names.begin();
-	     i != temp_names.end();
-	     ++i) {
-	  insert(Feature(i->first, i->second));
-	}
-      } else {
-	mask |= 1;
-      }
-    }
-
-    void dump(Formatter *f) const {
-      for (map<uint64_t,string>::const_iterator p = names.begin();
-	   p != names.end();
-	   ++p) {
-	char s[18];
-	snprintf(s, sizeof(s), "feature_%lld", (unsigned long long)p->first);
-	f->dump_string(s, p->second);
-      }
-    }
+    void dump(ceph::Formatter *f) const;
   };
 
   // These features have no impact on the read / write status
@@ -151,7 +120,7 @@ struct CompatSet {
    * -1: This CompatSet is missing at least one feature
    *     described in the other. It may still have more features, though.
    */
-  int compare(const CompatSet& other) {
+  int compare(const CompatSet& other) const {
     if ((other.compat.mask == compat.mask) &&
 	(other.ro_compat.mask == ro_compat.mask) &&
 	(other.incompat.mask == incompat.mask)) return 0;
@@ -167,7 +136,7 @@ struct CompatSet {
   /* Get the features supported by other CompatSet but not this one,
    * as a CompatSet.
    */
-  CompatSet unsupported(CompatSet& other) {
+  CompatSet unsupported(const CompatSet& other) const {
     CompatSet diff;
     uint64_t other_compat =
       ((other.compat.mask ^ compat.mask) & other.compat.mask);
@@ -178,13 +147,13 @@ struct CompatSet {
     for (int id = 1; id < 64; ++id) {
       uint64_t mask = (uint64_t)1 << id;
       if (mask & other_compat) {
-	diff.compat.insert( Feature(id, other.compat.names[id]));
+	diff.compat.insert( Feature(id, other.compat.names.at(id)));
       }
       if (mask & other_ro_compat) {
-	diff.ro_compat.insert(Feature(id, other.ro_compat.names[id]));
+	diff.ro_compat.insert(Feature(id, other.ro_compat.names.at(id)));
       }
       if (mask & other_incompat) {
-	diff.incompat.insert( Feature(id, other.incompat.names[id]));
+	diff.incompat.insert( Feature(id, other.incompat.names.at(id)));
       }
     }
     return diff;
@@ -217,51 +186,19 @@ struct CompatSet {
     return true;
   }
 
-  void encode(bufferlist& bl) const {
-    compat.encode(bl);
-    ro_compat.encode(bl);
-    incompat.encode(bl);
-  }
-  
-  void decode(bufferlist::iterator& bl) {
-    compat.decode(bl);
-    ro_compat.decode(bl);
-    incompat.decode(bl);
-  }
+  std::ostream& printlite(std::ostream& o) const;
 
-  void dump(Formatter *f) const {
-    f->open_object_section("compat");
-    compat.dump(f);
-    f->close_section();
-    f->open_object_section("ro_compat");
-    ro_compat.dump(f);
-    f->close_section();
-    f->open_object_section("incompat");
-    incompat.dump(f);
-    f->close_section();
-  }
+  void encode(ceph::buffer::list& bl) const;
+  void decode(ceph::buffer::list::const_iterator& bl);
 
-  static void generate_test_instances(list<CompatSet*>& o) {
-    o.push_back(new CompatSet);
-    o.push_back(new CompatSet);
-    o.back()->compat.insert(Feature(1, "one"));
-    o.back()->compat.insert(Feature(2, "two"));
-    o.back()->ro_compat.insert(Feature(4, "four"));
-    o.back()->incompat.insert(Feature(3, "three"));
-  }
+  void dump(ceph::Formatter *f) const;
+
+  static std::list<CompatSet> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(CompatSet)
 
-inline ostream& operator<<(ostream& out, const CompatSet::FeatureSet& fs)
-{
-  return out << fs.names;
-}
-
-inline ostream& operator<<(ostream& out, const CompatSet& compat)
-{
-  return out << "compat=" << compat.compat
-	     << ",rocompat=" << compat.ro_compat
-	     << ",incompat=" << compat.incompat;
-}
+std::ostream& operator<<(std::ostream& out, const CompatSet::Feature& f);
+std::ostream& operator<<(std::ostream& out, const CompatSet::FeatureSet& fs);
+std::ostream& operator<<(std::ostream& out, const CompatSet& compat);
 
 #endif

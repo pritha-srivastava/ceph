@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -36,10 +37,10 @@ public:
   Dumper() : ino(-1)
   {}
 
-  int init(mds_role_t role_);
+  int init(mds_role_t role_, const std::string &type);
   int recover_journal(Journaler *journaler);
   int dump(const char *dumpfile);
-  int undump(const char *dumpfile);
+  int undump(const char *dumpfile, bool force);
 };
 
 #endif /* JOURNAL_DUMPER_H_ */

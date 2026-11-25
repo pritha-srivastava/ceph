@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,8 +15,7 @@
  *  version 2.1 of the License, or (at your option) any later version.
  *
  */
-
-#include <errno.h>
+#include <cerrno>
 #include <algorithm>
 
 #include "include/str_map.h"
@@ -28,20 +28,20 @@
 
 #include "ErasureCodeLrc.h"
 
-// re-include our assert to clobber boost's
-#include "include/assert.h"
-
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_osd
 #undef dout_prefix
 #define dout_prefix _prefix(_dout)
+
+using namespace std;
+using namespace ceph;
 
 static ostream& _prefix(std::ostream* _dout)
 {
   return *_dout << "ErasureCodeLrc: ";
 }
 
-int ErasureCodeLrc::create_ruleset(const string &name,
+int ErasureCodeLrc::create_rule(const string &name,
 				   CrushWrapper &crush,
 				   ostream *ss) const
 {
@@ -49,39 +49,48 @@ int ErasureCodeLrc::create_ruleset(const string &name,
     *ss << "rule " << name << " exists";
     return -EEXIST;
   }
-  if (!crush.name_exists(ruleset_root)) {
-    *ss << "root item " << ruleset_root << " does not exist";
+  if (!crush.name_exists(rule_root)) {
+    *ss << "root item " << rule_root << " does not exist";
     return -ENOENT;
   }
-  int root = crush.get_item_id(ruleset_root);
+  int root = crush.get_item_id(rule_root);
+  if (rule_device_class.size()) {
+    if (!crush.class_exists(rule_device_class)) {
+      *ss << "device class " << rule_device_class << " does not exist";
+      return -ENOENT;
+    }
+    int c = crush.get_class_id(rule_device_class);
+    if (crush.class_bucket.count(root) == 0 ||
+	crush.class_bucket[root].count(c) == 0) {
+      *ss << "root item " << rule_root << " has no devices with class "
+	  << rule_device_class;
+      return -EINVAL;
+    }
+    root = crush.class_bucket[root][c];
+  }
 
-  int ruleset = 0;
   int rno = 0;
   for (rno = 0; rno < crush.get_max_rules(); rno++) {
-    if (!crush.rule_exists(rno) && !crush.ruleset_exists(rno))
+    if (!crush.rule_exists(rno))
        break;
   }
-  ruleset = rno;
 
-  int steps = 4 + ruleset_steps.size();
-  int min_rep = 3;
-  int max_rep = get_chunk_count();
+  int steps = 4 + rule_steps.size();
   int ret;
-  ret = crush.add_rule(steps, ruleset, pg_pool_t::TYPE_ERASURE,
-		  min_rep, max_rep, rno);
-  assert(ret == rno);
+  ret = crush.add_rule(rno, steps, pg_pool_t::TYPE_ERASURE);
+  ceph_assert(ret == rno);
   int step = 0;
 
   ret = crush.set_rule_step(rno, step++, CRUSH_RULE_SET_CHOOSELEAF_TRIES, 5, 0);
-  assert(ret == 0);
+  ceph_assert(ret == 0);
   ret = crush.set_rule_step(rno, step++, CRUSH_RULE_SET_CHOOSE_TRIES, 100, 0);
-  assert(ret == 0);
+  ceph_assert(ret == 0);
   ret = crush.set_rule_step(rno, step++, CRUSH_RULE_TAKE, root, 0);
-  assert(ret == 0);
+  ceph_assert(ret == 0);
   // [ [ "choose", "rack", 2 ],
   //   [ "chooseleaf", "host", 5 ] ]
-  for (vector<Step>::const_iterator i = ruleset_steps.begin();
-       i != ruleset_steps.end();
+  for (vector<Step>::const_iterator i = rule_steps.begin();
+       i != rule_steps.end();
        ++i) {
     int op = i->op == "chooseleaf" ?
       CRUSH_RULE_CHOOSELEAF_INDEP : CRUSH_RULE_CHOOSE_INDEP;
@@ -91,12 +100,12 @@ int ErasureCodeLrc::create_ruleset(const string &name,
       return -EINVAL;
     }
     ret = crush.set_rule_step(rno, step++, op, i->n, type);
-    assert(ret == 0);
+    ceph_assert(ret == 0);
   }
   ret = crush.set_rule_step(rno, step++, CRUSH_RULE_EMIT, 0, 0);
-  assert(ret == 0);
+  ceph_assert(ret == 0);
   crush.set_rule_name(rno, name);
-  return ruleset;
+  return rno;
 }
 
 int ErasureCodeLrc::layers_description(const ErasureCodeProfile &profile,
@@ -128,7 +137,7 @@ int ErasureCodeLrc::layers_description(const ErasureCodeProfile &profile,
   return 0;
 }
 
-int ErasureCodeLrc::layers_parse(string description_string,
+int ErasureCodeLrc::layers_parse(const string &description_string,
 				 json_spirit::mArray description,
 				 ostream *ss)
 {
@@ -211,8 +220,10 @@ int ErasureCodeLrc::layers_init(ostream *ss)
 	layer.data.push_back(position);
       if (*it == 'c')
 	layer.coding.push_back(position);
-      if (*it == 'c' || *it == 'D')
-	layer.chunks_as_set.insert(position);
+      if (*it == 'c' || *it == 'D') {
+        layer.chunks_as_set.insert(position);
+        layer.chunks_as_shard_set.insert(shard_id_t(position));
+      }
       position++;
     }
     layer.chunks = layer.data;
@@ -223,7 +234,7 @@ int ErasureCodeLrc::layers_init(ostream *ss)
     if (layer.profile.find("m") == layer.profile.end())
       layer.profile["m"] = stringify(layer.coding.size());
     if (layer.profile.find("plugin") == layer.profile.end())
-      layer.profile["plugin"] = "jerasure";
+      layer.profile["plugin"] = "isa";
     if (layer.profile.find("technique") == layer.profile.end())
       layer.profile["technique"] = "reed_sol_van";
     int err = registry.factory(layer.profile["plugin"],
@@ -237,7 +248,7 @@ int ErasureCodeLrc::layers_init(ostream *ss)
   return 0;
 }
 
-int ErasureCodeLrc::layers_sanity_checks(string description_string,
+int ErasureCodeLrc::layers_sanity_checks(const string &description_string,
 					 ostream *ss) const
 {
   int position = 0;
@@ -273,7 +284,7 @@ int ErasureCodeLrc::parse(ErasureCodeProfile &profile,
   if (r)
     return r;
 
-  return parse_ruleset(profile, ss);
+  return parse_rule(profile, ss);
 }
 
 const string ErasureCodeLrc::DEFAULT_KML("-1");
@@ -300,7 +311,7 @@ int ErasureCodeLrc::parse_kml(ErasureCodeProfile &profile,
 
   const char *generated[] = { "mapping",
 			      "layers",
-			      "ruleset-steps" };
+			      "crush-steps" };
 
   for (int i = 0; i < 3; i++) {
     if (profile.count(generated[i])) {
@@ -310,7 +321,7 @@ int ErasureCodeLrc::parse_kml(ErasureCodeProfile &profile,
     }
   }
 
-  if ((k + m) % l) {
+  if (l == 0 || (k + m) % l) {
     *ss << "k + m must be a multiple of l in "
 	<< profile << std::endl;
     return ERROR_LRC_K_M_MODULO;
@@ -361,54 +372,59 @@ int ErasureCodeLrc::parse_kml(ErasureCodeProfile &profile,
   profile["layers"] = layers + "]";
 
   ErasureCodeProfile::const_iterator parameter;
-  string ruleset_locality;
-  parameter = profile.find("ruleset-locality");
+  string rule_locality;
+  parameter = profile.find("crush-locality");
   if (parameter != profile.end())
-    ruleset_locality = parameter->second;
-  string ruleset_failure_domain = "host";
-  parameter = profile.find("ruleset-failure-domain");
+    rule_locality = parameter->second;
+  string rule_failure_domain = "host";
+  parameter = profile.find("crush-failure-domain");
   if (parameter != profile.end())
-    ruleset_failure_domain = parameter->second;
+    rule_failure_domain = parameter->second;
 
-  if (ruleset_locality != "") {
-    ruleset_steps.clear();
-    ruleset_steps.push_back(Step("choose", ruleset_locality,
+  if (rule_locality != "") {
+    rule_steps.clear();
+    rule_steps.push_back(Step("choose", rule_locality,
 				 local_group_count));
-    ruleset_steps.push_back(Step("chooseleaf", ruleset_failure_domain,
+    rule_steps.push_back(Step("chooseleaf", rule_failure_domain,
 				 l + 1));
-  } else if (ruleset_failure_domain != "") {
-    ruleset_steps.clear();
-    ruleset_steps.push_back(Step("chooseleaf", ruleset_failure_domain, 0));
+  } else if (rule_failure_domain != "") {
+    rule_steps.clear();
+    rule_steps.push_back(Step("chooseleaf", rule_failure_domain, 0));
   }
 
   return err;
 }
 
-int ErasureCodeLrc::parse_ruleset(ErasureCodeProfile &profile,
+int ErasureCodeLrc::parse_rule(ErasureCodeProfile &profile,
 				  ostream *ss)
 {
   int err = 0;
-  err |= to_string("ruleset-root", profile,
-		   &ruleset_root,
+  err |= to_string("crush-root", profile,
+		   &rule_root,
 		   "default", ss);
-
-  if (profile.count("ruleset-steps") != 0) {
-    ruleset_steps.clear();
-    string str = profile.find("ruleset-steps")->second;
+  err |= to_string("crush-device-class", profile,
+		   &rule_device_class,
+		   "", ss);
+  if (err) {
+    return err;
+  }
+  if (profile.count("crush-steps") != 0) {
+    rule_steps.clear();
+    string str = profile.find("crush-steps")->second;
     json_spirit::mArray description;
     try {
       json_spirit::mValue json;
       json_spirit::read_or_throw(str, json);
 
       if (json.type() != json_spirit::array_type) {
-	*ss << "ruleset-steps='" << str
+	*ss << "crush-steps='" << str
 	    << "' must be a JSON array but is of type "
 	    << json.type() << " instead" << std::endl;
 	return ERROR_LRC_ARRAY;
       }
       description = json.get_array();
     } catch (json_spirit::Error_position &e) {
-      *ss << "failed to parse ruleset-steps='" << str << "'"
+      *ss << "failed to parse crush-steps='" << str << "'"
 	  << " at line " << e.line_ << ", column " << e.column_
 	  << " : " << e.reason_ << std::endl;
       return ERROR_LRC_PARSE_JSON;
@@ -427,7 +443,7 @@ int ErasureCodeLrc::parse_ruleset(ErasureCodeProfile &profile,
 	    << " is of type " << i->type() << " instead" << std::endl;
 	return ERROR_LRC_ARRAY;
       }
-      int r = parse_ruleset_step(str, i->get_array(), ss);
+      int r = parse_rule_step(str, i->get_array(), ss);
       if (r)
 	return r;
     }
@@ -435,7 +451,7 @@ int ErasureCodeLrc::parse_ruleset(ErasureCodeProfile &profile,
   return 0;
 }
 
-int ErasureCodeLrc::parse_ruleset_step(string description_string,
+int ErasureCodeLrc::parse_rule_step(const string &description_string,
 				       json_spirit::mArray description,
 				       ostream *ss)
 {
@@ -454,14 +470,14 @@ int ErasureCodeLrc::parse_ruleset_step(string description_string,
 	  << json_string.str() << " found in " << description_string
 	  << " must be a JSON string but is of type "
 	  << i->type() << " instead" << std::endl;
-      return position == 0 ? ERROR_LRC_RULESET_OP : ERROR_LRC_RULESET_TYPE;
+      return position == 0 ? ERROR_LRC_RULE_OP : ERROR_LRC_RULE_TYPE;
     }
     if (position == 2 && i->type() != json_spirit::int_type) {
       *ss << "element " << position << " of the array "
 	  << json_string.str() << " found in " << description_string
 	  << " must be a JSON int but is of type "
 	  << i->type() << " instead" << std::endl;
-      return ERROR_LRC_RULESET_N;
+      return ERROR_LRC_RULE_N;
     }
 
     if (position == 0)
@@ -471,7 +487,7 @@ int ErasureCodeLrc::parse_ruleset_step(string description_string,
     if (position == 2)
       n = i->get_int();
   }
-  ruleset_steps.push_back(Step(op, type, n));
+  rule_steps.push_back(Step(op, type, n));
   return 0;
 }
 
@@ -510,11 +526,7 @@ int ErasureCodeLrc::init(ErasureCodeProfile &profile,
     return ERROR_LRC_MAPPING;
   }
   string mapping = profile.find("mapping")->second;
-  data_chunk_count = 0;
-  for(std::string::iterator it = mapping.begin(); it != mapping.end(); ++it) {
-    if (*it == 'D')
-      data_chunk_count++;
-  }
+  data_chunk_count = count(begin(mapping), end(mapping), 'D');
   chunk_count = mapping.length();
 
   r = layers_sanity_checks(description_string, ss);
@@ -545,16 +557,28 @@ set<int> ErasureCodeLrc::get_erasures(const set<int> &want,
   return result;
 }
 
-unsigned int ErasureCodeLrc::get_chunk_size(unsigned int object_size) const
+shard_id_set ErasureCodeLrc::get_erasures(const shard_id_set &want,
+				      const shard_id_set &available) const
 {
-  return layers.front().erasure_code->get_chunk_size(object_size);
+  return shard_id_set::difference(want, available);
 }
 
-void p(const set<int> &s) { cerr << s; } // for gdb
+unsigned int ErasureCodeLrc::get_chunk_size(unsigned int stripe_width) const
+{
+  return layers.front().erasure_code->get_chunk_size(stripe_width);
+}
 
-int ErasureCodeLrc::minimum_to_decode(const set<int> &want_to_read,
-				      const set<int> &available_chunks,
-				      set<int> *minimum)
+size_t ErasureCodeLrc::get_minimum_granularity()
+{
+  return layers.front().erasure_code->get_minimum_granularity();
+}
+
+void p(const shard_id_set &s) { cerr << s; } // for gdb
+
+[[deprecated]]
+int ErasureCodeLrc::_minimum_to_decode(const set<int> &want_to_read,
+				       const set<int> &available_chunks,
+				       set<int> *minimum)
 {
   dout(20) << __func__ << " want_to_read " << want_to_read
 	   << " available_chunks " << available_chunks << dendl;
@@ -644,8 +668,7 @@ int ErasureCodeLrc::minimum_to_decode(const set<int> &want_to_read,
 	       j != erasures.end();
 	       ++j) {
 	    erasures_not_recovered.erase(*j);
-	    if (erasures_want.count(*j))
-	      erasures_want.erase(*j);
+	    erasures_want.erase(*j);
 	  }
 	}
       }
@@ -724,6 +747,167 @@ int ErasureCodeLrc::minimum_to_decode(const set<int> &want_to_read,
   return -EIO;
 }
 
+int ErasureCodeLrc::_minimum_to_decode(const shard_id_set &want_to_read,
+				       const shard_id_set &available_chunks,
+				       shard_id_set *minimum)
+{
+  dout(20) << __func__ << " want_to_read " << want_to_read
+	   << " available_chunks " << available_chunks << dendl;
+  {
+    shard_id_set erasures_total;
+    shard_id_set erasures_not_recovered;
+    shard_id_set erasures_want;
+    for (shard_id_t i; i < get_chunk_count(); ++i) {
+      if (available_chunks.count(i) == 0) {
+	erasures_total.insert(i);
+	erasures_not_recovered.insert(i);
+	if (want_to_read.count(i) != 0)
+	  erasures_want.insert(i);
+      }
+    }
+
+    //
+    // Case 1:
+    //
+    // When no chunk is missing there is no need to read more than what
+    // is wanted.
+    //
+    if (erasures_want.empty()) {
+      *minimum = want_to_read;
+      dout(20) << __func__ << " minimum == want_to_read == "
+	       << want_to_read << dendl;
+      return 0;
+    }
+
+    //
+    // Case 2:
+    //
+    // Try to recover erasures with as few chunks as possible.
+    //
+    for (vector<Layer>::reverse_iterator i = layers.rbegin();
+	 i != layers.rend();
+	 ++i) {
+      //
+      // If this layer has no chunk that we want, skip it.
+      //
+      shard_id_set layer_want;
+      layer_want = shard_id_set::intersection(want_to_read, i->chunks_as_shard_set);
+      if (layer_want.empty())
+	continue;
+      //
+      // Are some of the chunks we want missing ?
+      //
+      shard_id_set layer_erasures = shard_id_set::intersection(layer_want, erasures_want);
+
+      shard_id_set layer_minimum;
+      if (layer_erasures.empty()) {
+	//
+	// The chunks we want are available, this is the minimum we need
+	// to read.
+	//
+	layer_minimum = layer_want;
+      } else {
+        shard_id_set erasures = shard_id_set::intersection(i->chunks_as_shard_set, erasures_not_recovered);
+
+	if (erasures.size() > i->erasure_code->get_coding_chunk_count()) {
+	  //
+	  // There are too many erasures for this layer to recover: skip
+	  // it and hope that an upper layer will be do better.
+	  //
+	  continue;
+	} else {
+	  //
+	  // Get all available chunks in that layer to recover the
+	  // missing one(s).
+	  //
+	  layer_minimum = shard_id_set::difference(i->chunks_as_shard_set, erasures_not_recovered);
+	  //
+	  // Chunks recovered by this layer are removed from the list of
+	  // erasures so that upper levels do not attempt to recover
+	  // them.
+	  //
+	  for (shard_id_set::const_iterator j = erasures.begin();
+	       j != erasures.end();
+	       ++j) {
+	    erasures_not_recovered.erase(*j);
+	    erasures_want.erase(*j);
+	  }
+	}
+      }
+      minimum->insert(layer_minimum);
+    }
+    if (erasures_want.empty()) {
+      minimum->insert(want_to_read);
+      for (shard_id_set::const_iterator i = erasures_total.begin();
+	   i != erasures_total.end();
+	   ++i) {
+	if (minimum->count(*i))
+	  minimum->erase(*i);
+      }
+      dout(20) << __func__ << " minimum = " << *minimum << dendl;
+      return 0;
+    }
+  }
+
+  {
+    //
+    // Case 3:
+    //
+    // The previous strategy failed to recover from all erasures.
+    //
+    // Try to recover as many chunks as possible, even from layers
+    // that do not contain chunks that we want, in the hope that it
+    // will help the upper layers.
+    //
+    shard_id_set erasures_total;
+    for (shard_id_t i; i < get_chunk_count(); ++i) {
+      if (available_chunks.count(i) == 0)
+	erasures_total.insert(i);
+    }
+
+    for (vector<Layer>::reverse_iterator i = layers.rbegin();
+	 i != layers.rend();
+	 ++i) {
+      shard_id_set layer_erasures = shard_id_set::intersection(i->chunks_as_shard_set, erasures_total);
+
+      // If this layer has no erasure, skip it
+      //
+      if (layer_erasures.empty())
+	continue;
+
+      if (layer_erasures.size() > 0 &&
+	  layer_erasures.size() <= i->erasure_code->get_coding_chunk_count()) {
+	//
+	// chunks recovered by this layer are removed from the list of
+	// erasures so that upper levels know they can rely on their
+	// availability
+	//
+	for (shard_id_set::const_iterator j = layer_erasures.begin();
+	     j != layer_erasures.end();
+	     ++j) {
+	  erasures_total.erase(*j);
+	}
+      }
+    }
+    if (erasures_total.empty()) {
+      //
+      // Do not try to be smart about what chunks are necessary to
+      // recover, use all available chunks.
+      //
+      *minimum = available_chunks;
+      dout(20) << __func__ << " minimum == available_chunks == "
+	       << available_chunks << dendl;
+      return 0;
+    }
+  }
+
+  derr << __func__ << " not enough chunks in " << available_chunks
+       << " to read " << want_to_read << dendl;
+  return -EIO;
+}
+
+IGNORE_DEPRECATED
+[[deprecated]]
 int ErasureCodeLrc::encode_chunks(const set<int> &want_to_encode,
 				  map<int, bufferlist> *encoded)
 {
@@ -742,16 +926,18 @@ int ErasureCodeLrc::encode_chunks(const set<int> &want_to_encode,
     set<int> layer_want_to_encode;
     map<int, bufferlist> layer_encoded;
     int j = 0;
-    for (vector<int>::const_iterator c = layer.chunks.begin();
-	 c != layer.chunks.end();
-	 ++c) {
-      layer_encoded[j] = (*encoded)[*c];
-      if (want_to_encode.find(*c) != want_to_encode.end())
+    for (const auto& c : layer.chunks) {
+      std::swap(layer_encoded[j], (*encoded)[c]);
+      if (want_to_encode.find(c) != want_to_encode.end())
 	layer_want_to_encode.insert(j);
       j++;
     }
     int err = layer.erasure_code->encode_chunks(layer_want_to_encode,
 						&layer_encoded);
+    j = 0;
+    for (const auto& c : layer.chunks) {
+      std::swap(layer_encoded[j++], (*encoded)[c]);
+    }
     if (err) {
       derr << __func__ << " layer " << layer.chunks_map
 	   << " failed with " << err << " trying to encode "
@@ -761,7 +947,63 @@ int ErasureCodeLrc::encode_chunks(const set<int> &want_to_encode,
   }
   return 0;
 }
+END_IGNORE_DEPRECATED
 
+int ErasureCodeLrc::encode_chunks(const shard_id_map<bufferptr> &in,
+                                  shard_id_map<bufferptr> &out)
+{
+  unsigned int chunk_size = 0;
+  shard_id_set all_shards;
+  auto& nonconst_in = const_cast<shard_id_map<bufferptr>&>(in);
+
+  for (const auto& [shard, ptr] : in) {
+    all_shards.insert(shard);
+    if (chunk_size == 0) chunk_size = ptr.length();
+    else ceph_assert(chunk_size == ptr.length());
+  }
+
+  unsigned int top = layers.size();
+  shard_id_set out_shards;
+  for (const auto& [shard, ptr] : out) {
+    out_shards.insert(shard);
+    all_shards.insert(shard);
+    if (chunk_size == 0) chunk_size = ptr.length();
+    else ceph_assert(chunk_size == ptr.length());
+  }
+
+  for (vector<Layer>::reverse_iterator i = layers.rbegin(); i != layers.rend(); ++i) {
+    --top;
+    if (i->chunks_as_shard_set.includes(all_shards)) {
+      break;
+    }
+  }
+
+  for (unsigned int i = top; i < layers.size(); ++i) {
+    const Layer &layer = layers[i];
+    shard_id_map<bufferptr> layer_in(get_chunk_count());
+    shard_id_map<bufferptr> layer_out(get_chunk_count());
+    shard_id_t j;
+    for (const auto& c : layer.chunks) {
+      if (nonconst_in.contains(shard_id_t(c)))
+        layer_in[j] = nonconst_in[shard_id_t(c)];
+      if (out.contains(shard_id_t(c)))
+        layer_out[j] = out[shard_id_t(c)];
+      ++j;
+    }
+    int err = layer.erasure_code->encode_chunks(layer_in, layer_out);
+    
+    if (err) {
+      derr << __func__ << " layer " << layer.chunks_map
+ 	    << " failed with " << err << " trying to encode "
+ 	    << dendl;
+      return err;
+    }
+  }
+  return 0;
+}
+
+IGNORE_DEPRECATED
+[[deprecated]]
 int ErasureCodeLrc::decode_chunks(const set<int> &want_to_read,
 				  const map<int, bufferlist> &chunks,
 				  map<int, bufferlist> *decoded)
@@ -826,13 +1068,99 @@ int ErasureCodeLrc::decode_chunks(const set<int> &want_to_read,
 	   ++c) {
 	(*decoded)[*c] = layer_decoded[j];
 	++j;
-	if (erasures.count(*c) != 0)
-	  erasures.erase(*c);
+	erasures.erase(*c);
       }
       want_to_read_erasures.clear();
       set_intersection(erasures.begin(), erasures.end(),
 		       want_to_read.begin(), want_to_read.end(),
 		       inserter(want_to_read_erasures, want_to_read_erasures.end()));
+      if (want_to_read_erasures.size() == 0)
+	break;
+    }
+  }
+
+  if (want_to_read_erasures.size() > 0) {
+    derr << __func__ << " want to read " << want_to_read
+	 << " with available_chunks = " << available_chunks
+	 << " end up being unable to read " << want_to_read_erasures << dendl;
+    return -EIO;
+  } else {
+    return 0;
+  }
+}
+END_IGNORE_DEPRECATED
+
+int ErasureCodeLrc::decode_chunks(const shard_id_set &want_to_read,
+                                  shard_id_map<bufferptr> &in,
+                                  shard_id_map<bufferptr> &out)
+{
+  shard_id_set available_chunks;
+  shard_id_set erasures;
+  unsigned int chunk_size = 0;
+
+  for (const auto& [shard, ptr] : in) {
+    if (chunk_size == 0) chunk_size = ptr.length();
+    else ceph_assert(chunk_size == ptr.length());
+    available_chunks.insert(shard);
+  }
+
+  for (const auto& [shard, ptr] : out) {
+    if (chunk_size == 0) {
+      chunk_size = ptr.length();
+    } else {
+      ceph_assert(chunk_size == ptr.length());
+    }
+    erasures.insert(shard);
+  }
+
+  shard_id_set want_to_read_erasures;
+
+  for (vector<Layer>::reverse_iterator layer = layers.rbegin();
+       layer != layers.rend();
+       ++layer) {
+    shard_id_set layer_erasures = shard_id_set::intersection(layer->chunks_as_shard_set, erasures);
+
+    if (layer_erasures.size() >
+	layer->erasure_code->get_coding_chunk_count()) {
+      // skip because there are too many erasures for this layer to recover
+    } else if(layer_erasures.size() == 0) {
+      // skip because all chunks are already available
+    } else {
+      shard_id_set layer_want_to_read;
+      shard_id_map<bufferptr> layer_in(get_chunk_count());
+      shard_id_map<bufferptr> layer_out(get_chunk_count());
+      shard_id_t j;
+      for (vector<int>::const_iterator c = layer->chunks.begin();
+	   c != layer->chunks.end();
+	   ++c)
+      {
+        shard_id_t cs(*c);
+        if (!erasures.contains(cs)) {
+          if (in.contains(cs)) {
+            layer_in[j] = in[cs];
+          } else {
+            layer_in[j] = out[cs];
+          }
+        } else {
+          layer_out[j] = out[cs];
+        }
+        ++j;
+      }
+      int err = layer->erasure_code->decode_chunks(layer_want_to_read, layer_in, layer_out);
+      if (err) {
+	derr << __func__ << " layer " << layer->chunks_map
+	     << " failed with " << err << " trying to decode "
+	     << layer_want_to_read << " with " << available_chunks << dendl;
+	return err;
+      }
+
+      for (vector<int>::const_iterator c = layer->chunks.begin();
+	   c != layer->chunks.end();
+	   ++c)
+      {
+	erasures.erase(shard_id_t(*c));
+      }
+      want_to_read_erasures = shard_id_set::intersection(erasures, want_to_read);
       if (want_to_read_erasures.size() == 0)
 	break;
     }

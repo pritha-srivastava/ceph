@@ -1,21 +1,15 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_TRACEPOINT_PROVIDER_H
 #define CEPH_TRACEPOINT_PROVIDER_H
 
-#include "include/int_types.h"
 #include "common/ceph_context.h"
 #include "common/config_obs.h"
-#include "common/Mutex.h"
-#include <dlfcn.h>
-#include <set>
-#include <string>
-#include <boost/noncopyable.hpp>
+#include "common/ceph_mutex.h"
+#include "include/dlfcn_compat.h"
 
-struct md_config_t;
-
-class TracepointProvider : public md_config_obs_t, boost::noncopyable {
+class TracepointProvider : public md_config_obs_t {
 public:
   struct Traits {
     const char *library;
@@ -52,32 +46,37 @@ public:
 
   TracepointProvider(CephContext *cct, const char *library,
                      const char *config_key);
-  virtual ~TracepointProvider();
+  ~TracepointProvider() override;
+
+  TracepointProvider(const TracepointProvider&) = delete;
+  TracepointProvider operator =(const TracepointProvider&) = delete;
+  TracepointProvider(TracepointProvider&&) = delete;
+  TracepointProvider operator =(TracepointProvider&&) = delete;
 
   template <const Traits &traits>
   static void initialize(CephContext *cct) {
 #ifdef WITH_LTTNG
-    TypedSingleton<traits> *singleton;
-    cct->lookup_or_create_singleton_object(singleton, traits.library);
+     cct->lookup_or_create_singleton_object<TypedSingleton<traits>>(
+       traits.library, false, cct);
 #endif
   }
 
 protected:
-  virtual const char** get_tracked_conf_keys() const {
-    return m_config_keys;
+  std::vector<std::string> get_tracked_keys() const noexcept override {
+    return std::vector<std::string>{m_config_key};
   }
-  virtual void handle_conf_change(const struct md_config_t *conf,
-                                  const std::set <std::string> &changed);
+  void handle_conf_change(const ConfigProxy& conf,
+			  const std::set <std::string> &changed) override;
 
 private:
   CephContext *m_cct;
   std::string m_library;
-  mutable const char* m_config_keys[2];
+  std::string m_config_key;
 
-  Mutex m_lock;
+  ceph::mutex m_lock = ceph::make_mutex("TracepointProvider::m_lock");
   void* m_handle = nullptr;
 
-  void verify_config(const struct md_config_t *conf);
+  void verify_config(const ConfigProxy& conf);
 };
 
 #endif // CEPH_TRACEPOINT_PROVIDER_H

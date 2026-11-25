@@ -1,18 +1,21 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
+#include <iostream>
 
 #include "common/SloppyCRCMap.h"
 #include "common/Formatter.h"
 #include <gtest/gtest.h>
 
+using namespace std;
+
 void dump(const SloppyCRCMap& scm)
 {
-  Formatter *f = Formatter::create("json-pretty");
+  auto f = Formatter::create_unique("json-pretty");
   f->open_object_section("map");
-  scm.dump(f);
+  scm.dump(f.get());
   f->close_section();
   f->flush(cout);
-  delete f;
 }
 
 TEST(SloppyCRCMap, basic) {

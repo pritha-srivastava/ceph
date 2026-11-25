@@ -5,39 +5,52 @@ Source: http://ceph.com/
 
 Files: *
 Copyright: (c) 2004-2010 by Sage Weil <sage@newdream.net>
-License: LGPL2.1 (see COPYING-LGPL2.1)
+License: LGPL-2.1 or LGPL-3 (see COPYING-LGPL2.1 and COPYING-LGPL3)
+
+Files: cmake/modules/FindPython*
+Copyright:
+    Copyright 2000-2023 Kitware, Inc. and Contributors
+License: BSD 3-clause
+
+Files: cmake/modules/FindLTTngUST.cmake
+Copyright:
+    Copyright 2016 Kitware, Inc.
+    Copyright 2016 Philippe Proulx <pproulx@efficios.com>
+License: BSD 3-clause
 
 Files: doc/*
 Copyright: (c) 2010-2012 New Dream Network and contributors
-License: Creative Commons Attribution-ShareAlike (CC BY-SA)
+License: Creative Commons Attribution Share Alike 3.0 (CC-BY-SA-3.0)
 
 Files: bin/git-archive-all.sh
 License: GPL3
 
 Files: src/mount/canonicalize.c
 Copyright: Copyright (C) 1993 Rick Sladkey <jrs@world.std.com>
-License: LGPL2 or later
-
-Files: src/os/btrfs_ioctl.h
-Copyright: Copyright (C) 2007 Oracle.  All rights reserved.
-License: GPL2 (see COPYING-GPL2)
+License: LGPL-2 or later
 
 Files: src/include/ceph_hash.cc
 Copyright: None
 License: Public domain
 
+Files: src/include/rados.h, except ceph_stable_mod(), which is public domain
+Copyright: the authors
+License: LGPL-2.1 or LGPL-3 (see COPYING-LGPL2.1 and COPYING-LGPL3)
+
 Files: src/common/bloom_filter.hpp
 Copyright: Copyright (C) 2000 Arash Partow <arash@partow.net>
 License: Boost Software License, Version 1.0
-
-Files: m4/acx_pthread.m4
-Copyright: Steven G. Johnson <stevenj@alum.mit.edu>
-License: GPLWithACException
 
 Files: src/common/crc32c_intel*:
 Copyright:
     Copyright 2012-2013 Intel Corporation All Rights Reserved.
 License: BSD 3-clause
+
+Files: src/common/deleter.h
+Copyright:
+    Copyright (C) 2014 Cloudius Systems, Ltd.
+License:
+    Apache-2.0
 
 Files: src/common/sctp_crc32.c: 
 Copyright:
@@ -70,6 +83,18 @@ License:
   ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
   THE POSSIBILITY OF SUCH DAMAGE.
 
+Files: src/common/sstring.hh
+Copyright:
+    Copyright 2014 Cloudius Systems
+License:
+    Apache-2.0
+
+Files: src/include/cpp-btree
+Copyright:
+    Copyright 2013 Google Inc. All Rights Reserved.
+License:
+    Apache-2.0
+
 Files: src/json_spirit
 Copyright:
 	Copyright John W. Wilkinson 2007 - 2011
@@ -98,6 +123,10 @@ License:
   WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
   FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
   OTHER DEALINGS IN THE SOFTWARE.
+
+Files: src/test/common/Throttle.cc src/test/filestore/chain_xattr.cc
+Copyright: Copyright (C) 2013 Cloudwatt <libre.licensing@cloudwatt.com>
+License: LGPL-2.1 or later
 
 Files: src/osd/ErasureCodePluginJerasure/*.{c,h}
 Copyright: Copyright (c) 2011, James S. Plank <plank@cs.utk.edu>
@@ -134,7 +163,14 @@ License:
 Packaging:
     Copyright (C) 2004-2009 by Sage Weil <sage@newdream.net>
     Copyright (C) 2010 Canonical, Ltd.
-    Licensed under LGPL-2.1
+    Licensed under LGPL-2.1 or LGPL-3.0
+
+Files: src/test/perf_local.cc
+Copyright:
+  (c) 2011-2014 Stanford University
+  (c) 2011 Facebook
+License:
+  The MIT License
 
 File: qa/workunits/erasure-code/jquery.js
   Copyright 2012 jQuery Foundation and other contributors
@@ -150,7 +186,70 @@ Files: src/include/timegm.h
   Copyright (C) Copyright 2010-2011 Vicente J. Botet Escriba
   License: Boost Software License, Version 1.0
 
-Files: src/msg/async/AsyncConnection.cc, src/msg/simple/Pipe.cc (sigpipe suppression)
-  Copyright (C) 2010 Tomash Brechko.  All rights reserved.
-  License: GPL3
+Files: src/pybind/mgr/diskprediction_local/models/*
+Copyright: None
+License: Public domain
 
+Files: src/ceph-volume/plugin/zfs/*
+Copyright: 2018, Willem Jan Withagen
+License: BSD 3-clause
+
+Files: src/include/function2.hpp
+Copyright: 2015-2018, Denis Blank
+License: Boost Software License, Version 1.0
+
+Files: src/include/expected.hpp
+Copyright: 2017, Simon Brand
+License: CC0
+
+Files: src/include/uses_allocator.h
+Copyright: 2016, Pablo Halpern <phalpern@halpernwightsoftware.com>
+License: Boost Software License, Version 1.0
+
+Files: src/common/async/bind_allocator.h
+Copyright: 2020 Red Hat <contact@redhat.com>
+           2003-2019 Christopher M. Kohlhoff <chris@kohlhoff.com>
+License: Boost Software License, Version 1.0
+
+Files: src/common/async/redirect_error.h,
+       src/test/common/test_async_redirect_error.cc
+Copyright: 2025 Contributors to the Ceph Project
+           2003-2024 Christopher M. Kohlhoff <chris@kohlhoff.com>
+License: Boost Software License, Version 1.0
+
+Files: src/script/backport-create-issue
+Copyright: 2015 Red Hat <contact@redhat.com>
+           2018 SUSE LLC
+License: GNU Affero General Public License, Version 3
+
+Files: src/script/backport-resolve-issue
+Copyright: 2015 Red Hat <contact@redhat.com>
+           2018 SUSE LLC
+License: GNU Affero General Public License, Version 3
+
+Files: src/common/*s390x*
+Copyright: 2024 IBM <contact@ibm.com>
+License: Apache License, version 2.0
+
+Files: src/rgw/madler/*
+License:
+  Copyright (C) 2014-2025 Mark Adler
+
+  This software is provided 'as-is', without any express or implied warranty.
+  In no event will the authors be held liable for any damages arising from the
+  use of this software.
+
+  Permission is granted to anyone to use this software for any purpose,
+  including commercial applications, and to alter it and redistribute it
+  freely, subject to the following restrictions:
+
+  1. The origin of this software must not be misrepresented; you must not claim
+     that you wrote the original software. If you use this software in a
+     product, an acknowledgment in the product documentation would be
+     appreciated but is not required.
+  2. Altered source versions must be plainly marked as such, and must not be
+     misrepresented as being the original software.
+  3. This notice may not be removed or altered from any source distribution.
+
+  Mark Adler
+  madler@alumni.caltech.edu

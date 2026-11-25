@@ -3,7 +3,6 @@ from textwrap import dedent
 from tasks.cephfs.cephfs_test_case import CephFSTestCase
 from tasks.cephfs.filesystem import ObjectNotFound, ROOT_INO
 
-
 class TestFlush(CephFSTestCase):
     def test_flush(self):
         self.mount_a.run_shell(["mkdir", "mydir"])
@@ -44,7 +43,10 @@ class TestFlush(CephFSTestCase):
 
         # ...and the journal is truncated to just a single subtreemap from the
         # newly created segment
-        summary_output = self.fs.journal_tool(["event", "get", "summary"])
+        self.fs.fail()
+        summary_output = self.fs.journal_tool(["event", "get", "summary"], 0)
+        self.fs.set_joinable()
+        self.fs.wait_for_daemons()
         try:
             self.assertEqual(summary_output,
                              dedent(
@@ -72,7 +74,9 @@ class TestFlush(CephFSTestCase):
                              ).strip())
             flush_data = self.fs.mds_asok(["flush", "journal"])
             self.assertEqual(flush_data['return_code'], 0)
-            self.assertEqual(self.fs.journal_tool(["event", "get", "summary"]),
+
+            self.fs.fail()
+            self.assertEqual(self.fs.journal_tool(["event", "get", "summary"], 0),
                              dedent(
                                  """
                                  Events by type:
@@ -80,16 +84,17 @@ class TestFlush(CephFSTestCase):
                                  Errors: 0
                                  """
                              ).strip())
+            self.fs.set_joinable()
+            self.fs.wait_for_daemons()
 
         # Now for deletion!
         # We will count the RADOS deletions and MDS file purges, to verify that
         # the expected behaviour is happening as a result of the purge
         initial_dels = self.fs.mds_asok(['perf', 'dump', 'objecter'])['objecter']['osdop_delete']
-        initial_purges = self.fs.mds_asok(['perf', 'dump', 'mds_cache'])['mds_cache']['strays_purged']
+        initial_purges = self.fs.mds_asok(['perf', 'dump', 'mds_cache'])['mds_cache']['strays_enqueued']
 
         # Use a client to delete a file
-        self.mount_a.mount()
-        self.mount_a.wait_until_mounted()
+        self.mount_a.mount_wait()
         self.mount_a.run_shell(["rm", "-rf", "mydir"])
 
         # Flush the journal so that the directory inode can be purged
@@ -98,7 +103,7 @@ class TestFlush(CephFSTestCase):
 
         # We expect to see a single file purge
         self.wait_until_true(
-            lambda: self.fs.mds_asok(['perf', 'dump', 'mds_cache'])['mds_cache']['strays_purged'] - initial_purges >= 2,
+            lambda: self.fs.mds_asok(['perf', 'dump', 'mds_cache'])['mds_cache']['strays_enqueued'] - initial_purges >= 2,
             60)
 
         # We expect two deletions, one of the dirfrag and one of the backtrace

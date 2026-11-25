@@ -1,5 +1,6 @@
 roles:
-- - mon.0
+- - mon.a
+  - mgr.x
   - osd.0
   - osd.1
   - osd.2
@@ -11,11 +12,17 @@ openstack:
 
 overrides:
   ceph:
-    conf:
-      osd:
-        debug osd: 5
+    log-ignorelist:
+      - overall HEALTH_
+      - \(OSDMAP_FLAGS\)
+      - \(OSD_
+      - \(PG_
+      - \(OBJECT_
+      - \(POOL_APP_NOT_ENABLED\)
 
 tasks:
 - install:
 - ceph:
+    pre-mgr-commands:
+      - sudo ceph config set mgr mgr_pool false --force
 - divergent_priors2:

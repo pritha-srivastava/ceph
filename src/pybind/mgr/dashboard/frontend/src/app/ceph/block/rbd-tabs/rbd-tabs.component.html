@@ -1,0 +1,48 @@
+<ul class="nav nav-tabs">
+  <li class="nav-item">
+    <a
+      class="nav-link"
+      routerLink="/block/rbd"
+      routerLinkActive="active"
+      ariaCurrentWhenActive="page"
+      [routerLinkActiveOptions]="{ exact: true }"
+      i18n
+      >Images</a
+    >
+  </li>
+  <li class="nav-item">
+    <a
+      class="nav-link"
+      routerLink="/block/rbd/namespaces"
+      routerLinkActive="active"
+      ariaCurrentWhenActive="page"
+      [routerLinkActiveOptions]="{ exact: true }"
+      i18n
+      >Namespaces</a
+    >
+  </li>
+  <li class="nav-item">
+    <a
+      class="nav-link"
+      routerLink="/block/rbd/trash"
+      routerLinkActive="active"
+      ariaCurrentWhenActive="page"
+      [routerLinkActiveOptions]="{ exact: true }"
+      i18n
+      >Trash</a
+    >
+  </li>
+  @if (grafanaPermission.read) {
+    <li class="nav-item">
+      <a
+        class="nav-link"
+        routerLink="/block/rbd/performance"
+        routerLinkActive="active"
+        ariaCurrentWhenActive="page"
+        [routerLinkActiveOptions]="{ exact: true }"
+        i18n
+        >Overall Performance</a
+      >
+    </li>
+  }
+</ul>

@@ -1,0 +1,84 @@
+@if (hostname || osdId !== null) {
+  <cd-table
+    [data]="devices"
+    [columns]="columns"
+  ></cd-table>
+}
+
+@if (hostname === '' && osdId === null) {
+  <cd-alert-panel
+    type="warning"
+    i18n
+    >Neither hostname nor OSD ID given</cd-alert-panel
+  >
+}
+
+<ng-template
+  #deviceLocation
+  let-value="data.value"
+>
+  @for (location of value; track location) {
+    @if (location.host === hostname) {
+      <cd-label [value]="location.dev"></cd-label>
+    }
+  }
+</ng-template>
+
+<ng-template
+  #daemonName
+  let-value="data.value"
+>
+  <ng-container
+    [ngTemplateOutlet]="osdId !== null ? osdIdDaemon : readableDaemons"
+    [ngTemplateOutletContext]="{ daemons: value }"
+  >
+  </ng-container>
+</ng-template>
+
+<ng-template
+  #osdIdDaemon
+  let-daemons="daemons"
+>
+  @for (daemon of daemons; track daemon) {
+    @if (daemon.includes(osdId)) {
+      <cd-label [value]="daemon"></cd-label>
+    }
+  }
+</ng-template>
+
+<ng-template
+  #readableDaemons
+  let-daemons="daemons"
+>
+  @for (daemon of daemons; track daemon) {
+    <cd-label
+      class="me-1"
+      [value]="daemon"
+    ></cd-label>
+  }
+</ng-template>
+
+<ng-template
+  #lifeExpectancy
+  let-value="data.value"
+>
+  @if (!value?.life_expectancy_enabled) {
+    <span i18n>{{ '' | notAvailable }}</span>
+  }
+  @if (value?.min && !value?.max) {
+    <span>&gt; {{ value.min | i18nPlural: translationMapping }}</span>
+  }
+  @if (value?.max && !value?.min) {
+    <span>&lt; {{ value.max | i18nPlural: translationMapping }}</span>
+  }
+  @if (value?.max && value?.min) {
+    <span>{{ value.min }} to {{ value.max | i18nPlural: translationMapping }}</span>
+  }
+</ng-template>
+
+<ng-template
+  #lifeExpectancyTimestamp
+  let-value="data.value"
+>
+  {{ value }}
+</ng-template>

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -26,17 +27,17 @@ public:
   explicit ECommitted(metareqid_t r) :
     LogEvent(EVENT_COMMITTED), reqid(r) { }
 
-  void print(ostream& out) const {
+  void print(std::ostream& out) const override {
     out << "ECommitted " << reqid;
   }
 
-  void encode(bufferlist &bl, uint64_t features) const;
-  void decode(bufferlist::iterator &bl);
-  void dump(Formatter *f) const;
-  static void generate_test_instances(list<ECommitted*>& ls);
+  void encode(bufferlist &bl, uint64_t features) const override;
+  void decode(bufferlist::const_iterator &bl) override;
+  void dump(Formatter *f) const override;
+  static std::list<ECommitted> generate_test_instances();
 
-  void update_segment() {}
-  void replay(MDSRank *mds);
+  void update_segment() override {}
+  void replay(MDSRank *mds) override;
 };
 WRITE_CLASS_ENCODER_FEATURES(ECommitted)
 

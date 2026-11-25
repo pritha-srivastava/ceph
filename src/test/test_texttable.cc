@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,6 +16,7 @@
 #include "common/TextTable.h"
 #include <iostream>
 #include "gtest/gtest.h"
+#include "include/coredumpctl.h"
 
 TEST(TextTable, Alignment) {
   TextTable t;
@@ -28,7 +30,7 @@ TEST(TextTable, Alignment) {
   t << "1" << 2 << 3 << TextTable::endrow;
   std::ostringstream oss;
   oss << t;
-  ASSERT_STREQ("HEAD1 HEAD2 HEAD3 \n1       2       3 \n", oss.str().c_str());
+  ASSERT_STREQ("HEAD1  HEAD2  HEAD3\n1        2        3\n", oss.str().c_str());
 }
 
 TEST(TextTable, WidenAndClearShrink) {
@@ -42,14 +44,14 @@ TEST(TextTable, WidenAndClearShrink) {
   // validate wide output
   std::ostringstream oss;
   oss << t;
-  ASSERT_STREQ("1     \nwider \n", oss.str().c_str());
+  ASSERT_STREQ("1    \nwider\n", oss.str().c_str());
   oss.str("");
 
   // reset, validate single-char width output
   t.clear();
   t << "s";
   oss << t;
-  ASSERT_STREQ("1 \ns \n", oss.str().c_str());
+  ASSERT_STREQ("1\ns\n", oss.str().c_str());
 }
 
 TEST(TextTable, Indent) {
@@ -60,7 +62,7 @@ TEST(TextTable, Indent) {
   t << "s";
   std::ostringstream oss;
   oss << t;
-  ASSERT_STREQ("          1 \n          s \n", oss.str().c_str());
+  ASSERT_STREQ("          1\n          s\n", oss.str().c_str());
 }
 
 
@@ -72,5 +74,6 @@ TEST(TextTable, TooManyItems) {
   t.define_column("3", TextTable::LEFT, TextTable::LEFT);
 
   // expect assertion failure on this, which throws FailedAssertion
+  PrCtl unset_dumpable;
   ASSERT_DEATH((t << "1" << "2" << "3" << "4" << TextTable::endrow), "");
 }

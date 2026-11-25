@@ -1,11 +1,20 @@
 #include <errno.h>
 #include <lua.hpp>
+#include "include/encoding.h"
 #include "include/types.h"
-#include "include/rados/librados.h"
+#include "include/rados/librados.hpp"
 #include "gtest/gtest.h"
-#include "test/librados/test.h"
+#include "test/librados/test_cxx.h"
+#include "test/librados/test_pool_types.h"
 #include "cls/lua/cls_lua_client.h"
 #include "cls/lua/cls_lua.h"
+#include "cls/lua/cls_lua_ops.h"
+
+using namespace std;
+using ceph::test::PoolType;
+using ceph::test::pool_type_name;
+using ceph::test::create_pool_by_type;
+using ceph::test::destroy_pool_by_type;
 
 /*
  * JSON script to test JSON I/O protocol with cls_lua
@@ -291,7 +300,7 @@ objclass.register(bl_concat_immut)
 -- RunError
 --
 function runerr_a()
-  error('WTF')
+  error('error_a')
 end
 
 function runerr_b()
@@ -526,20 +535,16 @@ objclass.register(current_subop_version)
  * Test harness uses single pool for the entire test case, and generates
  * unique object names for each test.
  */
-class ClsLua : public ::testing::Test {
+class TestClsLua : public ceph::test::ClsTestFixture {
+  // Inherits: rados, ioctx, pool_name, pool_type, SetUp(), TearDown()
   protected:
-    static void SetUpTestCase() {
-      pool_name = get_temp_pool_name();
-      ASSERT_EQ("", create_one_pool_pp(pool_name, rados));
-      ASSERT_EQ(0, rados.ioctx_create(pool_name.c_str(), ioctx));
-    }
-
-    static void TearDownTestCase() {
-      ioctx.close();
-      ASSERT_EQ(0, destroy_one_pool_pp(pool_name, rados));
-    }
+    string oid;
+    bufferlist reply_output;
 
     void SetUp() override {
+      // Call base class SetUp first
+      ceph::test::ClsTestFixture::SetUp();
+
       /* Grab test names to build unique objects */
       const ::testing::TestInfo* const test_info =
         ::testing::UnitTest::GetInstance()->current_test_info();
@@ -551,9 +556,6 @@ class ClsLua : public ::testing::Test {
 
       /* Unique object for test to use */
       oid = ss_oid.str();
-    }
-
-    void TearDown() override {
     }
 
     /*
@@ -578,24 +580,13 @@ class ClsLua : public ::testing::Test {
     {
       return __clslua_exec(oid, script, input, funcname);
     }
-
-    static librados::Rados rados;
-    static librados::IoCtx ioctx;
-    static string pool_name;
-
-    string oid;
-    bufferlist reply_output;
 };
 
-librados::Rados ClsLua::rados;
-librados::IoCtx ClsLua::ioctx;
-string ClsLua::pool_name;
-
-TEST_F(ClsLua, Write) {
+TEST_P(TestClsLua, Write) {
   /* write some data into object */
   string written = "Hello World";
   bufferlist inbl;
-  ::encode(written, inbl);
+  encode(written, inbl);
   ASSERT_EQ(0, clslua_exec(test_script, &inbl, "write"));
 
   /* have Lua read out of the object */
@@ -606,19 +597,19 @@ TEST_F(ClsLua, Write) {
 
   /* compare what Lua read to what we wrote */
   string read;
-  ::decode(read, outbl);
+  decode(read, outbl);
   ASSERT_EQ(read, written);
 }
 
-TEST_F(ClsLua, SyntaxError) {
+TEST_P(TestClsLua, SyntaxError) {
   ASSERT_EQ(-EIO, clslua_exec("-"));
 }
 
-TEST_F(ClsLua, EmptyScript) {
+TEST_P(TestClsLua, EmptyScript) {
   ASSERT_EQ(0, clslua_exec(""));
 }
 
-TEST_F(ClsLua, RetVal) {
+TEST_P(TestClsLua, RetVal) {
   /* handlers can return numeric values */
   ASSERT_EQ(1, clslua_exec(test_script, NULL, "rv_h1"));
   ASSERT_EQ(0, clslua_exec(test_script, NULL, "rv_h0"));
@@ -636,7 +627,7 @@ TEST_F(ClsLua, RetVal) {
   ASSERT_EQ(-EIO, clslua_exec(test_script, NULL, "rv_hstr"));
 }
 
-TEST_F(ClsLua, Create) {
+TEST_P(TestClsLua, Create) {
   /* create works */
   ASSERT_EQ(0, clslua_exec(test_script, NULL, "create_c"));
 
@@ -645,7 +636,7 @@ TEST_F(ClsLua, Create) {
   ASSERT_EQ(0, clslua_exec(test_script, NULL, "create_cne"));
 }
 
-TEST_F(ClsLua, Pcall) {
+TEST_P(TestClsLua, Pcall) {
   /* create and error works */
   ASSERT_EQ(0, clslua_exec(test_script, NULL, "pcall_c"));
   ASSERT_EQ(-EEXIST, clslua_exec(test_script, NULL, "pcall_c"));
@@ -666,7 +657,7 @@ TEST_F(ClsLua, Pcall) {
   ASSERT_EQ(-9999, clslua_exec(test_script, NULL, "pcall_pcr2"));
 }
 
-TEST_F(ClsLua, Remove) {
+TEST_P(TestClsLua, Remove) {
   /* object doesn't exist */
   ASSERT_EQ(-ENOENT, clslua_exec(test_script, NULL, "remove_r"));
 
@@ -676,9 +667,9 @@ TEST_F(ClsLua, Remove) {
   ASSERT_EQ(-ENOENT, clslua_exec(test_script, NULL, "remove_r"));
 }
 
-TEST_F(ClsLua, Stat) {
+TEST_P(TestClsLua, Stat) {
   /* build object and stat */
-  char buf[1024];
+  char buf[1024] = {};
   bufferlist bl;
   bl.append(buf, sizeof(buf));
   ASSERT_EQ(0, ioctx.write_full(oid, bl));
@@ -705,7 +696,7 @@ TEST_F(ClsLua, Stat) {
   ASSERT_EQ(-ENOENT, __clslua_exec("dne", test_script, NULL, "stat_sdne_pcall"));
 }
 
-TEST_F(ClsLua, MapClear) {
+TEST_P(TestClsLua, MapClear) {
   /* write some data into a key */
   string msg = "This is a test message";
   bufferlist val;
@@ -732,10 +723,10 @@ TEST_F(ClsLua, MapClear) {
   ASSERT_EQ(0, (int)map.count("foo"));
 }
 
-TEST_F(ClsLua, MapSetVal) {
+TEST_P(TestClsLua, MapSetVal) {
   /* build some input value */
   bufferlist orig_val;
-  ::encode("this is the original value yay", orig_val);
+  encode("this is the original value yay", orig_val);
 
   /* have the lua script stuff the data into a map value */
   ASSERT_EQ(0, clslua_exec(test_script, &orig_val, "map_set_val"));
@@ -747,11 +738,11 @@ TEST_F(ClsLua, MapSetVal) {
   ASSERT_EQ(0, ioctx.omap_get_vals_by_keys(oid, out_keys, &out_map));
   bufferlist out_bl = out_map["foo"];
   string out_val;
-  ::decode(out_val, out_bl);
+  decode(out_val, out_bl);
   ASSERT_EQ(out_val, "this is the original value yay");
 }
 
-TEST_F(ClsLua, MapGetVal) {
+TEST_P(TestClsLua, MapGetVal) {
   /* write some data into a key */
   string msg = "This is a test message";
   bufferlist orig_val;
@@ -772,7 +763,7 @@ TEST_F(ClsLua, MapGetVal) {
   ASSERT_EQ(-ENOENT, clslua_exec(test_script, NULL, "map_get_val_dne"));
 }
 
-TEST_F(ClsLua, Read) {
+TEST_P(TestClsLua, Read) {
   /* put data into object */
   string msg = "This is a test message";
   bufferlist bl;
@@ -788,7 +779,7 @@ TEST_F(ClsLua, Read) {
   ASSERT_EQ(ret_val, msg);
 }
 
-TEST_F(ClsLua, Log) {
+TEST_P(TestClsLua, Log) {
   ASSERT_EQ(0, clslua_exec("objclass.log()"));
   ASSERT_EQ(0, clslua_exec("s = objclass.log(); objclass.log(s);"));
   ASSERT_EQ(0, clslua_exec("objclass.log(1)"));
@@ -804,7 +795,7 @@ TEST_F(ClsLua, Log) {
   ASSERT_EQ(0, clslua_exec("s = objclass.log('one', 'two', 'three'); objclass.log(s);"));
 }
 
-TEST_F(ClsLua, BufferlistEquality) {
+TEST_P(TestClsLua, BufferlistEquality) {
   ASSERT_EQ(0, clslua_exec(test_script, NULL, "bl_eq_empty_equal"));
   ASSERT_EQ(0, clslua_exec(test_script, NULL, "bl_eq_empty_selfequal"));
   ASSERT_EQ(0, clslua_exec(test_script, NULL, "bl_eq_selfequal"));
@@ -812,16 +803,16 @@ TEST_F(ClsLua, BufferlistEquality) {
   ASSERT_EQ(0, clslua_exec(test_script, NULL, "bl_eq_notequal"));
 }
 
-TEST_F(ClsLua, RunError) {
+TEST_P(TestClsLua, RunError) {
   ASSERT_EQ(-EIO, clslua_exec(test_script, NULL, "runerr_c"));
 }
 
-TEST_F(ClsLua, HandleNotFunc) {
+TEST_P(TestClsLua, HandleNotFunc) {
   string script = "x = 1;";
   ASSERT_EQ(-EOPNOTSUPP, clslua_exec(script, NULL, "x"));
 }
 
-TEST_F(ClsLua, Register) {
+TEST_P(TestClsLua, Register) {
   /* normal cases: register and maybe call the handler */
   string script = "function h() end; objclass.register(h);";
   ASSERT_EQ(0, clslua_exec(script, NULL, ""));
@@ -856,18 +847,18 @@ TEST_F(ClsLua, Register) {
   ASSERT_EQ(-EIO, clslua_exec(script, NULL, ""));
 }
 
-TEST_F(ClsLua, BufferlistCompare) {
+TEST_P(TestClsLua, BufferlistCompare) {
   ASSERT_EQ(0, clslua_exec(test_script, NULL, "bl_lt"));
   ASSERT_EQ(0, clslua_exec(test_script, NULL, "bl_le"));
 }
 
-TEST_F(ClsLua, BufferlistConcat) {
+TEST_P(TestClsLua, BufferlistConcat) {
   ASSERT_EQ(0, clslua_exec(test_script, NULL, "bl_concat_eq"));
   ASSERT_EQ(0, clslua_exec(test_script, NULL, "bl_concat_ne"));
   ASSERT_EQ(0, clslua_exec(test_script, NULL, "bl_concat_immut"));
 }
 
-TEST_F(ClsLua, GetXattr) {
+TEST_P(TestClsLua, GetXattr) {
   bufferlist bl;
   bl.append("blahblahblahblahblah");
   ASSERT_EQ(0, ioctx.setxattr(oid, "fooz", bl));
@@ -875,7 +866,7 @@ TEST_F(ClsLua, GetXattr) {
   ASSERT_TRUE(reply_output == bl);
 }
 
-TEST_F(ClsLua, SetXattr) {
+TEST_P(TestClsLua, SetXattr) {
   bufferlist inbl;
   inbl.append("blahblahblahblahblah");
   ASSERT_EQ(0, clslua_exec(test_script, &inbl, "setxattr"));
@@ -884,9 +875,9 @@ TEST_F(ClsLua, SetXattr) {
   ASSERT_TRUE(outbl == inbl);
 }
 
-TEST_F(ClsLua, WriteFull) {
+TEST_P(TestClsLua, WriteFull) {
   // write some data
-  char buf[1024];
+  char buf[1024] = {};
   bufferlist blin;
   blin.append(buf, sizeof(buf));
   ASSERT_EQ(0, ioctx.write(oid, blin, blin.length(), 0));
@@ -907,7 +898,7 @@ TEST_F(ClsLua, WriteFull) {
   ASSERT_EQ(blin, blout);
 }
 
-TEST_F(ClsLua, GetXattrs) {
+TEST_P(TestClsLua, GetXattrs) {
   ASSERT_EQ(0, ioctx.create(oid, false));
 
   ASSERT_EQ(0, clslua_exec(test_script, NULL, "getxattrs"));
@@ -938,7 +929,7 @@ TEST_F(ClsLua, GetXattrs) {
   ASSERT_STREQ(out3.c_str(), "key1/key1str/key2/key2str/key3/key3str/");
 }
 
-TEST_F(ClsLua, MapGetKeys) {
+TEST_P(TestClsLua, MapGetKeys) {
   ASSERT_EQ(0, ioctx.create(oid, false));
 
   ASSERT_EQ(0, clslua_exec(test_script, NULL, "map_get_keys"));
@@ -965,7 +956,7 @@ TEST_F(ClsLua, MapGetKeys) {
   ASSERT_STREQ(out3.c_str(), "k1/k2/xxx/");
 }
 
-TEST_F(ClsLua, MapGetVals) {
+TEST_P(TestClsLua, MapGetVals) {
   ASSERT_EQ(0, ioctx.create(oid, false));
 
   ASSERT_EQ(0, clslua_exec(test_script, NULL, "map_get_vals"));
@@ -995,7 +986,7 @@ TEST_F(ClsLua, MapGetVals) {
   ASSERT_STREQ(out3.c_str(), "key1/key1str/key2/key2str/key3/key3str/");
 }
 
-TEST_F(ClsLua, MapHeader) {
+TEST_P(TestClsLua, MapHeader) {
   ASSERT_EQ(0, ioctx.create(oid, false));
 
   bufferlist bl_out;
@@ -1012,7 +1003,7 @@ TEST_F(ClsLua, MapHeader) {
   ASSERT_EQ(reply_output, hdr);
 }
 
-TEST_F(ClsLua, MapSetVals) {
+TEST_P(TestClsLua, MapSetVals) {
   ASSERT_EQ(0, ioctx.create(oid, false));
 
   ASSERT_EQ(0, clslua_exec(test_script, NULL, "map_set_vals_empty"));
@@ -1061,7 +1052,7 @@ TEST_F(ClsLua, MapSetVals) {
   ASSERT_EQ(-EINVAL, clslua_exec(test_script, NULL, "map_set_vals_bad_val"));
 }
 
-TEST_F(ClsLua, MapRemoveKey) {
+TEST_P(TestClsLua, MapRemoveKey) {
   ASSERT_EQ(0, ioctx.create(oid, false));
 
   std::map<string, bufferlist> out_vals;
@@ -1078,7 +1069,7 @@ TEST_F(ClsLua, MapRemoveKey) {
   ASSERT_STREQ("b_val", std::string(out_vals["b"].c_str(), out_vals["b"].length()).c_str());
 }
 
-TEST_F(ClsLua, VersionSubop) {
+TEST_P(TestClsLua, VersionSubop) {
   ASSERT_EQ(0, ioctx.create(oid, false));
 
   ASSERT_EQ(0, clslua_exec(test_script, NULL, "current_version"));
@@ -1091,16 +1082,27 @@ TEST_F(ClsLua, VersionSubop) {
   ASSERT_GT((int)reply_output.length(), 0);
 }
 
-TEST_F(ClsLua, Json) {
+TEST_P(TestClsLua, Json) {
   ASSERT_EQ(0, ioctx.create(oid, false));
 
   bufferlist inbl, outbl;
 
   inbl.append(json_test_script);
 
-  int ret = ioctx.exec(oid, "lua", "eval_json", inbl, outbl);
+  librados::ObjectWriteOperation wop;
+  int rval;
+  wop.exec(cls::lua::method::eval_json, inbl, &outbl, &rval);
+  int ret = ioctx.operate(oid, &wop);
   ASSERT_EQ(ret, 0);
 
   std::string out(outbl.c_str(), outbl.length());
   ASSERT_STREQ(out.c_str(), "omg it works");
 }
+
+
+INSTANTIATE_TEST_SUITE_P(, TestClsLua,
+  ::testing::Values(PoolType::REPLICATED, PoolType::FAST_EC),
+  [](const ::testing::TestParamInfo<PoolType>& info) {
+  return pool_type_name(info.param);
+  }
+);

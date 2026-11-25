@@ -1,0 +1,238 @@
+.. _radosgw-encryption:
+
+==========
+Encryption
+==========
+
+The Ceph Object Gateway supports server-side encryption of uploaded objects,
+with 3 options for the management of encryption keys. Server-side encryption
+means that the data is sent over HTTP in its unencrypted form, and the Ceph
+Object Gateway stores that data in the Ceph Storage Cluster in encrypted form.
+
+.. note:: Requests for server-side encryption must be sent over a secure HTTPS
+          connection to avoid sending secrets in plaintext. If a proxy is used
+          for SSL termination, ``rgw trust forwarded https`` must be enabled
+          before forwarded requests will be trusted as secure.
+
+.. note:: Server-side encryption keys must be 256-bit long and base64 encoded.
+
+.. toctree::
+   :maxdepth: 1
+
+   HashiCorp Vault Integration <vault>
+   KMIP Integration <kmip>
+   OpenStack Barbican Integration <barbican>
+
+Encryption Algorithm
+====================
+
+.. versionadded:: Umbrella
+
+The Ceph Object Gateway supports two AES-256 encryption algorithms for
+server-side encryption:
+
+**AES-256-CBC** (Cipher Block Chaining)
+  The legacy encryption algorithm. This mode is compatible with older Ceph
+  releases and is the default for backward compatibility. CBC mode encrypts
+  data but does not provide built-in integrity verification.
+
+**AES-256-GCM** (Galois/Counter Mode)
+  A modern authenticated encryption algorithm that provides both
+  confidentiality and integrity protection. GCM mode detects any tampering
+  or corruption of encrypted data. This is the recommended algorithm for
+  new deployments.
+
+The encryption algorithm for new objects can be configured with::
+
+  rgw crypt sse algorithm = aes-256-cbc    # default, for backward compatibility
+  rgw crypt sse algorithm = aes-256-gcm    # recommended for new deployments
+
+.. note:: This setting only affects newly encrypted objects. Existing objects
+          are always decrypted using the algorithm that was used when they
+          were encrypted, regardless of the current setting. This allows
+          CBC-encrypted and GCM-encrypted objects to coexist in the same
+          cluster.
+
+.. important:: When upgrading from an older Ceph release, keep the default
+               ``aes-256-cbc`` setting until all RGW instances have been
+               upgraded. Once all instances support GCM, you can enable
+               ``aes-256-gcm`` for new uploads.
+
+GCM Encryption Format
+---------------------
+
+AES-256-GCM encrypts data in 4 KB (4096 byte) chunks. Each chunk produces
+4112 bytes of ciphertext (4096 bytes of encrypted data plus a 16-byte
+authentication tag).
+
+.. list-table:: GCM Size Calculation Example
+   :header-rows: 1
+   :widths: 40 30 30
+
+   * - Description
+     - Size
+     - Notes
+   * - Original plaintext
+     - 10,000 bytes
+     - User's data
+   * - Number of chunks
+     - 3
+     - ⌈10000 ÷ 4096⌉
+   * - Authentication tags
+     - 48 bytes
+     - 3 chunks × 16 bytes
+   * - **Encrypted on disk**
+     - **10,048 bytes**
+     - plaintext + tags
+
+The storage overhead is approximately 0.4% (16 bytes per 4 KB). S3 API
+responses always report the original plaintext size, so this overhead is
+transparent to clients.
+
+Customer-Provided Keys
+======================
+
+In this mode, the client passes an encryption key along with each request to
+read or write encrypted data. It is the client's responsibility to manage those
+keys and remember which key was used to encrypt each object.
+
+This is implemented in S3 according to the `Amazon SSE-C`_ specification.
+
+As all key management is handled by the client, no special Ceph configuration
+is needed to support this encryption mode.
+
+A bucket can refuse new SSE-C uploads through the ``BlockedEncryptionTypes``
+element of its encryption configuration::
+
+  <ServerSideEncryptionConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+    <Rule>
+      <BlockedEncryptionTypes>
+        <EncryptionType>SSE-C</EncryptionType>
+      </BlockedEncryptionTypes>
+    </Rule>
+  </ServerSideEncryptionConfiguration>
+
+Set :confval:`rgw_s3_block_sse_c_by_default` to ``true`` to apply this
+configuration to all newly created buckets. It defaults to ``false`` and does
+not affect existing buckets. A subsequent ``PutBucketEncryption`` request can
+change the setting for an individual bucket. Configure the option consistently
+on all RGW daemons, including across zones in a multisite deployment.
+
+While SSE-C is blocked, PutObject, CopyObject, PostObject and multipart upload
+requests that ask for SSE-C are rejected with ``403 AccessDenied``. An SSE-C
+multipart upload started before the block can no longer upload parts or
+complete; abort it instead. Objects that were encrypted before the block are
+still readable with their key. Pass ``NONE`` instead of ``SSE-C`` to allow
+SSE-C uploads again.
+
+Key Management Service
+======================
+
+In this mode, an administrator stores keys in a secure key management service.
+These keys are then
+retrieved on demand by the Ceph Object Gateway to serve requests to encrypt
+or decrypt data.
+
+This is implemented in S3 according to the `Amazon SSE-KMS`_ specification.
+
+In principle, any key management service could be used here.  Currently
+integration with `Barbican`_, `Vault`_, and `KMIP`_ are implemented.
+
+See :ref:`radosgw-barbican`, :ref:`radosgw-vault`,
+and :ref:`radosgw-kmip`.
+
+SSE-S3
+======
+
+This makes key management invisible to the user.  They are still stored
+in Vault, but they are automatically created and deleted by Ceph and
+retrieved as required to serve requests to encrypt
+or decrypt data.
+
+This is implemented in S3 according to the `Amazon SSE-S3`_ specification.
+
+In principle, any key management service could be used here.  Currently
+only integration with `Vault`_, is implemented.
+
+See :ref:`radosgw-vault`.
+
+Bucket Encryption APIs
+======================
+
+Bucket Encryption APIs to support server-side encryption with Amazon
+S3-managed keys (SSE-S3) or AWS KMS customer master keys (SSE-KMS). 
+
+See `PutBucketEncryption`_, `GetBucketEncryption`_, `DeleteBucketEncryption`_
+
+Automatic Encryption (for testing only)
+=======================================
+
+A ``rgw crypt default encryption key`` can be set in ceph.conf to force the
+encryption of all objects that do not otherwise specify an encryption mode.
+
+The configuration expects a base64-encoded 256 bit key. For example::
+
+  rgw crypt default encryption key = 4YSmvJtBv0aZ7geVgAsdpRnLBEwWSWlMIGnRS8a9TSA=
+
+.. important:: This mode is for diagnostic purposes only! The ceph configuration
+   file is not a secure method for storing encryption keys. Keys that are
+   accidentally exposed in this way should be considered compromised.
+
+Caching
+=======
+
+The caching feature for Key Management Service (KMS) secrets greatly
+improves the performance of server-side encryption and lessens the
+load on the KMS.
+
+Secrets are stored using the `Linux Kernel Key Retention Service`_ in
+the RGW processes' process keyring. This is subject to a global quota
+and must be set in accordance with the configured cache size.
+Depending on whether RGW runs as root, these quotas can be managed by adjusting:
+
+- ``/proc/sys/kernel/keys/root_maxkeys`` and ``/proc/sys/kernel/keys/root_maxbytes``
+- ``/proc/sys/kernel/keys/maxkeys`` and ``/proc/sys/kernel/keys/maxbytes``
+
+Exceeding a quota will disable the cache, fail the request with an
+internal error, and log a failure message.
+
+Three different Cache Time-to-Live (TTL) values can be set:
+
+- **Positive TTL**: How long a successfully retrieved secret remains in the cache.
+- **Negative TTL**: How long to remember that a key does not exist, preventing
+  unnecessary requests to the KMS.
+- **Transient Error TTL**: How long to cache failures due to temporary issues
+  like KMS timeouts.
+
+Metrics
+---------
+
+The cache exports metrics under the ``kms-cache`` collection.
+
+- ``hit``: Hit counter
+- ``miss``:  Miss counter
+- ``expired``: Number of TTL expired entries
+- ``size``: Current cache size
+- ``capacity``: Cache maximum size
+- ``clear``: Number of cache clears. Resets ``size``, ``hit``, ``miss``, and
+  ``expired``.
+
+In addition the ``rgw`` collection has:
+
+- ``kms_fetch_lat``: Average KMS fetch latency. Also includes a successful
+  request counter. Each event results in a positive cache entry.
+- ``kms_error_transient``: Transient KMS fetch error counter. Each
+  event results in a transient error cache entry.
+- ``kms_error_permanent``: Permanent KMS fetch error counter. Each
+  event results in a negative cache cache entry.
+
+.. _Linux Kernel Key Retention Service:  https://www.kernel.org/doc/html/latest/security/keys/core.html
+.. _Amazon SSE-C: https://docs.aws.amazon.com/AmazonS3/latest/dev/ServerSideEncryptionCustomerKeys.html
+.. _Amazon SSE-KMS: https://docs.aws.amazon.com/AmazonS3/latest/dev/UsingKMSEncryption.html
+.. _Amazon SSE-S3: https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingServerSideEncryption.html
+.. _Barbican: https://wiki.openstack.org/wiki/Barbican
+.. _Vault: https://www.vaultproject.io/docs/
+.. _KMIP: https://www.oasis-open.org/committees/kmip/
+.. _PutBucketEncryption: https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketEncryption.html
+.. _GetBucketEncryption: https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketEncryption.html
+.. _DeleteBucketEncryption: https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketEncryption.html

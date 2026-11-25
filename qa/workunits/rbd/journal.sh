@@ -1,6 +1,5 @@
-#!/bin/bash -e
-
-. $(dirname $0)/../ceph-helpers.sh
+#!/usr/bin/env bash
+set -e
 
 function list_tests()
 {
@@ -12,7 +11,7 @@ function list_tests()
 
 function usage()
 {
-  echo "usage: $0 [-h|-l|-t <testname> [-t <testname>...] [--no-sanity-check] [--no-cleanup]]"
+  echo "usage: $0 [-h|-l|-t <testname> [-t <testname>...] [--no-cleanup]]"
 }
 
 function expect_false()
@@ -44,7 +43,7 @@ test_rbd_journal()
     rbd create --image-feature exclusive-lock --image-feature journaling \
 	--size 128 ${image}
     local journal=$(rbd info ${image} --format=xml 2>/dev/null |
-			   $XMLSTARLET sel -t -v "//image/journal")
+			   xmlstarlet sel -t -v "//image/journal")
     test -n "${journal}"
     rbd journal info ${journal}
     rbd journal info --journal ${journal}
@@ -53,14 +52,14 @@ test_rbd_journal()
     rbd feature disable ${image} journaling
 
     rbd info ${image} --format=xml 2>/dev/null |
-	expect_false $XMLSTARLET sel -t -v "//image/journal"
+	expect_false xmlstarlet sel -t -v "//image/journal"
     expect_false rbd journal info ${journal}
     expect_false rbd journal info --image ${image}
 
     rbd feature enable ${image} journaling
 
     local journal1=$(rbd info ${image} --format=xml 2>/dev/null |
-			    $XMLSTARLET sel -t -v "//image/journal")
+			    xmlstarlet sel -t -v "//image/journal")
     test "${journal}" = "${journal1}"
 
     rbd journal info ${journal}
@@ -69,11 +68,11 @@ test_rbd_journal()
 
     local count=10
     save_commit_position ${journal}
-    rbd bench-write ${image} --io-size 4096 --io-threads 1 \
+    rbd bench --io-type write ${image} --io-size 4096 --io-threads 1 \
 	--io-total $((4096 * count)) --io-pattern seq
-    rbd journal status --image ${image} | fgrep "tid=$((count - 1))"
+    rbd journal status --image ${image} | grep -F "tid=$((count - 1))"
     restore_commit_position ${journal}
-    rbd journal status --image ${image} | fgrep "positions=[]"
+    rbd journal status --image ${image} | grep -F "positions=[]"
     local count1=$(rbd journal inspect --verbose ${journal} |
 			  grep -c 'event_type.*AioWrite')
     test "${count}" -eq "${count1}"
@@ -88,23 +87,24 @@ test_rbd_journal()
     rbd create --image-feature exclusive-lock --image-feature journaling \
 	--size 128 ${image1}
     journal1=$(rbd info ${image1} --format=xml 2>/dev/null |
-		      $XMLSTARLET sel -t -v "//image/journal")
+		      xmlstarlet sel -t -v "//image/journal")
 
     save_commit_position ${journal1}
     rbd journal import --dest ${image1} $TMPDIR/journal.export
     rbd snap create ${image1}@test
     restore_commit_position ${journal1}
     # check that commit position is properly updated: the journal should contain
-    # 12 entries (10 AioWrite + 1 SnapCreate + 1 OpFinish) and commit
-    # position set to tid=11
+    # 14 entries (2 AioFlush + 10 AioWrite + 1 SnapCreate + 1 OpFinish) and
+    # commit position set to tid=14
     rbd journal inspect --image ${image1} --verbose | awk '
+      /AioFlush/          {a++}         # match: "event_type": "AioFlush",
       /AioWrite/          {w++}         # match: "event_type": "AioWrite",
       /SnapCreate/        {s++}         # match: "event_type": "SnapCreate",
       /OpFinish/          {f++}         # match: "event_type": "OpFinish",
-      /entries inspected/ {t=$1; e=$4}  # match: 12 entries inspected, 0 errors
+      /entries inspected/ {t=$1; e=$4}  # match: 14 entries inspected, 0 errors
                           {print}       # for diagnostic
       END                 {
-        if (w != 10 || s != 1 || f != 1 || t != 12 || e != 0) exit(1)
+        if (a != 2 || w != 10 || s != 1 || f != 1 || t != 14 || e != 0) exit(1)
       }
     '
 
@@ -128,7 +128,7 @@ rbd_assert_eq() {
     local expected_val=$4
 
     local val=$(rbd --format xml ${cmd} --image ${image} |
-		       $XMLSTARLET sel -t -v "${param}")
+		       xmlstarlet sel -t -v "${param}")
     test "${val}" = "${expected_val}"
 }
 
@@ -168,6 +168,30 @@ test_rbd_copy()
     rbd_assert_eq ${image} 'journal info' '//journal/object_pool' rbd
 
     rbd remove ${image}
+}
+
+test_rbd_deep_copy()
+{
+    local src=testrbdcopys$$
+    rbd create --size 256 ${src}
+    rbd snap create ${src}@snap1
+
+    local dest=testrbdcopy$$
+    rbd deep copy --image-feature exclusive-lock --image-feature journaling \
+        --journal-pool rbd \
+        --journal-object-size 20M \
+        --journal-splay-width 6 \
+        ${src} ${dest}
+
+    rbd snap purge ${src}
+    rbd remove ${src}
+
+    rbd_assert_eq ${dest} 'journal info' '//journal/order' 25
+    rbd_assert_eq ${dest} 'journal info' '//journal/splay_width' 6
+    rbd_assert_eq ${dest} 'journal info' '//journal/object_pool' rbd
+
+    rbd snap purge ${dest}
+    rbd remove ${dest}
 }
 
 test_rbd_clone()
@@ -247,7 +271,6 @@ TESTS+=" rbd_feature"
 
 tests_to_run=()
 
-sanity_check=true
 cleanup=true
 
 while [[ $# -gt 0 ]]; do
@@ -256,9 +279,6 @@ while [[ $# -gt 0 ]]; do
     case "$opt" in
 	"-l" )
 	    do_list=1
-	    ;;
-	"--no-sanity-check" )
-	    sanity_check=false
 	    ;;
 	"--no-cleanup" )
 	    cleanup=false
@@ -296,15 +316,9 @@ if test -z "$tests_to_run" ; then
 fi
 
 for i in $tests_to_run; do
-    if $sanity_check ; then
-	wait_for_clean
-    fi
     set -x
     test_${i}
     set +x
 done
-if $sanity_check ; then
-    wait_for_clean
-fi
 
 echo OK

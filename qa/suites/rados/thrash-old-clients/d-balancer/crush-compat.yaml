@@ -1,0 +1,6 @@
+tasks:
+- cephadm.shell:
+    mon.a:
+      - while ! ceph balancer status ; do sleep 1 ; done
+      - ceph balancer mode crush-compat
+      - ceph balancer on

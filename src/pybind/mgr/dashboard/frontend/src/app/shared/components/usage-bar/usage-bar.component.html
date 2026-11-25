@@ -1,0 +1,16 @@
+@if (customLabel) {
+  @if (isCustomLabelTemplate) {
+    <ng-container *ngTemplateOutlet="customLabel"></ng-container>
+  } @else {
+    <ng-container i18n>{{ customLabel }}</ng-container>
+  }
+}
+@if (used >= 0 && total > 0) {
+  <ibm-meter-chart
+    [data]="data"
+    [options]="options"
+  >
+  </ibm-meter-chart>
+} @else {
+  <span i18n>{{ noDataText }}</span>
+}

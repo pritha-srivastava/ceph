@@ -1,3 +1,5 @@
+.. _radosgw-bucketops:
+
 ===================
  Bucket Operations
 ===================
@@ -7,15 +9,18 @@ PUT Bucket
 Creates a new bucket. To create a bucket, you must have a user ID and a valid AWS Access Key ID to authenticate requests. You may not
 create buckets as an anonymous user.
 
-.. note:: We do not support request entities for ``PUT /{bucket}`` in this release.
-
 Constraints
 ~~~~~~~~~~~
 In general, bucket names should follow domain name constraints.
 
 - Bucket names must be unique.
-- Bucket names must begin and end with a lowercase letter.
-- Bucket names may contain a dash (-).
+- Bucket names cannot be formatted as IP address.
+- Bucket names can be between 3 and 63 characters long.
+- Bucket names must not contain uppercase characters or underscores.
+- Bucket names must start with a lowercase letter or number.
+- Bucket names must be a series of one or more labels. Adjacent labels are separated by a single period (.). Bucket names can contain lowercase letters, numbers, and hyphens. Each label must start and end with a lowercase letter or a number.
+
+.. note:: The above constraints are relaxed if the option 'rgw_relaxed_s3_bucket_names' is set to true except that the bucket names must still be unique, cannot be formatted as IP address and can contain letters, numbers, periods, dashes and underscores for up to 255 characters long.
 
 Syntax
 ~~~~~~
@@ -28,22 +33,41 @@ Syntax
 
     Authorization: AWS {access-key}:{hash-of-header-and-secret}
 
+
 Parameters
 ~~~~~~~~~~
 
-+---------------+----------------------+-----------------------------------------------------------------------------+------------+
-| Name          | Description          | Valid Values                                                                | Required   |
-+===============+======================+=============================================================================+============+
-| ``x-amz-acl`` | Canned ACLs.         | ``private``, ``public-read``, ``public-read-write``, ``authenticated-read`` | No         |
-+---------------+----------------------+-----------------------------------------------------------------------------+------------+
++--------------------------------------+-------------------------------+-----------------------------------------------+------------+
+| Name                                 | Description                   | Valid Values                                  | Required   |
++======================================+===============================+===============================================+============+
+| ``x-amz-acl``                        | Canned ACLs.                  | ``private``, ``public-read``,                 | No         |
+|                                      |                               | ``public-read-write``, ``authenticated-read`` |            |
++--------------------------------------+-------------------------------+-----------------------------------------------+------------+
+| ``x-amz-bucket-object-lock-enabled`` | Enable object lock on bucket. | ``true``, ``false``                           | No         |
++--------------------------------------+-------------------------------+-----------------------------------------------+------------+
+| ``x-amz-object-ownership``           | Set ownership controls.       | ``BucketOwnerEnforced``,                      | No         |
+|                                      |                               | ``BucketOwnerPreferred``, ``ObjectWriter``    |            |
++--------------------------------------+-------------------------------+-----------------------------------------------+------------+
 
+Request Entities
+~~~~~~~~~~~~~~~~
+
++-------------------------------+-----------+-----------------------------------------------------------------+
+| Name                          | Type      | Description                                                     |
++===============================+===========+=================================================================+
+| ``CreateBucketConfiguration`` | Container | A container for the bucket configuration.                       |
++-------------------------------+-----------+-----------------------------------------------------------------+
+| ``LocationConstraint``        | String    | A zonegroup API name, with optional :ref:`s3_bucket_placement`. |
++-------------------------------+-----------+-----------------------------------------------------------------+
 
 
 HTTP Response
 ~~~~~~~~~~~~~
 
 If the bucket name is unique, within constraints and unused, the operation will succeed.
-If a bucket with the same name already exists and the user is the bucket owner, the operation will succeed.
+If a bucket with the same name already exists and the user is the
+bucket owner, the operation will succeed unless non-default option
+``rgw_bucket_eexist_override`` is `true`.
 If the bucket name is already in use, the operation will fail.
 
 +---------------+-----------------------+----------------------------------------------------------+
@@ -91,18 +115,19 @@ Syntax
 Parameters
 ~~~~~~~~~~
 
-+-----------------+-----------+-----------------------------------------------------------------------+
-| Name            | Type      | Description                                                           |
-+=================+===========+=======================================================================+
-| ``prefix``      | String    | Only returns objects that contain the specified prefix.               |
-+-----------------+-----------+-----------------------------------------------------------------------+
-| ``delimiter``   | String    | The delimiter between the prefix and the rest of the object name.     |
-+-----------------+-----------+-----------------------------------------------------------------------+
-| ``marker``      | String    | A beginning index for the list of objects returned.                   |
-+-----------------+-----------+-----------------------------------------------------------------------+
-| ``max-keys``    | Integer   | The maximum number of keys to return. Default is 1000.                |
-+-----------------+-----------+-----------------------------------------------------------------------+
-
++---------------------+-----------+-------------------------------------------------------------------------------------------------+
+| Name                | Type      | Description                                                                                     |
++=====================+===========+=================================================================================================+
+| ``prefix``          | String    | Only returns objects that contain the specified prefix.                                         |
++---------------------+-----------+-------------------------------------------------------------------------------------------------+
+| ``delimiter``       | String    | The delimiter between the prefix and the rest of the object name.                               |
++---------------------+-----------+-------------------------------------------------------------------------------------------------+
+| ``marker``          | String    | A beginning index for the list of objects returned.                                             |
++---------------------+-----------+-------------------------------------------------------------------------------------------------+
+| ``max-keys``        | Integer   | The maximum number of keys to return. Default is 1000.                                          |
++---------------------+-----------+-------------------------------------------------------------------------------------------------+
+| ``allow-unordered`` | Boolean   | Non-standard extension. Allows results to be returned unordered. Cannot be used with delimiter. |
++---------------------+-----------+-------------------------------------------------------------------------------------------------+
 
 HTTP Response
 ~~~~~~~~~~~~~
@@ -110,7 +135,7 @@ HTTP Response
 +---------------+---------------+--------------------+
 | HTTP Status   | Status Code   | Description        |
 +===============+===============+====================+
-| ``200``       | OK            | Buckets retrieved  |
+| ``200``       | OK            | Buckets retrieved. |
 +---------------+---------------+--------------------+
 
 Bucket Response Entities
@@ -156,6 +181,8 @@ The ``ListBucketResult`` contains objects, where each object is within a ``Conte
 +------------------------+-----------+------------------------------------------+
 | ``StorageClass``       | String    | Should always return ``STANDARD``.       |
 +------------------------+-----------+------------------------------------------+
+| ``Type``               | String    | ``Appendable`` or ``Normal``.            |
++------------------------+-----------+------------------------------------------+
 
 Get Bucket Location
 -------------------
@@ -181,7 +208,7 @@ Response Entities
 | Name                   | Type      | Description                              |
 +========================+===========+==========================================+
 | ``LocationConstraint`` | String    | The region where bucket resides, empty   |
-|                        |           | string for defult region                 |
+|                        |           | string for default region.               |
 +------------------------+-----------+------------------------------------------+
 
 
@@ -261,6 +288,8 @@ Request Entities
 | ``Permission``            | String      | The permission given to the ``Grantee`` bucket.                                              |
 +---------------------------+-------------+----------------------------------------------------------------------------------------------+
 
+.. note:: For accounts users, the ``Owner`` and ``ID`` in ``AccessControlPolicy`` may be set to either the legacy user ID or the new account ID. Both are accepted for backward compatibility.
+
 List Bucket Multipart Uploads
 -----------------------------
 
@@ -292,7 +321,7 @@ You may specify parameters for ``GET /{bucket}?uploads``, but none of them are r
 +------------------------+-----------+--------------------------------------------------------------------------------------+
 | ``max-uploads``        | Integer   | The maximum number of multipart uploads. The range from 1-1000. The default is 1000. |
 +------------------------+-----------+--------------------------------------------------------------------------------------+
-| ``upload-id-marker``   | String    | Ignored if ``key-marker`` isn't specified. Specifies the ``ID`` of first             |
+| ``upload-id-marker``   | String    | Ignored if ``key-marker`` is not specified. Specifies the ``ID`` of first            |
 |                        |           | upload to list in lexicographical order at or following the ``ID``.                  |
 +------------------------+-----------+--------------------------------------------------------------------------------------+
 
@@ -375,3 +404,569 @@ REQUEST ENTITIES
 +-----------------------------+-----------+---------------------------------------------------------------------------+
 | ``Status``                  | String    | Sets the versioning state of the bucket.  Valid Values: Suspended/Enabled |
 +-----------------------------+-----------+---------------------------------------------------------------------------+
+
+PUT BUCKET OBJECT LOCK
+--------------------------------
+
+Places an Object Lock configuration on the specified bucket. The rule specified in the Object Lock configuration will be
+applied by default to every new object placed in the specified bucket.
+
+Syntax
+~~~~~~
+
+::
+
+    PUT /{bucket}?object-lock HTTP/1.1
+
+Request Entities
+~~~~~~~~~~~~~~~~
+
++-----------------------------+-------------+----------------------------------------------------------------------------------------+----------+
+| Name                        | Type        | Description                                                                            | Required |
++=============================+=============+========================================================================================+==========+
+| ``ObjectLockConfiguration`` | Container   | A container for the request.                                                           |   Yes    |
++-----------------------------+-------------+----------------------------------------------------------------------------------------+----------+
+| ``ObjectLockEnabled``       | String      | Indicates whether this bucket has an Object Lock configuration enabled.                |   Yes    |
++-----------------------------+-------------+----------------------------------------------------------------------------------------+----------+
+| ``Rule``                    | Container   | The Object Lock rule in place for the specified bucket.                                |   No     |
++-----------------------------+-------------+----------------------------------------------------------------------------------------+----------+
+| ``DefaultRetention``        | Container   | The default retention period applied to new objects placed in the specified bucket.    |   No     |
++-----------------------------+-------------+----------------------------------------------------------------------------------------+----------+
+| ``Mode``                    | String      | The default Object Lock retention mode. Valid Values:  GOVERNANCE/COMPLIANCE           |   Yes    |
++-----------------------------+-------------+----------------------------------------------------------------------------------------+----------+
+| ``Days``                    | Integer     | The number of days specified for the default retention period.                         |   No     |
++-----------------------------+-------------+----------------------------------------------------------------------------------------+----------+
+| ``Years``                   | Integer     | The number of years specified for the default retention period.                        |   No     |
++-----------------------------+-------------+----------------------------------------------------------------------------------------+----------+
+
+HTTP Response
+~~~~~~~~~~~~~
+
+If the bucket object lock is not enabled when creating the bucket, the operation will fail.
+
++---------------+-----------------------+----------------------------------------------------------+
+| HTTP Status   | Status Code           | Description                                              |
++===============+=======================+==========================================================+
+| ``400``       | MalformedXML          | The XML is not well-formed.                              |
++---------------+-----------------------+----------------------------------------------------------+
+| ``409``       | InvalidBucketState    | The bucket object lock is not enabled.                   |
++---------------+-----------------------+----------------------------------------------------------+
+
+GET BUCKET OBJECT LOCK
+--------------------------------
+
+Gets the Object Lock configuration for a bucket. The rule specified in the Object Lock configuration will be applied by
+default to every new object placed in the specified bucket.
+
+Syntax
+~~~~~~
+
+::
+
+    GET /{bucket}?object-lock HTTP/1.1
+
+
+Response Entities
+~~~~~~~~~~~~~~~~~
+
++-----------------------------+-------------+----------------------------------------------------------------------------------------+----------+
+| Name                        | Type        | Description                                                                            | Required |
++=============================+=============+========================================================================================+==========+
+| ``ObjectLockConfiguration`` | Container   | A container for the request.                                                           |   Yes    |
++-----------------------------+-------------+----------------------------------------------------------------------------------------+----------+
+| ``ObjectLockEnabled``       | String      | Indicates whether this bucket has an Object Lock configuration enabled.                |   Yes    |
++-----------------------------+-------------+----------------------------------------------------------------------------------------+----------+
+| ``Rule``                    | Container   | The Object Lock rule in place for the specified bucket.                                |   No     |
++-----------------------------+-------------+----------------------------------------------------------------------------------------+----------+
+| ``DefaultRetention``        | Container   | The default retention period applied to new objects placed in the specified bucket.    |   No     |
++-----------------------------+-------------+----------------------------------------------------------------------------------------+----------+
+| ``Mode``                    | String      | The default Object Lock retention mode. Valid Values:  GOVERNANCE/COMPLIANCE           |   Yes    |
++-----------------------------+-------------+----------------------------------------------------------------------------------------+----------+
+| ``Days``                    | Integer     | The number of days specified for the default retention period.                         |   No     |
++-----------------------------+-------------+----------------------------------------------------------------------------------------+----------+
+| ``Years``                   | Integer     | The number of years specified for the default retention period.                        |   No     |
++-----------------------------+-------------+----------------------------------------------------------------------------------------+----------+
+
+Create Notification
+-------------------
+
+Create a publisher for a specific bucket into a topic.
+
+Syntax
+~~~~~~
+
+::
+
+    PUT /{bucket}?notification HTTP/1.1
+
+
+Request Entities
+~~~~~~~~~~~~~~~~
+
+Parameters are XML encoded in the body of the request, in the following format:
+
+::
+
+   <NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+       <TopicConfiguration>
+           <Id></Id>
+           <Topic></Topic>
+           <Event></Event>
+           <Filter>
+               <S3Key>
+                   <FilterRule>
+                       <Name></Name>
+                       <Value></Value>
+                   </FilterRule>
+                </S3Key>
+                <S3Metadata>
+                    <FilterRule>
+                        <Name></Name>
+                        <Value></Value>
+                    </FilterRule>
+                </S3Metadata>
+                <S3Tags>
+                    <FilterRule>
+                        <Name></Name>
+                        <Value></Value>
+                    </FilterRule>
+                </S3Tags>
+            </Filter>
+       </TopicConfiguration>
+   </NotificationConfiguration>
+
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| Name                          | Type      | Description                                                                          | Required |
++===============================+===========+======================================================================================+==========+
+| ``NotificationConfiguration`` | Container | Holding list of ``TopicConfiguration`` entities.                                     | Yes      |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``TopicConfiguration``        | Container | Holding ``Id``, ``Topic`` and list of ``Event`` entities.                            | Yes      |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``Id``                        | String    | Name of the notification.                                                            | Yes      |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``Topic``                     | String    | Topic ARN. Topic must be created beforehand.                                         | Yes      |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``Event``                     | String    | List of supported events see: :ref:`radosgw-s3-notification-compatibility`.          | No       |
+|                               |           | Multiple ``Event`` entities can be used. If omitted, all "Created" and "Removed"     |          |
+|                               |           | events are handled. "Lifecycle" and "Synced" event types must be                     |          |
+|                               |           | specified explicitly.                                                                |          |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``Filter``                    | Container | Holding ``S3Key``, ``S3Metadata`` and ``S3Tags`` entities.                           | No       |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``S3Key``                     | Container | Holding a list of ``FilterRule`` entities, for filtering based on object key.        | No       |
+|                               |           | At most, 3 entities may be in the list, with ``Name`` be ``prefix``, ``suffix`` or   |          |
+|                               |           | ``regex``. All filter rules in the list must match for the filter to match.          |          |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``S3Metadata``                | Container | Holding a list of ``FilterRule`` entities, for filtering based on object metadata.   | No       |
+|                               |           | All filter rules in the list must match the metadata defined on the object. However, |          |
+|                               |           | the object still match if it has other metadata entries not listed in the filter.    |          |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``S3Tags``                    | Container | Holding a list of ``FilterRule`` entities, for filtering based on object tags.       | No       |
+|                               |           | All filter rules in the list must match the tags defined on the object. However,     |          |
+|                               |           | the object still match if it has other tags not listed in the filter.                |          |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``S3Key.FilterRule``          | Container | Holding ``Name`` and ``Value`` entities. ``Name`` would  be: ``prefix``, ``suffix``  | Yes      |
+|                               |           | or ``regex``. The ``Value`` would hold the key prefix, key suffix or a regular       |          |
+|                               |           | expression for matching the key, accordingly.                                        |          |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``S3Metadata.FilterRule``     | Container | Holding ``Name`` and ``Value`` entities. ``Name`` would be the name of the metadata  | Yes      |
+|                               |           | attribute (e.g. ``x-amz-meta-xxx``). The ``Value`` would be the expected value for   |          |
+|                               |           | this attribute.                                                                      |          |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``S3Tags.FilterRule``         | Container | Holding ``Name`` and ``Value`` entities. ``Name`` would be the tag key,              |  Yes     |
+|                               |           | and ``Value`` would be the tag value.                                                |          |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+
+
+HTTP Response
+~~~~~~~~~~~~~
+
++---------------+-----------------------+----------------------------------------------------------+
+| HTTP Status   | Status Code           | Description                                              |
++===============+=======================+==========================================================+
+| ``400``       | MalformedXML          | The XML is not well-formed.                              |
++---------------+-----------------------+----------------------------------------------------------+
+| ``400``       | InvalidArgument       | Missing Id; Missing/Invalid Topic ARN; Invalid Event.    |
++---------------+-----------------------+----------------------------------------------------------+
+| ``404``       | NoSuchBucket          | The bucket does not exist.                               |
++---------------+-----------------------+----------------------------------------------------------+
+| ``404``       | NoSuchKey             | The topic does not exist.                                |
++---------------+-----------------------+----------------------------------------------------------+
+
+
+Delete Notification
+-------------------
+
+Delete a specific, or all, notifications from a bucket.
+
+.. note::
+
+    - Notification deletion is an extension to the S3 notification API
+    - When the bucket is deleted, any notification defined on it is also deleted
+    - Deleting an unknown notification (e.g. double delete) is not considered an error
+
+Syntax
+~~~~~~
+
+::
+
+    DELETE /{bucket}?notification[=<notification-id>] HTTP/1.1
+
+
+Parameters
+~~~~~~~~~~
+
++------------------------+-----------+-----------------------------------------------------------------------------------------+
+| Name                   | Type      | Description                                                                             |
++========================+===========+=========================================================================================+
+| ``notification-id``    | String    | Name of the notification. If not provided, all notifications on the bucket are deleted. |
++------------------------+-----------+-----------------------------------------------------------------------------------------+
+
+HTTP Response
+~~~~~~~~~~~~~
+
++---------------+-----------------------+----------------------------------------------------------+
+| HTTP Status   | Status Code           | Description                                              |
++===============+=======================+==========================================================+
+| ``404``       | NoSuchBucket          | The bucket does not exist.                               |
++---------------+-----------------------+----------------------------------------------------------+
+
+Get/List Notification
+---------------------
+
+Get a specific notification, or list all notifications configured on a bucket.
+
+Syntax
+~~~~~~
+
+::
+
+    GET /{bucket}?notification[=<notification-id>] HTTP/1.1
+
+
+Parameters
+~~~~~~~~~~
+
++------------------------+-----------+----------------------------------------------------------------------------------------+
+| Name                   | Type      | Description                                                                            |
++========================+===========+========================================================================================+
+| ``notification-id``    | String    | Name of the notification. If not provided, all notifications on the bucket are listed. |
++------------------------+-----------+----------------------------------------------------------------------------------------+
+
+Response Entities
+~~~~~~~~~~~~~~~~~
+
+The response is XML encoded in the body of the request, in the following format:
+
+::
+
+   <NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+       <TopicConfiguration>
+           <Id></Id>
+           <Topic></Topic>
+           <Event></Event>
+           <Filter>
+               <S3Key>
+                   <FilterRule>
+                       <Name></Name>
+                       <Value></Value>
+                   </FilterRule>
+                </S3Key>
+                <S3Metadata>
+                    <FilterRule>
+                        <Name></Name>
+                        <Value></Value>
+                    </FilterRule>
+                </S3Metadata>
+                <S3Tags>
+                    <FilterRule>
+                        <Name></Name>
+                        <Value></Value>
+                    </FilterRule>
+                </S3Tags>
+            </Filter>
+       </TopicConfiguration>
+   </NotificationConfiguration>
+
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| Name                          | Type      | Description                                                                          | Required |
++===============================+===========+======================================================================================+==========+
+| ``NotificationConfiguration`` | Container | Holding list of ``TopicConfiguration`` entities.                                     | Yes      |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``TopicConfiguration``        | Container | Holding ``Id``, ``Topic`` and list of ``Event`` entities.                            | Yes      |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``Id``                        | String    | Name of the notification.                                                            | Yes      |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``Topic``                     | String    | Topic ARN.                                                                           | Yes      |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``Event``                     | String    | Handled event. Multiple ``Event`` entities may exist.                                | Yes      |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``Filter``                    | Container | Holding the filters configured for this notification.                                | No       |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+
+HTTP Response
+~~~~~~~~~~~~~
+
++---------------+-----------------------+----------------------------------------------------------+
+| HTTP Status   | Status Code           | Description                                              |
++===============+=======================+==========================================================+
+| ``404``       | NoSuchBucket          | The bucket does not exist.                               |
++---------------+-----------------------+----------------------------------------------------------+
+| ``404``       | NoSuchKey             | The notification does not exist (if provided).           |
++---------------+-----------------------+----------------------------------------------------------+
+
+Enable Bucket Logging
+---------------------
+
+Enable logging for a bucket.
+
+Syntax
+~~~~~~
+
+::
+
+    PUT /{bucket}?logging HTTP/1.1
+
+
+Request Entities
+~~~~~~~~~~~~~~~~
+
+Parameters are XML encoded in the body of the request, in the following format:
+
+::
+
+  <BucketLoggingStatus xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+    <LoggingEnabled>
+      <TargetBucket>string</TargetBucket>
+      <TargetGrants>
+        <Grant>
+          <Grantee>
+            <DisplayName>string</DisplayName>
+            <EmailAddress>string</EmailAddress>
+            <ID>string</ID>
+            <xsi:type>string</xsi:type>
+            <URI>string</URI>
+          </Grantee>
+          <Permission>string</Permission>
+        </Grant>
+      </TargetGrants>
+      <TargetObjectKeyFormat>
+        <PartitionedPrefix>
+          <PartitionDateSource>DeliveryTime|EventTime</PartitionDateSource>
+        </PartitionedPrefix>
+        <SimplePrefix>
+        </SimplePrefix>
+      </TargetObjectKeyFormat>
+      <TargetPrefix>string</TargetPrefix>
+      <LoggingType>Standard|Journal</LoggingType>
+      <ObjectRollTime>integer</ObjectRollTime>
+      <Filter>
+        <S3Key>
+          <FilterRule>
+            <Name>suffix/prefix/regex</Name>
+            <Value></Value>
+          </FilterRule>
+        </S3Key>
+      </Filter>
+    </LoggingEnabled>
+  </BucketLoggingStatus>
+
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| Name                          | Type      | Description                                                                          | Required |
++===============================+===========+======================================================================================+==========+
+| ``BucketLoggingStatus``       | Container | Enabling/Disabling logging configuration for the bucket.                             | Yes      |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``LoggingEnabled``            | Container | Holding the logging configuration for the bucket.                                    | Yes      |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``TargetBucket``              | String    | The bucket where the logs are stored. The log bucket cannot have bucket logging      | Yes      |
+|                               |           | enabled.                                                                             |          |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``TargetGrants``              | Container | Not supported. The owner of the log bucket is the owner of the log objects.          | No       |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``TargetObjectKeyFormat``     | Container | The format of the log object key. Contains either ``PartitionedPrefix`` or           | No       |
+|                               |           | ``SimplePrefix`` entities.                                                           |          |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``PartitionedPrefix``         | Container | Indicates a partitioned  log object key format. Note that ``PartitionDateSource``    | No       |
+|                               |           | is ignored and hardcoded as ``DeliveryTime``.                                        |          |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``SimplePrefix``              | Container | Indicates a simple log object key format (default format).                           | No       |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``TargetPrefix``              | String    | The prefix for the log objects. Used in both formats. May be used to distinguish     | No       |
+|                               |           | between different source buckets writing log records to the same log bucket.         |          |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``LoggingType``               | String    | The type of logging. Valid values are:                                               | No       |
+|                               |           | ``Standard`` (default) all bucket operations are logged after being performed.       |          |
+|                               |           | The log record will contain all fields.                                              |          |
+|                               |           | ``Journal`` only operations that modify an object are logged.                        |          |
+|                               |           | Will record the minimum subset of fields in the log record that is needed            |          |
+|                               |           | for journaling.                                                                      |          |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+| ``ObjectRollTime``            | Integer   | The time in seconds after which a new log object is created, and the previous log    | No       |
+|                               |           | object added to the log bucket. Default is 3600 seconds (1 hour).                    |          |
++-------------------------------+-----------+--------------------------------------------------------------------------------------+----------+
+
+Response Entities
+~~~~~~~~~~~~~~~~~
+
+The response is XML encoded in the body of the request, only if a configuration change triggers flushing of the current logging object.
+In this case it will return the name of the flushed logging object in following format:
+
+::
+
+  <PostBucketLoggingOutput xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+    <FlushedLoggingObject>string</FlushedLoggingObject>
+  </PostBucketLoggingOutput>
+
+.. note:: In case that the operation was successfull, but but the triggered flush failed, the response an empty ``200 OK``, without
+   a ``PutBucketLoggingOutput`` section. In order to prevent potential data loss, it is recommened to flush the logging object before
+   changing the logging configuration.
+
+HTTP Response
+~~~~~~~~~~~~~
+
++---------------+-----------------------+----------------------------------------------------------+
+| HTTP Status   | Status Code           | Description                                              |
++===============+=======================+==========================================================+
+| ``400``       | MalformedXML          | The XML is not well-formed.                              |
++---------------+-----------------------+----------------------------------------------------------+
+| ``400``       | InvalidArgument       | Missing mandatory value or invalid value.                |
++---------------+-----------------------+----------------------------------------------------------+
+| ``404``       | NoSuchBucket          | The bucket does not exist.                               |
++---------------+-----------------------+----------------------------------------------------------+
+
+
+Disable Bucket Logging
+----------------------
+
+Disable bucket logging from a bucket.
+
+Syntax
+~~~~~~
+
+::
+
+    PUT /{bucket}?logging HTTP/1.1
+
+
+Request Entities
+~~~~~~~~~~~~~~~~
+
+Parameters are XML encoded in the body of the request, in the following format:
+
+::
+
+  <BucketLoggingStatus xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  </BucketLoggingStatus>
+
+
+HTTP Response
+~~~~~~~~~~~~~
+
++---------------+-----------------------+----------------------------------------------------------+
+| HTTP Status   | Status Code           | Description                                              |
++===============+=======================+==========================================================+
+| ``404``       | NoSuchBucket          | The bucket does not exist.                               |
++---------------+-----------------------+----------------------------------------------------------+
+
+Get Bucket Logging
+------------------
+
+Get logging configured on a bucket.
+
+Syntax
+~~~~~~
+
+::
+
+    GET /{bucket}?logging HTTP/1.1
+
+
+Response Entities
+~~~~~~~~~~~~~~~~~
+
+The response header contains ``Last-Modified`` date/time of the logging configuration.
+Logging configuration is XML encoded in the body of the response, in the following format:
+
+::
+
+  <BucketLoggingStatus xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+    <LoggingEnabled>
+      <TargetBucket>string</TargetBucket>
+      <TargetGrants>
+        <Grant>
+          <Grantee>
+            <DisplayName>string</DisplayName>
+            <EmailAddress>string</EmailAddress>
+            <ID>string</ID>
+            <xsi:type>string</xsi:type>
+            <URI>string</URI>
+          </Grantee>
+          <Permission>string</Permission>
+        </Grant>
+      </TargetGrants>
+      <TargetObjectKeyFormat>
+        <PartitionedPrefix>
+          <PartitionDateSource>DeliveryTime|EventTime</PartitionDateSource>
+        </PartitionedPrefix>
+        <SimplePrefix>
+        </SimplePrefix>
+      </TargetObjectKeyFormat>
+      <TargetPrefix>string</TargetPrefix>
+      <LoggingType>Standard|Journal</LoggingType>
+      <ObjectRollTime>integer</ObjectRollTime>
+      <Filter>
+        <S3Key>
+          <FilterRule>
+            <Name>suffix/prefix/regex</Name>
+            <Value></Value>
+          </FilterRule>
+        </S3Key>
+      </Filter>
+    </LoggingEnabled>
+  </BucketLoggingStatus>
+
+
+HTTP Response
+~~~~~~~~~~~~~
+
++---------------+-----------------------+----------------------------------------------------------+
+| HTTP Status   | Status Code           | Description                                              |
++===============+=======================+==========================================================+
+| ``404``       | NoSuchBucket          | The bucket does not exist.                               |
++---------------+-----------------------+----------------------------------------------------------+
+
+Flush Bucket Logging
+--------------------
+
+Flushes logging object for a given source bucket (if not flushed, the logging objects are written lazily to the log bucket).
+Returns the name of the object that was flushed. Flushing will happen even if the logging object is empty.
+
+Syntax
+~~~~~~
+
+::
+
+    POST /{bucket}?logging HTTP/1.1
+
+Response Entities
+~~~~~~~~~~~~~~~~~
+
+The response is XML encoded in the body of the request, in the following format:
+
+::
+
+  <PostBucketLoggingOutput xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+    <FlushedLoggingObject>string</FlushedLoggingObject>
+  </PostBucketLoggingOutput>
+
+HTTP Response
+~~~~~~~~~~~~~
+
++---------------+-----------------------+----------------------------------------------------------+
+| HTTP Status   | Status Code           | Description                                              |
++===============+=======================+==========================================================+
+| ``201``       | Created               | Flushed pending logging object successfully.             |
++---------------+-----------------------+----------------------------------------------------------+
+| ``404``       | NoSuchBucket          | The bucket does not exist.                               |
++---------------+-----------------------+----------------------------------------------------------+
+

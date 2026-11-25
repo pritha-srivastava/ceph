@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,7 +16,7 @@
 #include <boost/format.hpp>
 
 #include "common/escape.h"
-#include "common/Formatter.h"
+#include "common/XMLFormatter.h"
 #include "rgw/rgw_common.h"
 #include "rgw/rgw_formats.h"
 #include "rgw/rgw_rest.h"
@@ -23,6 +24,8 @@
 #define LARGE_SIZE 8192
 
 #define dout_subsys ceph_subsys_rgw
+
+using namespace std;
 
 RGWFormatter_Plain::RGWFormatter_Plain(const bool ukv)
   : use_kv(ukv)
@@ -62,7 +65,7 @@ void RGWFormatter_Plain::reset()
   min_stack_level = 0;
 }
 
-void RGWFormatter_Plain::open_array_section(const char *name)
+void RGWFormatter_Plain::open_array_section(std::string_view name)
 {
   struct plain_stack_entry new_entry;
   new_entry.is_array = true;
@@ -78,14 +81,14 @@ void RGWFormatter_Plain::open_array_section(const char *name)
   stack.push_back(new_entry);
 }
 
-void RGWFormatter_Plain::open_array_section_in_ns(const char *name, const char *ns)
+void RGWFormatter_Plain::open_array_section_in_ns(std::string_view name, const char *ns)
 {
   ostringstream oss;
   oss << name << " " << ns;
   open_array_section(oss.str().c_str());
 }
 
-void RGWFormatter_Plain::open_object_section(const char *name)
+void RGWFormatter_Plain::open_object_section(std::string_view name)
 {
   struct plain_stack_entry new_entry;
   new_entry.is_array = false;
@@ -97,7 +100,7 @@ void RGWFormatter_Plain::open_object_section(const char *name)
   stack.push_back(new_entry);
 }
 
-void RGWFormatter_Plain::open_object_section_in_ns(const char *name,
+void RGWFormatter_Plain::open_object_section_in_ns(std::string_view name,
 						   const char *ns)
 {
   ostringstream oss;
@@ -110,33 +113,38 @@ void RGWFormatter_Plain::close_section()
   stack.pop_back();
 }
 
-void RGWFormatter_Plain::dump_unsigned(const char *name, uint64_t u)
+void RGWFormatter_Plain::dump_null(std::string_view name)
+{
+  dump_value_int(name, "null"); /* I feel a little bad about this. */
+}
+
+void RGWFormatter_Plain::dump_unsigned(std::string_view name, uint64_t u)
 {
   dump_value_int(name, "%" PRIu64, u);
 }
 
-void RGWFormatter_Plain::dump_int(const char *name, int64_t u)
+void RGWFormatter_Plain::dump_int(std::string_view name, int64_t u)
 {
   dump_value_int(name, "%" PRId64, u);
 }
 
-void RGWFormatter_Plain::dump_float(const char *name, double d)
+void RGWFormatter_Plain::dump_float(std::string_view name, double d)
 {
   dump_value_int(name, "%f", d);
 }
 
-void RGWFormatter_Plain::dump_string(const char *name, const std::string& s)
+void RGWFormatter_Plain::dump_string(std::string_view name, std::string_view s)
 {
-  dump_format(name, "%s", s.c_str());
+  dump_format(name, "%.*s", s.size(), s.data());
 }
 
-std::ostream& RGWFormatter_Plain::dump_stream(const char *name)
+std::ostream& RGWFormatter_Plain::dump_stream(std::string_view name)
 {
   // TODO: implement this!
   ceph_abort();
 }
 
-void RGWFormatter_Plain::dump_format_va(const char *name, const char *ns, bool quoted, const char *fmt, va_list ap)
+void RGWFormatter_Plain::dump_format_va(std::string_view name, const char *ns, bool quoted, const char *fmt, va_list ap)
 {
   char buf[LARGE_SIZE];
 
@@ -164,10 +172,11 @@ void RGWFormatter_Plain::dump_format_va(const char *name, const char *ns, bool q
     eol = "";
   wrote_something = true;
 
-  if (use_kv && !entry.is_array)
-    write_data("%s%s: %s", eol, name, buf);
-  else
+  if (use_kv && !entry.is_array) {
+    write_data("%s%.*s: %s", eol, static_cast<int>(name.size()), name.data(), buf);
+  } else {
     write_data("%s%s", eol, buf);
+  }
 }
 
 int RGWFormatter_Plain::get_len() const
@@ -183,9 +192,9 @@ void RGWFormatter_Plain::write_raw_data(const char *data)
 
 void RGWFormatter_Plain::write_data(const char *fmt, ...)
 {
-#define LARGE_ENOUGH_LEN 128
+  static constexpr auto LARGE_ENOUGH_LEN = 128;
   int n, size = LARGE_ENOUGH_LEN;
-  char s[size + 8];
+  char s[LARGE_ENOUGH_LEN + 8];
   char *p, *np;
   bool p_on_stack;
   va_list ap;
@@ -218,7 +227,7 @@ void RGWFormatter_Plain::write_data(const char *fmt, ...)
 done:
 #define LARGE_ENOUGH_BUF 4096
   if (!buf) {
-    max_len = max(LARGE_ENOUGH_BUF, size);
+    max_len = std::max(LARGE_ENOUGH_BUF, size);
     buf = (char *)malloc(max_len);
     if (!buf) {
       cerr << "ERROR: RGWFormatter_Plain::write_data: failed allocating " << max_len << " bytes" << std::endl;
@@ -247,7 +256,7 @@ done_free:
     free(p);
 }
 
-void RGWFormatter_Plain::dump_value_int(const char *name, const char *fmt, ...)
+void RGWFormatter_Plain::dump_value_int(std::string_view name, const char *fmt, ...)
 {
   char buf[LARGE_SIZE];
   va_list ap;
@@ -274,10 +283,11 @@ void RGWFormatter_Plain::dump_value_int(const char *name, const char *fmt, ...)
     eol = "";
   wrote_something = true;
 
-  if (use_kv && !entry.is_array)
-    write_data("%s%s: %s", eol, name, buf);
-  else
+  if (use_kv && !entry.is_array) {
+    write_data("%s%.*s: %s", eol, static_cast<int>(name.size()), name.data(), buf);
+  } else {
     write_data("%s%s", eol, buf);
+  }
 
 }
 
@@ -287,7 +297,10 @@ void RGWFormatter_Plain::dump_value_int(const char *name, const char *fmt, ...)
 class HTMLHelper : public XMLFormatter {
 public:
   static std::string escape(const std::string& unescaped_str) {
-    return escape_xml_str(unescaped_str.c_str());
+    int len = escape_xml_attr_len(unescaped_str.c_str());
+    std::string escaped(len, 0);
+    escape_xml_attr(unescaped_str.c_str(), escaped.data());
+    return escaped;
   }
 };
 
@@ -298,7 +311,7 @@ void RGWSwiftWebsiteListingFormatter::generate_header(
   ss << R"(<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 )"
      << R"(Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">)";
 
-  ss << "<html><head><title>Listing of " << HTMLHelper::escape(dir_path)
+  ss << "<html><head><title>Listing of " << xml_stream_escaper(dir_path)
      << "</title>";
 
   if (! css_path.empty()) {
@@ -315,7 +328,7 @@ void RGWSwiftWebsiteListingFormatter::generate_header(
 
   ss << "</head><body>";
 
-  ss << R"(<h1 id="title">Listing of )" << HTMLHelper::escape(dir_path) << "</h1>"
+  ss << R"(<h1 id="title">Listing of )" << xml_stream_escaper(dir_path) << "</h1>"
      << R"(<table id="listing">)"
      << R"(<tr id="heading">)"
      << R"(<th class="colname">Name</th>)"
@@ -343,7 +356,7 @@ std::string RGWSwiftWebsiteListingFormatter::format_name(
   return item_name.substr(prefix.length());
 }
 
-void RGWSwiftWebsiteListingFormatter::dump_object(const RGWObjEnt& objent)
+void RGWSwiftWebsiteListingFormatter::dump_object(const rgw_bucket_dir_entry& objent)
 {
   const auto name = format_name(objent.key.name);
   ss << boost::format(R"(<tr class="item %s">)")
@@ -351,9 +364,9 @@ void RGWSwiftWebsiteListingFormatter::dump_object(const RGWObjEnt& objent)
      << boost::format(R"(<td class="colname"><a href="%s">%s</a></td>)")
                                 % url_encode(name)
                                 % HTMLHelper::escape(name)
-     << boost::format(R"(<td class="colsize">%lld</td>)") % objent.size
+     << boost::format(R"(<td class="colsize">%lld</td>)") % objent.meta.size
      << boost::format(R"(<td class="coldate">%s</td>)")
-                                % dump_time_to_str(objent.mtime)
+                                % dump_time_to_str(objent.meta.mtime)
      << R"(</tr>)";
 }
 

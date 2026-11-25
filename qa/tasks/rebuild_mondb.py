@@ -1,6 +1,6 @@
 """
-Test if we can recover the leveldb from OSD after where all leveldbs are
-corrupted
+Test that we can rebuild the mon RocksDB from OSD data if all mon DBs are
+corrupted or lost
 """
 
 import logging
@@ -8,13 +8,13 @@ import os.path
 import shutil
 import tempfile
 
-import ceph_manager
+from tasks import ceph_manager
 from teuthology import misc as teuthology
 
 log = logging.getLogger(__name__)
 
 
-def push_directory(path, remote, remote_dir):
+def _push_directory(path, remote, remote_dir):
     """
     local_temp_path=`mktemp`
     tar czf $local_temp_path $path
@@ -46,61 +46,42 @@ def push_directory(path, remote, remote_dir):
     remote.run(args=['sudo', 'rm', '-fr', remote_temp_path])
 
 
-def task(ctx, config):
-    """
-    Test monitor recovery from OSD
-    """
-    if config is None:
-        config = {}
-    assert isinstance(config, dict), \
-        'task only accepts a dict for configuration'
-
-    first_mon = teuthology.get_first_mon(ctx, config)
-    (mon,) = ctx.cluster.only(first_mon).remotes.iterkeys()
-
-    manager = ceph_manager.CephManager(
-        mon,
-        ctx=ctx,
-        logger=log.getChild('ceph_manager'))
-
-    mons = ctx.cluster.only(teuthology.is_type('mon'))
+def _nuke_mons(manager, mons, mon_id):
     assert mons
-    # note down the first cluster_name and mon_id
-    # we will recover it later on
-    cluster_name = None
-    mon_id = None
-    for remote, roles in mons.remotes.iteritems():
-        is_mon = teuthology.is_type('mon')
+    is_mon = teuthology.is_type('mon')
+    for remote, roles in mons.remotes.items():
         for role in roles:
             if not is_mon(role):
                 continue
             cluster, _, m = teuthology.split_role(role)
-            if cluster_name is None:
-                cluster_name = cluster
-                mon_id = m
-            assert cluster_name == cluster
             log.info('killing {cluster}:mon.{mon}'.format(
                 cluster=cluster,
                 mon=m))
             manager.kill_mon(m)
             mon_data = os.path.join('/var/lib/ceph/mon/',
-                                    '{0}-{1}'.format(cluster_name, m))
+                                    '{0}-{1}'.format(cluster, m))
             if m == mon_id:
                 # so we will only need to recreate the store.db for the
                 # first mon, would be easier than mkfs on it then replace
                 # the its store.db with the recovered one
                 store_dir = os.path.join(mon_data, 'store.db')
                 remote.run(args=['sudo', 'rm', '-r', store_dir])
+                # we need to remove the external_log_to file too, since it
+                # references a version number inside store.db
+                remote.run(args=['sudo', 'rm', '-r', os.path.join(mon_data,
+                                                                  'external_log_to')])
             else:
                 remote.run(args=['sudo', 'rm', '-r', mon_data])
 
+
+def _rebuild_db(ctx, manager, cluster_name, mon, mon_id, keyring_path):
     local_mstore = tempfile.mkdtemp()
 
     # collect the maps from all OSDs
-    osds = ctx.cluster.only(teuthology.is_type('osd'))
+    is_osd = teuthology.is_type('osd')
+    osds = ctx.cluster.only(is_osd)
     assert osds
-    for osd, roles in osds.remotes.iteritems():
-        is_osd = teuthology.is_type('osd')
+    for osd, roles in osds.remotes.items():
         for role in roles:
             if not is_osd(role):
                 continue
@@ -109,15 +90,15 @@ def task(ctx, config):
             log.info('collecting maps from {cluster}:osd.{osd}'.format(
                 cluster=cluster,
                 osd=osd_id))
-            # push leveldb to OSD
+            # push RocksDB to OSD
             osd_mstore = os.path.join(teuthology.get_testdir(ctx), 'mon-store')
             osd.run(args=['sudo', 'mkdir', '-m', 'o+x', '-p', osd_mstore])
 
-            push_directory(local_mstore, osd, osd_mstore)
+            _push_directory(local_mstore, osd, osd_mstore)
             log.info('rm -rf {0}'.format(local_mstore))
             shutil.rmtree(local_mstore)
-            # update leveldb with OSD data
-            options = '--op update-mon-db --mon-store-path {0}'
+            # update RocksDB with OSD data
+            options = '--no-mon-config --op update-mon-db --mon-store-path {0}'
             log.info('cot {0}'.format(osd_mstore))
             manager.objectstore_tool(pool=None,
                                      options=options.format(osd_mstore),
@@ -132,15 +113,13 @@ def task(ctx, config):
             osd.run(args=['sudo', 'rm', '-fr', osd_mstore])
 
     # recover the first_mon with re-built mon db
-    # pull from recovered leveldb from client
+    # pull from recovered RocksDB from client
     mon_store_dir = os.path.join('/var/lib/ceph/mon',
                                  '{0}-{1}'.format(cluster_name, mon_id))
-    push_directory(local_mstore, mon, mon_store_dir)
+    _push_directory(local_mstore, mon, mon_store_dir)
     mon.run(args=['sudo', 'chown', '-R', 'ceph:ceph', mon_store_dir])
     shutil.rmtree(local_mstore)
-    default_keyring = '/etc/ceph/{cluster}.keyring'.format(
-        cluster=cluster_name)
-    keyring_path = config.get('keyring_path', default_keyring)
+
     # fill up the caps in the keyring file
     mon.run(args=['sudo',
                   'ceph-authtool', keyring_path,
@@ -151,23 +130,67 @@ def task(ctx, config):
                   '-n', 'client.admin',
                   '--cap', 'mon', 'allow *',
                   '--cap', 'osd', 'allow *',
-                  '--cap', 'mds', 'allow *'])
-    mon.run(args=['sudo', '-u', 'ceph',
-                  'ceph-monstore-tool', mon_store_dir,
-                  'rebuild', '--', '--keyring',
-                  keyring_path])
+                  '--cap', 'mds', 'allow *',
+                  '--cap', 'mgr', 'allow *'])
+    # client/mgr keys aren't reconstructed from OSD data like osd.* keys
+    # are, so pull them from their keyring files into keyring_path before
+    # rebuild, or they'd be silently dropped from the rebuilt auth db.
+    # note: only picks up keyrings colocated with the recovered mon's host.
+    is_client = teuthology.is_type('client')
+    for role in ctx.cluster.only(is_client).remotes.get(mon, []):
+        if not is_client(role):
+            continue
+        _, _, client_id = teuthology.split_role(role)
+        client_keyring = '/etc/ceph/{0}.client.{1}.keyring'.format(
+            cluster_name, client_id)
+        mon.run(args=['sudo',
+                      'ceph-authtool', keyring_path,
+                      '--import-keyring', client_keyring])
 
+        mon.run(args=['sudo',
+                      'ceph-authtool', keyring_path,
+                      '-n', f'client.{client_id}',
+                      '--cap', 'mon', 'allow rw',
+                      '--cap', 'osd', 'allow rwx'])
+    is_mgr = teuthology.is_type('mgr')
+    for role in ctx.cluster.only(is_mgr).remotes.get(mon, []):
+        if not is_mgr(role):
+            continue
+        _, _, mgr_id = teuthology.split_role(role)
+        mgr_keyring = '/var/lib/ceph/mgr/{0}-{1}/keyring'.format(
+            cluster_name, mgr_id)
+        mon.run(args=['sudo',
+                      'ceph-authtool', keyring_path,
+                      '--import-keyring', mgr_keyring])
+
+        mon.run(args=['sudo',
+                      'ceph-authtool', keyring_path,
+                      '-n', f'mgr.{mgr_id}',
+                      '--cap', 'mon', 'allow profile mgr',
+                      '--cap', 'osd', 'allow *',
+                      '--cap', 'mds', 'allow *'])
+    log.info('Validating reconstructed keyring:')
+    mon.run(args=['sudo', 'ceph-authtool', '-l', keyring_path])
+    mon.run(args=['sudo', '-u', 'ceph',
+                  'CEPH_ARGS=--no-mon-config',
+                  'ceph-monstore-tool', mon_store_dir,
+                  'rebuild', '--',
+                  '--keyring', keyring_path,
+                  '--monmap', '/tmp/monmap',
+                  ])
+
+
+def _revive_mons(manager, mons, recovered, keyring_path):
     # revive monitors
     # the initial monmap is in the ceph.conf, so we are good.
     n_mons = 0
-    for remote, roles in mons.remotes.iteritems():
-        is_mon = teuthology.is_type('mon')
+    is_mon = teuthology.is_type('mon')
+    for remote, roles in mons.remotes.items():
         for role in roles:
             if not is_mon(role):
                 continue
             cluster, _, m = teuthology.split_role(role)
-            assert cluster_name == cluster
-            if mon_id != m:
+            if recovered != m:
                 log.info('running mkfs on {cluster}:mon.{mon}'.format(
                     cluster=cluster,
                     mon=m))
@@ -178,16 +201,67 @@ def task(ctx, config):
                         '--cluster', cluster,
                         '--mkfs',
                         '-i', m,
-                        '--keyring', keyring_path])
+                        '--keyring', keyring_path,
+                        '--monmap', '/tmp/monmap'])
+            log.info('reviving mon.{0}'.format(m))
             manager.revive_mon(m)
             n_mons += 1
+    manager.wait_for_mon_quorum_size(n_mons)
 
-    manager.wait_for_mon_quorum_size(n_mons, timeout=30)
-    for osd, roles in osds.remotes.iteritems():
-        is_osd = teuthology.is_type('osd')
+
+def _revive_mgrs(ctx, manager):
+    is_mgr = teuthology.is_type('mgr')
+    mgrs = ctx.cluster.only(is_mgr)
+    for _, roles in mgrs.remotes.items():
+        for role in roles:
+            if not is_mgr(role):
+                continue
+            _, _, mgr_id = teuthology.split_role(role)
+            log.info('reviving mgr.{0}'.format(mgr_id))
+            manager.revive_mgr(mgr_id)
+
+
+def _revive_osds(ctx, manager):
+    is_osd = teuthology.is_type('osd')
+    osds = ctx.cluster.only(is_osd)
+    for _, roles in osds.remotes.items():
         for role in roles:
             if not is_osd(role):
                 continue
             _, _, osd_id = teuthology.split_role(role)
             log.info('reviving osd.{0}'.format(osd_id))
             manager.revive_osd(osd_id)
+
+
+def task(ctx, config):
+    """
+    Test monitor recovery from OSD
+    """
+    if config is None:
+        config = {}
+    assert isinstance(config, dict), \
+        'task only accepts a dict for configuration'
+
+    first_mon = teuthology.get_first_mon(ctx, config)
+    (mon,) = ctx.cluster.only(first_mon).remotes.keys()
+
+    # stash a monmap for later
+    mon.run(args=['ceph', 'mon', 'getmap', '-o', '/tmp/monmap'])
+
+    manager = ceph_manager.CephManager(
+        mon,
+        ctx=ctx,
+        logger=log.getChild('ceph_manager'))
+
+    mons = ctx.cluster.only(teuthology.is_type('mon'))
+    # note down the first cluster_name and mon_id
+    # we will recover it later on
+    cluster_name, _, mon_id = teuthology.split_role(first_mon)
+    _nuke_mons(manager, mons, mon_id)
+    default_keyring = '/etc/ceph/{cluster}.keyring'.format(
+        cluster=cluster_name)
+    keyring_path = config.get('keyring_path', default_keyring)
+    _rebuild_db(ctx, manager, cluster_name, mon, mon_id, keyring_path)
+    _revive_mons(manager, mons, mon_id, keyring_path)
+    _revive_mgrs(ctx, manager)
+    _revive_osds(ctx, manager)

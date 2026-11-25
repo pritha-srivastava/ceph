@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,50 +17,74 @@
 #define MGR_STANDBY_H_
 
 #include "auth/Auth.h"
+#include "common/async/context_pool.h"
 #include "common/Finisher.h"
 #include "common/Timer.h"
+#include "common/LogClient.h"
 
-#include "DaemonServer.h"
-#include "PyModules.h"
-
-#include "DaemonState.h"
-#include "ClusterState.h"
+#include "mon/MonClient.h"
+#include "osdc/Objecter.h"
+#include "PyModuleRegistry.h"
+#include "MgrClient.h"
 
 class MMgrMap;
 class Mgr;
+class PyModuleConfig;
+class MgrHook;
 
-class MgrStandby : public Dispatcher {
+class MgrStandby : public Dispatcher,
+		   public md_config_obs_t {
+public:
+  // config observer bits
+  std::vector<std::string> get_tracked_keys() const noexcept override;
+  void handle_conf_change(const ConfigProxy& conf,
+			  const std::set <std::string> &changed) override;
+  int asok_command(std::string_view cmd, const cmdmap_t& cmdmap, Formatter* f,
+		   std::ostream& errss, ceph::buffer::list& outbl);
+
 protected:
-  MonClient *monc;
-  Objecter *objecter;
-  Messenger *client_messenger;
+  ceph::async::io_context_pool poolctx;
+  MonClient monc;
+  std::unique_ptr<Messenger> client_messenger;
+  Objecter objecter;
 
-  Mutex lock;
+  MgrClient mgrc;
+
+  LogClient log_client;
+  LogChannelRef clog, audit_clog;
+
+  ceph::mutex lock = ceph::make_mutex("MgrStandby::lock");
+  Finisher finisher;
   SafeTimer timer;
 
-  Mgr *active_mgr;
+  PyModuleRegistry py_module_registry;
+  std::shared_ptr<Mgr> active_mgr;
+  std::unique_ptr<MgrHook> asok_hook;
+
+  int orig_argc;
+  const char **orig_argv;
 
   std::string state_str();
 
-  void handle_mgr_map(MMgrMap *m);
+  void handle_mgr_map(ceph::ref_t<MMgrMap> m);
+  void _update_log_config();
+  void send_beacon();
+
+  bool available_in_map;
 
 public:
-  MgrStandby();
-  ~MgrStandby();
+  MgrStandby(int argc, const char **argv);
+  ~MgrStandby() override;
 
-  bool ms_dispatch(Message *m);
-  bool ms_handle_reset(Connection *con) { return false; }
-  void ms_handle_remote_reset(Connection *con) {}
-  bool ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer,
-                         bool force_new);
-  bool ms_handle_refused(Connection *con);
+  Dispatcher::dispatch_result_t ms_dispatch2(const ceph::ref_t<Message>& m) override;
+  bool ms_handle_reset(Connection *con) override { return false; }
+  void ms_handle_remote_reset(Connection *con) override {}
+  bool ms_handle_refused(Connection *con) override;
 
   int init();
-  void shutdown();
-  void usage() {}
-  int main(vector<const char *> args);
-  void handle_signal(int signum);
-  void send_beacon();
+  void respawn();
+  int main(std::vector<const char *> args);
+  void tick();
 };
 
 #endif

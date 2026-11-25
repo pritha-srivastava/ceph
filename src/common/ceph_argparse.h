@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -23,34 +24,53 @@
  * stuff to live.
  */
 
-#include <deque>
-#include <stdint.h>
+#include <iosfwd>
 #include <string>
 #include <vector>
 
 #include "common/entity_name.h"
-#include "msg/msg_types.h"
+#include "include/encoding.h"
+#include "msg/msg_types.h" // for struct entity_addr_t
+
+class entity_addrvec_t;
 
 /////////////////////// Types ///////////////////////
 class CephInitParameters
 {
 public:
   explicit CephInitParameters(uint32_t module_type_);
-  std::list<std::string> get_conf_files() const;
 
   uint32_t module_type;
   EntityName name;
+  bool no_config_file = false;
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(module_type, bl);
+    encode(name, bl);
+    encode(no_config_file, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(module_type, bl);
+    decode(name, bl);
+    decode(no_config_file, bl);
+    DECODE_FINISH(bl);
+  }
 };
+WRITE_CLASS_ENCODER(CephInitParameters)
 
 /////////////////////// Functions ///////////////////////
 extern void string_to_vec(std::vector<std::string>& args, std::string argstr);
-extern void env_to_vec(std::vector<const char*>& args, const char *name=NULL);
-extern void argv_to_vec(int argc, const char **argv,
-                 std::vector<const char*>& args);
+extern void clear_g_str_vec();
+extern void env_to_vec(std::vector<const char*>& args, const char *name=nullptr);
+extern std::vector<const char*> argv_to_vec(int argc, const char* const * argv);
 extern void vec_to_argv(const char *argv0, std::vector<const char*>& args,
 			int *argc, const char ***argv);
 
-extern bool parse_ip_port_vec(const char *s, std::vector<entity_addr_t>& vec);
+extern bool parse_ip_port_vec(const char *s, std::vector<entity_addrvec_t>& vec,
+			      int type=0);
 bool ceph_argparse_double_dash(std::vector<const char*> &args,
 	std::vector<const char*>::iterator &i);
 bool ceph_argparse_flag(std::vector<const char*> &args,
@@ -68,8 +88,9 @@ bool ceph_argparse_binary_flag(std::vector<const char*> &args,
 	std::vector<const char*>::iterator &i, int *ret,
 	std::ostream *oss, ...);
 extern CephInitParameters ceph_argparse_early_args
-	    (std::vector<const char*>& args, uint32_t module_type, int flags,
+	    (std::vector<const char*>& args, uint32_t module_type,
 	     std::string *cluster, std::string *conf_file_list);
+extern bool ceph_argparse_need_usage(const std::vector<const char*>& args);
 extern void generic_server_usage();
 extern void generic_client_usage();
 

@@ -1,0 +1,207 @@
+import { Component, OnDestroy, OnInit } from '@angular/core';
+
+import _ from 'lodash';
+import { Observable, ReplaySubject, Subject, Subscription, combineLatest, of } from 'rxjs';
+
+import { Permissions } from '~/app/shared/models/permissions';
+import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
+import { RefreshIntervalService } from '~/app/shared/services/refresh-interval.service';
+import { RgwDaemonService } from '~/app/shared/api/rgw-daemon.service';
+import { RgwRealmService } from '~/app/shared/api/rgw-realm.service';
+import { RgwZoneService } from '~/app/shared/api/rgw-zone.service';
+import { RgwZonegroupService } from '~/app/shared/api/rgw-zonegroup.service';
+import { RgwBucketService } from '~/app/shared/api/rgw-bucket.service';
+import { PrometheusService } from '~/app/shared/api/prometheus.service';
+
+import { RgwPromqls as queries } from '~/app/shared/enum/dashboard-promqls.enum';
+import { Icons } from '~/app/shared/enum/icons.enum';
+import { RgwMultisiteService } from '~/app/shared/api/rgw-multisite.service';
+import { ChartPoint } from '~/app/shared/models/area-chart-point';
+import {
+  catchError,
+  distinctUntilChanged,
+  filter,
+  shareReplay,
+  skip,
+  switchMap,
+  takeUntil,
+  tap
+} from 'rxjs/operators';
+import { NotificationService } from '~/app/shared/services/notification.service';
+import { NotificationType } from '~/app/shared/enum/notification-type.enum';
+import { PerformanceCardService } from '~/app/shared/api/performance-card.service';
+
+@Component({
+  selector: 'cd-rgw-overview-dashboard',
+  templateUrl: './rgw-overview-dashboard.component.html',
+  styleUrls: ['./rgw-overview-dashboard.component.scss'],
+  standalone: false
+})
+export class RgwOverviewDashboardComponent implements OnInit, OnDestroy {
+  icons = Icons;
+
+  interval = new Subscription();
+  permissions: Permissions;
+  rgwDaemonCount = 0;
+  rgwRealmCount = 0;
+  rgwZonegroupCount = 0;
+  rgwZoneCount = 0;
+  rgwBucketCount = 0;
+  objectCount = 0;
+  UserCount = 0;
+  totalPoolUsedBytes = 0;
+  averageObjectSize = 0;
+  realmData: any;
+  realmSub: Subscription;
+  multisiteInfo: object[] = [];
+  ZonegroupSub: Subscription;
+  ZoneSUb: Subscription;
+  queriesResults: Record<string, [number, string][]> = {
+    RGW_REQUEST_PER_SECOND: [],
+    BANDWIDTH: [],
+    AVG_GET_LATENCY: [],
+    AVG_PUT_LATENCY: []
+  };
+  requestsChartData: ChartPoint[] = [];
+  latencyChartData: ChartPoint[] = [];
+  bandwidthChartData: ChartPoint[] = [];
+  timerGetPrometheusDataSub: Subscription;
+  chartTitles = ['Metadata Sync', 'Data Sync'];
+  realm: string;
+  zonegroup: string;
+  zone: string;
+  metadataSyncInfo: string;
+  replicaZonesInfo: any = [];
+  metadataSyncData: {};
+  showMultisiteCard = true;
+  loading = false;
+  multisiteSyncStatus$: Observable<any>;
+  subject = new ReplaySubject<any>();
+  fetchDataSub: Subscription;
+  private destroy$ = new Subject<void>();
+
+  constructor(
+    private authStorageService: AuthStorageService,
+    private refreshIntervalService: RefreshIntervalService,
+    private rgwDaemonService: RgwDaemonService,
+    private rgwRealmService: RgwRealmService,
+    private rgwZonegroupService: RgwZonegroupService,
+    private rgwZoneService: RgwZoneService,
+    private rgwBucketService: RgwBucketService,
+    private prometheusService: PrometheusService,
+    private rgwMultisiteService: RgwMultisiteService,
+    private notificationService: NotificationService,
+    private performanceCardService: PerformanceCardService
+  ) {
+    this.permissions = this.authStorageService.getPermissions();
+  }
+
+  ngOnInit() {
+    this.interval = this.refreshIntervalService.intervalData$.subscribe(() => {
+      this.fetchDataSub = combineLatest([
+        this.rgwDaemonService.list(),
+        this.rgwBucketService.getTotalBucketsAndUsersLength()
+      ]).subscribe(([daemonData, bucketData]) => {
+        this.rgwDaemonCount = daemonData.length;
+        this.rgwBucketCount = bucketData.buckets_count;
+        this.UserCount = bucketData.users_count;
+        this.objectCount = bucketData.objects_count || 0;
+        this.totalPoolUsedBytes = bucketData.objects_size || 0;
+        this.averageObjectSize =
+          this.objectCount > 0 ? this.totalPoolUsedBytes / this.objectCount : 0;
+      });
+      this.getSyncStatus();
+    });
+    this.realmSub = this.rgwRealmService.list().subscribe((data: any) => {
+      this.rgwRealmCount = data['realms'].length || 0;
+    });
+    this.ZonegroupSub = this.rgwZonegroupService.list().subscribe((data: any) => {
+      this.rgwZonegroupCount = data['zonegroups'].length;
+    });
+    this.ZoneSUb = this.rgwZoneService.list().subscribe((data: any) => {
+      this.rgwZoneCount = data['zones'].length;
+    });
+    this.getPrometheusData(this.prometheusService.lastHourDateObject);
+    this.multisiteSyncStatus$ = this.subject.pipe(
+      switchMap(() =>
+        this.rgwMultisiteService.getSyncStatus().pipe(
+          tap((data: any) => {
+            this.loading = false;
+            this.replicaZonesInfo = data['dataSyncInfo'];
+            this.metadataSyncInfo = data['metadataSyncInfo'];
+            if (this.replicaZonesInfo.length === 0) {
+              this.showMultisiteCard = false;
+              this.loading = false;
+            }
+            [this.realm, this.zonegroup, this.zone] = data['primaryZoneData'];
+          }),
+          catchError((err) => {
+            err.preventDefault();
+            this.loading = false;
+            this.showMultisiteCard = false;
+            const errorMessage = $localize`Unable to fetch sync status`;
+            this.notificationService.show(
+              NotificationType.error,
+              errorMessage,
+              err.error.detail || err.error.message
+            );
+            return of(true);
+          })
+        )
+      ),
+      shareReplay(1)
+    );
+    // Show loading only when Object Gateway daemon selection changes.
+    this.rgwDaemonService.selectedDaemon$
+      .pipe(
+        filter((daemon) => !!daemon?.id),
+        distinctUntilChanged((prev, curr) => prev?.id === curr?.id),
+        skip(1),
+        takeUntil(this.destroy$)
+      )
+      .subscribe(() => {
+        this.loading = true;
+        this.getSyncStatus();
+      });
+  }
+
+  ngOnDestroy() {
+    this.interval?.unsubscribe();
+    this.realmSub?.unsubscribe();
+    this.ZonegroupSub?.unsubscribe();
+    this.ZoneSUb?.unsubscribe();
+    this.fetchDataSub?.unsubscribe();
+    this.destroy$.next();
+    this.destroy$.complete();
+    this.prometheusService?.unsubscribe();
+  }
+
+  getPrometheusData(selectedTime: any) {
+    this.prometheusService
+      .getRangeQueriesData(selectedTime, queries, true)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe((results) => {
+        this.queriesResults = results;
+        this.requestsChartData = this.performanceCardService.toSeries(
+          results?.RGW_REQUEST_PER_SECOND || [],
+          $localize`Requests/sec`
+        );
+        this.latencyChartData = this.performanceCardService.mergeSeries(
+          this.performanceCardService.toSeries(results?.AVG_GET_LATENCY || [], 'GET'),
+          this.performanceCardService.toSeries(results?.AVG_PUT_LATENCY || [], 'PUT')
+        );
+        this.bandwidthChartData = this.performanceCardService.mergeSeries(
+          this.performanceCardService.toSeries(results?.GET_BANDWIDTH || [], 'GET'),
+          this.performanceCardService.toSeries(results?.PUT_BANDWIDTH || [], 'PUT')
+        );
+      });
+  }
+
+  getSyncStatus() {
+    this.subject.next();
+  }
+
+  trackByFn(zone: any) {
+    return zone;
+  }
+}

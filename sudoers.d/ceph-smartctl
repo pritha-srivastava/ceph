@@ -1,0 +1,7 @@
+## allow ceph daemons (which run as user ceph) to collect device health
+## metrics through the block-device-health helper, which validates its
+## arguments and runs the fixed smartctl / nvme command lines.  (The
+## command lines used to be argument patterns here; sudo-rs, the default
+## sudo on Ubuntu >= 25.10, does not allow wildcards in arguments.)
+
+ceph ALL=NOPASSWD: /usr/libexec/ceph/block-device-health

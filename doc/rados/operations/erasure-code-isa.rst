@@ -2,24 +2,28 @@
 ISA erasure code plugin
 =======================
 
+The *isa* plugin is the default for Ceph erasure coded pools.
 The *isa* plugin encapsulates the `ISA
-<https://01.org/intel%C2%AE-storage-acceleration-library-open-source-version/>`_
-library. It only runs on Intel processors.
+<https://www.intel.com/content/www/us/en/developer/tools/isa-l/overview.html>`_
+library.
 
 Create an isa profile
 =====================
 
-To create a new *isa* erasure code profile::
+To create a new *isa* erasure code profile:
 
-        ceph osd erasure-code-profile set {name} \
-             plugin=isa \
-             technique={reed_sol_van|cauchy} \
-             [k={data-chunks}] \
-             [m={coding-chunks}] \
-             [ruleset-root={root}] \
-             [ruleset-failure-domain={bucket-type}] \
-             [directory={directory}] \
-             [--force]
+.. prompt:: bash $
+
+   ceph osd erasure-code-profile set {name} \
+     plugin=isa \
+     technique={reed_sol_van|cauchy} \
+     [k={data-chunks}] \
+     [m={coding-chunks}] \
+     [crush-root={root}] \
+     [crush-failure-domain={bucket-type}] \
+     [crush-device-class={device-class}] \
+     [directory={directory}] \
+     [--force]
 
 Where:
 
@@ -55,26 +59,36 @@ Where:
 :Required: No.
 :Default: reed_sol_van
 
-``ruleset-root={root}``
+``crush-root={root}``
 
 :Description: The name of the crush bucket used for the first step of
-              the ruleset. For intance **step take default**.
+              the CRUSH rule. For instance **step take default**.
 
 :Type: String
 :Required: No.
 :Default: default
 
-``ruleset-failure-domain={bucket-type}``
+``crush-failure-domain={bucket-type}``
 
 :Description: Ensure that no two chunks are in a bucket with the same
               failure domain. For instance, if the failure domain is
               **host** no two chunks will be stored on the same
-              host. It is used to create a ruleset step such as **step
+              host. It is used to create a CRUSH rule step such as **step
               chooseleaf host**.
 
 :Type: String
 :Required: No.
 :Default: host
+
+``crush-device-class={device-class}``
+
+:Description: Restrict placement to devices of a specific class (e.g.,
+              ``ssd`` or ``hdd``), using the crush device class names
+              in the CRUSH map.
+
+:Type: String
+:Required: No.
+:Default:
 
 ``directory={directory}``
 

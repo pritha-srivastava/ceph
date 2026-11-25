@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #ifndef CEPH_LIBRBD_OPERATION_OBJECT_MAP_ITERATE_H
 #define CEPH_LIBRBD_OPERATION_OBJECT_MAP_ITERATE_H
 
@@ -34,10 +35,10 @@ public:
   {
   }
 
-  virtual void send();
+  void send() override;
 
 protected:
-  virtual bool should_complete(int r);
+  bool should_complete(int r) override;
 
 private:
   enum State {
@@ -49,7 +50,7 @@ private:
   ProgressContext &m_prog_ctx;
   ObjectIterateWork<ImageCtxT> m_handle_mismatch;
   std::atomic_flag m_invalidate = ATOMIC_FLAG_INIT;
-  State m_state;
+  State m_state = STATE_VERIFY_OBJECTS;
 
   void send_verify_objects();
   void send_invalidate_object_map();

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,7 +16,7 @@
 #ifndef CEPH_COMMON_FD_H
 #define CEPH_COMMON_FD_H
 
-class CephContext;
+#include "include/common_fwd.h"
 
 void dump_open_fds(CephContext *cct);
 

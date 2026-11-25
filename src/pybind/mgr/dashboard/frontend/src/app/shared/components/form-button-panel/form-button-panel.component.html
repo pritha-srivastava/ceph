@@ -1,0 +1,46 @@
+@if (!modalForm) {
+  <div [ngClass]="wrappingClass">
+    @if (showCancel) {
+      <cd-back-button
+        (backAction)="backAction()"
+        [name]="cancelText"
+      ></cd-back-button>
+    }
+    @if (showSubmit) {
+      <cd-submit-button
+        (submitAction)="submitAction()"
+        [disabled]="disabled"
+        [form]="form"
+        [ariaLabel]="submitText"
+        data-testid="submitBtn"
+        [buttonType]="submitBtnType"
+        >{{ submitText }}</cd-submit-button
+      >
+    }
+  </div>
+} @else {
+  <cds-modal-footer>
+    @if (showCancel) {
+      <cd-back-button
+        (backAction)="backAction()"
+        [name]="cancelText"
+        [modalForm]="modalForm"
+        [showSubmit]="showSubmit"
+        class="w-100"
+      ></cd-back-button>
+    }
+    @if (showSubmit) {
+      <cd-submit-button
+        (submitAction)="submitAction()"
+        [disabled]="disabled"
+        [form]="form"
+        [ariaLabel]="submitText"
+        data-testid="submitBtn"
+        [modalForm]="modalForm"
+        [buttonType]="submitBtnType"
+        class="w-100"
+        >{{ submitText }}</cd-submit-button
+      >
+    }
+  </cds-modal-footer>
+}

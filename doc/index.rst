@@ -2,106 +2,91 @@
  Welcome to Ceph
 =================
 
-Ceph uniquely delivers **object, block, and file storage in one unified
-system**. 
+.. meta::
+   :description: Ceph documentation. Ceph delivers object, block, and file storage in one unified system.
+   :ceph-page-type: assembly
 
-.. raw:: html
+Ceph delivers **object, block, and file storage in one unified system**. It
+runs on ordinary servers, keeps redundant copies of your data, and has no
+single point of failure.
 
-	<style type="text/css">div.body h3{margin:5px 0px 0px 0px;}</style>
-	<table cellpadding="10"><colgroup><col width="33%"><col width="33%"><col width="33%"></colgroup><tbody valign="top"><tr><td><h3>Ceph Object Store</h3>
+**New to Ceph?** Go to :ref:`Start Here <start-here>`.
 
-- RESTful Interface
-- S3- and Swift-compliant APIs
-- S3-style subdomains
-- Unified S3/Swift namespace
-- User management
-- Usage tracking
-- Striped objects
-- Cloud solution integration
-- Multi-site deployment
-- Disaster recovery
+.. list-table::
+   :header-rows: 1
+   :widths: 22 78
 
-.. raw:: html 
+   * - I want to
+     - Go to
+   * - Learn what Ceph is
+     - :ref:`Start Here <start-here>`, :ref:`Architecture <architecture>`
+   * - Deploy a cluster
+     - :ref:`Installing Ceph <install-overview>`,
+       :ref:`Cephadm <cephadm>`,
+       :doc:`Upgrading <cephadm/upgrade>`
+   * - Operate a cluster
+     - :ref:`Cluster Operations <rados-operations>`,
+       :ref:`Manager Modules <ceph-manager-daemon>`,
+       :ref:`Dashboard <mgr-dashboard>`,
+       :ref:`Monitoring <monitoring>`
+   * - Use a storage service
+     - :ref:`Block Device (RBD) <ceph_block_device>`,
+       :ref:`File System (CephFS) <ceph-file-system>`,
+       :ref:`Object Gateway (RGW) <object-gateway>`,
+       :ref:`Kubernetes (CSI) <ceph-csi>`
+   * - Fix a problem
+     - :ref:`Troubleshooting <rados_troubleshooting>`,
+       :doc:`Health Checks <rados/operations/health-checks>`,
+       :doc:`CephFS Troubleshooting <cephfs/troubleshooting>`,
+       :doc:`RGW Troubleshooting <radosgw/troubleshooting>`
+   * - Look something up
+     - :doc:`Configuration <rados/configuration/index>`,
+       :doc:`APIs <api/index>`,
+       `Releases`_,
+       :doc:`Glossary <glossary>`
+   * - Contribute
+     - :doc:`Developer Guide <dev/developer_guide/index>`,
+       :ref:`Documenting Ceph <documenting_ceph>`,
+       :ref:`Ceph Community Channels <get-involved>`
 
-	</td><td><h3>Ceph Block Device</h3>
+Additional Resources
+====================
 
-
-- Thin-provisioned
-- Images up to 16 exabytes
-- Configurable striping
-- In-memory caching
-- Snapshots
-- Copy-on-write cloning
-- Kernel driver support
-- KVM/libvirt support
-- Back-end for cloud solutions
-- Incremental backup
-- Disaster recovery
-
-.. raw:: html 
-
-	</td><td><h3>Ceph Filesystem</h3>
-	
-- POSIX-compliant semantics
-- Separates metadata from data
-- Dynamic rebalancing
-- Subdirectory snapshots
-- Configurable striping 
-- Kernel driver support
-- FUSE support
-- NFS/CIFS deployable
-- Use with Hadoop (replace HDFS)
-
-.. raw:: html
-
-	</td></tr><tr><td>
-	
-See `Ceph Object Store`_ for additional details.
-
-.. raw:: html
-
-	</td><td>
-	
-See `Ceph Block Device`_ for additional details.
-	
-.. raw:: html
-
-	</td><td>
-	
-See `Ceph Filesystem`_ for additional details.	
-	
-.. raw::	html 
-
-	</td></tr></tbody></table>
-
-Ceph is highly reliable, easy to manage, and free. The power of Ceph
-can transform your company's IT infrastructure and your ability to manage vast
-amounts of data. To try Ceph, see our `Getting Started`_ guides. To learn more
-about Ceph, see our `Architecture`_ section.
-
-
-
-.. _Ceph Object Store: radosgw
-.. _Ceph Block Device: rbd/rbd
-.. _Ceph Filesystem: cephfs
-.. _Getting Started: start
-.. _Architecture: architecture
+- `Ceph Releases`_
+- :doc:`Ceph Foundation <foundation>`
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 3
    :hidden:
 
-   start/intro
    start/index
    install/index
+   cephadm/index
    rados/index
    cephfs/index
-   rbd/rbd
+   rbd/index
    radosgw/index
+   csi/index
    mgr/index
+   mgr/dashboard
+   monitoring/index
    api/index
-   architecture
-   Development <dev/index>
-   release-notes
-   releases
+   architecture/index
+   Developer Guide <dev/developer_guide/index>
+   dev/internals
+   governance
+   Technical Charter <technical-charter>
+   foundation
+   ceph-volume/index
+   crimson/crimson
+   releases/general
+   releases/index
+   security/index
+   hardware-monitoring/index
    Glossary <glossary>
+   Tracing <jaegertracing/index>
+
+.. Need to be external links because doc/releases/general.rst is not in
+   stable branches and we want to always use the main branch version
+.. _Releases: https://docs.ceph.com/en/latest/releases/general/
+.. _Ceph Releases: https://docs.ceph.com/en/latest/releases/general/

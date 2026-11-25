@@ -1,0 +1,342 @@
+import logging
+import os
+import re
+from typing import Dict, List, Optional, Tuple, Union
+
+from ..call_wrappers import call, CallVerbosity
+from ..constants import DEFAULT_IMAGE, CEPH_DEFAULT_CONF, LOG_DIR_MODE
+from ..container_daemon_form import ContainerDaemonForm, daemon_to_container
+from ..container_types import CephContainer, extract_uid_gid
+from ..context import CephadmContext
+from ..context_getters import fetch_configs, get_config_and_keyring
+from ..daemon_form import register as register_daemon_form
+from ..daemon_identity import DaemonIdentity
+from ..data_utils import dict_get, is_fsid
+from ..deploy import DeploymentType
+from ..deployment_utils import to_deployment_container
+from ..exceptions import Error
+from ..file_utils import makedirs, populate_files, write_new
+from ..net_utils import EndPoint
+
+
+logger = logging.getLogger()
+
+
+@register_daemon_form
+class NFSGanesha(ContainerDaemonForm):
+    """Defines a NFS-Ganesha container"""
+
+    daemon_type = 'nfs'
+    entrypoint = '/usr/local/scripts/ganesha-entrypoint.sh'
+    ganesha_binary = '/usr/bin/ganesha.nfsd'
+    entrypoint_script_name = 'ganesha-entrypoint.sh'
+    daemon_args = ['-F', '-L', 'STDERR']
+
+    required_files = ['ganesha.conf', 'idmap.conf']
+
+    port_map = {
+        'nfs': 2049,
+    }
+
+    @classmethod
+    def for_daemon_type(cls, daemon_type: str) -> bool:
+        return cls.daemon_type == daemon_type
+
+    def __init__(
+        self,
+        ctx: CephadmContext,
+        fsid: str,
+        daemon_id: Union[int, str],
+        config_json: Dict,
+        image: str = DEFAULT_IMAGE,
+    ) -> None:
+        self.ctx = ctx
+        self.fsid = fsid
+        self.daemon_id = daemon_id
+        self.image = image
+
+        # config-json options
+        self.pool = dict_get(config_json, 'pool', require=True)
+        self.namespace = dict_get(config_json, 'namespace')
+        self.userid = dict_get(config_json, 'userid')
+        self.extra_args = dict_get(config_json, 'extra_args', [])
+        self.files = dict_get(config_json, 'files', {})
+        self.rgw = dict_get(config_json, 'rgw', {})
+        self.enable_rdma = dict_get(config_json, 'enable_rdma', False)
+        self.enable_cephfs_client_log = dict_get(
+            config_json, 'enable_cephfs_client_log', False
+        )
+        self.cephfs_client_log_dir = dict_get(
+            config_json, 'cephfs_client_log_dir', None
+        )
+
+        # validate the supplied args
+        self.validate()
+
+    @classmethod
+    def init(
+        cls, ctx: CephadmContext, fsid: str, daemon_id: Union[int, str]
+    ) -> 'NFSGanesha':
+        return cls(ctx, fsid, daemon_id, fetch_configs(ctx), ctx.image)
+
+    @classmethod
+    def create(
+        cls, ctx: CephadmContext, ident: DaemonIdentity
+    ) -> 'NFSGanesha':
+        return cls.init(ctx, ident.fsid, ident.daemon_id)
+
+    @property
+    def identity(self) -> DaemonIdentity:
+        return DaemonIdentity(self.fsid, self.daemon_type, self.daemon_id)
+
+    def _get_container_mounts(self, data_dir):
+        # type: (str) -> Dict[str, str]
+        mounts = dict()
+        mounts[os.path.join(data_dir, 'config')] = '/etc/ceph/ceph.conf:z'
+        mounts[os.path.join(data_dir, 'keyring')] = '/etc/ceph/keyring:z'
+        mounts[os.path.join(data_dir, 'etc/ganesha')] = '/etc/ganesha:z'
+        mounts[
+            os.path.join(data_dir, self.entrypoint_script_name)
+        ] = self.entrypoint
+        if self.rgw:
+            cluster = self.rgw.get('cluster', 'ceph')
+            rgw_user = self.rgw.get('user', 'admin')
+            mounts[
+                os.path.join(data_dir, 'keyring.rgw')
+            ] = '/var/lib/ceph/radosgw/%s-%s/keyring:z' % (cluster, rgw_user)
+        return mounts
+
+    def _get_host_log_dir(self, ctx: CephadmContext) -> str:
+        log_dir = self.cephfs_client_log_dir
+        if not log_dir:
+            return os.path.join(ctx.log_dir, self.identity.fsid)
+
+        resolved = os.path.realpath(log_dir)
+        if not log_dir.startswith('/') or resolved == '/':
+            raise Error('invalid cephfs_client_log_dir: %s' % log_dir)
+        if os.path.exists(resolved) and not os.path.isdir(resolved):
+            raise Error(
+                'cephfs_client_log_dir is not a directory: %s' % log_dir
+            )
+        return resolved
+
+    def customize_container_mounts(
+        self, ctx: CephadmContext, mounts: Dict[str, str]
+    ) -> None:
+        data_dir = self.identity.data_dir(ctx.data_dir)
+        mounts.update(self._get_container_mounts(data_dir))
+        if self.enable_cephfs_client_log:
+            host_log_dir = self._get_host_log_dir(ctx)
+            mounts[host_log_dir] = '/var/log/ceph:z'
+
+    @staticmethod
+    def get_container_envs():
+        # type: () -> List[str]
+        envs = ['CEPH_CONF=%s' % (CEPH_DEFAULT_CONF)]
+        return envs
+
+    @staticmethod
+    def get_version(ctx, container_id):
+        # type: (CephadmContext, str) -> Optional[str]
+        version = None
+        out, err, code = call(
+            ctx,
+            [
+                ctx.container_engine.path,
+                'exec',
+                container_id,
+                NFSGanesha.ganesha_binary,
+                '-v',
+            ],
+            verbosity=CallVerbosity.QUIET,
+        )
+        if code == 0:
+            match = re.search(r'NFS-Ganesha Release\s*=\s*[V]*([\d.]+)', out)
+            if match:
+                version = match.group(1)
+        return version
+
+    def validate(self):
+        # type: () -> None
+        if not is_fsid(self.fsid):
+            raise Error('not an fsid: %s' % self.fsid)
+        if not self.daemon_id:
+            raise Error('invalid daemon_id: %s' % self.daemon_id)
+        if not self.image:
+            raise Error('invalid image: %s' % self.image)
+
+        # check for the required files
+        if self.required_files:
+            for fname in self.required_files:
+                if fname not in self.files:
+                    raise Error(
+                        'required file missing from config-json: %s' % fname
+                    )
+
+        # check for an RGW config
+        if self.rgw:
+            if not self.rgw.get('keyring'):
+                raise Error('RGW keyring is missing')
+            if not self.rgw.get('user'):
+                raise Error('RGW user is missing')
+
+    def get_daemon_name(self):
+        # type: () -> str
+        return '%s.%s' % (self.daemon_type, self.daemon_id)
+
+    def get_container_name(self, desc=None):
+        # type: (Optional[str]) -> str
+        cname = 'ceph-%s-%s' % (self.fsid, self.get_daemon_name())
+        if desc:
+            cname = '%s-%s' % (cname, desc)
+        return cname
+
+    def get_daemon_args(self):
+        # type: () -> List[str]
+        return self.daemon_args + self.extra_args
+
+    @staticmethod
+    def ganesha_conf_text(conf: Union[str, List[str]]) -> str:
+        if isinstance(conf, list):
+            return '\n'.join(conf)
+        return conf
+
+    @staticmethod
+    def nfsv3_enabled_in_ganesha_conf(conf: Union[str, List[str]]) -> bool:
+        """Return True when ganesha.conf enables NFSv3 (Protocols includes 3)."""
+        text = NFSGanesha.ganesha_conf_text(conf)
+        match = re.search(r'Protocols\s*=\s*([^;]+)', text, re.MULTILINE)
+        if not match:
+            # No Protocols line (e.g. minimal test stubs): keep legacy behavior.
+            return True
+        protocols = match.group(1)
+        return bool(re.search(r'(?:^|[,\s])3(?:[,\s]|$)', protocols))
+
+    @staticmethod
+    def ganesha_entrypoint_script(nfsv3: bool = True) -> str:
+        # NFSv3 registration with SunRPC requires a running portmapper.
+        # The image installs rpcbind but cephadm previously started only
+        # ganesha.nfsd, which fails on Rocky 10 / Ganesha 9.x with
+        # "Cannot register NFS V3 on TCP" when rpcbind is not up.
+        rpcbind_block = ''
+        if nfsv3:
+            rpcbind_block = """if command -v rpcbind >/dev/null 2>&1; then
+    if ! rpcinfo -p >/dev/null 2>&1; then
+        rpcbind
+    fi
+fi
+"""
+        return f"""#!/bin/bash
+set -e
+{rpcbind_block}exec /usr/bin/ganesha.nfsd "$@"
+"""
+
+    def create_daemon_dirs(self, data_dir, uid, gid):
+        # type: (str, int, int) -> None
+        """Create files under the container data dir"""
+        if not os.path.isdir(data_dir):
+            raise OSError('data_dir is not a directory: %s' % (data_dir))
+
+        logger.info('Creating ganesha config...')
+
+        # create the ganesha conf dir
+        config_dir = os.path.join(data_dir, 'etc/ganesha')
+
+        kmip_dir = os.path.join(data_dir, 'etc/ganesha/kmip')
+        makedirs(config_dir, uid, gid, 0o755)
+        makedirs(kmip_dir, uid, gid, 0o755)
+
+        tls_dir = os.path.join(data_dir, 'etc/ganesha/tls')
+        makedirs(config_dir, uid, gid, 0o755)
+        makedirs(tls_dir, uid, gid, 0o755)
+
+        config_files = {
+            fname: content
+            for fname, content in self.files.items()
+            if fname in ['ganesha.conf', 'idmap.conf']
+        }
+        kmip_files = {
+            fname: content
+            for fname, content in self.files.items()
+            if fname.startswith('kmip')
+        }
+        tls_files = {
+            fname: content
+            for fname, content in self.files.items()
+            if fname.startswith('tls')
+        }
+
+        # populate files from the config-json
+        populate_files(config_dir, config_files, uid, gid)
+        populate_files(kmip_dir, kmip_files, uid, gid)
+        populate_files(tls_dir, tls_files, uid, gid)
+
+        ganesha_conf = self.files.get('ganesha.conf', '')
+        nfsv3 = self.nfsv3_enabled_in_ganesha_conf(ganesha_conf)
+        entrypoint_path = os.path.join(data_dir, self.entrypoint_script_name)
+        with write_new(entrypoint_path, owner=(uid, gid)) as f:
+            f.write(self.ganesha_entrypoint_script(nfsv3=nfsv3))
+        os.chmod(entrypoint_path, 0o700)
+
+        if self.enable_cephfs_client_log:
+            host_log_dir = self._get_host_log_dir(self.ctx)
+            if not os.path.exists(host_log_dir):
+                makedirs(host_log_dir, uid, gid, LOG_DIR_MODE)
+
+        # write the RGW keyring
+        if self.rgw:
+            keyring_path = os.path.join(data_dir, 'keyring.rgw')
+            with write_new(keyring_path, owner=(uid, gid)) as f:
+                f.write(self.rgw.get('keyring', ''))
+
+    def firewall_service_name(self) -> str:
+        return 'nfs'
+
+    def container(self, ctx: CephadmContext) -> CephContainer:
+        ctr = daemon_to_container(ctx, self)
+        return to_deployment_container(ctx, ctr)
+
+    def customize_container_endpoints(
+        self, endpoints: List[EndPoint], deployment_type: DeploymentType
+    ) -> None:
+        if deployment_type == DeploymentType.DEFAULT and not endpoints:
+            nfs_ports = list(NFSGanesha.port_map.values())
+            endpoints.extend([EndPoint('0.0.0.0', p) for p in nfs_ports])
+
+    def uid_gid(self, ctx: CephadmContext) -> Tuple[int, int]:
+        # TODO: extract ganesha uid/gid (997, 994) ?
+        return extract_uid_gid(ctx)
+
+    def config_and_keyring(
+        self, ctx: CephadmContext
+    ) -> Tuple[Optional[str], Optional[str]]:
+        return get_config_and_keyring(ctx)
+
+    def customize_container_envs(
+        self, ctx: CephadmContext, envs: List[str]
+    ) -> None:
+        envs.extend(self.get_container_envs())
+
+    def customize_process_args(
+        self, ctx: CephadmContext, args: List[str]
+    ) -> None:
+        args.extend(self.get_daemon_args())
+
+    def customize_container_args(
+        self, ctx: CephadmContext, args: List[str]
+    ) -> None:
+        args.append(ctx.container_engine.unlimited_pids_option)
+        if self.enable_rdma:
+            # Container args when NFS RDMA is enabled
+            rdma_args: List[str] = [
+                '-v',
+                '/dev/infiniband:/dev/infiniband',
+                '--cap-add=IPC_LOCK',
+                '--ulimit',
+                'memlock=-1:-1',
+                '--privileged',
+            ]
+            args.extend(rdma_args)
+
+    def default_entrypoint(self) -> str:
+        return self.entrypoint

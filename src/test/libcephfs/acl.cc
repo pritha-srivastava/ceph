@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,6 +15,7 @@
 #include "include/types.h"
 #include "gtest/gtest.h"
 #include "include/cephfs/libcephfs.h"
+#include "include/fs_types.h"
 #include "include/ceph_fs.h"
 #include "client/posix_acl.h"
 #include <errno.h>
@@ -21,7 +23,9 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#ifdef __linux__
 #include <sys/xattr.h>
+#endif
 
 static size_t acl_ea_size(int count)
 {
@@ -145,7 +149,10 @@ TEST(ACL, SetACL) {
   ASSERT_EQ(ceph_fchown(cmount, fd, 65534, 65534), 0);
 
   ASSERT_EQ(0, ceph_conf_set(cmount, "client_permissions", "1"));
+  // "nobody" will be ignored on Windows
+  #ifndef _WIN32
   ASSERT_EQ(ceph_open(cmount, test_file, O_RDWR, 0), -EACCES);
+  #endif
   ASSERT_EQ(0, ceph_conf_set(cmount, "client_permissions", "0"));
 
   size_t acl_buf_size = acl_ea_size(5);
@@ -240,7 +247,7 @@ TEST(ACL, DefaultACL) {
   // set default acl
   ASSERT_EQ(ceph_setxattr(cmount, test_dir1, ACL_EA_DEFAULT, acl1_buf, acl_buf_size, 0), 0);
 
-  char test_dir2[256];
+  char test_dir2[262];
   sprintf(test_dir2, "%s/dir2", test_dir1);
   ASSERT_EQ(ceph_mkdir(cmount, test_dir2, 0755), 0);
 
@@ -258,7 +265,7 @@ TEST(ACL, DefaultACL) {
     ASSERT_EQ(check_acl_and_mode(acl2_buf, acl_buf_size, stx.stx_mode), 0);
   }
 
-  char test_file1[256];
+  char test_file1[262];
   sprintf(test_file1, "%s/file1", test_dir1);
   int fd = ceph_open(cmount, test_file1, O_CREAT|O_RDWR, 0666);
   ASSERT_GT(fd, 0);
@@ -278,6 +285,9 @@ TEST(ACL, DefaultACL) {
 
   free(acl1_buf);
   free(acl2_buf);
+  ASSERT_EQ(ceph_unlink(cmount, test_file1), 0);
+  ASSERT_EQ(ceph_rmdir(cmount, test_dir2), 0);
+  ASSERT_EQ(ceph_rmdir(cmount, test_dir1), 0);
   ceph_close(cmount, fd);
   ceph_shutdown(cmount);
 }
@@ -303,5 +313,56 @@ TEST(ACL, Disabled) {
   ASSERT_EQ(ceph_getxattr(cmount, test_dir, ACL_EA_ACCESS, acl_buf, acl_buf_size), -EOPNOTSUPP);
 
   free(acl_buf);
+  ceph_shutdown(cmount);
+}
+
+TEST(ACL, SnapdirACL) {
+  struct ceph_mount_info *cmount;
+  ASSERT_EQ(0, ceph_create(&cmount, NULL));
+  ASSERT_EQ(0, ceph_conf_read_file(cmount, NULL));
+  ASSERT_EQ(0, ceph_mount(cmount, "/"));
+  ASSERT_EQ(0, ceph_conf_set(cmount, "client_acl_type", "posix_acl"));
+
+  int acl_buf_size = acl_ea_size(5);
+  void *acl1_buf = malloc(acl_buf_size);
+  void *acl2_buf = malloc(acl_buf_size);
+  void *acl3_buf = malloc(acl_buf_size);
+
+  ASSERT_EQ(generate_test_acl(acl1_buf, acl_buf_size, 0750), 0);
+
+  char test_dir1[256];
+  sprintf(test_dir1, "dir1_acl_default_%d", getpid());
+  ASSERT_EQ(ceph_mkdir(cmount, test_dir1, 0750), 0);
+
+  // set default acl
+  ASSERT_EQ(ceph_setxattr(cmount, test_dir1, ACL_EA_DEFAULT, acl1_buf, acl_buf_size, 0), 0);
+
+  char test_dir2[262];
+  sprintf(test_dir2, "%s/dir2", test_dir1);
+  ASSERT_EQ(ceph_mkdir(cmount, test_dir2, 0755), 0);
+
+  // inherit default acl
+  ASSERT_EQ(ceph_getxattr(cmount, test_dir2, ACL_EA_DEFAULT, acl2_buf, acl_buf_size), acl_buf_size);
+  ASSERT_EQ(memcmp(acl1_buf, acl2_buf, acl_buf_size), 0);
+
+  char test_dir2_snapdir[512];
+  sprintf(test_dir2_snapdir, "%s/dir2/.snap", test_dir1);
+
+  // inherit default acl
+  ASSERT_EQ(ceph_getxattr(cmount, test_dir2_snapdir, ACL_EA_DEFAULT, acl3_buf, acl_buf_size), acl_buf_size);
+  ASSERT_EQ(memcmp(acl2_buf, acl3_buf, acl_buf_size), 0);
+
+  memset(acl2_buf, 0, acl_buf_size);
+  memset(acl3_buf, 0, acl_buf_size);
+
+  ASSERT_EQ(ceph_getxattr(cmount, test_dir2, ACL_EA_ACCESS, acl2_buf, acl_buf_size), acl_buf_size);
+  ASSERT_EQ(ceph_getxattr(cmount, test_dir2_snapdir, ACL_EA_ACCESS, acl3_buf, acl_buf_size), acl_buf_size);
+  ASSERT_EQ(memcmp(acl2_buf, acl3_buf, acl_buf_size), 0);
+
+  free(acl1_buf);
+  free(acl2_buf);
+  free(acl3_buf);
+  ASSERT_EQ(ceph_rmdir(cmount, test_dir2), 0);
+  ASSERT_EQ(ceph_rmdir(cmount, test_dir1), 0);
   ceph_shutdown(cmount);
 }

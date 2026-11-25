@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -20,60 +21,76 @@
 
 #include <map>
 #include <set>
-using namespace std;
+#include <vector>
 
 #include "include/types.h"
-#include "mds/FSMap.h"
-#include "mds/MDSMap.h"
+#include "PaxosFSMap.h"
 #include "PaxosService.h"
-#include "msg/Messenger.h"
+#include "mds/MDSMap.h"
 #include "messages/MMDSBeacon.h"
+#include "mon/mon_types.h" // for Metadata
+#include "CommandHandler.h"
 
-class MMonCommand;
-class MMDSLoadTargets;
-class MMDSMap;
+class Monitor;
 class FileSystemCommandHandler;
+struct Subscription;
 
-#define MDS_HEALTH_PREFIX "mds_health"
-
-class MDSMonitor : public PaxosService {
+class MDSMonitor : public PaxosService, public PaxosFSMap, protected CommandHandler {
  public:
-  MDSMonitor(Monitor *mn, Paxos *p, string service_name);
+  using clock = ceph::coarse_mono_clock;
+  using time = ceph::coarse_mono_time;
+
+  MDSMonitor(Monitor &mn, Paxos &p, std::string service_name);
 
   // service methods
-  void create_initial();
-  void update_from_paxos(bool *need_bootstrap);
-  void init();
-  void create_pending(); 
-  void encode_pending(MonitorDBStore::TransactionRef t);
+  void create_initial() override;
+  void get_store_prefixes(std::set<std::string>& s) const override;
+  void update_from_paxos(bool *need_bootstrap) override;
+  void init() override;
+  void create_pending() override;
+  void encode_pending(MonitorDBStore::TransactionRef t) override;
   // we don't require full versions; don't encode any.
-  virtual void encode_full(MonitorDBStore::TransactionRef t) { }
-  version_t get_trim_to();
+  void encode_full(MonitorDBStore::TransactionRef t) override { }
+  version_t get_trim_to() const override;
 
-  bool preprocess_query(MonOpRequestRef op);  // true if processed.
-  bool prepare_update(MonOpRequestRef op);
-  bool should_propose(double& delay);
+  bool preprocess_query(MonOpRequestRef op) override;  // true if processed.
+  bool prepare_update(MonOpRequestRef op) override;
+  bool should_propose(double& delay) override;
+  bool has_health_warnings(const std::vector<mds_metric_t>& warnings,
+			   const mds_gid_t& gid=MDS_GID_NONE);
+  bool has_health_warnings(const std::vector<mds_metric_t>& warnings,
+			   const std::vector<mds_gid_t>& gids);
+  bool has_any_health_warning();
 
-  void on_active();
-  void on_restart();
+  bool should_print_status() const {
+    auto& fs = get_fsmap();
+    auto fs_count = fs.filesystem_count();
+    auto standby_count = fs.get_num_standby();
+    return fs_count > 0 || standby_count > 0;
+  }
+
+  void on_active() override;
+  void on_restart() override;
 
   void check_subs();
   void check_sub(Subscription *sub);
 
-  const FSMap &get_pending() const { return pending_fsmap; }
-  const FSMap &get_fsmap() const { return fsmap; }
-  void dump_info(Formatter *f);
-  int print_nodes(Formatter *f);
+  void dump_info(ceph::Formatter *f);
+  int print_nodes(ceph::Formatter *f);
+
+  /**
+   * Return true if a blocklist was done (i.e. OSD propose needed)
+   */
+  bool fail_mds_gid(FSMap &fsmap, mds_gid_t gid);
+
+  bool is_leader() const override;
 
  protected:
-  // mds maps
-  FSMap fsmap;           // current
-  FSMap pending_fsmap;  // current + pending updates
+  using mds_info_t = MDSMap::mds_info_t;
 
   // my helpers
-  void print_map(FSMap &m, int dbl=7);
-  void create_new_fs(FSMap &m, const std::string &name, int metadata_pool, int data_pool);
-  void update_logger();
+  template<int dblV = 7>
+  void print_map(const FSMap &m);
 
   void _updated(MonOpRequestRef op);
 
@@ -84,81 +101,72 @@ class MDSMonitor : public PaxosService {
   bool preprocess_offload_targets(MonOpRequestRef op);
   bool prepare_offload_targets(MonOpRequestRef op);
 
-  void get_health(list<pair<health_status_t,string> >& summary,
-		  list<pair<health_status_t,string> > *detail,
-		  CephContext *cct) const override;
-  int fail_mds(std::ostream &ss, const std::string &arg);
-  /**
-   * Return true if a blacklist was done (i.e. OSD propose needed)
-   */
-  bool fail_mds_gid(mds_gid_t gid);
+  int fail_mds(FSMap &fsmap, std::ostream &ss,
+      const std::string &arg, mds_info_t *failed_info);
 
   bool preprocess_command(MonOpRequestRef op);
   bool prepare_command(MonOpRequestRef op);
 
-  int parse_role(
-      const std::string &role_str,
-      mds_role_t *role,
-      std::ostream &ss);
-
-  int management_command(
-      MonOpRequestRef op,
-      std::string const &prefix,
-      map<string, cmd_vartype> &cmdmap,
-      std::stringstream &ss);
-  void modify_legacy_filesystem(
-      std::function<void(std::shared_ptr<Filesystem> )> fn);
-  int legacy_filesystem_command(
-      MonOpRequestRef op,
-      std::string const &prefix,
-      map<string, cmd_vartype> &cmdmap,
-      std::stringstream &ss);
   int filesystem_command(
+      FSMap &fsmap,
       MonOpRequestRef op,
       std::string const &prefix,
-      map<string, cmd_vartype> &cmdmap,
+      const cmdmap_t& cmdmap,
       std::stringstream &ss);
 
   // beacons
   struct beacon_info_t {
-    utime_t stamp;
-    uint64_t seq;
+    ceph::mono_time stamp = ceph::mono_clock::zero();
+    uint64_t seq = 0;
+    beacon_info_t() {}
+    beacon_info_t(ceph::mono_time stamp, uint64_t seq) : stamp(stamp), seq(seq) {}
   };
-  map<mds_gid_t, beacon_info_t> last_beacon;
-
-  bool try_standby_replay(
-      const MDSMap::mds_info_t& finfo,
-      const Filesystem &leader_fs,
-      const MDSMap::mds_info_t& ainfo);
+  std::map<mds_gid_t, beacon_info_t> last_beacon;
 
   std::list<std::shared_ptr<FileSystemCommandHandler> > handlers;
 
-  bool maybe_promote_standby(std::shared_ptr<Filesystem> fs);
-  bool maybe_expand_cluster(std::shared_ptr<Filesystem> fs);
-  void maybe_replace_gid(mds_gid_t gid, const beacon_info_t &beacon,
-      bool *mds_propose, bool *osd_propose);
-  void tick();     // check state, take actions
+  bool maybe_promote_standby(FSMap& fsmap, const Filesystem& fs);
+  bool maybe_resize_cluster(FSMap &fsmap, const Filesystem& fs);
+  bool drop_mds(FSMap &fsmap, mds_gid_t gid, const mds_info_t* rep_info, bool* osd_propose);
+  bool check_health(FSMap &fsmap, bool* osd_propose);
+  void tick() override;     // check state, take actions
 
-  int dump_metadata(const string& who, Formatter *f, ostream& err);
+  int dump_metadata(const FSMap &fsmap, const std::string &who, ceph::Formatter *f,
+		    std::ostream& err);
 
-  MDSMap *generate_mds_map(fs_cluster_id_t fscid);
   void update_metadata(mds_gid_t gid, const Metadata& metadata);
-  void remove_from_metadata(MonitorDBStore::TransactionRef t);
-  int load_metadata(map<mds_gid_t, Metadata>& m);
+  void remove_from_metadata(const FSMap &fsmap, MonitorDBStore::TransactionRef t);
+  int load_metadata(std::map<mds_gid_t, Metadata>& m);
+  void count_metadata(const std::string& field, ceph::Formatter *f);
 
+  void assign_quiesce_db_leader(FSMap &fsmap);
+
+public:
+  void print_fs_summary(std::ostream& out) {
+    get_fsmap().print_fs_summary(out);
+  }
+  void count_metadata(const std::string& field, std::map<std::string,int> *out);
+  void get_versions(std::map<std::string, std::list<std::string>> &versions);
+
+protected:
   // MDS daemon GID to latest health state from that GID
   std::map<uint64_t, MDSHealth> pending_daemon_health;
   std::set<uint64_t> pending_daemon_health_rm;
 
-  map<mds_gid_t, Metadata> pending_metadata;
+  std::map<mds_gid_t, Metadata> pending_metadata;
 
-  int _check_pool(const int64_t pool_id, std::stringstream *ss) const;
-  mds_gid_t gid_from_arg(const std::string& arg, std::ostream& err);
+  mds_gid_t gid_from_arg(const FSMap &fsmap, const std::string &arg, std::ostream& err);
 
   // When did the mon last call into our tick() method?  Used for detecting
   // when the mon was not updating us for some period (e.g. during slow
   // election) to reset last_beacon timeouts
-  utime_t last_tick;
+  ceph::mono_time last_tick = ceph::mono_clock::zero();
+
+private:
+  time last_fsmap_struct_flush = clock::zero();
+  bool check_fsmap_struct_version = true;
+  boost::optional<const entity_addrvec_t&> get_rank_addrs(const Filesystem& fs,
+                                                          mds_rank_t rank) const;
 };
 
 #endif

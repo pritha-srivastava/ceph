@@ -1,0 +1,25 @@
+import { CommonModule } from '@angular/common';
+import { NgModule } from '@angular/core';
+
+import { SharedModule } from '../shared/shared.module';
+import { CephfsModule } from './cephfs/cephfs.module';
+import { ClusterModule } from './cluster/cluster.module';
+import { NfsModule } from './nfs/nfs.module';
+import { PerformanceCounterModule } from './performance-counter/performance-counter.module';
+import { SmbModule } from './smb/smb.module';
+import { TilesModule } from 'carbon-components-angular';
+
+@NgModule({
+  imports: [
+    CommonModule,
+    ClusterModule,
+    PerformanceCounterModule,
+    CephfsModule,
+    NfsModule,
+    SmbModule,
+    SharedModule,
+    TilesModule
+  ],
+  declarations: []
+})
+export class CephModule {}

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph distributed storage system
  *
@@ -26,20 +27,20 @@
 #undef dout_prefix
 #define dout_prefix _prefix(_dout)
 
-static ostream& _prefix(std::ostream* _dout)
+static std::ostream& _prefix(std::ostream* _dout)
 {
   return *_dout << "ErasureCodePluginJerasure: ";
 }
 
 int ErasureCodePluginJerasure::factory(const std::string& directory,
-		      ErasureCodeProfile &profile,
-		      ErasureCodeInterfaceRef *erasure_code,
-		      ostream *ss) {
+				       ceph::ErasureCodeProfile &profile,
+				       ceph::ErasureCodeInterfaceRef *erasure_code,
+				       std::ostream *ss) {
     ErasureCodeJerasure *interface;
     std::string t;
     if (profile.find("technique") != profile.end())
       t = profile.find("technique")->second;
-    if (t == "reed_sol_van") {
+    if (t == "reed_sol_van" || t == "") { // Default!
       interface = new ErasureCodeJerasureReedSolomonVandermonde();
     } else if (t == "reed_sol_r6_op") {
       interface = new ErasureCodeJerasureReedSolomonRAID6();
@@ -54,11 +55,10 @@ int ErasureCodePluginJerasure::factory(const std::string& directory,
     } else if (t == "liber8tion") {
       interface = new ErasureCodeJerasureLiber8tion();
     } else {
-      derr << "technique=" << t << " is not a valid coding technique. "
+      *ss << "technique=" << t << " is not a valid coding technique. "
 	   << " Choose one of the following: "
 	   << "reed_sol_van, reed_sol_r6_op, cauchy_orig, "
-	   << "cauchy_good, liberation, blaum_roth, liber8tion"
-	   << dendl;
+	   << "cauchy_good, liberation, blaum_roth, liber8tion";
       return -ENOENT;
     }
     dout(20) << __func__ << ": " << profile << dendl;
@@ -67,23 +67,24 @@ int ErasureCodePluginJerasure::factory(const std::string& directory,
       delete interface;
       return r;
     }
-    *erasure_code = ErasureCodeInterfaceRef(interface);
+    *erasure_code = ceph::ErasureCodeInterfaceRef(interface);
     return 0;
 }
-
-#ifndef BUILDING_FOR_EMBEDDED
 
 const char *__erasure_code_version() { return CEPH_GIT_NICE_VER; }
 
 int __erasure_code_init(char *plugin_name, char *directory)
 {
-  ErasureCodePluginRegistry &instance = ErasureCodePluginRegistry::instance();
+  auto& instance = ceph::ErasureCodePluginRegistry::instance();
   int w[] = { 4, 8, 16, 32 };
   int r = jerasure_init(4, w);
   if (r) {
     return -r;
   }
-  return instance.add(plugin_name, new ErasureCodePluginJerasure());
+  auto plugin = std::make_unique<ErasureCodePluginJerasure>();
+  r = instance.add(plugin_name, plugin.get());
+  if (r == 0) {
+    plugin.release();
+  }
+  return r;
 }
-
-#endif

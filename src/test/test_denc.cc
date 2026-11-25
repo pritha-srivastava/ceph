@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph distributed storage system
  *
@@ -16,22 +17,68 @@
 
 #include <stdio.h>
 
+#include <iostream> // for std::cout
+#include <numeric>
+
 #include "global/global_init.h"
 #include "common/ceph_argparse.h"
 #include "global/global_context.h"
 #include "gtest/gtest.h"
 
 #include "include/denc.h"
+#include "include/denc_contiguous.h"
+#include "include/ceph_fs_encoder.h"
+#include "include/mempool.h"
+#include "include/utime.h"
+
+#include <boost/container/flat_map.hpp>
+#include <boost/container/flat_set.hpp>
+#include <boost/optional.hpp>
+
+using namespace std;
 
 // test helpers
 
 template<typename T>
+std::string encode_to_string(const T& v) {
+  bufferlist bl;
+  encode(v, bl);
+  return bl.to_str();
+}
+
+template<typename T>
+void expect_wire_format(const T& v, const std::string& wire) {
+  ASSERT_EQ(wire, encode_to_string(v));
+
+  bufferlist bl;
+  bl.append(wire);
+  auto p = bl.cbegin();
+  T out;
+  decode(out, p);
+  ASSERT_EQ(v, out);
+  ASSERT_EQ(wire.size(), p.get_off());
+}
+
+static void append_le32(std::string& s, uint32_t v) {
+  for (unsigned i = 0; i < 4; ++i) {
+    s.push_back(static_cast<char>(v >> (i * 8)));
+  }
+}
+
+static void append_denc_header(std::string& s, uint8_t v,
+                               uint8_t compat, uint32_t len) {
+  s.push_back(static_cast<char>(v));
+  s.push_back(static_cast<char>(compat));
+  append_le32(s, len);
+}
+
+template<typename T>
 void test_encode_decode(T v) {
   bufferlist bl;
-  ::encode(v, bl);
-  bufferlist::iterator p = bl.begin();
+  encode(v, bl);
+  auto p = bl.cbegin();
   T out;
-  ::decode(out, p);
+  decode(out, p);
   ASSERT_EQ(v, out);
 }
 
@@ -65,10 +112,10 @@ void test_denc(T v) {
 template<typename T>
 void test_encode_decode_featured(T v) {
   bufferlist bl;
-  ::encode(v, bl, 123);
-  bufferlist::iterator p = bl.begin();
+  encode(v, bl, 123);
+  auto p = bl.cbegin();
   T out;
-  ::decode(out, p);
+  decode(out, p);
   ASSERT_EQ(v, out);
 }
 
@@ -122,8 +169,8 @@ struct denc_counter_t {
     p.append("a", 1);
     ++counts.num_encode;
   }
-  void decode(buffer::ptr::iterator &p) {
-    p.advance(1);
+  void decode(buffer::ptr::const_iterator &p) {
+    p += 1;
     ++counts.num_decode;
   }
 };
@@ -138,8 +185,8 @@ struct denc_counter_bounded_t {
     p.append("a", 1);
     ++counts.num_encode;
   }
-  void decode(buffer::ptr::iterator &p) {
-    p.advance(1);
+  void decode(buffer::ptr::const_iterator &p) {
+    p += 1;
     ++counts.num_decode;
   }
 };
@@ -150,8 +197,8 @@ TEST(denc, denc_counter)
   denc_counter_t single, single2;
   {
     bufferlist bl;
-    ::encode(single, bl);
-    ::decode(single2, bl);
+    encode(single, bl);
+    decode(single2, bl);
   }
   ASSERT_EQ(counts.num_bound_encode, 1);
   ASSERT_EQ(counts.num_encode, 1);
@@ -182,13 +229,15 @@ TEST(denc, string)
 struct legacy_t {
   int32_t a = 1;
   void encode(bufferlist& bl) const {
-    ::encode(a, bl);
+    using ceph::encode;
+    encode(a, bl);
   }
-  void decode(bufferlist::iterator& p) {
-    ::decode(a, p);
+  void decode(bufferlist::const_iterator& p) {
+    using ceph::decode;
+    decode(a, p);
   }
   legacy_t() {}
-  legacy_t(int32_t i) : a(i) {}
+  explicit legacy_t(int32_t i) : a(i) {}
   friend bool operator<(const legacy_t& l, const legacy_t& r) {
     return l.a < r.a;
   }
@@ -242,8 +291,8 @@ TEST(denc, vector)
     v.resize(100);
     {
       bufferlist bl;
-      ::encode(v, bl);
-      ::decode(v2, bl);
+      encode(v, bl);
+      decode(v2, bl);
     }
     ASSERT_EQ(counts.num_bound_encode, 100);
     ASSERT_EQ(counts.num_encode, 100);
@@ -255,8 +304,8 @@ TEST(denc, vector)
     v.resize(100);
     {
       bufferlist bl;
-      ::encode(v, bl);
-      ::decode(v2, bl);
+      encode(v, bl);
+      decode(v2, bl);
     }
     ASSERT_EQ(counts.num_bound_encode, 1);
     ASSERT_EQ(counts.num_encode, 100);
@@ -278,8 +327,8 @@ TEST(denc, list)
     }
     {
       bufferlist bl;
-      ::encode(l, bl);
-      ::decode(l2, bl);
+      encode(l, bl);
+      decode(l2, bl);
     }
     ASSERT_EQ(counts.num_bound_encode, 1);
     ASSERT_EQ(counts.num_encode, 100);
@@ -347,23 +396,48 @@ struct foo_t {
 };
 WRITE_CLASS_DENC_BOUNDED(foo_t)
 
-struct foo2_t {
-  int32_t c = 0;
-  uint64_t d = 123;
+struct foo2_accept1_t {
+  int32_t a = 0;
+  uint64_t b = 123;
+  int32_t c = -1; // uninitialized for v1
 
-  DENC(foo2_t, v, p) {
-    DENC_START(1, 1, p);
-    ::denc(v.c, p);
-    ::denc(v.d, p);
+  DENC(foo2_accept1_t, v, p) {
+    DENC_START(2, 1, p);
+    ::denc(v.a, p);
+    ::denc(v.b, p);
+    if (struct_v >= 2) {
+      ::denc(v.c, p);
+    }
     DENC_FINISH(p);
   }
+};
+WRITE_CLASS_DENC_BOUNDED(foo2_accept1_t)
 
-  friend bool operator==(const foo2_t& l, const foo2_t& r) {
-    return l.c == r.c && l.d == r.d;
+struct foo2_only2_t {
+  int32_t a = 0;
+  uint64_t b = 123;
+  uint32_t c = 55;
+
+  DENC(foo2_only2_t, v, p) {
+    DENC_START_COMPAT_2(2, 2, p);
+    ::denc(v.a, p);
+    ::denc(v.b, p);
+    ::denc(v.c, p);
+    DENC_FINISH(p);
   }
 };
-WRITE_CLASS_DENC_BOUNDED(foo2_t)
+WRITE_CLASS_DENC_BOUNDED(foo2_only2_t)
 
+struct denc_overread_t {
+  DENC(denc_overread_t, v, p) {
+    DENC_START(1, 1, p);
+    __u8 value = 0;
+    ::denc(value, p);
+    ::denc(value, p);
+    DENC_FINISH(p);
+  }
+};
+WRITE_CLASS_DENC_BOUNDED(denc_overread_t)
 
 struct bar_t {
   int32_t a = 0;
@@ -385,7 +459,7 @@ TEST(denc, foo)
   foo_t a;
   test_denc(a);
   bufferlist bl;
-  ::encode(a, bl);
+  encode(a, bl);
   bl.hexdump(cout);
 }
 
@@ -404,11 +478,11 @@ TEST(denc, pair)
   {
     auto a = bl.get_contiguous_appender(1000);
     denc(p, a);
-    ::encode(p, bl);
+    encode(p, bl);
   }
 
   pair<int32_t,legacy_t> lp;
-  ::encode(lp, bl);
+  encode(lp, bl);
 }
 
 template<template<class, class> class C>
@@ -576,5 +650,315 @@ TEST(denc, optional)
     denc(out, bpi);
     ASSERT_FALSE(!!out);
     ASSERT_EQ(bpi.get_pos(), bl.c_str() + bl.length());
+  }
+}
+
+TEST(denc, stdoptional)
+{
+  {
+    cout << "std::optional<uint64_t>" << std::endl;
+    std::optional<uint64_t> s = 97, t = std::nullopt;
+    counts.reset();
+    test_denc(s);
+    test_denc(t);
+  }
+  {
+    cout << "std::optional<std::string>" << std::endl;
+    std::optional<std::string> s = std::string("Meow"), t = std::nullopt;
+    counts.reset();
+    test_denc(s);
+    test_denc(t);
+  }
+  {
+    size_t s = 0;
+    denc(std::nullopt, s);
+    ASSERT_NE(s, 0u);
+
+    // encode
+    bufferlist bl;
+    {
+      auto a = bl.get_contiguous_appender(s);
+      denc(std::nullopt, a);
+    }
+    ASSERT_LE(bl.length(), s);
+
+    bl.rebuild();
+    std::optional<uint32_t> out = 5;
+    auto bpi = bl.front().begin();
+    denc(out, bpi);
+    ASSERT_FALSE(!!out);
+    ASSERT_EQ(bpi.get_pos(), bl.c_str() + bl.length());
+  }
+}
+
+// unlike legacy_t, Legacy supports denc() also.
+struct Legacy {
+  static unsigned n_denc;
+  static unsigned n_decode;
+  uint8_t value = 0;
+  DENC(Legacy, v, p) {
+    n_denc++;
+    denc(v.value, p);
+  }
+  void decode(buffer::list::const_iterator& p) {
+    n_decode++;
+    using ceph::decode;
+    decode(value, p);
+  }
+  static void reset() {
+    n_denc = n_decode = 0;
+  }
+  static bufferlist encode_n(unsigned n, const vector<unsigned>& segments);
+};
+WRITE_CLASS_DENC(Legacy)
+unsigned Legacy::n_denc = 0;
+unsigned Legacy::n_decode = 0;
+
+bufferlist Legacy::encode_n(unsigned n, const vector<unsigned>& segments) {
+  vector<Legacy> v;
+  for (unsigned i = 0; i < n; i++) {
+    v.push_back(Legacy());
+  }
+  bufferlist bl(n * sizeof(uint8_t));
+  using ceph::encode;
+  encode(v, bl);
+  bufferlist segmented;
+  auto p = bl.begin();
+
+  auto sum = std::accumulate(segments.begin(), segments.end(), 0u);
+  ceph_assert(sum != 0u);
+  for (auto i : segments) {
+    buffer::ptr seg;
+    p.copy_deep(bl.length() * i / sum, seg);
+    segmented.push_back(seg);
+  }
+  p.copy_all(segmented);
+  return segmented;
+}
+
+TEST(denc, no_copy_if_segmented_and_lengthy)
+{
+  static_assert(_denc::has_legacy_denc<Legacy>::value,
+                "Legacy do have legacy denc");
+  {
+    // use denc() which shallow_copy() if the buffer is small
+    constexpr unsigned N_COPIES = 42;
+    const vector<unsigned> segs{50, 50}; // half-half
+    bufferlist segmented = Legacy::encode_n(N_COPIES, segs);
+    ASSERT_GT(segmented.get_num_buffers(), 1u);
+    ASSERT_LT(segmented.length(), CEPH_PAGE_SIZE);
+    auto p = segmented.cbegin();
+    vector<Legacy> v;
+    // denc() is shared by encode() and decode(), so reset() right before
+    // decode()
+    Legacy::reset();
+    decode(v, p);
+    ASSERT_EQ(N_COPIES, v.size());
+    ASSERT_EQ(N_COPIES, Legacy::n_denc);
+    ASSERT_EQ(0u, Legacy::n_decode);
+  }
+  {
+    // use denc() which shallow_copy() if the buffer is not segmented and large
+    const unsigned N_COPIES = CEPH_PAGE_SIZE * 2;
+    const vector<unsigned> segs{100};
+    bufferlist segmented = Legacy::encode_n(N_COPIES, segs);
+    ASSERT_EQ(segmented.get_num_buffers(), 1u);
+    ASSERT_GT(segmented.length(), CEPH_PAGE_SIZE);
+    auto p = segmented.cbegin();
+    vector<Legacy> v;
+    Legacy::reset();
+    decode(v, p);
+    ASSERT_EQ(N_COPIES, v.size());
+    ASSERT_EQ(N_COPIES, Legacy::n_denc);
+    ASSERT_EQ(0u, Legacy::n_decode);
+  }
+  {
+    // use denc() which shallow_copy() if the buffer is segmented and large,
+    // but the total size of the chunks to be decoded is smallish.
+    bufferlist large_bl = Legacy::encode_n(CEPH_PAGE_SIZE * 2, {50, 50});
+    bufferlist small_bl = Legacy::encode_n(100, {50, 50});
+    bufferlist segmented;
+    segmented.append(large_bl);
+    segmented.append(small_bl);
+    ASSERT_GT(segmented.get_num_buffers(), 1u);
+    ASSERT_GT(segmented.length(), CEPH_PAGE_SIZE);
+    auto p = segmented.cbegin();
+    p += large_bl.length();
+    ASSERT_LT(segmented.length() - p.get_off(), CEPH_PAGE_SIZE);
+    vector<Legacy> v;
+    Legacy::reset();
+    decode(v, p);
+    ASSERT_EQ(Legacy::n_denc, 100u);
+    ASSERT_EQ(0u, Legacy::n_decode);
+  }
+  {
+    // use decode() which avoids deep copy if the buffer is segmented and large
+    bufferlist small_bl = Legacy::encode_n(100, {50, 50});
+    bufferlist large_bl = Legacy::encode_n(CEPH_PAGE_SIZE * 2, {50, 50});
+    bufferlist segmented;
+    segmented.append(small_bl);
+    segmented.append(large_bl);
+    ASSERT_GT(segmented.get_num_buffers(), 1u);
+    ASSERT_GT(segmented.length(), CEPH_PAGE_SIZE);
+    auto p = segmented.cbegin();
+    p += small_bl.length();
+    ASSERT_GT(segmented.length() - p.get_off(), CEPH_PAGE_SIZE);
+    vector<Legacy> v;
+    Legacy::reset();
+    decode(v, p);
+    ASSERT_EQ(0u, Legacy::n_denc);
+    ASSERT_EQ(CEPH_PAGE_SIZE * 2, Legacy::n_decode);
+  }
+}
+
+TEST(denc, compat_allows)
+{
+  foo_t v1;
+  v1.a = 5001; v1.b = 6002;
+  size_t s = 0;
+  denc(v1, s);
+  bufferlist bl;
+  {
+    auto app = bl.get_contiguous_appender(s);
+    denc(v1, app);
+  }
+
+  foo2_accept1_t v2;
+  v2.a = 111; v2.b = 111; v2.c = 111;
+  auto bpi = bl.front().begin();
+  denc(v2, bpi);
+  ASSERT_EQ(v1.a, v2.a);
+  ASSERT_EQ(v1.b, v2.b);
+  ASSERT_EQ(111, v2.c);
+}
+
+TEST(denc, compat_disallows)
+{
+  foo2_only2_t v2;
+  v2.a = 5001; v2.b = 6002; v2.c = 7003;
+  size_t s = 0;
+  denc(v2, s);
+  bufferlist bl;
+  {
+    auto app = bl.get_contiguous_appender(s);
+    denc(v2, app);
+  }
+
+  foo_t v1;
+  v1.a = 111; v1.b = 111;
+  auto bpi = bl.front().begin();
+  ASSERT_ANY_THROW(denc(v1,bpi));
+}
+
+TEST(denc, finish_skips_unread_fields)
+{
+  foo2_accept1_t v2;
+  v2.a = 5001;
+  v2.b = 6002;
+  v2.c = 7003;
+
+  size_t s = 0;
+  denc(v2, s);
+  bufferlist bl;
+  {
+    auto app = bl.get_contiguous_appender(s);
+    denc(v2, app);
+  }
+
+  foo_t v1;
+  auto bpi = bl.front().begin();
+  denc(v1, bpi);
+
+  ASSERT_EQ(v2.a, v1.a);
+  ASSERT_EQ(v2.b, v1.b);
+  ASSERT_EQ(bpi.get_pos(), bl.c_str() + bl.length());
+}
+
+TEST(denc, finish_rejects_overread)
+{
+  std::string wire;
+  append_denc_header(wire, 1, 1, 1);
+  wire.push_back(17);
+  wire.push_back(19);
+
+  bufferlist bl;
+  bl.append(wire);
+
+  denc_overread_t value;
+  auto bpi = bl.front().begin();
+
+  ASSERT_THROW(denc(value, bpi), buffer::malformed_input);
+}
+
+// encode_contiguous() must put the same bytes on the wire as encoding each
+// value on its own: CInode::encode_inodestat() relies on it for every inode
+// it sends to a client.
+template<typename T>
+static T raw_pattern(uint8_t seed)
+{
+  T v;
+  auto p = reinterpret_cast<uint8_t*>(&v);
+  for (size_t i = 0; i < sizeof(T); ++i)
+    p[i] = seed + i;
+  return v;
+}
+
+TEST(denc, encode_contiguous_matches_separate_encodes)
+{
+  using ceph::encode;
+  using ceph::encode_contiguous;
+  using ceph::raw_bytes;
+
+  const auto cap = raw_pattern<ceph_mds_reply_cap>(1);
+  const auto layout = raw_pattern<ceph_file_layout>(101);
+  const auto dir_layout = raw_pattern<ceph_dir_layout>(201);
+  const std::tuple fixed{uint64_t(0x1122334455667788ULL), uint32_t(42),
+                         utime_t(1700000000, 123456789), uint8_t(7)};
+
+  for (bool empty : {false, true}) {
+    SCOPED_TRACE(empty ? "empty containers" : "non-empty containers");
+    const mempool::mds_co::string pool_ns(empty ? "" : "ns-1");
+    const std::string symlink(empty ? "" : std::string(300, 's'));
+    const std::map<std::string, std::string> meta = empty ?
+      std::map<std::string, std::string>{} :
+      std::map<std::string, std::string>{{"a", "1"}, {"key", "value"}};
+    const std::vector<uint8_t> vec = empty ?
+      std::vector<uint8_t>{} : std::vector<uint8_t>{1, 2, 3, 4, 5};
+    const std::vector<uint8_t, mempool::mds_co::pool_allocator<uint8_t>>
+      pvec(vec.begin(), vec.end());
+    const bool flag = !empty;
+
+    // Start both off with the same prefix, so the contiguous append lands at
+    // an odd offset in a buffer that is already in use.
+    bufferlist expected, actual;
+    expected.append("xyz", 3);
+    actual.append("xyz", 3);
+
+    encode(fixed, expected);
+    encode(cap, expected);
+    encode(layout, expected);
+    encode(pool_ns, expected);
+    encode(symlink, expected);
+    encode(dir_layout, expected);
+    encode(meta, expected);
+    encode(flag, expected);
+    encode(vec, expected);
+    encode(pvec, expected);
+
+    encode_contiguous(actual, fixed, raw_bytes(cap), raw_bytes(layout),
+                      pool_ns, symlink, raw_bytes(dir_layout), meta, flag,
+                      vec, pvec);
+
+    ASSERT_EQ(expected.length(), actual.length());
+    ASSERT_TRUE(expected.contents_equal(actual));
+  }
+
+  // A single value, and the raw-struct wrapper on its own.
+  {
+    bufferlist expected, actual;
+    encode(layout, expected);
+    encode_contiguous(actual, raw_bytes(layout));
+    ASSERT_EQ(sizeof(layout), actual.length());
+    ASSERT_TRUE(expected.contents_equal(actual));
   }
 }

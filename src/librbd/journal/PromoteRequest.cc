@@ -1,15 +1,15 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/journal/PromoteRequest.h"
 #include "common/dout.h"
 #include "common/errno.h"
-#include "common/WorkQueue.h"
 #include "journal/Journaler.h"
 #include "journal/Settings.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/Journal.h"
 #include "librbd/Utils.h"
+#include "librbd/asio/ContextWQ.h"
 #include "librbd/journal/OpenRequest.h"
 
 #define dout_subsys ceph_subsys_rbd
@@ -26,7 +26,7 @@ using librbd::util::create_context_callback;
 template <typename I>
 PromoteRequest<I>::PromoteRequest(I *image_ctx, bool force, Context *on_finish)
   : m_image_ctx(image_ctx), m_force(force), m_on_finish(on_finish),
-    m_lock("PromoteRequest::m_lock") {
+    m_lock(ceph::make_mutex("PromoteRequest::m_lock")) {
 }
 
 template <typename I>
@@ -40,7 +40,7 @@ void PromoteRequest<I>::send_open() {
   ldout(cct, 20) << dendl;
 
   m_journaler = new Journaler(m_image_ctx->md_ctx, m_image_ctx->id,
-                              Journal<>::IMAGE_CLIENT_ID, {});
+                              Journal<>::IMAGE_CLIENT_ID, {}, nullptr);
   Context *ctx = create_async_context_callback(
     *m_image_ctx, create_context_callback<
       PromoteRequest<I>, &PromoteRequest<I>::handle_open>(this));
@@ -87,7 +87,7 @@ void PromoteRequest<I>::allocate_tag() {
   tag_data.predecessor = predecessor;
 
   bufferlist tag_bl;
-  ::encode(tag_data, tag_bl);
+  encode(tag_data, tag_bl);
 
   Context *ctx = create_context_callback<
     PromoteRequest<I>, &PromoteRequest<I>::handle_allocate_tag>(this);
@@ -102,6 +102,93 @@ void PromoteRequest<I>::handle_allocate_tag(int r) {
   if (r < 0) {
     m_ret_val = r;
     lderr(cct) << "failed to allocate tag: " << cpp_strerror(r) << dendl;
+    shut_down();
+    return;
+  }
+
+  m_tag_tid = m_tag.tid;
+  append_event();
+}
+
+template <typename I>
+void PromoteRequest<I>::append_event() {
+  CephContext *cct = m_image_ctx->cct;
+  ldout(cct, 20) << dendl;
+
+  EventEntry event_entry{DemotePromoteEvent{}, {}};
+  bufferlist event_entry_bl;
+  encode(event_entry, event_entry_bl);
+
+  m_journaler->start_append(0);
+  m_future = m_journaler->append(m_tag_tid, event_entry_bl);
+
+  auto ctx = create_context_callback<
+    PromoteRequest<I>, &PromoteRequest<I>::handle_append_event>(this);
+  m_future.flush(ctx);
+}
+
+template <typename I>
+void PromoteRequest<I>::handle_append_event(int r) {
+  CephContext *cct = m_image_ctx->cct;
+  ldout(cct, 20) << "r=" << r << dendl;
+
+  if (r < 0) {
+    m_ret_val = r;
+    lderr(cct) << "failed to append promotion journal event: "
+               << cpp_strerror(r) << dendl;
+    stop_append();
+    return;
+  }
+
+  commit_event();
+}
+
+template <typename I>
+void PromoteRequest<I>::commit_event() {
+  CephContext *cct = m_image_ctx->cct;
+  ldout(cct, 20) << dendl;
+
+  m_journaler->committed(m_future);
+
+  auto ctx = create_context_callback<
+    PromoteRequest<I>, &PromoteRequest<I>::handle_commit_event>(this);
+  m_journaler->flush_commit_position(ctx);
+}
+
+template <typename I>
+void PromoteRequest<I>::handle_commit_event(int r) {
+  CephContext *cct = m_image_ctx->cct;
+  ldout(cct, 20) << "r=" << r << dendl;
+
+  if (r < 0) {
+    m_ret_val = r;
+    lderr(cct) << "failed to flush promote commit position: "
+               << cpp_strerror(r) << dendl;
+  }
+
+  stop_append();
+}
+
+template <typename I>
+void PromoteRequest<I>::stop_append() {
+  CephContext *cct = m_image_ctx->cct;
+  ldout(cct, 20) << dendl;
+
+  auto ctx = create_context_callback<
+    PromoteRequest<I>, &PromoteRequest<I>::handle_stop_append>(this);
+  m_journaler->stop_append(ctx);
+}
+
+template <typename I>
+void PromoteRequest<I>::handle_stop_append(int r) {
+  CephContext *cct = m_image_ctx->cct;
+  ldout(cct, 20) << "r=" << r << dendl;
+
+  if (r < 0) {
+    if (m_ret_val == 0) {
+      m_ret_val = r;
+    }
+    lderr(cct) << "failed to stop journal append: " << cpp_strerror(r) << dendl;
   }
 
   shut_down();

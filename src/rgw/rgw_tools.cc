@@ -1,114 +1,47 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
-#include <errno.h>
+#include <cerrno>
+#include <unordered_map>
 
 #include "common/errno.h"
-#include "common/safe_io.h"
+#include "common/safe_io.h" // for safe_read()
+#include "common/split.h"
 
-#include "include/types.h"
-
-#include "rgw_common.h"
-#include "rgw_rados.h"
-#include "rgw_tools.h"
+#include "driver/rados/rgw_tools.h"
 
 #define dout_subsys ceph_subsys_rgw
+#define dout_context g_ceph_context
 
 #define READ_CHUNK_LEN (512 * 1024)
 
-static std::map<std::string, std::string>* ext_mime_map;
+using namespace std;
 
-int rgw_put_system_obj(RGWRados *rgwstore, rgw_bucket& bucket, const string& oid, const char *data, size_t size, bool exclusive,
-                       RGWObjVersionTracker *objv_tracker, real_time set_mtime, map<string, bufferlist> *pattrs)
+namespace {
+std::unique_ptr<std::map<std::string, std::string, std::less<>>> ext_mime_map;
+
+void parse_mime_map_line(std::string_view line)
 {
-  map<string,bufferlist> no_attrs;
-  if (!pattrs)
-    pattrs = &no_attrs;
-
-  rgw_obj obj(bucket, oid);
-
-  int ret = rgwstore->put_system_obj(NULL, obj, data, size, exclusive, NULL, *pattrs, objv_tracker, set_mtime);
-
-  if (ret == -ENOENT) {
-    ret = rgwstore->create_pool(bucket);
-    if (ret >= 0)
-      ret = rgwstore->put_system_obj(NULL, obj, data, size, exclusive, NULL, *pattrs, objv_tracker, set_mtime);
-  }
-
-  return ret;
-}
-
-int rgw_get_system_obj(RGWRados *rgwstore, RGWObjectCtx& obj_ctx, rgw_bucket& bucket, const string& key, bufferlist& bl,
-                       RGWObjVersionTracker *objv_tracker, real_time *pmtime, map<string, bufferlist> *pattrs,
-                       rgw_cache_entry_info *cache_info)
-{
-  struct rgw_err err;
-  bufferlist::iterator iter;
-  int request_len = READ_CHUNK_LEN;
-  rgw_obj obj(bucket, key);
-
-  do {
-    RGWRados::SystemObject source(rgwstore, obj_ctx, obj);
-    RGWRados::SystemObject::Read rop(&source);
-
-    rop.stat_params.attrs = pattrs;
-    rop.stat_params.lastmod = pmtime;
-    rop.stat_params.perr = &err;
-
-    int ret = rop.stat(objv_tracker);
-    if (ret < 0)
-      return ret;
-
-    rop.read_params.cache_info = cache_info;
-
-    ret = rop.read(0, request_len - 1, bl, objv_tracker);
-    if (ret == -ECANCELED) {
-      /* raced, restart */
-      continue;
-    }
-    if (ret < 0)
-      return ret;
-
-    if (ret < request_len)
-      break;
-    bl.clear();
-    request_len *= 2;
-  } while (true);
-
-  return 0;
-}
-
-int rgw_delete_system_obj(RGWRados *rgwstore, rgw_bucket& bucket, const string& oid,
-                          RGWObjVersionTracker *objv_tracker)
-{
-  rgw_obj obj(bucket, oid);
-  return rgwstore->delete_system_obj(obj, objv_tracker);
-}
-
-void parse_mime_map_line(const char *start, const char *end)
-{
-  char line[end - start + 1];
-  strncpy(line, start, end - start);
-  line[end - start] = '\0';
-  char *l = line;
-#define DELIMS " \t\n\r"
-
-  while (isspace(*l))
-    l++;
-
-  char *mime = strsep(&l, DELIMS);
-  if (!mime)
+  static constexpr std::string_view delims{" \t\n\r"};
+  static constexpr std::string_view wschars{" \f\n\r\t\v"};
+  auto spaces = line.find_first_not_of(wschars);
+  if (spaces == line.npos) {
     return;
+  }
+  line.remove_prefix(spaces);
 
-  char *ext;
-  do {
-    ext = strsep(&l, DELIMS);
-    if (ext && *ext) {
-      (*ext_mime_map)[ext] = mime;
-    }
-  } while (ext);
+  auto splitline = ceph::split(line, delims);
+  auto iter = splitline.begin();
+  if (iter == splitline.end()) {
+    return;
+  }
+  auto mime = *iter;
+  ++iter;
+  while (iter != splitline.end()) {
+    (*ext_mime_map)[std::string{*iter}] = mime;
+    ++iter;
+  }
 }
-
 
 void parse_mime_map(const char *buf)
 {
@@ -117,20 +50,20 @@ void parse_mime_map(const char *buf)
     while (*end && *end != '\n') {
       end++;
     }
-    parse_mime_map_line(start, end);
+    parse_mime_map_line({start, end});
     end++;
     start = end;
   }
 }
 
-static int ext_mime_map_init(CephContext *cct, const char *ext_map)
+int ext_mime_map_init(const DoutPrefixProvider *dpp, CephContext *cct, const char *ext_map)
 {
   int fd = open(ext_map, O_RDONLY);
   char *buf = NULL;
   int ret;
   if (fd < 0) {
     ret = -errno;
-    ldout(cct, 0) << __func__ << " failed to open file=" << ext_map
+    ldpp_dout(dpp, 0) << __func__ << " failed to open file=" << ext_map
                   << " : " << cpp_strerror(-ret) << dendl;
     return ret;
   }
@@ -139,7 +72,7 @@ static int ext_mime_map_init(CephContext *cct, const char *ext_map)
   ret = fstat(fd, &st);
   if (ret < 0) {
     ret = -errno;
-    ldout(cct, 0) << __func__ << " failed to stat file=" << ext_map
+    ldpp_dout(dpp, 0) << __func__ << " failed to stat file=" << ext_map
                   << " : " << cpp_strerror(-ret) << dendl;
     goto done;
   }
@@ -147,17 +80,17 @@ static int ext_mime_map_init(CephContext *cct, const char *ext_map)
   buf = (char *)malloc(st.st_size + 1);
   if (!buf) {
     ret = -ENOMEM;
-    ldout(cct, 0) << __func__ << " failed to allocate buf" << dendl;
+    ldpp_dout(dpp, 0) << __func__ << " failed to allocate buf" << dendl;
     goto done;
   }
 
   ret = safe_read(fd, buf, st.st_size + 1);
   if (ret != st.st_size) {
     // huh? file size has changed?
-    ldout(cct, 0) << __func__ << " raced! will retry.." << dendl;
+    ldpp_dout(dpp, 0) << __func__ << " raced! will retry.." << dendl;
     free(buf);
     close(fd);
-    return ext_mime_map_init(cct, ext_map);
+    return ext_mime_map_init(dpp, cct, ext_map);
   }
   buf[st.st_size] = '\0';
 
@@ -168,28 +101,26 @@ done:
   close(fd);
   return ret;
 }
+} // namespace
 
-const char *rgw_find_mime_by_ext(string& ext)
+std::string_view rgw_find_mime_by_ext(std::string_view ext)
 {
-  map<string, string>::iterator iter = ext_mime_map->find(ext);
+  auto iter = ext_mime_map->find(ext);
   if (iter == ext_mime_map->end())
-    return NULL;
+    return std::string_view{};
 
-  return iter->second.c_str();
+  return iter->second;
 }
 
-int rgw_tools_init(CephContext *cct)
+int rgw_tools_init(const DoutPrefixProvider *dpp, CephContext *cct)
 {
-  ext_mime_map = new std::map<std::string, std::string>;
-  int ret = ext_mime_map_init(cct, cct->_conf->rgw_mime_types_file.c_str());
-  if (ret < 0)
-    return ret;
-
+  ext_mime_map = std::make_unique<std::map<std::string, std::string, std::less<>>>();
+  ext_mime_map_init(dpp, cct, cct->_conf->rgw_mime_types_file.c_str());
+  // ignore errors; missing mime.types is not fatal
   return 0;
 }
 
 void rgw_tools_cleanup()
 {
-  delete ext_mime_map;
   ext_mime_map = nullptr;
 }

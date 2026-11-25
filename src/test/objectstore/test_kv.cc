@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,28 +13,46 @@
  *
  */
 
+#include <common/pretty_binary.h>
 #include <stdio.h>
 #include <string.h>
 #include <iostream>
+#include <string>
+#include <random>
 #include <time.h>
 #include <sys/mount.h>
 #include "kv/KeyValueDB.h"
+#include "kv/RocksDBStore.h"
 #include "include/Context.h"
 #include "common/ceph_argparse.h"
+#include "common/Clock.h" // for ceph_clock_now()
 #include "global/global_init.h"
-#include "common/Mutex.h"
 #include "common/Cond.h"
 #include "common/errno.h"
 #include "include/stringify.h"
 #include <gtest/gtest.h>
+#include <fmt/format.h>
 
-#if GTEST_HAS_PARAM_TEST
+using namespace std;
+
+std::string gen_random_string(size_t size) {
+  std::string s;
+  for (size_t i = 0; i < size; i++) {
+    s.push_back(rand());
+  }
+  return s;
+}
 
 class KVTest : public ::testing::TestWithParam<const char*> {
 public:
   boost::scoped_ptr<KeyValueDB> db;
 
   KVTest() : db(0) {}
+
+  string _bl_to_str(bufferlist val) {
+    string str(val.c_str(), val.length());
+    return str;
+  }
 
   void rm_r(string path) {
     string cmd = string("rm -r ") + path;
@@ -72,6 +91,8 @@ public:
 
 TEST_P(KVTest, OpenClose) {
   ASSERT_EQ(0, db->create_and_open(cout));
+  db->close();
+  db->open(cout);
   fini();
 }
 
@@ -110,6 +131,61 @@ TEST_P(KVTest, OpenWriteRead) {
     ASSERT_EQ(v2.length(), 6u);
     (v2.c_str())[v2.length()] = 0x0;
     ASSERT_EQ(std::string(v2.c_str()), std::string("value2"));
+  }
+  fini();
+}
+
+TEST_P(KVTest, RocksDBDumpTransaction) {
+  RocksDBStore* rdb = dynamic_cast<RocksDBStore*>(db.get());
+  if (!rdb) {
+    return;
+  }
+
+  ASSERT_EQ(0, db->create_and_open(cout));
+  {
+    KeyValueDB::Transaction t = db->get_transaction();
+    bufferlist value;
+    value.append("value");
+    t->set("O", "key", value);
+    value.clear();
+    value.append("value2");
+    t->set("P", "key2", value);
+    value.clear();
+    value.append("value3");
+    t->set("O", "key3", value);
+
+    t->rmkey("O", "A1");
+    t->rmkey("D", "A1");
+    t->rmkey("D", "A2");
+    t->rmkey("D", "A3");
+    t->merge("A", "A5", value);
+    // following txcs to be skipped
+    t->merge("B", "A5", value);
+    t->merge("B", "A5", value);
+
+    auto* _t = dynamic_cast<RocksDBStore::RocksDBTransactionImpl*>(t.get());
+    ASSERT_TRUE(_t != nullptr);
+    RocksWBHandler bat_txc_short(*rdb, false, 8);
+    _t->bat.Iterate(&bat_txc_short);
+    auto seen = bat_txc_short.get_seen(true); // using 'sorted' result to ensure
+                                              // fixed ordering in the result
+    std::cout << "Seen short = " << seen << std::endl;
+    ASSERT_EQ(seen, "DF:D*3,DF:O,MF:A,PF:O*2,PF:P,...*2");
+
+    RocksWBHandler bat_txc_verbose(*rdb, true, 8);
+    _t->bat.Iterate(&bat_txc_verbose);
+    seen = bat_txc_verbose.get_seen();
+    std::cout << "Seen verbose:" << seen << std::endl;
+    ASSERT_EQ(seen,
+      "\nPutCF(prefix = O, key = 'key', val len = 5)"
+      "\nPutCF(prefix = P, key = 'key2', val len = 6)"
+      "\nPutCF(prefix = O, key = 'key3', val len = 6)"
+      "\nDeleteCF(prefix = O, key = 'A1')"
+      "\nDeleteCF(prefix = D, key = 'A1')"
+      "\nDeleteCF(prefix = D, key = 'A2')"
+      "\nDeleteCF(prefix = D, key = 'A3')"
+      "\nMergeCF(prefix = A, key = 'A5', val len = 6)"
+      "\n<...>*2");
   }
   fini();
 }
@@ -199,12 +275,11 @@ struct AppendMOP : public KeyValueDB::MergeOperator {
     const char *ldata, size_t llen,
     const char *rdata, size_t rlen,
     std::string *new_value) override {
-
     *new_value = std::string(ldata, llen) + std::string(rdata, rlen);
   }
   // We use each operator name and each prefix to construct the
   // overall RocksDB operator name for consistency check at open time.
-  string name() const override {
+  const char *name() const override {
     return "Append";
   }
 };
@@ -255,36 +330,1466 @@ TEST_P(KVTest, Merge) {
   fini();
 }
 
+TEST_P(KVTest, RMRange) {
+  ASSERT_EQ(0, db->create_and_open(cout));
+  bufferlist value;
+  value.append("value");
+  {
+    KeyValueDB::Transaction t = db->get_transaction();
+    t->set("prefix", "key1", value);
+    t->set("prefix", "key2", value);
+    t->set("prefix", "key3", value);
+    t->set("prefix", "key4", value);
+    t->set("prefix", "key45", value);
+    t->set("prefix", "key5", value);
+    t->set("prefix", "key6", value);
+    db->submit_transaction_sync(t);
+  }
 
-INSTANTIATE_TEST_CASE_P(
+  {
+    KeyValueDB::Transaction t = db->get_transaction();
+    t->set("prefix", "key7", value);
+    t->set("prefix", "key8", value);
+    t->rm_range_keys("prefix", "key2", "key7");
+    db->submit_transaction_sync(t);
+    bufferlist v1, v2;
+    ASSERT_EQ(0, db->get("prefix", "key1", &v1));
+    v1.clear();
+    ASSERT_EQ(-ENOENT, db->get("prefix", "key45", &v1));
+    ASSERT_EQ(0, db->get("prefix", "key8", &v1));
+    v1.clear();
+    ASSERT_EQ(-ENOENT, db->get("prefix", "key2", &v1));
+    ASSERT_EQ(0, db->get("prefix", "key7", &v2));
+  }
+
+  {
+    KeyValueDB::Transaction t = db->get_transaction();
+    t->rm_range_keys("prefix", "key", "key");
+    db->submit_transaction_sync(t);
+    bufferlist v1, v2;
+    ASSERT_EQ(0, db->get("prefix", "key1", &v1));
+    ASSERT_EQ(0, db->get("prefix", "key8", &v2));
+  }
+
+  {
+    KeyValueDB::Transaction t = db->get_transaction();
+    t->rm_range_keys("prefix", "key-", "key~");
+    db->submit_transaction_sync(t);
+    bufferlist v1, v2;
+    ASSERT_EQ(-ENOENT, db->get("prefix", "key1", &v1));
+    ASSERT_EQ(-ENOENT, db->get("prefix", "key8", &v2));
+  }
+
+  fini();
+}
+
+TEST_P(KVTest, ShardingRMRange) {
+  if(string(GetParam()) != "rocksdb")
+    return;
+  std::string cfs("O(7)=");
+  ASSERT_EQ(0, db->create_and_open(cout, cfs));
+  {
+    KeyValueDB::Transaction t = db->get_transaction();
+    for (size_t i = 0; i < 1000; i++) {
+      bufferlist value;
+      char* a;
+      ASSERT_EQ(asprintf(&a, "key%3.3ld", i), 6);
+      value.append(a);
+      t->set("O", a, value);
+      free(a);
+    }
+    db->submit_transaction_sync(t);
+  }
+
+  {
+    KeyValueDB::Transaction t = db->get_transaction();
+    t->rm_range_keys("O", "key277", "key467");
+    db->submit_transaction_sync(t);
+  }
+
+  for (size_t i = 0; i < 1000; i++) {
+    char* key;
+    ASSERT_EQ(asprintf(&key, "key%3.3ld", i), 6);
+    bufferlist value;
+    int r = db->get("O", key, &value);
+    ASSERT_EQ(r, (i >= 277 && i < 467 ? -ENOENT : 0));
+    free(key);
+  }
+
+  fini();
+}
+
+
+TEST_P(KVTest, RocksDBColumnFamilyTest) {
+  if(string(GetParam()) != "rocksdb")
+    return;
+
+  std::string cfs("cf1 cf2");
+  ASSERT_EQ(0, db->init(g_conf()->bluestore_rocksdb_options));
+  cout << "creating two column families and opening them" << std::endl;
+  ASSERT_EQ(0, db->create_and_open(cout, cfs));
+  {
+    KeyValueDB::Transaction t = db->get_transaction();
+    bufferlist value;
+    value.append("value");
+    cout << "write a transaction includes three keys in different CFs" << std::endl;
+    t->set("prefix", "key", value);
+    t->set("cf1", "key", value);
+    t->set("cf2", "key2", value);
+    ASSERT_EQ(0, db->submit_transaction_sync(t));
+  }
+  fini();
+
+  init();
+  ASSERT_EQ(0, db->open(cout, cfs));
+  {
+    bufferlist v1, v2, v3;
+    cout << "reopen db and read those keys" << std::endl;
+    ASSERT_EQ(0, db->get("prefix", "key", &v1));
+    ASSERT_EQ(0, _bl_to_str(v1) != "value");
+    ASSERT_EQ(0, db->get("cf1", "key", &v2));
+    ASSERT_EQ(0, _bl_to_str(v2) != "value");
+    ASSERT_EQ(0, db->get("cf2", "key2", &v3));
+    ASSERT_EQ(0, _bl_to_str(v2) != "value");
+  }
+  {
+    cout << "delete two keys in CFs" << std::endl;
+    KeyValueDB::Transaction t = db->get_transaction();
+    t->rmkey("prefix", "key");
+    t->rmkey("cf2", "key2");
+    ASSERT_EQ(0, db->submit_transaction_sync(t));
+  }
+  fini();
+
+  init();
+  ASSERT_EQ(0, db->open(cout, cfs));
+  {
+    cout << "reopen db and read keys again." << std::endl;
+    bufferlist v1, v2, v3;
+    ASSERT_EQ(-ENOENT, db->get("prefix", "key", &v1));
+    ASSERT_EQ(0, db->get("cf1", "key", &v2));
+    ASSERT_EQ(0, _bl_to_str(v2) != "value");
+    ASSERT_EQ(-ENOENT, db->get("cf2", "key2", &v3));
+  }
+  fini();
+}
+
+TEST_P(KVTest, RocksDBIteratorTest) {
+  if(string(GetParam()) != "rocksdb")
+    return;
+
+  std::string cfs("cf1");
+  ASSERT_EQ(0, db->init(g_conf()->bluestore_rocksdb_options));
+  cout << "creating one column family and opening it" << std::endl;
+  ASSERT_EQ(0, db->create_and_open(cout, cfs));
+  {
+    KeyValueDB::Transaction t = db->get_transaction();
+    bufferlist bl1;
+    bl1.append("hello");
+    bufferlist bl2;
+    bl2.append("world");
+    cout << "write some kv pairs into default and new CFs" << std::endl;
+    t->set("prefix", "key1", bl1);
+    t->set("prefix", "key2", bl2);
+    t->set("cf1", "key1", bl1);
+    t->set("cf1", "key2", bl2);
+    ASSERT_EQ(0, db->submit_transaction_sync(t));
+  }
+  {
+    cout << "iterating the default CF" << std::endl;
+    KeyValueDB::Iterator iter = db->get_iterator("prefix");
+    iter->seek_to_first();
+    ASSERT_EQ(1, iter->valid());
+    ASSERT_EQ("key1", iter->key());
+    ASSERT_EQ("hello", _bl_to_str(iter->value()));
+    ASSERT_EQ(0, iter->next());
+    ASSERT_EQ(1, iter->valid());
+    ASSERT_EQ("key2", iter->key());
+    ASSERT_EQ("world", _bl_to_str(iter->value()));
+  }
+  {
+    cout << "iterating the new CF" << std::endl;
+    KeyValueDB::Iterator iter = db->get_iterator("cf1");
+    iter->seek_to_first();
+    ASSERT_EQ(1, iter->valid());
+    ASSERT_EQ("key1", iter->key());
+    ASSERT_EQ("hello", _bl_to_str(iter->value()));
+    ASSERT_EQ(0, iter->next());
+    ASSERT_EQ(1, iter->valid());
+    ASSERT_EQ("key2", iter->key());
+    ASSERT_EQ("world", _bl_to_str(iter->value()));
+  }
+  fini();
+}
+
+TEST_P(KVTest, RocksDBShardingIteratorTest) {
+  if(string(GetParam()) != "rocksdb")
+    return;
+
+  std::string cfs("A(6)");
+  ASSERT_EQ(0, db->init(g_conf()->bluestore_rocksdb_options));
+  cout << "creating one column family and opening it" << std::endl;
+  ASSERT_EQ(0, db->create_and_open(cout, cfs));
+  {
+    KeyValueDB::Transaction t = db->get_transaction();
+    for (int v = 100; v <= 999; v++) {
+      std::string str = to_string(v);
+      bufferlist val;
+      val.append(str);
+      t->set("A", str, val);
+    }
+    ASSERT_EQ(0, db->submit_transaction_sync(t));
+  }
+  {
+    KeyValueDB::Iterator it = db->get_iterator("A");
+    int pos = 0;
+    ASSERT_EQ(it->lower_bound(to_string(pos)), 0);
+    for (pos = 100; pos <= 999; pos++) {
+      ASSERT_EQ(it->valid(), true);
+      ASSERT_EQ(it->key(), to_string(pos));
+      ASSERT_EQ(it->value().to_str(), to_string(pos));
+      it->next();
+    }
+    ASSERT_EQ(it->valid(), false);
+    pos = 999;
+    ASSERT_EQ(it->lower_bound(to_string(pos)), 0);
+    for (pos = 999; pos >= 100; pos--) {
+      ASSERT_EQ(it->valid(), true);
+      ASSERT_EQ(it->key(), to_string(pos));
+      ASSERT_EQ(it->value().to_str(), to_string(pos));
+      it->prev();
+    }
+    ASSERT_EQ(it->valid(), false);
+  }
+  fini();
+}
+
+TEST_P(KVTest, RocksDBCFMerge) {
+  if(string(GetParam()) != "rocksdb")
+    return;
+
+  shared_ptr<KeyValueDB::MergeOperator> p(new AppendMOP);
+  int r = db->set_merge_operator("cf1",p);
+  if (r < 0)
+    return; // No merge operators for this database type
+  std::string cfs("cf1");
+  ASSERT_EQ(0, db->init(g_conf()->bluestore_rocksdb_options));
+  cout << "creating one column family and opening it" << std::endl;
+  ASSERT_EQ(0, db->create_and_open(cout, cfs));
+
+  {
+    KeyValueDB::Transaction t = db->get_transaction();
+    bufferlist v1, v2, v3;
+    v1.append(string("1"));
+    v2.append(string("2"));
+    v3.append(string("3"));
+    t->set("P", "K1", v1);
+    t->set("cf1", "A1", v2);
+    t->rmkey("cf1", "A2");
+    t->merge("cf1", "A2", v3);
+    db->submit_transaction_sync(t);
+  }
+  {
+    bufferlist v1, v2, v3;
+    ASSERT_EQ(0, db->get("P", "K1", &v1));
+    ASSERT_EQ(tostr(v1), "1");
+    ASSERT_EQ(0, db->get("cf1", "A1", &v2));
+    ASSERT_EQ(tostr(v2), "2");
+    ASSERT_EQ(0, db->get("cf1", "A2", &v3));
+    ASSERT_EQ(tostr(v3), "?3");
+  }
+  {
+    KeyValueDB::Transaction t = db->get_transaction();
+    bufferlist v1;
+    v1.append(string("1"));
+    t->merge("cf1", "A2", v1);
+    db->submit_transaction_sync(t);
+  }
+  {
+    bufferlist v;
+    ASSERT_EQ(0, db->get("cf1", "A2", &v));
+    ASSERT_EQ(tostr(v), "?31");
+  }
+  fini();
+}
+
+TEST_P(KVTest, RocksDB_estimate_size) {
+  if(string(GetParam()) != "rocksdb")
+    GTEST_SKIP();
+
+  std::string cfs("cf1");
+  ASSERT_EQ(0, db->init(g_conf()->bluestore_rocksdb_options));
+  cout << "creating one column family and opening it" << std::endl;
+  ASSERT_EQ(0, db->create_and_open(cout));
+
+  srand(0);
+  for(int test = 0; test < 20; test++)
+  {
+    KeyValueDB::Transaction t = db->get_transaction();
+    for (int i = 0; i < 100; i++) {
+      bufferlist v1;
+      v1.append(gen_random_string(1000));
+      t->set("A", to_string(rand()%100000), v1);
+    }
+    db->submit_transaction_sync(t);
+    db->compact();
+
+    int64_t size_a = db->estimate_prefix_size("A","");
+    ASSERT_GT(size_a, (test + 1) * 1000 * 100 * 0.5);
+    ASSERT_LT(size_a, (test + 1) * 1000 * 100 * 1.5);
+    int64_t size_a1 = db->estimate_prefix_size("A","1");
+    ASSERT_GT(size_a1, (test + 1) * 1000 * 100 * 0.1 * 0.5);
+    ASSERT_LT(size_a1, (test + 1) * 1000 * 100 * 0.1 * 1.5);
+    int64_t size_b = db->estimate_prefix_size("B","");
+    ASSERT_EQ(size_b, 0);
+  }
+
+  fini();
+}
+
+TEST_P(KVTest, RocksDB_estimate_size_column_family) {
+  if(string(GetParam()) != "rocksdb")
+    GTEST_SKIP();
+
+  std::string cfs("cf1");
+  ASSERT_EQ(0, db->init(g_conf()->bluestore_rocksdb_options));
+  cout << "creating one column family and opening it" << std::endl;
+  ASSERT_EQ(0, db->create_and_open(cout, cfs));
+
+  srand(0);
+  for(int test = 0; test < 20; test++)
+  {
+    KeyValueDB::Transaction t = db->get_transaction();
+    for (int i = 0; i < 100; i++) {
+      bufferlist v1;
+      v1.append(gen_random_string(1000));
+      t->set("cf1", to_string(rand()%100000), v1);
+    }
+    db->submit_transaction_sync(t);
+    db->compact();
+
+    int64_t size_a = db->estimate_prefix_size("cf1","");
+    ASSERT_GT(size_a, (test + 1) * 1000 * 100 * 0.5);
+    ASSERT_LT(size_a, (test + 1) * 1000 * 100 * 1.5);
+    int64_t size_a1 = db->estimate_prefix_size("cf1","1");
+    ASSERT_GT(size_a1, (test + 1) * 1000 * 100 * 0.1 * 0.5);
+    ASSERT_LT(size_a1, (test + 1) * 1000 * 100 * 0.1 * 1.5);
+    int64_t size_b = db->estimate_prefix_size("B","");
+    ASSERT_EQ(size_b, 0);
+  }
+
+  fini();
+}
+
+TEST_P(KVTest, RocksDB_parse_sharding_def) {
+  if(string(GetParam()) != "rocksdb")
+    GTEST_SKIP();
+
+  bool result;
+  std::vector<RocksDBStore::ColumnFamily> sharding_def;
+  char const* error_position = nullptr;
+  std::string error_msg;
+
+  std::string_view text_def = "A(10,0-30) B(6)=option1,option2=aaaa C";
+  result = RocksDBStore::parse_sharding_def(text_def,
+					    sharding_def,
+					    &error_position,
+					    &error_msg);
+
+  ASSERT_EQ(result, true);
+  ASSERT_EQ(error_position, nullptr);
+  ASSERT_EQ(error_msg, "");
+  std::cout << text_def << std::endl;
+  if (error_position) std::cout << std::string(error_position - text_def.begin(), ' ') << "^" << error_msg << std::endl;
+
+  ASSERT_EQ(sharding_def.size(), 3);
+  ASSERT_EQ(sharding_def[0].name, "A");
+  ASSERT_EQ(sharding_def[0].shard_cnt, 10);
+  ASSERT_EQ(sharding_def[0].hash_l, 0);
+  ASSERT_EQ(sharding_def[0].hash_h, 30);
+
+  ASSERT_EQ(sharding_def[1].name, "B");
+  ASSERT_EQ(sharding_def[1].shard_cnt, 6);
+  ASSERT_EQ(sharding_def[1].options, "option1,option2=aaaa");
+  ASSERT_EQ(sharding_def[2].name, "C");
+  ASSERT_EQ(sharding_def[2].shard_cnt, 1);
+
+
+  text_def = "A(10 B(6)=option C";
+  result = RocksDBStore::parse_sharding_def(text_def,
+					    sharding_def,
+					    &error_position,
+					    &error_msg);
+  std::cout << text_def << std::endl;
+  if (error_position)
+    std::cout << std::string(error_position - text_def.begin(), ' ') << "^" << error_msg << std::endl;
+  ASSERT_EQ(result, false);
+  ASSERT_NE(error_position, nullptr);
+  ASSERT_NE(error_msg, "");
+
+  text_def = "A(10,1) B(6)=option C";
+  result = RocksDBStore::parse_sharding_def(text_def,
+					    sharding_def,
+					    &error_position,
+					    &error_msg);
+  std::cout << text_def << std::endl;
+  std::cout << std::string(error_position - text_def.begin(), ' ') << "^" << error_msg << std::endl;
+  ASSERT_EQ(result, false);
+  ASSERT_NE(error_position, nullptr);
+  ASSERT_NE(error_msg, "");
+}
+
+
+
+class RocksDBShardingTest : public ::testing::TestWithParam<const char*> {
+public:
+  boost::scoped_ptr<KeyValueDB> db;
+
+  RocksDBShardingTest() : db(0) {}
+
+  string _bl_to_str(bufferlist val) {
+    string str(val.c_str(), val.length());
+    return str;
+  }
+
+  void rm_r(string path) {
+    string cmd = string("rm -r ") + path;
+    if (verbose)
+      cout << "==> " << cmd << std::endl;
+    int r = ::system(cmd.c_str());
+    if (r) {
+      cerr << "failed with exit code " << r
+	   << ", continuing anyway" << std::endl;
+    }
+  }
+
+  void SetUp() override {
+    verbose = getenv("VERBOSE") && strcmp(getenv("VERBOSE"), "1") == 0;
+
+    int r = ::mkdir("kv_test_temp_dir", 0777);
+    if (r < 0 && errno != EEXIST) {
+      r = -errno;
+      cerr << __func__ << ": unable to create kv_test_temp_dir: "
+	   << cpp_strerror(r) << std::endl;
+      return;
+    }
+    db.reset(KeyValueDB::create(g_ceph_context, "rocksdb",
+				"kv_test_temp_dir"));
+    ASSERT_EQ(0, db->init(g_conf()->bluestore_rocksdb_options));
+    if (verbose)
+      cout << "Creating database with sharding: " << GetParam() << std::endl;
+    ASSERT_EQ(0, db->create_and_open(cout, GetParam()));
+  }
+  void TearDown() override {
+    db.reset(nullptr);
+    rm_r("kv_test_temp_dir");
+  }
+
+  /*
+    A - main 0/1/20
+    B - shard 1/3 x 0/1/20
+    C - main 0/1/20
+    D - shard 1/3 x 0/1/20
+    E - main 0/1/20
+  */
+  bool verbose;
+  std::vector<std::string> sharding_defs = {
+    "Betelgeuse D",
+    "Betelgeuse(3) D",
+    "Betelgeuse D(3)",
+    "Betelgeuse(3) D(3)"};
+  std::vector<std::string> prefixes = {"Ad", "Betelgeuse", "C", "D", "Evade"};
+  std::vector<std::string> randoms = {"0", "1", "2", "3", "4", "5",
+				      "found", "brain", "fully", "pen", "worth", "race",
+				      "stand", "nodded", "whenever", "surrounded", "industrial", "skin",
+				      "this", "direction", "family", "beginning", "whenever", "held",
+				      "metal", "year", "like", "valuable", "softly", "whistle",
+				      "perfectly", "broken", "idea", "also", "coffee", "branch",
+				      "tongue", "immediately", "bent", "partly", "burn", "include",
+				      "certain", "burst", "final", "smoke", "positive", "perfectly"
+  };
+  int R = randoms.size();
+
+  typedef int test_id[6];
+  void zero(test_id& x) {
+    k = 0;
+    v = 0;
+    for (auto& i:x)
+      i = 0;
+  }
+  bool end(const test_id& x) {
+    return x[5] != 0;
+  }
+  void next(test_id& x) {
+    x[0]++;
+    for (int i = 0; i < 5; i++) {
+      if (x[i] == 3) {
+	x[i] = 0;
+	++x[i + 1];
+      }
+    }
+  }
+
+  std::map<std::string, std::string> data;
+  int k = 0;
+  int v = 0;
+
+  void generate_data(const test_id& x) {
+    data.clear();
+    for (int i = 0; i < 5; i++) {
+      if (verbose)
+	std::cout << x[i] << "-";
+      switch (x[i]) {
+      case 0:
+	break;
+      case 1:
+	data[RocksDBStore::combine_strings(prefixes[i], randoms[k++ % R])] = randoms[v++ % R];
+	break;
+      case 2:
+	std::string base = randoms[k++ % R];
+	for (int j = 0; j < 10; j++) {
+	  data[RocksDBStore::combine_strings(prefixes[i], base + "." + randoms[k++ % R])] = randoms[v++ % R];
+	}
+	break;
+      }
+    }
+  }
+
+  void data_to_db() {
+    KeyValueDB::Transaction t = db->get_transaction();
+    for (auto &d : data) {
+      bufferlist v1;
+      v1.append(d.second);
+      string prefix;
+      string key;
+      RocksDBStore::split_key(d.first, &prefix, &key);
+      t->set(prefix, key, v1);
+      if (verbose)
+	std::cout << "SET " << prefix << " " << key << std::endl;
+    }
+    ASSERT_EQ(db->submit_transaction_sync(t), 0);
+  }
+
+  void clear_db() {
+    KeyValueDB::Transaction t = db->get_transaction();
+    for (auto &d : data) {
+      string prefix;
+      string key;
+      RocksDBStore::split_key(d.first, &prefix, &key);
+      t->rmkey(prefix, key);
+    }
+    ASSERT_EQ(db->submit_transaction_sync(t), 0);
+    //paranoid, check if db empty
+    KeyValueDB::WholeSpaceIterator it = db->get_wholespace_iterator();
+    ASSERT_EQ(it->seek_to_first(), 0);
+    ASSERT_EQ(it->valid(), false);
+  }
+};
+
+TEST_P(RocksDBShardingTest, wholespace_next) {
+  test_id X;
+  zero(X);
+  do {
+    generate_data(X);
+    data_to_db();
+
+    KeyValueDB::WholeSpaceIterator it = db->get_wholespace_iterator();
+    //move forward
+    auto dit = data.begin();
+    int r = it->seek_to_first();
+    ASSERT_EQ(r, 0);
+    ASSERT_EQ(it->valid(), (dit != data.end()));
+
+    while (dit != data.end()) {
+      ASSERT_EQ(it->valid(), true);
+      string prefix;
+      string key;
+      RocksDBStore::split_key(dit->first, &prefix, &key);
+      auto raw_key = it->raw_key();
+      ASSERT_EQ(raw_key.first, prefix);
+      ASSERT_EQ(raw_key.second, key);
+      ASSERT_EQ(it->value().to_str(), dit->second);
+      if (verbose)
+	std::cout << "next " << prefix << " " << key << std::endl;
+      ASSERT_EQ(it->next(), 0);
+      ++dit;
+    }
+    ASSERT_EQ(it->valid(), false);
+
+    clear_db();
+    next(X);
+  } while (!end(X));
+}
+
+TEST_P(RocksDBShardingTest, wholespace_prev) {
+  test_id X;
+  zero(X);
+  do {
+    generate_data(X);
+    data_to_db();
+
+    KeyValueDB::WholeSpaceIterator it = db->get_wholespace_iterator();
+    auto dit = data.rbegin();
+    int r = it->seek_to_last();
+    ASSERT_EQ(r, 0);
+    ASSERT_EQ(it->valid(), (dit != data.rend()));
+
+    while (dit != data.rend()) {
+      ASSERT_EQ(it->valid(), true);
+      string prefix;
+      string key;
+      RocksDBStore::split_key(dit->first, &prefix, &key);
+      auto raw_key = it->raw_key();
+      ASSERT_EQ(raw_key.first, prefix);
+      ASSERT_EQ(raw_key.second, key);
+      ASSERT_EQ(it->value().to_str(), dit->second);
+      if (verbose)
+	std::cout << "prev " << prefix << " " << key << std::endl;
+      ASSERT_EQ(it->prev(), 0);
+      ++dit;
+    }
+    ASSERT_EQ(it->valid(), false);
+
+    clear_db();
+    next(X);
+  } while (!end(X));
+}
+
+TEST_P(RocksDBShardingTest, wholespace_lower_bound) {
+  test_id X;
+  zero(X);
+  do {
+    generate_data(X);
+    data_to_db();
+
+    KeyValueDB::WholeSpaceIterator it = db->get_wholespace_iterator();
+    auto dit = data.begin();
+    int r = it->seek_to_first();
+    ASSERT_EQ(r, 0);
+    ASSERT_EQ(it->valid(), (dit != data.end()));
+
+    while (dit != data.end()) {
+      ASSERT_EQ(it->valid(), true);
+      string prefix;
+      string key;
+      RocksDBStore::split_key(dit->first, &prefix, &key);
+      KeyValueDB::WholeSpaceIterator it1 = db->get_wholespace_iterator();
+      ASSERT_EQ(it1->lower_bound(prefix, key), 0);
+      ASSERT_EQ(it1->valid(), true);
+      auto raw_key = it1->raw_key();
+      ASSERT_EQ(raw_key.first, prefix);
+      ASSERT_EQ(raw_key.second, key);
+      if (verbose)
+	std::cout << "lower_bound " << prefix << " " << key << std::endl;
+      ASSERT_EQ(it->next(), 0);
+      ++dit;
+    }
+    ASSERT_EQ(it->valid(), false);
+
+    clear_db();
+    next(X);
+  } while (!end(X));
+}
+
+TEST_P(RocksDBShardingTest, wholespace_upper_bound) {
+  test_id X;
+  zero(X);
+  do {
+    generate_data(X);
+    data_to_db();
+
+    KeyValueDB::WholeSpaceIterator it = db->get_wholespace_iterator();
+    auto dit = data.begin();
+    int r = it->seek_to_first();
+    ASSERT_EQ(r, 0);
+    ASSERT_EQ(it->valid(), (dit != data.end()));
+
+    while (dit != data.end()) {
+      ASSERT_EQ(it->valid(), true);
+      string prefix;
+      string key;
+      string key_minus_1;
+      RocksDBStore::split_key(dit->first, &prefix, &key);
+      //decrement key minimally
+      key_minus_1 = key.substr(0, key.length() - 1) + std::string(1, key[key.length() - 1] - 1);
+      KeyValueDB::WholeSpaceIterator it1 = db->get_wholespace_iterator();
+      ASSERT_EQ(it1->upper_bound(prefix, key_minus_1), 0);
+      ASSERT_EQ(it1->valid(), true);
+      auto raw_key = it1->raw_key();
+      ASSERT_EQ(raw_key.first, prefix);
+      ASSERT_EQ(raw_key.second, key);
+      if (verbose)
+	std::cout << "upper_bound " << prefix << " " << key_minus_1 << std::endl;
+      ASSERT_EQ(it->next(), 0);
+      ++dit;
+    }
+    ASSERT_EQ(it->valid(), false);
+
+    clear_db();
+    next(X);
+  } while (!end(X));
+}
+
+TEST_P(RocksDBShardingTest, wholespace_lookup_limits) {
+  test_id X;
+  zero(X);
+  do {
+    generate_data(X);
+    data_to_db();
+
+    //lookup before first
+    if (data.size() > 0) {
+      auto dit = data.begin();
+      string prefix;
+      string key;
+      RocksDBStore::split_key(dit->first, &prefix, &key);
+      KeyValueDB::WholeSpaceIterator it1 = db->get_wholespace_iterator();
+      ASSERT_EQ(it1->lower_bound(" ", " "), 0);
+      ASSERT_EQ(it1->valid(), true);
+      auto raw_key = it1->raw_key();
+      ASSERT_EQ(raw_key.first, prefix);
+      ASSERT_EQ(raw_key.second, key);
+    }
+    //lookup after last
+    KeyValueDB::WholeSpaceIterator it1 = db->get_wholespace_iterator();
+    ASSERT_EQ(it1->lower_bound("~", "~"), 0);
+    ASSERT_EQ(it1->valid(), false);
+
+    clear_db();
+    next(X);
+  } while (!end(X));
+}
+
+
+
+class RocksDBResharding : public ::testing::Test {
+public:
+  boost::scoped_ptr<RocksDBStore> db;
+
+  RocksDBResharding() : db(0) {}
+
+  string _bl_to_str(bufferlist val) {
+    string str(val.c_str(), val.length());
+    return str;
+  }
+
+  void rm_r(string path) {
+    string cmd = string("rm -r ") + path;
+    if (verbose)
+      cout << "==> " << cmd << std::endl;
+    int r = ::system(cmd.c_str());
+    if (r) {
+      cerr << "failed with exit code " << r
+	   << ", continuing anyway" << std::endl;
+    }
+  }
+
+  void SetUp() override {
+    verbose = getenv("VERBOSE") && strcmp(getenv("VERBOSE"), "1") == 0;
+
+    int r = ::mkdir("kv_test_temp_dir", 0777);
+    if (r < 0 && errno != EEXIST) {
+      r = -errno;
+      cerr << __func__ << ": unable to create kv_test_temp_dir: "
+	   << cpp_strerror(r) << std::endl;
+      return;
+    }
+
+    KeyValueDB* db_kv = KeyValueDB::create(g_ceph_context, "rocksdb",
+					 "kv_test_temp_dir");
+    RocksDBStore* db_rocks = dynamic_cast<RocksDBStore*>(db_kv);
+    ceph_assert(db_rocks);
+    db.reset(db_rocks);
+    ASSERT_EQ(0, db->init(g_conf()->bluestore_rocksdb_options));
+  }
+  void TearDown() override {
+    db.reset(nullptr);
+    rm_r("kv_test_temp_dir");
+  }
+
+  bool verbose;
+  std::vector<std::string> prefixes = {"Ad", "Betelgeuse", "C", "D", "Evade"};
+  std::vector<std::string> randoms = {"0", "1", "2", "3", "4", "5",
+				      "found", "brain", "fully", "pen", "worth", "race",
+				      "stand", "nodded", "whenever", "surrounded", "industrial", "skin",
+				      "this", "direction", "family", "beginning", "whenever", "held",
+				      "metal", "year", "like", "valuable", "softly", "whistle",
+				      "perfectly", "broken", "idea", "also", "coffee", "branch",
+				      "tongue", "immediately", "bent", "partly", "burn", "include",
+				      "certain", "burst", "final", "smoke", "positive", "perfectly"
+  };
+  int R = randoms.size();
+  int k = 0;
+  std::map<std::string, std::string> data;
+
+  void generate_data() {
+    data.clear();
+    for (size_t p = 0; p < prefixes.size(); p++) {
+      size_t elem_count = 1 << (( p * 3 ) + 3);
+      for (size_t i = 0; i < elem_count; i++) {
+	std::string key;
+	for (int x = 0; x < 5; x++) {
+	  key = key + randoms[rand() % R];
+	}
+	std::string value;
+	for (int x = 0; x < 3; x++) {
+	  value = value + randoms[rand() % R];
+	}
+	data[RocksDBStore::combine_strings(prefixes[p], key)] = value;
+      }
+    }
+  }
+
+  void data_to_db() {
+    KeyValueDB::Transaction t = db->get_transaction();
+    size_t i = 0;
+    for (auto& d: data) {
+      bufferlist v1;
+      v1.append(d.second);
+      string prefix;
+      string key;
+      RocksDBStore::split_key(d.first, &prefix, &key);
+      t->set(prefix, key, v1);
+      if (verbose)
+	std::cout << "SET " << prefix << " " << key << std::endl;
+      i++;
+      if ((i % 1000) == 0) {
+	ASSERT_EQ(db->submit_transaction_sync(t), 0);
+	t.reset();
+	if (verbose)
+	  std::cout << "writing key to DB" << std::endl;
+	t = db->get_transaction();
+      }
+    }
+    if (verbose)
+      std::cout << "writing keys to DB" << std::endl;
+    ASSERT_EQ(db->submit_transaction_sync(t), 0);
+  }
+
+  void clear_db() {
+    KeyValueDB::Transaction t = db->get_transaction();
+    for (auto &d : data) {
+      string prefix;
+      string key;
+      RocksDBStore::split_key(d.first, &prefix, &key);
+      t->rmkey(prefix, key);
+    }
+    ASSERT_EQ(db->submit_transaction_sync(t), 0);
+    //paranoid, check if db empty
+    KeyValueDB::WholeSpaceIterator it = db->get_wholespace_iterator();
+    ASSERT_EQ(it->seek_to_first(), 0);
+    ASSERT_EQ(it->valid(), false);
+  }
+
+  void check_db() {
+    KeyValueDB::WholeSpaceIterator it = db->get_wholespace_iterator();
+    //move forward
+    auto dit = data.begin();
+    int r = it->seek_to_first();
+    ASSERT_EQ(r, 0);
+    ASSERT_EQ(it->valid(), (dit != data.end()));
+
+    while (dit != data.end()) {
+      ASSERT_EQ(it->valid(), true);
+      string prefix;
+      string key;
+      RocksDBStore::split_key(dit->first, &prefix, &key);
+      auto raw_key = it->raw_key();
+      ASSERT_EQ(raw_key.first, prefix);
+      ASSERT_EQ(raw_key.second, key);
+      ASSERT_EQ(it->value().to_str(), dit->second);
+      if (verbose)
+	std::cout << "next " << prefix << " " << key << std::endl;
+      ASSERT_EQ(it->next(), 0);
+      ++dit;
+    }
+    ASSERT_EQ(it->valid(), false);
+  }
+};
+
+TEST_F(RocksDBResharding, basic) {
+  ASSERT_EQ(0, db->create_and_open(cout, ""));
+  generate_data();
+  data_to_db();
+  check_db();
+  db->close();
+  ASSERT_EQ(db->reshard("Evade(4)"), 0);
+  ASSERT_EQ(db->open(cout), 0);
+  check_db();
+  db->close();
+}
+
+TEST_F(RocksDBResharding, all_to_shards) {
+  ASSERT_EQ(0, db->create_and_open(cout, ""));
+  generate_data();
+  data_to_db();
+  check_db();
+  db->close();
+  ASSERT_EQ(db->reshard("Ad(1) Betelgeuse(1) C(1) D(1) Evade(1)"), 0);
+  ASSERT_EQ(db->open(cout), 0);
+  check_db();
+  db->close();
+}
+
+TEST_F(RocksDBResharding, all_to_shards_and_back_again) {
+  ASSERT_EQ(0, db->create_and_open(cout, ""));
+  generate_data();
+  data_to_db();
+  check_db();
+  db->close();
+  ASSERT_EQ(db->reshard("Ad(1) Betelgeuse(1) C(1) D(1) Evade(1)"), 0);
+  ASSERT_EQ(db->open(cout), 0);
+  check_db();
+  db->close();
+  ASSERT_EQ(db->reshard(""), 0);
+  ASSERT_EQ(db->open(cout), 0);
+  check_db();
+  db->close();
+}
+
+TEST_F(RocksDBResharding, resume_interrupted_at_batch) {
+  ASSERT_EQ(0, db->create_and_open(cout, ""));
+  generate_data();
+  data_to_db();
+  check_db();
+  db->close();
+  RocksDBStore::resharding_ctrl ctrl;
+  ctrl.unittest_fail_after_first_batch = true;
+  ASSERT_EQ(db->reshard("Evade(4)", &ctrl), -1000);
+  ASSERT_NE(db->open(cout), 0);
+  ASSERT_EQ(db->reshard("Evade(4)"), 0);
+  ASSERT_EQ(db->open(cout), 0);
+  check_db();
+  db->close();
+}
+
+TEST_F(RocksDBResharding, resume_interrupted_at_column) {
+  ASSERT_EQ(0, db->create_and_open(cout, ""));
+  generate_data();
+  data_to_db();
+  check_db();
+  db->close();
+  RocksDBStore::resharding_ctrl ctrl;
+  ctrl.unittest_fail_after_processing_column = true;
+  ASSERT_EQ(db->reshard("Evade(4)", &ctrl), -1001);
+  ASSERT_NE(db->open(cout), 0);
+  ASSERT_EQ(db->reshard("Evade(4)"), 0);
+  ASSERT_EQ(db->open(cout), 0);
+  check_db();
+  db->close();
+}
+
+TEST_F(RocksDBResharding, resume_interrupted_before_commit) {
+  ASSERT_EQ(0, db->create_and_open(cout, ""));
+  generate_data();
+  data_to_db();
+  check_db();
+  db->close();
+  RocksDBStore::resharding_ctrl ctrl;
+  ctrl.unittest_fail_after_successful_processing = true;
+  ASSERT_EQ(db->reshard("Evade(4)", &ctrl), -1002);
+  ASSERT_NE(db->open(cout), 0);
+  ASSERT_EQ(db->reshard("Evade(4)"), 0);
+  ASSERT_EQ(db->open(cout), 0);
+  check_db();
+  db->close();
+}
+
+TEST_F(RocksDBResharding, prevent_incomplete_hash_change) {
+  ASSERT_EQ(0, db->create_and_open(cout, "Evade(4,0-3)"));
+  generate_data();
+  data_to_db();
+  check_db();
+  db->close();
+  RocksDBStore::resharding_ctrl ctrl;
+  ctrl.unittest_fail_after_successful_processing = true;
+  ASSERT_EQ(db->reshard("Evade(4,0-8)", &ctrl), -1002);
+  ASSERT_NE(db->open(cout), 0);
+  ASSERT_EQ(db->reshard("Evade(4,0-8)"), 0);
+  ASSERT_EQ(db->open(cout), 0);
+  check_db();
+  db->close();
+}
+
+TEST_F(RocksDBResharding, change_reshard) {
+  ASSERT_EQ(0, db->create_and_open(cout, "Ad(4)"));
+  generate_data();
+  data_to_db();
+  check_db();
+  db->close();
+  {
+    RocksDBStore::resharding_ctrl ctrl;
+    ctrl.unittest_fail_after_first_batch = true;
+    ASSERT_EQ(db->reshard("C(5) D(3)", &ctrl), -1000);
+  }
+  {
+    RocksDBStore::resharding_ctrl ctrl;
+    ASSERT_NE(db->open(cout), 0);
+    ctrl.unittest_fail_after_first_batch = false;
+    ctrl.unittest_fail_after_processing_column = true;
+    ASSERT_EQ(db->reshard("C(5) Evade(2)", &ctrl), -1001);
+  }
+  {
+    RocksDBStore::resharding_ctrl ctrl;
+    ASSERT_NE(db->open(cout), 0);
+    ctrl.unittest_fail_after_processing_column = false;
+    ctrl.unittest_fail_after_successful_processing = true;
+    ASSERT_EQ(db->reshard("Evade(2) D(3)", &ctrl), -1002);
+  }
+  {
+    ASSERT_NE(db->open(cout), 0);
+    ASSERT_EQ(db->reshard("Ad(1) Evade(5)"), 0);
+  }
+  {
+    ASSERT_EQ(db->open(cout), 0);
+    check_db();
+    db->close();
+  }
+}
+
+typedef std::mt19937 gen_type;
+
+class RocksDBSplitRange : public ::testing::Test {
+public:
+  boost::scoped_ptr<RocksDBStore> db;
+  gen_type rng = gen_type(0);
+  RocksDBSplitRange() : db(0) {}
+
+  string _bl_to_str(bufferlist val) {
+    string str(val.c_str(), val.length());
+    return str;
+  }
+
+  void rm_r(string path) {
+    string cmd = string("rm -r ") + path;
+    if (verbose)
+      cout << "==> " << cmd << std::endl;
+    int r = ::system(cmd.c_str());
+    if (r) {
+      cerr << "failed with exit code " << r
+        << ", continuing anyway" << std::endl;
+    }
+  }
+
+  void SetUp() override {
+    verbose = getenv("VERBOSE") && strcmp(getenv("VERBOSE"), "1") == 0;
+
+    int r = ::mkdir("kv_test_temp_dir", 0777);
+    if (r < 0 && errno != EEXIST) {
+      r = -errno;
+      cerr << __func__ << ": unable to create kv_test_temp_dir: "
+        << cpp_strerror(r) << std::endl;
+      return;
+    }
+
+    KeyValueDB* db_kv = KeyValueDB::create(g_ceph_context, "rocksdb", "kv_test_temp_dir");
+    RocksDBStore* db_rocks = dynamic_cast<RocksDBStore*>(db_kv);
+    ceph_assert(db_rocks);
+    db.reset(db_rocks);
+    ASSERT_EQ(0, db->init(g_conf()->bluestore_rocksdb_options));
+  }
+
+  void TearDown() override {
+    db.reset(nullptr);
+    rm_r("kv_test_temp_dir");
+  }
+
+  bool is_jenkins() {
+    return (getenv("JENKINS_HOME") != nullptr);
+  }
+
+  bool verbose;
+  std::vector<std::string> random_words = {
+    "found", "brain", "fully", "pen", "worth", "race",
+    "stand", "nodded", "whenever", "surrounded", "industrial", "skin",
+    "this", "direction", "family", "beginning", "whenever", "held",
+    "metal", "year", "like", "valuable", "softly", "whistle",
+    "perfectly", "broken", "idea", "also", "coffee", "branch",
+    "tongue", "immediately", "bent", "partly", "burn", "include",
+    "certain", "burst", "final", "smoke", "positive", "perfectly"
+  };
+  uniform_int_distribution<> uniform_random_words =
+    uniform_int_distribution<>(0, random_words.size() - 1);
+  uniform_int_distribution<> random_byte =
+    uniform_int_distribution<>('!', '~');
+  std::map<std::string, std::string> data;
+
+  std::string random_string(uint32_t msg_size, uint32_t compress_target)
+  {
+    std::string result;
+    uint32_t s = 0; // accumulated message
+    uint32_t c = 0; // estimated compressed size
+    // pick words
+    while (s < msg_size && (msg_size - s) > (compress_target - c)) {
+      uint32_t idx = uniform_random_words(rng);
+      result += random_words[idx];
+      s += random_words[idx].length();
+      c += 2; //~1 = random byte, ~2 = ref message
+    }
+    // fillup with full random bytes
+    while (s < msg_size) {
+      result.push_back(random_byte(rng));
+      s++;
+    }
+    return result;
+  }
+
+  struct DataToDB {
+    KeyValueDB* db;
+    std::string prefix;
+    KeyValueDB::Transaction t;
+    uint32_t cnt = 0;
+    DataToDB(KeyValueDB* db, const std::string& prefix)
+    : db(db), prefix(prefix)
+    {
+      t = db->get_transaction();
+    }
+    void add(const std::string& key, const std::string& value)
+    {
+      bufferlist v;
+      v.append(value);
+      t->set(prefix, key, v);
+      cnt++;
+      if ((cnt % 1000) == 0) {
+        ASSERT_EQ(db->submit_transaction_sync(t), 0);
+        t.reset();
+        t = db->get_transaction();
+      }
+    }
+    void rm(const std::string& key)
+    {
+      t->rmkey(prefix, key);
+      cnt++;
+      if ((cnt % 1000) == 0) {
+        ASSERT_EQ(db->submit_transaction_sync(t), 0);
+        t.reset();
+        t = db->get_transaction();
+      }
+    }
+    void flush()
+    {
+      ASSERT_EQ(db->submit_transaction_sync(t), 0);
+      t.reset();
+      t = db->get_transaction();
+    }
+  };
+
+  struct TreeGen {
+    uint32_t left_w;
+    uint32_t right_w;
+    std::string left_name;
+    std::string right_name;
+    bool sub_tree_branch(int& n) const
+    {
+      uint32_t count_left = (n * left_w) / (left_w + right_w);
+      uint32_t rem = (n * left_w) % (left_w + right_w);
+      uint32_t count_right = n - count_left;
+      if (rem >= right_w) {
+        n = count_left;
+        return false; //left
+      } else {
+        n = count_right - 1; //right
+        return true;
+      }
+    }
+    std::string get_branch_name(int n) const
+    {
+      std::string result;
+      while (n > 0) {
+        bool do_right = sub_tree_branch(n);
+        if (do_right)
+          result.append(right_name);
+        else
+          result.append(left_name);
+      }
+      return result;
+    }
+    TreeGen(
+      uint32_t left_weight,
+      uint32_t right_weight,
+      const std::string& left_name,
+      const std::string& right_name)
+      : left_w(left_weight)
+      , right_w(right_weight)
+      , left_name(left_name)
+      , right_name(right_name)
+    {
+      if (left_weight < right_weight) {
+        std::swap(this->left_name, this->right_name);
+        std::swap(left_weight, right_weight);
+      }
+    }
+  };
+
+  void grow_tree(
+    const TreeGen& t, DataToDB& data_to_db,
+    uint32_t key_from, uint32_t key_to,
+    const std::string& key_tail,
+    uint32_t value_size, uint32_t value_comp_size)
+  {
+    for(uint32_t i = key_from; i < key_to; i++) {
+      std::string key = t.get_branch_name(i) + key_tail;
+      std::string value = random_string(value_size, value_comp_size);
+      data_to_db.add(key, value);
+    }
+    data_to_db.flush();
+  }
+
+  void prune_tree(
+    const TreeGen& t, DataToDB& data_to_db,
+    uint32_t key_from, uint32_t key_to,
+    const std::string& key_tail)
+  {
+    for(uint32_t i = key_from; i < key_to; i++) {
+      std::string key = t.get_branch_name(i) + key_tail;
+      data_to_db.rm(key);
+    }
+    data_to_db.flush();
+  }
+
+  std::pair<uint64_t, uint64_t> get_split_quality(
+    const std::string& prefix,
+    const std::vector<KeyValueDB::keyrange_t>& chunks)
+  {
+    uint64_t all_keys = 0;
+    uint64_t max_keys = 0;
+    KeyValueDB::Iterator it;
+    it = db->get_iterator(prefix);
+    if (verbose) std::cout << "keys_in_shards: ";
+    for (const auto& c : chunks) {
+      uint64_t keys = 0;
+      it->lower_bound(c.first_key);
+      while(it->valid() && it->key() < c.upper_bound) {
+        keys++;
+        all_keys++;
+        it->next();
+      }
+      if (verbose) std::cout << keys << " " << std::flush;
+      if (max_keys < keys) {
+        max_keys = keys;
+      }
+    }
+    if (verbose) std::cout << std::endl;
+    return make_pair(all_keys, max_keys);
+  }
+
+  void scan_split_quality(
+    const std::string& prefix)
+  {
+    if (!verbose) return;
+    std::vector<KeyValueDB::keyrange_t> chunks;
+    auto c_set = {1, 3, 5, 10, 20, 30};
+    auto p_set = {0.2, 0.1, 0.05, 0.02, 0.01};
+    std::cout << fmt::format("{:6}","");
+    for (uint32_t c: c_set) {
+      std::cout << fmt::format("{:10}",c);
+    }
+    std::cout << std::endl;
+    for (double prec: p_set) {
+      std::cout << fmt::format("{:5.2f} ",prec);
+      for (uint32_t c: c_set) {
+        utime_t start = ceph_clock_now();
+        db->util_divide_key_range(
+          prefix, "", std::string(20, '\377'),
+          c, 1000000, prec, chunks);
+        utime_t end = ceph_clock_now();
+        std::cout << fmt::format("{:7.3f}/{:2}", double(end - start) * 1000, chunks.size());
+      }
+      std::cout << std::endl;
+    }
+  }
+};
+
+TEST_F(RocksDBSplitRange, grow_tree) {
+  ASSERT_EQ(0, db->create_and_open(cout, "O"));
+
+  TreeGen t(70, 30, "l", "r");
+  DataToDB to_db(db.get(), "O");
+  vector<uint32_t> keys_to_test = {0, 1000, 10000, 100000, 1'000'000, 2'000'000, 5'000'000, 10'000'000};
+  if (is_jenkins()) keys_to_test = {1'000'000};
+  uint64_t keys = 0;
+  for (auto keys_end : keys_to_test) {
+    if (verbose) std::cout << "grow " << keys << "->" << keys_end << std::endl;
+    grow_tree(t, to_db, keys, keys_end, "a", 1000, 300);
+    keys = keys_end;
+    keys_end = keys_end * 2;
+
+    std::vector<KeyValueDB::keyrange_t> chunks;
+    utime_t start = ceph_clock_now();
+    db->util_divide_key_range(
+      "O", "", "",
+      10, 10000000, 0.1, chunks);
+    utime_t end = ceph_clock_now();
+    if (verbose) std::cout << "time=" << end - start << std::endl;
+    auto [all_keys, max_keys] = get_split_quality("O", chunks);
+    double speedup = double(all_keys) / max_keys;
+    if (verbose) std::cout << "quality=" << double(all_keys) / max_keys / chunks.size()
+      << " speedup=" << speedup << std::endl;
+    EXPECT_EQ(all_keys, keys);
+    if (all_keys > 1000000) {
+      EXPECT_GT(speedup, 8);
+    }
+    scan_split_quality("O");
+  }
+  db->close();
+}
+
+TEST_F(RocksDBSplitRange, grow_tree_high_quality) {
+  ASSERT_EQ(0, db->create_and_open(cout, "O"));
+
+  TreeGen t(70, 30, "l", "r");
+  DataToDB to_db(db.get(), "O");
+  vector<uint32_t> keys_to_test = {0, 1000, 10000, 100000, 1'000'000, 2'000'000, 5'000'000, 10'000'000};
+  if (is_jenkins()) keys_to_test = {1'000'000};
+  uint64_t keys = 0;
+  for (auto keys_end : keys_to_test) {
+    if (verbose) std::cout << "grow " << keys << "->" << keys_end << std::endl;
+    grow_tree(t, to_db, keys, keys_end, "a", 1000, 300);
+    keys = keys_end;
+    keys_end = keys_end * 2;
+
+    std::vector<KeyValueDB::keyrange_t> chunks;
+    db->util_divide_key_range(
+      "O", "", "",
+      10, 10000000, 0.02, chunks);
+    auto [all_keys, max_keys] = get_split_quality("O", chunks);
+    double speedup = double(all_keys) / max_keys;
+    if (verbose) std::cout << "quality=" << double(all_keys) / max_keys / chunks.size()
+      << " speedup=" << speedup << std::endl;
+    EXPECT_EQ(all_keys, keys);
+    if (all_keys > 1000000) {
+      EXPECT_GT(speedup, 8);
+    }
+    scan_split_quality("O");
+  }
+  db->close();
+}
+
+TEST_F(RocksDBSplitRange, grow_two_trees) {
+  ASSERT_EQ(0, db->create_and_open(cout, "O"));
+
+  TreeGen t1(70, 30, "left", "right");
+  TreeGen t2(60, 40, "left", "right");
+  DataToDB to_db(db.get(), "O");
+  vector<uint32_t> keys_to_test = {0, 1000, 10000, 100000, 1'000'000, 2'000'000, 5'000'000, 10'000'000};
+  if (is_jenkins()) keys_to_test = {1'000'000};
+  uint64_t keys = 0;
+  for (auto keys_end : keys_to_test) {
+    if (verbose) std::cout << "grow " << keys << "->" << keys_end << std::endl;
+    grow_tree(t1, to_db, keys, keys_end, "a", 1000, 300);
+    grow_tree(t2, to_db, keys, keys_end, "b", 500, 150);
+    keys = keys_end;
+    keys_end = keys_end * 2;
+
+    std::vector<KeyValueDB::keyrange_t> chunks;
+    db->util_divide_key_range(
+      "O", "", "",
+      10, 10000000, 0.1, chunks);
+    auto [all_keys, max_keys] = get_split_quality("O", chunks);
+    double speedup = double(all_keys) / max_keys;
+    if (verbose) std::cout << "quality=" << double(all_keys) / max_keys / chunks.size()
+      << " speedup=" << speedup << std::endl;
+    EXPECT_EQ(all_keys, keys * 2);
+    if (all_keys > 1000000) {
+      EXPECT_GT(speedup, 5);
+    }
+    scan_split_quality("O");
+  }
+  db->close();
+}
+
+TEST_F(RocksDBSplitRange, grow_prune_tree) {
+  ASSERT_EQ(0, db->create_and_open(cout, "O"));
+
+  TreeGen t(70, 30, "l", "r");
+  DataToDB to_db(db.get(), "O");
+  vector<uint32_t> keys_to_test = {0, 1000, 10000, 100000, 1'000'000, 2'000'000, 5'000'000, 10'000'000};
+  if (is_jenkins()) keys_to_test = {1'000'000};
+  uint64_t keys = 0;
+  uint64_t pruned_keys = 0;
+  for (auto keys_end : keys_to_test) {
+    if (verbose) std::cout << "grow  " << keys << "->" << keys_end << std::endl;
+    grow_tree(t, to_db, keys, keys_end, "a", 1000, 300);
+    if (verbose) std::cout << "prune " << pruned_keys << "->" << keys / 2 << std::endl;
+    prune_tree(t, to_db, pruned_keys, keys / 2, "a");
+    pruned_keys = keys / 2;
+    keys = keys_end;
+    keys_end = keys_end * 2;
+
+    std::vector<KeyValueDB::keyrange_t> chunks;
+    db->util_divide_key_range(
+      "O", "", "",
+      10, 10000000, 0.1, chunks);
+    auto [all_keys, max_keys] = get_split_quality("O", chunks);
+    double speedup = double(all_keys) / max_keys;
+    if (verbose) std::cout << "quality=" << double(all_keys) / max_keys / chunks.size()
+      << " speedup=" << speedup << std::endl;
+    EXPECT_EQ(all_keys, keys - pruned_keys);
+    if (all_keys > 1000000) {
+      EXPECT_GT(speedup, 5);
+    }
+    scan_split_quality("O");
+  }
+  db->close();
+}
+
+TEST_F(RocksDBSplitRange, grow_tree_small_leaves) {
+  ASSERT_EQ(0, db->create_and_open(cout, "O"));
+
+  TreeGen t(7, 3, "0", "1");
+  DataToDB to_db(db.get(), "O");
+  vector<uint32_t> keys_to_test = {
+    0, 1000, 10000, 100000, 1'000'000, 2'000'000, 5'000'000, 10'000'000, 20'000'000, 50'000'000};
+  if (is_jenkins()) keys_to_test = {2'500'000};
+
+  uint64_t keys = 0;
+  for (auto keys_end : keys_to_test) {
+    if (verbose) std::cout << "grow " << keys << "->" << keys_end << std::endl;
+    grow_tree(t, to_db, keys, keys_end, "aaaa", 100, 30);
+    keys = keys_end;
+    keys_end = keys_end * 2;
+
+    std::vector<KeyValueDB::keyrange_t> chunks;
+    db->util_divide_key_range(
+      "O", "", "",
+      10, 10000000, 0.05, chunks);
+    auto [all_keys, max_keys] = get_split_quality("O", chunks);
+    double speedup = double(all_keys) / max_keys;
+    if (verbose) std::cout << "quality=" << double(all_keys) / max_keys / chunks.size()
+      << " speedup=" << speedup << std::endl;
+    EXPECT_EQ(all_keys, keys);
+    if (all_keys > 2000000) {
+      EXPECT_GT(speedup, 6);
+    }
+    scan_split_quality("O");
+  }
+  db->close();
+}
+
+
+INSTANTIATE_TEST_SUITE_P(
   KeyValueDB,
   KVTest,
-  ::testing::Values("leveldb", "rocksdb", "memdb"));
+  ::testing::Values("rocksdb"));
 
-#else
-
-// Google Test may not support value-parameterized tests with some
-// compilers. If we use conditional compilation to compile out all
-// code referring to the gtest_main library, MSVC linker will not link
-// that library at all and consequently complain about missing entry
-// point defined in that library (fatal error LNK1561: entry point
-// must be defined). This dummy test keeps gtest_main linked in.
-TEST(DummyTest, ValueParameterizedTestsAreNotSupportedOnThisPlatform) {}
-
-#endif
+INSTANTIATE_TEST_SUITE_P(
+  KeyValueDB,
+  RocksDBShardingTest,
+  ::testing::Values("Betelgeuse D",
+		    "Betelgeuse(3) D",
+		    "Betelgeuse D(3)",
+		    "Betelgeuse(3) D(3)"));
 
 int main(int argc, char **argv) {
-  vector<const char*> args;
-  argv_to_vec(argc, (const char **)argv, args);
-  env_to_vec(args);
-
+  auto args = argv_to_vec(argc, argv);
   auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
-			 CODE_ENVIRONMENT_UTILITY, 0);
+			 CODE_ENVIRONMENT_UTILITY,
+			 CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
   common_init_finish(g_ceph_context);
-  g_ceph_context->_conf->set_val(
+  g_ceph_context->_conf.set_val(
     "enable_experimental_unrecoverable_data_corrupting_features",
-    "rocksdb, memdb");
-  g_ceph_context->_conf->apply_changes(NULL);
+    "rocksdb");
+  g_ceph_context->_conf.apply_changes(nullptr);
 
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

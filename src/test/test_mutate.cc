@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -40,12 +41,10 @@ static void usage(void)
 
 int main(int argc, const char **argv)
 {
-  int ret = 0;
-  vector<const char*> args;
-  argv_to_vec(argc, argv, args);
-  env_to_vec(args);
+  auto args = argv_to_vec(argc, argv);
   auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
-			 CODE_ENVIRONMENT_UTILITY, 0);
+			 CODE_ENVIRONMENT_UTILITY,
+			 CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
   common_init_finish(g_ceph_context);
 
   string val;
@@ -83,6 +82,7 @@ int main(int argc, const char **argv)
      return 1;
   }
 
+  int ret = 0;
   librados::ObjectWriteOperation o;
   IoCtx ioctx;
   if (rados.pool_lookup(pool_name.c_str()) <= 0) {
@@ -99,6 +99,8 @@ int main(int argc, const char **argv)
 	  << "': error " << ret << std::endl;
      return 1;
   }
+  ioctx.application_enable("rados", true);
+
   librados::ObjectWriteOperation op;
   op.create(true);
   ret = ioctx.operate(oid, &op);

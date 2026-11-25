@@ -1,0 +1,650 @@
+
+import json
+import textwrap
+
+import pytest
+import yaml
+
+from ceph.deployment.hostspec import HostSpec
+from ceph.deployment.inventory import Devices, Device
+from ceph.deployment.service_spec import ServiceSpec
+from ceph.deployment import inventory
+from ceph.utils import datetime_now
+from mgr_module import HandleCommandResult
+
+from test_orchestrator import TestOrchestrator as _TestOrchestrator
+
+from orchestrator import InventoryHost, DaemonDescription, ServiceDescription, DaemonDescriptionStatus, OrchResult, OrchestratorError
+from orchestrator import OrchestratorValidationError
+from orchestrator.module import to_format, Format, OrchestratorCli, preview_table_osd
+from unittest import mock
+
+
+def _test_resource(data, resource_class, extra=None):
+    # ensure we can deserialize and serialize
+    rsc = resource_class.from_json(data)
+    assert rsc.to_json() == resource_class.from_json(rsc.to_json()).to_json()
+
+    if extra:
+        # if there is an unexpected data provided
+        data_copy = data.copy()
+        data_copy.update(extra)
+        with pytest.raises(OrchestratorValidationError):
+            resource_class.from_json(data_copy)
+
+
+def test_inventory():
+    json_data = {
+        'name': 'host0',
+        'addr': '1.2.3.4',
+        'devices': [
+            {
+                'sys_api': {
+                    'rotational': '1',
+                    'size': 1024,
+                },
+                'path': '/dev/sda',
+                'available': False,
+                'rejected_reasons': [],
+                'lvs': []
+            }
+        ]
+    }
+    _test_resource(json_data, InventoryHost, {'abc': False})
+    for devices in json_data['devices']:
+        _test_resource(devices, inventory.Device)
+
+    json_data = [{}, {'name': 'host0', 'addr': '1.2.3.4'}, {'devices': []}]
+    for data in json_data:
+        with pytest.raises(OrchestratorValidationError):
+            InventoryHost.from_json(data)
+
+
+def test_daemon_description():
+    json_data = {
+        'hostname': 'test',
+        'daemon_type': 'mon',
+        'daemon_id': 'a',
+        'status': -1,
+    }
+    _test_resource(json_data, DaemonDescription, {'abc': False})
+
+    dd = DaemonDescription.from_json(json_data)
+    assert dd.status.value == DaemonDescriptionStatus.error.value
+
+
+def test_apply():
+    to = _TestOrchestrator('', 0, 0)
+    completion = to.apply([
+        ServiceSpec(service_type='nfs', service_id='foo'),
+        ServiceSpec(service_type='nfs', service_id='foo'),
+        ServiceSpec(service_type='nfs', service_id='foo'),
+    ])
+    res = '<NFSServiceSpec for service_name=nfs.foo>'
+    assert completion.result == [res, res, res]
+
+
+def test_yaml():
+    y = """daemon_type: crash
+daemon_id: ubuntu
+daemon_name: crash.ubuntu
+hostname: ubuntu
+status: 1
+status_desc: starting
+is_active: false
+pending_daemon_config: false
+user_stopped: false
+events:
+- 2020-06-10T10:08:22.933241Z daemon:crash.ubuntu [INFO] "Deployed crash.ubuntu on
+  host 'ubuntu'"
+---
+service_type: crash
+service_name: crash
+placement:
+  host_pattern: '*'
+status:
+  container_image_id: 74803e884bea289d2d2d3ebdf6d37cd560499e955595695b1390a89800f4e37a
+  container_image_name: quay.io/ceph/daemon-base:latest-main-devel
+  created: '2020-06-10T10:37:31.051288Z'
+  last_refresh: '2020-06-10T10:57:40.715637Z'
+  running: 1
+  size: 1
+events:
+- 2020-06-10T10:37:31.139159Z service:crash [INFO] "service was created"
+"""
+    types = (DaemonDescription, ServiceDescription)
+
+    for y, cls in zip(y.split('---\n'), types):
+        data = yaml.safe_load(y)
+        object = cls.from_json(data)
+
+        assert to_format(object, Format.yaml, False, cls) == y
+        assert to_format([object], Format.yaml, True, cls) == y
+
+        j = json.loads(to_format(object, Format.json, False, cls))
+        assert to_format(cls.from_json(j), Format.yaml, False, cls) == y
+
+
+def test_event_multiline():
+    from .._interface import OrchestratorEvent
+    e = OrchestratorEvent(datetime_now(), 'service', 'subject', 'ERROR', 'message')
+    assert OrchestratorEvent.from_json(e.to_json()) == e
+
+    e = OrchestratorEvent(datetime_now(), 'service',
+                          'subject', 'ERROR', 'multiline\nmessage')
+    assert OrchestratorEvent.from_json(e.to_json()) == e
+
+
+def test_handle_command():
+    cmd = {
+        'prefix': 'orch daemon add',
+        'daemon_type': 'mon',
+        'placement': 'smithi044:[v2:172.21.15.44:3301,v1:172.21.15.44:6790]=c',
+    }
+    m = OrchestratorCli('orchestrator', 0, 0)
+    r = m._handle_command(None, cmd)
+    assert r == HandleCommandResult(
+        retval=-2, stdout='', stderr='No orchestrator configured (try `ceph orch set backend`)')
+
+
+@pytest.mark.parametrize('svc_arg,paths', [
+    ('host0:/dev/sda,/dev/sdb', ['/dev/sda', '/dev/sdb']),
+    (
+        'host0:/dev/disk/by-path/pci-0000:cd:00.0-nvme-1',
+        ['/dev/disk/by-path/pci-0000:cd:00.0-nvme-1'],
+    ),
+    (
+        'host0:/dev/disk/by-path/pci-0000:c9:00.0-nvme-1,'
+        '/dev/disk/by-path/pci-0000:cd:00.0-nvme-1',
+        [
+            '/dev/disk/by-path/pci-0000:c9:00.0-nvme-1',
+            '/dev/disk/by-path/pci-0000:cd:00.0-nvme-1',
+        ],
+    ),
+    (
+        'host0:data_devices=/dev/disk/by-path/pci-0000:cd:00.0-nvme-1',
+        ['/dev/disk/by-path/pci-0000:cd:00.0-nvme-1'],
+    ),
+])
+def test_daemon_add_osd_device_paths(svc_arg, paths):
+    m = OrchestratorCli('orchestrator', 0, 0)
+    with mock.patch.object(m, 'create_osds', return_value=OrchResult('Scheduled')) as create_osds:
+        r = m._daemon_add_osd(svc_arg, method='raw')
+    assert r.retval == 0
+    assert r.stdout == 'Scheduled'
+    drive_group = create_osds.call_args[0][0]
+    assert drive_group.placement.host_pattern.pattern == 'host0'
+    assert [dev.path for dev in drive_group.data_devices.paths] == paths
+    assert drive_group.method == 'raw'
+
+
+def test_daemon_add_osd_rejects_spec_without_separator():
+    m = OrchestratorCli('orchestrator', 0, 0)
+    r = m._daemon_add_osd('host0')
+    assert r.retval != 0
+    assert "Invalid 'host:device' spec" in r.stderr
+
+
+r = OrchResult([ServiceDescription(spec=ServiceSpec(service_type='osd'), running=123)])
+
+
+@mock.patch("orchestrator.OrchestratorCli.describe_service", return_value=r)
+def test_orch_ls(_describe_service):
+    cmd = {
+        'prefix': 'orch ls',
+    }
+    m = OrchestratorCli('orchestrator', 0, 0)
+    r = m._handle_command(None, cmd)
+    out = 'NAME  PORTS  RUNNING  REFRESHED  AGE  PLACEMENT  \n' \
+          'osd              123  -          -               '
+    assert r == HandleCommandResult(retval=0, stdout=out, stderr='')
+
+    cmd = {
+        'prefix': 'orch ls',
+        'format': 'yaml',
+    }
+    m = OrchestratorCli('orchestrator', 0, 0)
+    r = m._handle_command(None, cmd)
+    out = textwrap.dedent("""
+        service_type: osd
+        service_name: osd
+        spec:
+          filter_logic: AND
+          objectstore: bluestore
+          osd_type: classic
+          termination_grace_period_seconds: 30
+        status:
+          running: 123
+          size: 0
+        """).lstrip()
+    assert r == HandleCommandResult(retval=0, stdout=out, stderr='')
+
+
+@mock.patch("orchestrator.OrchestratorCli.describe_service", return_value=OrchResult([]))
+def test_orch_ls_empty(_describe_service):
+    m = OrchestratorCli('orchestrator', 0, 0)
+
+    # plain format keeps the human-readable message
+    r = m._handle_command(None, {'prefix': 'orch ls'})
+    assert r == HandleCommandResult(retval=0, stdout='No services reported', stderr='')
+
+    # structured formats must stay parseable when nothing matches,
+    # e.g. 'orch ls --service-type nvmeof --format json'
+    r = m._handle_command(None, {'prefix': 'orch ls', 'format': 'json'})
+    assert json.loads(r.stdout) == []
+
+    r = m._handle_command(None, {'prefix': 'orch ls', 'format': 'yaml'})
+    assert yaml.safe_load(r.stdout) is None
+
+    r = m._handle_command(None, {'prefix': 'orch ls', 'export': True})
+    assert yaml.safe_load(r.stdout) is None
+
+
+dlist = OrchResult([DaemonDescription(daemon_type="osd", daemon_id="1"), DaemonDescription(
+    daemon_type="osd", daemon_id="10"), DaemonDescription(daemon_type="osd", daemon_id="2")])
+
+
+@mock.patch("orchestrator.OrchestratorCli.list_daemons", return_value=dlist)
+def test_orch_ps(_describe_service):
+
+    # Ensure natural sorting on daemon names (osd.1, osd.2, osd.10)
+    cmd = {
+        'prefix': 'orch ps'
+    }
+    m = OrchestratorCli('orchestrator', 0, 0)
+    r = m._handle_command(None, cmd)
+    expected_out = 'NAME    HOST       PORTS  STATUS   REFRESHED  AGE  MEM USE  MEM LIM  VERSION    IMAGE ID   \n'\
+                   'osd.1   <unknown>         unknown          -    -        -        -  <unknown>  <unknown>  \n'\
+                   'osd.2   <unknown>         unknown          -    -        -        -  <unknown>  <unknown>  \n'\
+                   'osd.10  <unknown>         unknown          -    -        -        -  <unknown>  <unknown>  '
+    expected_out = [c for c in expected_out if c.isalpha()]
+    actual_out = [c for c in r.stdout if c.isalpha()]
+    assert r.retval == 0
+    assert expected_out == actual_out
+    assert r.stderr == ''
+
+
+hlist = OrchResult([HostSpec("ceph-node-1"), HostSpec("ceph-node-2"), HostSpec("ceph-node-10")])
+
+
+@mock.patch("orchestrator.OrchestratorCli.get_hosts", return_value=hlist)
+def test_orch_host_ls(_describe_service):
+
+    # Ensure natural sorting on hostnames (ceph-node-1, ceph-node-2, ceph-node-10)
+    cmd = {
+        'prefix': 'orch host ls'
+    }
+    m = OrchestratorCli('orchestrator', 0, 0)
+    r = m._handle_command(None, cmd)
+    expected_out = 'HOST          ADDR          LABELS  STATUS  \n'\
+                   'ceph-node-1   ceph-node-1                   \n'\
+                   'ceph-node-2   ceph-node-2                   \n'\
+                   'ceph-node-10  ceph-node-10                  \n'\
+                   '3 hosts in cluster'
+    expected_out = [c for c in expected_out if c.isalpha()]
+    actual_out = [c for c in r.stdout if c.isalpha()]
+    assert r.retval == 0
+    assert expected_out == actual_out
+    assert r.stderr == ''
+
+
+def test_orch_device_ls():
+    devices = Devices([Device("/dev/vdb", available=True)])
+    ilist = OrchResult([InventoryHost("ceph-node-1", devices=devices), InventoryHost("ceph-node-2",
+                       devices=devices), InventoryHost("ceph-node-10", devices=devices)])
+
+    with mock.patch("orchestrator.OrchestratorCli.get_inventory", return_value=ilist):
+        # Ensure natural sorting on hostnames (ceph-node-1, ceph-node-2, ceph-node-10)
+        cmd = {
+            'prefix': 'orch device ls'
+        }
+        m = OrchestratorCli('orchestrator', 0, 0)
+        r = m._handle_command(None, cmd)
+        expected_out = 'HOST          PATH      TYPE     DEVICE ID   SIZE  AVAILABLE  REFRESHED  REJECT REASONS  \n'\
+                       'ceph-node-1   /dev/vdb  unknown  None          0   Yes        0s ago                     \n'\
+                       'ceph-node-2   /dev/vdb  unknown  None          0   Yes        0s ago                     \n'\
+                       'ceph-node-10  /dev/vdb  unknown  None          0   Yes        0s ago                     '
+        expected_out = [c for c in expected_out if c.isalpha()]
+        actual_out = [c for c in r.stdout if c.isalpha()]
+        assert r.retval == 0
+        assert expected_out == actual_out
+        assert r.stderr == ''
+
+
+def test_preview_table_osd_smoke():
+    data = [
+        {
+            'service_type': 'osd',
+            'data':
+            {
+                'foo host':
+                [
+                    {
+                        'osdspec': 'foo',
+                        'error': '',
+                        'data':
+                        [
+                            {
+                                "block_db": "/dev/nvme0n1",
+                                "block_db_size": "66.67 GB",
+                                "data": "/dev/sdb",
+                                "data_size": "300.00 GB",
+                                "encryption": "None"
+                            },
+                            {
+                                "block_db": "/dev/nvme0n1",
+                                "block_db_size": "66.67 GB",
+                                "data": "/dev/sdc",
+                                "data_size": "300.00 GB",
+                                "encryption": "None"
+                            },
+                            {
+                                "block_db": "/dev/nvme0n1",
+                                "block_db_size": "66.67 GB",
+                                "data": "/dev/sdd",
+                                "data_size": "300.00 GB",
+                                "encryption": "None"
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+    ]
+    preview_table_osd(data)
+
+
+@mock.patch("orchestrator.module.OrchestratorCli.release_name", new_callable=mock.PropertyMock)
+@mock.patch("orchestrator.module.OrchestratorCli._apply_misc")
+@mock.patch("orchestrator.module.OrchestratorCli.remote")
+@mock.patch("orchestrator.module.OrchestratorCli.get")
+class TestApplyNvmeof:
+
+    def setup_method(self):
+        self.m = OrchestratorCli('orchestrator', 0, 0)
+
+    def test_missing_group_raises_validation_error(self, mock_get, mock_remote, mock_apply_misc, mock_release_name):
+        res = self.m._apply_nvmeof(pool="mypool", group="")
+
+        assert res.retval != 0
+        assert "The --group argument is required" in res.stderr
+        mock_apply_misc.assert_not_called()
+
+    def test_inbuf_raises_validation_error(self, mock_get, mock_remote, mock_apply_misc, mock_release_name):
+        res = self.m._apply_nvmeof(pool="mypool", group="mygroup", inbuf="some_yaml_content")
+
+        assert res.retval != 0
+        assert "unrecognized command -i; -h or --help for usage" in res.stderr
+        mock_apply_misc.assert_not_called()
+
+    def test_custom_pool_skips_metadata_pool_creation(self, mock_get, mock_remote, mock_apply_misc, mock_release_name):
+        mock_apply_misc.return_value = HandleCommandResult(retval=0, stdout="Success")
+
+        res = self.m._apply_nvmeof(pool="custompool", group="mygroup")
+
+        mock_remote.assert_not_called()
+        mock_apply_misc.assert_called_once()
+        assert res.retval == 0
+
+    def test_default_pool_fails_if_module_disabled(self, mock_get, mock_remote, mock_apply_misc, mock_release_name):
+        mock_release_name.return_value = "squid"
+        mock_get.return_value = {'modules': [], 'always_on_modules': {}}
+
+        res = self.m._apply_nvmeof(pool=".nvmeof", group="mygroup")
+
+        assert res.retval != 0
+        assert (
+            "NVMe-oF support requires the nvmeof manager module to be enabled before proceeding. "
+            "Enable it with: ceph mgr module enable nvmeof"
+        ) in res.stderr
+        mock_remote.assert_not_called()
+        mock_apply_misc.assert_not_called()
+
+    def test_default_pool_creates_metadata_pool_if_module_enabled(self, mock_get, mock_remote, mock_apply_misc, mock_release_name):
+        mock_release_name.return_value = "squid"
+        mock_get.return_value = {'modules': ['nvmeof'], 'always_on_modules': {}}
+        mock_apply_misc.return_value = HandleCommandResult(retval=0, stdout="Success")
+
+        res = self.m._apply_nvmeof(pool=".nvmeof", group="mygroup")
+
+        mock_remote.assert_called_once_with('nvmeof', 'create_pool_if_not_exists')
+        mock_apply_misc.assert_called_once()
+        assert res.retval == 0
+
+
+@mock.patch("orchestrator.module.OrchestratorCli._apply_misc")
+class TestApplyOAuth2Proxy:
+
+    def setup_method(self):
+        self.m = OrchestratorCli('orchestrator', 0, 0)
+
+    def test_missing_required_fields_raises_error(self, mock_apply_misc):
+        res = self.m._apply_oauth2_proxy()
+
+        assert res.retval != 0
+        assert (
+            'Missing required fields for oauth2-proxy: provider_display_name, '
+            'oidc_issuer_url, client_id, client_secret.'
+        ) in res.stderr
+        mock_apply_misc.assert_not_called()
+
+    def test_inbuf_with_missing_fields_is_rejected(self, mock_apply_misc):
+        res = self.m._apply_oauth2_proxy(inbuf=textwrap.dedent("""
+            service_type: oauth2-proxy
+            spec:
+              oidc_issuer_url: "https://idp.example.com"
+              client_id: "oauth-client"
+              client_secret: "oauth-secret"
+            """).strip())
+
+        assert res.retval != 0
+        assert (
+            'unrecognized command -i; -h or --help for usage'
+        ) in res.stderr
+        mock_apply_misc.assert_not_called()
+
+    def test_inbuf_with_valid_spec_is_rejected(self, mock_apply_misc):
+        res = self.m._apply_oauth2_proxy(inbuf=textwrap.dedent("""
+            service_type: oauth2-proxy
+            spec:
+              provider_display_name: "My OIDC Provider"
+              oidc_issuer_url: "https://idp.example.com"
+              client_id: "oauth-client"
+              client_secret: "oauth-secret"
+            """).strip())
+
+        assert res.retval != 0
+        assert (
+            'unrecognized command -i; -h or --help for usage'
+        ) in res.stderr
+        mock_apply_misc.assert_not_called()
+
+    def test_cli_args_propagated_to_spec(self, mock_apply_misc):
+        mock_apply_misc.return_value = HandleCommandResult(retval=0, stdout="Success")
+
+        res = self.m._apply_oauth2_proxy(
+            provider_display_name="My OIDC Provider",
+            oidc_issuer_url="https://idp.example.com",
+            client_id="oauth-client",
+            client_secret="oauth-secret",
+        )
+
+        assert res.retval == 0
+        mock_apply_misc.assert_called_once()
+        spec = mock_apply_misc.call_args[0][0][0]
+        assert spec.provider_display_name == "My OIDC Provider"
+        assert spec.oidc_issuer_url == "https://idp.example.com"
+        assert spec.client_id == "oauth-client"
+        assert spec.client_secret == "oauth-secret"
+
+    def test_cli_args_with_https_address(self, mock_apply_misc):
+        mock_apply_misc.return_value = HandleCommandResult(retval=0, stdout="Success")
+
+        res = self.m._apply_oauth2_proxy(
+            provider_display_name="My OIDC Provider",
+            oidc_issuer_url="https://idp.example.com",
+            client_id="oauth-client",
+            client_secret="oauth-secret",
+            https_address="gateway.example.com:443",
+        )
+
+        assert res.retval == 0
+        spec = mock_apply_misc.call_args[0][0][0]
+        assert spec.https_address == "gateway.example.com:443"
+        assert spec.provider_display_name == "My OIDC Provider"
+        assert spec.oidc_issuer_url == "https://idp.example.com"
+        assert spec.client_id == "oauth-client"
+        assert spec.client_secret == "oauth-secret"
+
+    def test_partial_cli_args_raises_error(self, mock_apply_misc):
+        res = self.m._apply_oauth2_proxy(
+            provider_display_name="My OIDC Provider",
+            client_id="oauth-client",
+        )
+
+        assert res.retval != 0
+        assert 'Missing required fields for oauth2-proxy' in res.stderr
+        mock_apply_misc.assert_not_called()
+
+
+@mock.patch("orchestrator.module.OrchestratorCli._apply_misc")
+class TestApplyOAuth2ProxyYaml:
+
+    def setup_method(self):
+        self.m = OrchestratorCli('orchestrator', 0, 0)
+
+    def test_apply_yaml_missing_required_fields(self, mock_apply_misc):
+        res = self.m.apply_misc(
+            inbuf=textwrap.dedent("""
+                service_type: oauth2-proxy
+                spec:
+                  oidc_issuer_url: "https://idp.example.com"
+                """).strip()
+        )
+
+        assert res.retval != 0
+        assert (
+            'Missing required fields for oauth2-proxy: '
+            'provider_display_name, client_id, client_secret.'
+        ) in res.stderr
+        mock_apply_misc.assert_not_called()
+
+
+@mock.patch("orchestrator.module.OrchestratorCli.cert_store_set_pair")
+class TestCertStoreCertKeySet:
+
+    def setup_method(self):
+        self.m = OrchestratorCli('orchestrator', 0, 0)
+
+    def test_inbuf_is_forwarded_as_cert_with_empty_key(self, mock_set_pair):
+        mock_set_pair.return_value = OrchResult("Certificate/key pair set correctly")
+
+        res = self.m._cert_store_cert_key_set(
+            consumer="rgw",
+            inbuf="FULLCHAIN_PEM_BLOB",
+            cert_name="rgw_ssl_cert",
+            service_name="rgw.realm.zone",
+            hostname="host1",
+            force=True,
+        )
+
+        assert res == HandleCommandResult(
+            retval=0,
+            stdout="Certificate/key pair set correctly",
+            stderr="",
+        )
+        mock_set_pair.assert_called_once_with(
+            "FULLCHAIN_PEM_BLOB",
+            "",
+            "rgw",
+            "rgw_ssl_cert",
+            "rgw.realm.zone",
+            "host1",
+            True,
+        )
+
+    def test_cert_and_key_are_forwarded_with_all_options(self, mock_set_pair):
+        mock_set_pair.return_value = OrchResult("Certificate/key pair set correctly")
+
+        res = self.m._cert_store_cert_key_set(
+            consumer="rgw",
+            cert="CERT_PEM",
+            key="KEY_PEM",
+            cert_name="rgw_ssl_cert",
+            service_name="rgw.realm.zone",
+            hostname="host1",
+            force=True,
+        )
+
+        assert res == HandleCommandResult(
+            retval=0,
+            stdout="Certificate/key pair set correctly",
+            stderr="",
+        )
+        mock_set_pair.assert_called_once_with(
+            "CERT_PEM",
+            "KEY_PEM",
+            "rgw",
+            "rgw_ssl_cert",
+            "rgw.realm.zone",
+            "host1",
+            True,
+        )
+
+    def test_missing_cert_or_key_without_inbuf_is_rejected(self, mock_set_pair):
+        res = self.m._cert_store_cert_key_set(
+            consumer="rgw",
+            cert="CERT_PEM",
+        )
+
+        assert res.retval != 0
+        assert (
+            "This command requires passing cert/key pair by either using "
+            "--cert/--key parameters or a combined PEM file using \"-i\" option."
+        ) in res.stderr
+        mock_set_pair.assert_not_called()
+
+    def test_backend_error_is_returned_as_cli_error(self, mock_set_pair):
+        mock_set_pair.return_value = OrchResult(
+            None,
+            OrchestratorError("backend rejected PEM"),
+        )
+
+        res = self.m._cert_store_cert_key_set(
+            consumer="rgw",
+            inbuf="BAD_PEM",
+        )
+
+        assert res.retval != 0
+        assert "backend rejected PEM" in res.stderr
+        mock_set_pair.assert_called_once_with(
+            "BAD_PEM",
+            "",
+            "rgw",
+            None,
+            None,
+            None,
+            False,
+        )
+
+    def test_inbuf_takes_precedence_over_cert_and_key(self, mock_set_pair):
+        mock_set_pair.return_value = OrchResult("Certificate/key pair set correctly")
+
+        res = self.m._cert_store_cert_key_set(
+            consumer="rgw",
+            cert="CERT_PEM_SHOULD_BE_IGNORED",
+            key="KEY_PEM_SHOULD_BE_IGNORED",
+            inbuf="FULLCHAIN_PEM_BLOB",
+        )
+
+        assert res.retval == 0
+        assert res.stdout == "Certificate/key pair set correctly"
+        mock_set_pair.assert_called_once_with(
+            "FULLCHAIN_PEM_BLOB",
+            "",
+            "rgw",
+            None,
+            None,
+            None,
+            False,
+        )

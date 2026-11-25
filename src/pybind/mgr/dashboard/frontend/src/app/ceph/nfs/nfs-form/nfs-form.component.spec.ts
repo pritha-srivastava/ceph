@@ -1,0 +1,371 @@
+import { HttpClientTestingModule, HttpTestingController } from '@angular/common/http/testing';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { ReactiveFormsModule } from '@angular/forms';
+import { ActivatedRoute, Router } from '@angular/router';
+import { RouterTestingModule } from '@angular/router/testing';
+
+import { NgbTypeaheadModule } from '@ng-bootstrap/ng-bootstrap';
+
+import { Observable, of } from 'rxjs';
+
+import { NfsFormClientComponent } from '~/app/ceph/nfs/nfs-form-client/nfs-form-client.component';
+import { NfsFormComponent } from '~/app/ceph/nfs/nfs-form/nfs-form.component';
+import { Directory } from '~/app/shared/api/nfs.service';
+import { SharedModule } from '~/app/shared/shared.module';
+import { ActivatedRouteStub } from '~/testing/activated-route-stub';
+import { configureTestBed, RgwHelper } from '~/testing/unit-test-helper';
+
+describe('NfsFormComponent', () => {
+  let component: NfsFormComponent;
+  let fixture: ComponentFixture<NfsFormComponent>;
+  let httpTesting: HttpTestingController;
+  let activatedRoute: ActivatedRouteStub;
+  let router: Router;
+
+  const nfsClusterListResponse = [
+    {
+      name: 'mynfs',
+      enable_rdma: false,
+      backend: [],
+      virtual_ip: null,
+      placement: {}
+    }
+  ];
+
+  const flushNfsClusterList = () => {
+    const req = httpTesting.expectOne(
+      (request) =>
+        request.url === 'api/nfs-ganesha/cluster' && request.params.get('info') === 'true'
+    );
+    req.flush(nfsClusterListResponse);
+  };
+
+  configureTestBed({
+    declarations: [NfsFormComponent, NfsFormClientComponent],
+    imports: [
+      HttpClientTestingModule,
+      ReactiveFormsModule,
+      RouterTestingModule,
+      SharedModule,
+      NgbTypeaheadModule
+    ],
+    providers: [
+      {
+        provide: ActivatedRoute,
+        useValue: new ActivatedRouteStub({ cluster_id: 'mynfs', export_id: '1' })
+      }
+    ]
+  });
+
+  const matchSquash = (backendSquashValue: string, uiSquashValue: string) => {
+    component.ngOnInit();
+    flushNfsClusterList();
+    httpTesting.expectOne('ui-api/nfs-ganesha/cephfs/filesystems').flush([{ id: 1, name: 'a' }]);
+    httpTesting.expectOne('api/nfs-ganesha/export/mynfs/1').flush({
+      fsal: {
+        name: 'RGW'
+      },
+      export_id: 1,
+      transports: ['TCP', 'UDP'],
+      protocols: [4],
+      clients: [],
+      squash: backendSquashValue
+    });
+    httpTesting.verify();
+    expect(component.nfsForm.value).toMatchObject({
+      squash: uiSquashValue
+    });
+  };
+
+  beforeEach(() => {
+    fixture = TestBed.createComponent(NfsFormComponent);
+    component = fixture.componentInstance;
+    httpTesting = TestBed.inject(HttpTestingController);
+    activatedRoute = <ActivatedRouteStub>TestBed.inject(ActivatedRoute);
+    router = TestBed.inject(Router);
+
+    Object.defineProperty(router, 'url', {
+      get: jasmine.createSpy('url').and.returnValue('/cephfs/nfs')
+    });
+    RgwHelper.selectDaemon();
+    fixture.detectChanges();
+
+    flushNfsClusterList();
+    httpTesting.expectOne('ui-api/nfs-ganesha/cephfs/filesystems').flush([{ id: 1, name: 'a' }]);
+    httpTesting.verify();
+  });
+
+  it('should create', () => {
+    expect(component).toBeTruthy();
+  });
+
+  it('should create the form', () => {
+    expect(component.nfsForm.value).toEqual({
+      access_type: 'RW',
+      clients: [],
+      cluster_id: 'mynfs',
+      fsal: { fs_name: '', name: 'CEPH', user_id: '' },
+      path: '',
+      protocolNfsv4: true,
+      protocolNfsv3: true,
+      pseudo: '',
+      rgw_export_type: null,
+      sec_label_xattr: 'security.selinux',
+      security_label: false,
+      squash: 'no_root_squash',
+      subvolume: '',
+      subvolume_group: '_nogroup',
+      transportTCP: true,
+      transportUDP: true,
+      transportRDMA: false
+    });
+    expect(component.nfsForm.get('cluster_id').disabled).toBeFalsy();
+  });
+
+  it('should hide RDMA transport when cluster does not support it', () => {
+    component.resolveClusters([
+      {
+        name: 'no-rdma-cluster',
+        enable_rdma: false,
+        backend: [],
+        virtual_ip: null,
+        placement: {}
+      }
+    ]);
+    expect(component.isSelectedClusterRdmaEnabled()).toBe(false);
+  });
+
+  it('should show RDMA transport when selected cluster supports it', () => {
+    component.allClusters = [
+      { cluster_id: 'rdma-cluster', enable_rdma: true },
+      { cluster_id: 'no-rdma-cluster', enable_rdma: false }
+    ];
+    component.nfsForm.get('cluster_id').setValue('rdma-cluster');
+    expect(component.isSelectedClusterRdmaEnabled()).toBe(true);
+  });
+
+  it('should pre-select cluster from route param (selected row)', () => {
+    component.isEdit = false;
+    component.selectedClusterId = 'second-cluster';
+    component.resolveClusters([
+      {
+        name: 'first-cluster',
+        enable_rdma: false,
+        backend: [],
+        virtual_ip: null,
+        placement: {}
+      },
+      {
+        name: 'second-cluster',
+        enable_rdma: true,
+        backend: [],
+        virtual_ip: null,
+        placement: {}
+      }
+    ]);
+    expect(component.nfsForm.get('cluster_id').value).toBe('second-cluster');
+    expect(component.isSelectedClusterRdmaEnabled()).toBe(true);
+    expect(component.nfsForm.get('transportRDMA').value).toBe(true);
+  });
+
+  it('should not auto-select when no cluster context provided', () => {
+    component.isEdit = false;
+    component.selectedClusterId = '';
+    component.nfsForm.get('cluster_id').setValue('');
+    component.resolveClusters([
+      {
+        name: 'first-cluster',
+        enable_rdma: false,
+        backend: [],
+        virtual_ip: null,
+        placement: {}
+      },
+      {
+        name: 'second-cluster',
+        enable_rdma: true,
+        backend: [],
+        virtual_ip: null,
+        placement: {}
+      }
+    ]);
+    // No selectedClusterId → user must pick from dropdown
+    expect(component.nfsForm.get('cluster_id').value).toBe('');
+  });
+
+  it('should prepare data when selecting an cluster', () => {
+    component.nfsForm.patchValue({ cluster_id: 'cluster1' });
+
+    component.nfsForm.patchValue({ cluster_id: 'cluster2' });
+  });
+
+  it('should not allow changing cluster in edit mode', () => {
+    component.isEdit = true;
+    component.ngOnInit();
+    expect(component.nfsForm.get('cluster_id').disabled).toBeTruthy();
+  });
+
+  it('should mark NFSv4 & NFSv3 protocols as enabled always', () => {
+    expect(component.nfsForm.get('protocolNfsv4')).toBeTruthy();
+    expect(component.nfsForm.get('protocolNfsv3')).toBeTruthy();
+  });
+
+  it('should match backend squash values with ui values', () => {
+    component.isEdit = true;
+    matchSquash('none', 'no_root_squash');
+    matchSquash('all', 'all_squash');
+    matchSquash('rootid', 'root_id_squash');
+    matchSquash('root', 'root_squash');
+  });
+
+  describe('should submit request', () => {
+    beforeEach(() => {
+      component.nfsForm.patchValue({
+        access_type: 'RW',
+        clients: [],
+        cluster_id: 'cluster1',
+        fsal: { name: 'CEPH', fs_name: 1 },
+        path: '/foo',
+        protocolNfsv4: true,
+        protocolNfsv3: true,
+        pseudo: '/baz',
+        squash: 'no_root_squash',
+        transportTCP: true,
+        transportUDP: true
+      });
+    });
+
+    it('should call update', () => {
+      activatedRoute.setParams({ cluster_id: 'cluster1', export_id: '1' });
+      component.isEdit = true;
+      component.cluster_id = 'cluster1';
+      component.export_id = '1';
+      component.nfsForm.patchValue({ export_id: 1 });
+      component.submitAction();
+
+      const req = httpTesting.expectOne('api/nfs-ganesha/export/cluster1/1');
+      expect(req.request.method).toBe('PUT');
+      expect(req.request.body).toEqual({
+        access_type: 'RW',
+        clients: [],
+        cluster_id: 'cluster1',
+        export_id: 1,
+        fsal: { fs_name: 1, name: 'CEPH', sec_label_xattr: null },
+        path: '/foo',
+        protocols: [3, 4],
+        pseudo: '/baz',
+        security_label: false,
+        squash: 'no_root_squash',
+        transports: ['TCP', 'UDP']
+      });
+    });
+
+    it('should call update with selected nfs protocol', () => {
+      activatedRoute.setParams({ cluster_id: 'cluster1', export_id: '1' });
+      component.isEdit = true;
+      component.cluster_id = 'cluster1';
+      component.export_id = '1';
+      component.nfsForm.patchValue({ export_id: 1, protocolNfsv3: false });
+      component.submitAction();
+
+      const req = httpTesting.expectOne('api/nfs-ganesha/export/cluster1/1');
+      expect(req.request.method).toBe('PUT');
+      expect(req.request.body).toEqual({
+        access_type: 'RW',
+        clients: [],
+        cluster_id: 'cluster1',
+        export_id: 1,
+        fsal: { fs_name: 1, name: 'CEPH', sec_label_xattr: null },
+        path: '/foo',
+        protocols: [4],
+        pseudo: '/baz',
+        security_label: false,
+        squash: 'no_root_squash',
+        transports: ['TCP', 'UDP']
+      });
+    });
+
+    it('should call create', () => {
+      activatedRoute.setParams({ cluster_id: undefined, export_id: undefined });
+      component.submitAction();
+
+      const req = httpTesting.expectOne('api/nfs-ganesha/export');
+      expect(req.request.method).toBe('POST');
+      expect(req.request.body).toEqual({
+        access_type: 'RW',
+        clients: [],
+        cluster_id: 'cluster1',
+        fsal: {
+          fs_name: 1,
+          name: 'CEPH',
+          sec_label_xattr: null
+        },
+        path: '/foo',
+        protocols: [3, 4],
+        pseudo: '/baz',
+        security_label: false,
+        squash: 'no_root_squash',
+        transports: ['TCP', 'UDP']
+      });
+    });
+  });
+
+  describe('edit mode CephFS subvolume fields', () => {
+    it('should populate subvolume group and subvolume from export path', () => {
+      component.isEdit = true;
+      spyOn(component['subvolgrpService'], 'get').and.returnValue(of([{ name: 'g1' }]));
+      spyOn(component['subvolService'], 'get').and.returnValue(of([{ name: 'sv1' }]));
+
+      component.resolveModel({
+        fsal: { name: 'CEPH', fs_name: 'testfs' },
+        path: '/volumes/g1/sv1',
+        protocols: [3, 4],
+        transports: ['TCP'],
+        clients: [],
+        squash: 'none'
+      });
+
+      expect(component.nfsForm.get('subvolume_group').value).toBe('g1');
+      expect(component.nfsForm.get('subvolume').value).toBe('sv1');
+      expect(component['subvolgrpService'].get).toHaveBeenCalledWith('testfs');
+      expect(component['subvolService'].get).toHaveBeenCalledWith('testfs', 'g1');
+      expect(component.allsubvols).toEqual([{ name: 'sv1' }]);
+    });
+  });
+
+  describe('pathExistence', () => {
+    beforeEach(() => {
+      component['nfsService']['lsDir'] = jest.fn((): Observable<Directory> =>
+        of({ paths: ['/path1'] })
+      );
+      component.nfsForm.get('name').setValue('CEPH');
+      component.setPathValidation();
+    });
+
+    const testValidator = (pathName: string, valid: boolean, expectedError?: string) => {
+      const path = component.nfsForm.get('path');
+      path.setValue(pathName);
+      path.markAsDirty();
+      path.updateValueAndValidity();
+
+      if (valid) {
+        expect(path.errors).toBe(null);
+      } else {
+        expect(path.hasError(expectedError)).toBeTruthy();
+      }
+    };
+
+    it('path cannot be empty', () => {
+      testValidator('', false, 'required');
+    });
+
+    it('path that does not exist should be invalid', () => {
+      testValidator('/path2', false, 'pathNameNotAllowed');
+      expect(component['nfsService']['lsDir']).toHaveBeenCalledTimes(1);
+    });
+
+    it('path that exists should be valid', () => {
+      testValidator('/path1', true);
+      expect(component['nfsService']['lsDir']).toHaveBeenCalledTimes(1);
+    });
+  });
+});

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
 * Ceph - scalable distributed file system
 *
@@ -37,8 +38,8 @@ public:
 		    const std::string &pool_name,
 		    int num_objects,
 		    const std::string &suffix);
-  ~StRadosCreatePool();
-  virtual int run();
+  ~StRadosCreatePool() override;
+  int run() override;
 private:
   CrossProcessSem *m_setup_sem;
   CrossProcessSem *m_pool_setup_sem;

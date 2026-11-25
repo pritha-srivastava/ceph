@@ -1,10 +1,10 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #include "include/encoding.h"
 #include "KeyValueDBMemory.h"
 #include <map>
 #include <set>
-#include "include/memory.h"
 #include <iostream>
 
 using namespace std;
@@ -27,7 +27,7 @@ protected:
 
 public:
   explicit WholeSpaceMemIterator(KeyValueDBMemory *db) : db(db), ready(false) { }
-  ~WholeSpaceMemIterator() { }
+  ~WholeSpaceMemIterator() override { }
 
   int seek_to_first() override {
     if (db->db.empty()) {
@@ -58,7 +58,7 @@ public:
       return 0;
     }
     --it;
-    assert(it != db->db.end());
+    ceph_assert(it != db->db.end());
     ready = true;
     return 0;
   }
@@ -86,7 +86,7 @@ public:
       return 0;
     }
 
-    assert(it != db->db.end());
+    ceph_assert(it != db->db.end());
 
     ready = true;
     return 0;
@@ -99,7 +99,7 @@ public:
       ready = false;
       return 0;
     }
-    assert(it != db->db.end());
+    ceph_assert(it != db->db.end());
     ready = true;
     return 0;
   }
@@ -133,7 +133,21 @@ public:
       return "";
   }
 
+  string_view key_as_sv() override {
+    if (valid())
+      return (*it).first.second;
+    else
+      return "";
+  }
+
   pair<string,string> raw_key() override {
+    if (valid())
+      return (*it).first;
+    else
+      return make_pair("", "");
+  }
+
+  pair<string_view,string_view> raw_key_as_sv() override {
     if (valid())
       return (*it).first;
     else
@@ -149,6 +163,13 @@ public:
       return (*it).second;
     else
       return bufferlist();
+  }
+
+  std::string_view value_as_sv() override {
+    if (valid())
+      return std::string_view{it->second.c_str(), it->second.length()};
+    else
+      return std::string_view();
   }
 
   int status() override {
@@ -217,8 +238,26 @@ int KeyValueDBMemory::rmkeys_by_prefix(const string &prefix) {
   return 0;
 }
 
-KeyValueDB::WholeSpaceIterator KeyValueDBMemory::_get_iterator() {
-  return ceph::shared_ptr<KeyValueDB::WholeSpaceIteratorImpl>(
+int KeyValueDBMemory::rm_range_keys(const string &prefix, const string &start, const string &end) {
+  map<std::pair<string,string>,bufferlist>::iterator i;
+  i = db.lower_bound(make_pair(prefix, start));
+  if (i == db.end())
+    return 0;
+
+  while (i != db.end()) {
+    std::pair<string,string> key = (*i).first;
+    if (key.first != prefix)
+      break;
+    if (key.second >= end)
+      break;
+    ++i;
+    rmkey(key.first, key.second);
+  }
+  return 0;
+}
+
+KeyValueDB::WholeSpaceIterator KeyValueDBMemory::get_wholespace_iterator(IteratorOpts opts) {
+  return std::shared_ptr<KeyValueDB::WholeSpaceIteratorImpl>(
     new WholeSpaceMemIterator(this)
   );
 }
@@ -240,7 +279,7 @@ public:
 
   explicit WholeSpaceSnapshotMemIterator(KeyValueDBMemory *db) :
     WholeSpaceMemIterator(db) { }
-  ~WholeSpaceSnapshotMemIterator() {
+  ~WholeSpaceSnapshotMemIterator() override {
     delete db;
   }
 };

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,11 +16,11 @@
 #ifndef CEPH_COMMON_PIDFILE_H
 #define CEPH_COMMON_PIDFILE_H
 
-struct md_config_t;
+#include <string_view>
 
 // Write a pidfile with the current pid, using the configuration in the
 // provided conf structure.
-int pidfile_write(const md_config_t *conf);
+[[nodiscard]] int pidfile_write(std::string_view pid_file);
 
 // Remove the pid file that was previously written by pidfile_write.
 // This is safe to call in a signal handler context.

@@ -4,10 +4,29 @@ set(rados_srcs
   rados/RadosImport.cc
   rados/PoolDump.cc
   ${PROJECT_SOURCE_DIR}/src/common/util.cc
-  ${PROJECT_SOURCE_DIR}/src/common/obj_bencher.cc)
+  ${PROJECT_SOURCE_DIR}/src/common/obj_bencher.cc
+  ${PROJECT_SOURCE_DIR}/src/osd/ECUtilL.cc)
+if(WIN32)
+  list(APPEND rados_srcs ../common/win32/code_page.rc)
+endif()
 add_executable(rados ${rados_srcs})
-target_link_libraries(rados librados global ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS} radosstriper)
+
+target_link_libraries(rados librados global ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS})
+if(WITH_LIBRADOSSTRIPER)
+  target_link_libraries(rados radosstriper)
+else()
+  target_link_libraries(rados cls_lock_client)
+endif()
 install(TARGETS rados DESTINATION bin)
+
+if(NOT WIN32)
+  set(neorados_srcs
+      neorados.cc)
+  add_executable(neorados ${neorados_srcs})
+  target_link_libraries(neorados libneorados ${FMT_LIB} ${CMAKE_DL_LIBS})
+  add_dependencies(tests neorados)
+  #install(TARGETS neorados DESTINATION bin)
+endif()
 
 if(WITH_TESTS)
 add_executable(ceph_scratchtool scratchtool.c)
@@ -18,29 +37,24 @@ add_executable(ceph_scratchtoolpp scratchtoolpp.cc)
 target_link_libraries(ceph_scratchtoolpp librados global)
 install(TARGETS ceph_scratchtoolpp DESTINATION bin)
 
-add_executable(ceph_radosacl radosacl.cc)
-target_link_libraries(ceph_radosacl librados global)
-install(TARGETS ceph_radosacl DESTINATION bin)
-
-add_executable(ceph-osdomap-tool ceph_osdomap_tool.cc)
-target_link_libraries(ceph-osdomap-tool os global ${Boost_PROGRAM_OPTIONS_LIBRARY})
-install(TARGETS ceph-osdomap-tool DESTINATION bin)
-
-add_executable(ceph-monstore-tool ceph_monstore_tool.cc)
-target_link_libraries(ceph-monstore-tool os global ${Boost_PROGRAM_OPTIONS_LIBRARY})
-install(TARGETS ceph-monstore-tool DESTINATION bin)
 install(PROGRAMS
   ceph-monstore-update-crush.sh
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/ceph)
 endif(WITH_TESTS)
 
+add_executable(ceph-monstore-tool
+  ceph_monstore_tool.cc
+  ../mgr/mgr_commands.cc)
+target_link_libraries(ceph-monstore-tool kv os global Boost::program_options)
+install(TARGETS ceph-monstore-tool DESTINATION bin)
+
 add_executable(ceph-objectstore-tool
   ceph_objectstore_tool.cc
   rebuild_mondb.cc
   RadosDump.cc)
-target_link_libraries(ceph-objectstore-tool osd os global ${Boost_PROGRAM_OPTIONS_LIBRARY} ${CMAKE_DL_LIBS})
+target_link_libraries(ceph-objectstore-tool osd kv os global Boost::program_options ${CMAKE_DL_LIBS})
 if(WITH_FUSE)
-  target_link_libraries(ceph-objectstore-tool fuse)
+  target_link_libraries(ceph-objectstore-tool FUSE::FUSE)
 endif(WITH_FUSE)
 install(TARGETS ceph-objectstore-tool DESTINATION bin)
 
@@ -52,11 +66,13 @@ if(WITH_TESTS)
 endif(WITH_TESTS)
 endif(WITH_LIBCEPHFS)
 
-if(WITH_TESTS)
-add_executable(ceph-kvstore-tool ceph_kvstore_tool.cc)
-target_link_libraries(ceph-kvstore-tool os global)
+add_executable(ceph-kvstore-tool
+  kvstore_tool.cc
+  ceph_kvstore_tool.cc)
+target_link_libraries(ceph-kvstore-tool
+  legacy-option-headers kv
+  os global)
 install(TARGETS ceph-kvstore-tool DESTINATION bin)
-endif(WITH_TESTS)
 
 set(ceph_conf_srcs ceph_conf.cc)
 add_executable(ceph-conf ${ceph_conf_srcs})
@@ -65,7 +81,9 @@ install(TARGETS ceph-conf DESTINATION bin)
 
 set(crushtool_srcs crushtool.cc)
 add_executable(crushtool ${crushtool_srcs})
-target_link_libraries(crushtool global)
+target_link_libraries(crushtool
+  legacy-option-headers
+  global)
 install(TARGETS crushtool DESTINATION bin)
 
 set(monmaptool_srcs monmaptool.cc)
@@ -77,6 +95,15 @@ set(osdomaptool_srcs osdmaptool.cc)
 add_executable(osdmaptool ${osdomaptool_srcs})
 target_link_libraries(osdmaptool global)
 install(TARGETS osdmaptool DESTINATION bin)
+
+install(PROGRAMS crushdiff DESTINATION bin)
+
+set(ceph-diff-sorted_srcs ceph-diff-sorted.cc)
+add_executable(ceph-diff-sorted ${ceph-diff-sorted_srcs})
+set_target_properties(ceph-diff-sorted PROPERTIES
+  SKIP_RPATH TRUE
+  INSTALL_RPATH "")
+install(TARGETS ceph-diff-sorted DESTINATION bin)
 
 if(WITH_TESTS)
 set(ceph_psim_srcs psim.cc)
@@ -92,6 +119,7 @@ install(TARGETS ceph-authtool DESTINATION bin)
 
 if(WITH_CEPHFS)
   add_subdirectory(cephfs)
+  add_subdirectory(cephfs_mirror)
 endif(WITH_CEPHFS)
 
 if(WITH_RBD)
@@ -100,4 +128,18 @@ if(WITH_RBD)
   if(LINUX)
     add_subdirectory(rbd_nbd)
   endif()
+  if(WIN32)
+    add_subdirectory(rbd_wnbd)
+  endif()
+  if(FREEBSD)
+    add_subdirectory(rbd_ggate)
+  endif()
 endif(WITH_RBD)
+
+add_subdirectory(immutable_object_cache)
+add_subdirectory(ceph-dencoder)
+add_subdirectory(erasure-code)
+add_subdirectory(ceph_dedup)
+if(WITH_RADOSGW)
+  add_subdirectory(rgw)
+endif(WITH_RADOSGW)

@@ -1,21 +1,17 @@
-// -*- mode:C; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
-#include <iostream>
-
-#include <string.h>
-#include <stdlib.h>
 #include <errno.h>
 
-#include "include/types.h"
-#include "include/utime.h"
 #include "objclass/objclass.h"
-#include "cls/version/cls_version_types.h"
-#include "cls/version/cls_version_ops.h"
-#include "common/Clock.h"
 
-#include "global/global_context.h"
+#include "cls/version/cls_version_ops.h"
+
 #include "include/compat.h"
+
+using std::list;
+
+using ceph::bufferlist;
 
 CLS_VER(1,0)
 CLS_NAME(version)
@@ -27,7 +23,7 @@ static int set_version(cls_method_context_t hctx, struct obj_version *objv)
 {
   bufferlist bl;
 
-  ::encode(*objv, bl);
+  encode(*objv, bl);
 
   CLS_LOG(20, "cls_version: set_version %s:%d", objv->tag.c_str(), (int)objv->ver);
 
@@ -72,24 +68,25 @@ static int read_version(cls_method_context_t hctx, obj_version *objv, bool impli
     return ret;
 
   try {
-    bufferlist::iterator iter = bl.begin();
-    ::decode(*objv, iter);
-  } catch (buffer::error& err) {
+    auto iter = bl.cbegin();
+    decode(*objv, iter);
+  } catch (ceph::buffer::error& err) {
     CLS_LOG(0, "ERROR: read_version(): failed to decode version entry\n");
     return -EIO;
   }
+  CLS_LOG(20, "cls_version: read_version %s:%d", objv->tag.c_str(), (int)objv->ver);
 
   return 0;
 }
 
 static int cls_version_set(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
-  bufferlist::iterator in_iter = in->begin();
+  auto in_iter = in->cbegin();
 
   cls_version_set_op op;
   try {
-    ::decode(op, in_iter);
-  } catch (buffer::error& err) {
+    decode(op, in_iter);
+  } catch (ceph::buffer::error& err) {
     CLS_LOG(1, "ERROR: cls_version_get(): failed to decode entry\n");
     return -EINVAL;
   }
@@ -109,6 +106,7 @@ static bool check_conds(list<obj_version_cond>& conds, obj_version& objv)
   for (list<obj_version_cond>::iterator iter = conds.begin(); iter != conds.end(); ++iter) {
     obj_version_cond& cond = *iter;
     obj_version& v = cond.ver;
+    CLS_LOG(20, "cls_version: check_version %s:%d (cond=%d)", v.tag.c_str(), (int)v.ver, (int)cond.cond);
 
     switch (cond.cond) {
       case VER_COND_NONE:
@@ -149,12 +147,12 @@ static bool check_conds(list<obj_version_cond>& conds, obj_version& objv)
 
 static int cls_version_inc(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
-  bufferlist::iterator in_iter = in->begin();
+  auto in_iter = in->cbegin();
 
   cls_version_inc_op op;
   try {
-    ::decode(op, in_iter);
-  } catch (buffer::error& err) {
+    decode(op, in_iter);
+  } catch (ceph::buffer::error& err) {
     CLS_LOG(1, "ERROR: cls_version_get(): failed to decode entry\n");
     return -EINVAL;
   }
@@ -178,12 +176,12 @@ static int cls_version_inc(cls_method_context_t hctx, bufferlist *in, bufferlist
 
 static int cls_version_check(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
-  bufferlist::iterator in_iter = in->begin();
+  auto in_iter = in->cbegin();
 
   cls_version_check_op op;
   try {
-    ::decode(op, in_iter);
-  } catch (buffer::error& err) {
+    decode(op, in_iter);
+  } catch (ceph::buffer::error& err) {
     CLS_LOG(1, "ERROR: cls_version_get(): failed to decode entry\n");
     return -EINVAL;
   }
@@ -192,8 +190,7 @@ static int cls_version_check(cls_method_context_t hctx, bufferlist *in, bufferli
   int ret = read_version(hctx, &objv, false);
   if (ret < 0)
     return ret;
-  CLS_LOG(20, "cls_version: read_version %s:%d", objv.tag.c_str(), (int)objv.ver);
-  
+
   if (!check_conds(op.conds, objv)) {
     CLS_LOG(20, "cls_version: failed condition check");
     return -ECANCELED;
@@ -211,7 +208,7 @@ static int cls_version_read(cls_method_context_t hctx, bufferlist *in, bufferlis
   if (ret < 0)
     return ret;
 
-  ::encode(read_ret, *out);
+  encode(read_ret, *out);
 
   return 0;
 }
@@ -227,14 +224,16 @@ CLS_INIT(version)
   cls_method_handle_t h_version_read;
   cls_method_handle_t h_version_check_conds;
 
-  cls_register("version", &h_class);
+  using namespace cls::version;
+  cls_register(ClassId::name, &h_class);
 
-  /* version */
-  cls_register_cxx_method(h_class, "set", CLS_METHOD_RD | CLS_METHOD_WR, cls_version_set, &h_version_set);
-  cls_register_cxx_method(h_class, "inc", CLS_METHOD_RD | CLS_METHOD_WR, cls_version_inc, &h_version_inc);
-  cls_register_cxx_method(h_class, "inc_conds", CLS_METHOD_RD | CLS_METHOD_WR, cls_version_inc, &h_version_inc_conds);
-  cls_register_cxx_method(h_class, "read", CLS_METHOD_RD, cls_version_read, &h_version_read);
-  cls_register_cxx_method(h_class, "check_conds", CLS_METHOD_RD, cls_version_check, &h_version_check_conds);
+  ClassRegistrar<ClassId> cls(h_class);
+
+  cls.register_cxx_method(method::set, cls_version_set, &h_version_set);
+  cls.register_cxx_method(method::inc, cls_version_inc, &h_version_inc);
+  cls.register_cxx_method(method::inc_conds, cls_version_inc, &h_version_inc_conds);
+  cls.register_cxx_method(method::read, cls_version_read, &h_version_read);
+  cls.register_cxx_method(method::check_conds, cls_version_check, &h_version_check_conds);
 
   return;
 }

@@ -1,0 +1,29 @@
+---
+name: "Check for Incompatible Licenses"
+on:
+  pull_request_target:
+    branches:
+      - main
+      - vampire
+      - umbrella
+      - tentacle
+      - squid
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  pull_request:
+    name: "Check for Incompatible Licenses"
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check PR Diff for License
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        DIFF=$(gh pr diff ${{ github.event.pull_request.number }} -R ${{ github.repository }})
+        if echo "$DIFF" | grep -qi "GNU General Public License"; then
+          echo "Error: Incompatible license 'GNU General Public License' found in PR diff."
+          exit 1
+        fi

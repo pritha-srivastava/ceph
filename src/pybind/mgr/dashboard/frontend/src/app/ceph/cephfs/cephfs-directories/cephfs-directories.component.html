@@ -1,0 +1,101 @@
+<div class="row">
+  <div class="col-sm-4 pe-0">
+    <div class="card">
+      <div class="card-header">
+        <button
+          type="button"
+          [class.disabled]="loadingIndicator"
+          class="btn btn-light pull-right"
+          (click)="refreshAllDirectories()"
+        >
+          <svg
+            [cdsIcon]="icons.refresh"
+            [size]="icons.size16"
+          ></svg>
+        </button>
+      </div>
+      <div class="card-body card-tree">
+        <cds-tree-view
+          [tree]="nodes"
+          (select)="selectNode($event)"
+        >
+        </cds-tree-view>
+        @if (loadingIndicator) {
+          <div>
+            <cds-loading
+              [isActive]="true"
+              [overlay]="false"
+              size="sm"
+            ></cds-loading>
+          </div>
+        }
+      </div>
+    </div>
+  </div>
+  <!-- Selection details -->
+  @if (selectedDir) {
+    <div class="col-sm-8 metadata">
+      <div class="card">
+        <div class="card-header">
+          {{ selectedDir.path }}
+        </div>
+        <div class="card-body">
+          @if (selectedDir.path !== '/') {
+            <legend i18n>Quotas</legend>
+            <cd-table
+              [data]="settings"
+              [columns]="quota.columns"
+              [limit]="0"
+              [footer]="false"
+              selectionType="single"
+              (updateSelection)="quota.updateSelection($event)"
+              [onlyActionHeader]="true"
+              identifier="quotaKey"
+              [forceIdentifier]="true"
+              [toolHeader]="false"
+            >
+              <cd-table-actions
+                class="only-table-actions"
+                [permission]="permission"
+                [selection]="quota.selection"
+                [tableActions]="quota.tableActions"
+              >
+              </cd-table-actions>
+            </cd-table>
+          }
+          <legend i18n>Snapshots</legend>
+          <cd-table
+            [data]="selectedDir.snapshots"
+            [columns]="snapshot.columns"
+            identifier="name"
+            forceIdentifier="true"
+            selectionType="single"
+            (updateSelection)="snapshot.updateSelection($event)"
+          >
+            <cd-table-actions
+              class="table-actions"
+              [permission]="permission"
+              [selection]="snapshot.selection"
+              [tableActions]="snapshot.tableActions"
+            >
+            </cd-table-actions>
+          </cd-table>
+        </div>
+      </div>
+    </div>
+  }
+</div>
+
+<ng-template
+  #origin
+  let-row="data.row"
+  let-value="data.value"
+>
+  <span
+    class="quota-origin"
+    tabindex="0"
+    (keydown.enter)="selectOrigin(value)"
+    (click)="selectOrigin(value)"
+    >{{ value }}</span
+  >
+</ng-template>

@@ -30,7 +30,7 @@ Create a Container
 
 To create a new container, make a ``PUT`` request with the API version, account,
 and the name of the new container. The container name must be unique, must not
-contain a forward-slash (/) character, and should be less than 256 bytes. You 
+contain a forward slash (``/``) character, and should be less than 256 bytes. You
 may include access control headers and metadata headers in the request. The 
 operation is idempotent; that is, if you make a request to create a container
 that already exists, it will return with a HTTP 202 return code, but will not
@@ -67,7 +67,7 @@ Headers
 
 ``X-Container-Meta-{key}``
 
-:Description:  A user-defined meta data key that takes an arbitrary string value.
+:Description: A user-defined metadata key that takes an arbitrary string value.
 :Type: String
 :Required: No
 
@@ -90,7 +90,7 @@ will fail.
 List a Container's Objects
 ==========================
 
-To list the objects within a container, make a ``GET`` request with the with the 
+To list the objects within a container, make a ``GET`` request with the 
 API version, account, and the name of the container.  You can specify query 
 parameters to filter the full list, or leave out the parameters to return a list 
 of the first 10,000 object names stored in the container.
@@ -147,6 +147,13 @@ Parameters
 :Type: String
 :Required: No
 
+``allow_unordered``
+
+:Description: Allows the results to be returned unordered to reduce computation overhead. Cannot be used with ``delimiter``.
+:Type: Boolean
+:Required: No
+:Non-Standard Extension: Yes
+
 
 Response Entities
 ~~~~~~~~~~~~~~~~~
@@ -193,6 +200,15 @@ You may also specify ``*`` in the ``X-Container-Read`` or ``X-Container-Write``
 settings, which effectively enables all users to either read from or write
 to the container. Setting ``*`` makes the container public. That is it 
 enables anonymous users to either read from or write to the container.
+
+.. note:: If you are planning to expose public read ACL functionality
+	  for the Swift API, it is strongly recommended to include the
+	  Swift account name in the endpoint definition, so as to most
+	  closely emulate the behavior of native OpenStack Swift. To
+	  do so, set the ``ceph.conf`` configuration option ``rgw
+	  swift account in url = true``, and update your Keystone
+	  endpoint to the URL suffix ``/v1/AUTH_%(tenant_id)s``
+	  (instead of just ``/v1``).
 
 
 Syntax
@@ -245,10 +261,56 @@ Request Headers
 
 ``X-Container-Meta-{key}``
 
-:Description:  A user-defined meta data key that takes an arbitrary string value.
+:Description: A user-defined metadata key that takes an arbitrary string value.
 :Type: String
 :Required: No
 
+
+Enable Object Versioning for a Container
+========================================
+
+To enable object versioning a container, make a ``POST`` request with
+the API version, account, and container name. You must have write
+permissions on the container to add or update metadata.
+
+.. note:: Object versioning support is not enabled in radosgw by
+	  default; you must set ``rgw swift versioning enabled =
+	  true`` in ``ceph.conf`` to enable this feature.
+
+Syntax
+~~~~~~
+
+::
+
+   POST /{api version}/{account}/{container} HTTP/1.1
+   Host: {fqdn}
+	X-Auth-Token: {auth-token}
+	X-Versions-Location: {archive-container}
+
+Request Headers
+~~~~~~~~~~~~~~~
+
+``X-Versions-Location``
+
+:Description: The name of a container (the "archive container") that
+	      will be used to store versions of the objects in the
+	      container that the ``POST`` request is made on (the
+	      "current container"). The archive container need not
+	      exist at the time it is being referenced, but once
+	      ``X-Versions-Location`` is set on the current container,
+	      and object versioning is thus enabled, the archive
+	      container must exist before any further objects are
+	      updated or deleted in the current container.
+
+	      .. note:: ``X-Versions-Location`` is the only
+                        versioning-related header that radosgw
+                        interprets. ``X-History-Location``, supported
+                        by native OpenStack Swift, is currently not
+                        supported by radosgw.
+:Type: String
+:Required: No (if this header is passed with an empty value, object
+	   versioning on the current container is disabled, but the
+	   archive container continues to exist.)
 
 
 Delete a Container
@@ -257,7 +319,7 @@ Delete a Container
 To delete a container, make a ``DELETE`` request with the API version, account,
 and the name of the container. The container must be empty. If you'd like to check 
 if the container is empty, execute a ``HEAD`` request against the container. Once 
-you've successfully removed the container, you'll be able to reuse the container name.
+you have successfully removed the container, you will be able to reuse the container name.
 
 Syntax
 ~~~~~~

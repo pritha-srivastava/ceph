@@ -1,0 +1,94 @@
+.. _ceph-volume:
+
+ceph-volume
+===========
+Deploy OSDs with different device technologies like LVM or physical devices using
+pluggable tools (:doc:`lvm/index` itself is treated like a plugin) and trying to
+follow a predictable and robust way of preparing, activating, and starting OSDs.
+
+:ref:`Overview <ceph-volume-overview>` |
+:ref:`Plugin Guide <ceph-volume-plugins>`
+
+
+**Command Line Subcommands**
+
+There is currently support for ``lvm``, and plain devices (with GPT partitions)
+that may have been deployed with ``ceph-disk``.
+
+``zfs`` support is available for running a FreeBSD cluster.
+
+* :ref:`ceph-volume-lvm`
+* :ref:`ceph-volume-simple`
+* :ref:`ceph-volume-zfs`
+
+**Node inventory**
+
+The :ref:`ceph-volume-inventory` subcommand provides information and metadata
+about a node's physical device inventory.
+
+
+Migrating
+---------
+``ceph-disk`` was deprecated in the Mimic release and has since been removed.
+``ceph-volume`` is the supported tool for provisioning and managing OSDs. If
+your cluster still has OSDs that rely on ``ceph-disk``,
+there are two migration paths:
+
+#. Keep OSDs deployed with ``ceph-disk``: the :ref:`ceph-volume-simple` command
+   takes over their management and disables the old ``ceph-disk`` triggers.
+#. Redeploy existing OSDs with ``ceph-volume``: this is covered in depth in
+   :ref:`rados-replacing-an-osd`.
+
+.. note::
+
+   Adopted ``ceph-disk`` OSDs continue to run, but the cephadm
+   orchestrator cannot manage them as it does ``ceph-volume`` OSDs.
+   Incremental redeployment with ``ceph-volume`` is therefore
+   preferred.
+
+For background on why ``ceph-disk`` was replaced, see the :ref:`Replacing
+ceph-disk <ceph-disk-replaced>` section.
+
+
+New deployments
+^^^^^^^^^^^^^^^
+For new deployments, :ref:`ceph-volume-lvm` is recommended. It can use any
+logical volume for OSDs, or it can set up a minimal logical
+volume on a device.
+
+Existing OSDs
+^^^^^^^^^^^^^
+If the cluster has OSDs that were provisioned with ``ceph-disk``, then
+``ceph-volume`` can take over the management of these with
+:ref:`ceph-volume-simple`. A scan is done on the data device or OSD directory,
+and ``ceph-disk`` is fully disabled. Encryption is fully supported.
+
+
+.. toctree::
+   :hidden:
+   :maxdepth: 3
+   :caption: Contents:
+
+   intro
+   systemd
+   inventory
+   drive-group
+   lvm/index
+   lvm/activate
+   lvm/batch
+   lvm/encryption
+   lvm/prepare
+   lvm/create
+   lvm/scan
+   lvm/systemd
+   lvm/list
+   lvm/zap
+   lvm/migrate
+   lvm/newdb
+   lvm/newwal
+   simple/index
+   simple/activate
+   simple/scan
+   simple/systemd
+   zfs/index
+   zfs/inventory

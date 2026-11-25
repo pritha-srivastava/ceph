@@ -1,43 +1,493 @@
+.. _placement groups:
+
 ==================
  Placement Groups
 ==================
 
+Placement groups (PGs) are subsets of each logical Ceph pool. Placement groups
+perform the function of placing objects (as a group) into OSDs. Ceph manages
+data internally at placement-group granularity: this scales better than would
+managing individual RADOS objects. A cluster that has a larger number of
+placement groups (for example, 150 per OSD) is better balanced than an
+otherwise identical cluster with a smaller number of placement groups.
+
+Ceph’s internal RADOS objects are each mapped to a specific placement group,
+and each placement group belongs to exactly one Ceph pool.
+
+See Sage Weil's blog post `New in Nautilus: PG merging and autotuning
+<https://ceph.io/en/news/blog/2019/new-in-nautilus-pg-merging-and-autotuning/>`_
+for more information about the relationship of placement groups to pools and to
+objects.
+
+.. _pg-autoscaler:
+
+Autoscaling placement groups
+============================
+
+Placement groups (PGs) are an internal implementation detail of how Ceph
+distributes data. Autoscaling provides a way to manage PGs, and especially to
+manage the number of PGs present in different pools.  When *pg-autoscaling* is
+enabled, the cluster makes recommendations or automatic
+adjustments with respect to the number of PGs for each pool (``pgp_num``) in
+accordance with observed and expected pool utilization.
+
+Each pool has a ``pg_autoscale_mode`` property that can be set to ``off``,
+``on``, or ``warn``:
+
+* ``off``: Disable autoscaling for this pool. It is up to the administrator to
+  choose an appropriate ``pg_num`` for each pool. For more information, see
+  :ref:`choosing-number-of-placement-groups`.
+* ``on``: Enable automated adjustments of the PG count for the given pool.
+* ``warn``: Raise health checks when the PG count is in need of adjustment.
+
+To set the autoscaling mode for an existing pool, run a command of the
+following form:
+
+.. prompt:: bash #
+
+   ceph osd pool set <pool-name> pg_autoscale_mode <mode>
+
+For example, to enable autoscaling on pool ``foo``, run the following command:
+
+.. prompt:: bash #
+
+   ceph osd pool set foo pg_autoscale_mode on
+
+There is also a central config ``pg_autoscale_mode`` option that controls the
+autoscale mode for pools that are created
+after the initial setup of the cluster. To change this setting, run a command
+of the following form:
+
+.. prompt:: bash #
+
+   ceph config set global osd_pool_default_pg_autoscale_mode <mode>
+
+You can disable or enable the autoscaler for all pools with the ``noautoscale``
+flag. By default, this flag is set to ``off``, but you can set it to ``on`` by
+running the following command:
+
+.. prompt:: bash #
+
+   ceph osd pool set noautoscale
+
+To set the ``noautoscale`` flag to ``off``, run the following command:
+
+.. prompt:: bash #
+
+   ceph osd pool unset noautoscale
+
+To get the current value of the flag, run the following command:
+
+.. prompt:: bash #
+
+   ceph osd pool get noautoscale
+
+Viewing PG scaling recommendations
+----------------------------------
+
+To view each pool, its relative utilization, and any recommended changes to the
+PG count, run the following command:
+
+.. prompt:: bash #
+
+   ceph osd pool autoscale-status
+
+The output will resemble the following::
+
+   POOL    SIZE  TARGET SIZE  RATE  RAW CAPACITY   RATIO  FINAL RATIO  TARGET RATIO  EFFECTIVE RATIO BIAS PG_NUM  NEW PG_NUM  AUTOSCALE BULK
+   a     12900M                3.0        82431M  0.4695       0.2560                                          8         128  warn      True
+   c         0                 3.0        82431M  0.0000       0.1280        0.2000           0.9884  1.0      1          64  warn      True
+   b         0        953.6M   3.0        82431M  0.0347       0.0640                                          8              warn      False
+
+- **POOL** is the name of the pool. 
+
+- **SIZE** is the amount of data stored in the pool. 
+  
+- **TARGET SIZE** (if present) is the amount of data that is expected to be
+  stored in the pool, as specified by the administrator. The system uses the
+  greater of **SIZE** and **TARGET SIZE** for its calculations.
+
+- **RATE** is the space amplification factor for the pool that indicates how much raw storage
+  capacity is consumed for a given amount of user data. For example, a three-replica pool
+  will show a value of 3.0, and a ``k=4 m=2`` erasure-coded pool will have a value of 1.5.
+
+- **RAW CAPACITY** is the total amount of raw storage capacity on the specific
+  OSDs available to the pool. Note that in many cases this capacity is shared
+  among multiple pools.
+
+- **RATIO** is the ratio of (1) the storage consumed by the pool to (2) the
+  total raw storage capacity. In other words, RATIO is defined as 
+  (SIZE * RATE) / RAW CAPACITY and may be thought of as a fullness percentage.
+
+- **FINAL RATIO** is the ratio of (1) the expected number of PGs allocated to the
+  pool to (2) the total target PG budget. FINAL RATIO is defined as
+  (FINAL_POOL_PG_TARGET * RATE) / TOTAL PG BUDGET where FINAL_POOL_PG_TARGET = NEW PG_NUM (if present)
+  or PG_NUM otherwise. FINAL RATIO may be thought of as the target utilization percentage.
+
+- **TARGET RATIO** (if present) is the ratio of the expected storage of this
+  pool relative to the expected storage of all other pools
+  that have target ratios set.  If both ``target_size_bytes`` and
+  ``target_size_ratio`` are specified, then ``target_size_ratio`` takes
+  precedence.  Note that when the BIAS value is other than 1, notably for
+  CephFS metadata and RGW index pools, the target ratio is best left alone,
+  as adjusting both can result in inappropriate ``pg_num`` values via double-dipping.
+
+- **EFFECTIVE RATIO** is the result of making two adjustments to the target
+  ratio:
+
+  #. Subtracting any capacity expected to be used by pools that have target
+     size set.
+
+  #. Normalizing the target ratios among pools that have a target ratio set so
+     that collectively they target cluster capacity. For example, four pools
+     with target_ratio 1.0 would each have an effective ratio of 0.25.
+
+  The system's calculations use whichever of these two ratios (that is, the 
+  target ratio and the effective ratio) is greater.
+
+- **BIAS** is used as a multiplier to manually adjust a pool's PG in accordance
+  with prior information about how many PGs a specific pool is expected to
+  have.  This is important for pools that primarily store data in omaps vs
+  RADOS objects, notably RGW index and CephFS / RBD EC metadata pools. When
+  a bias other than 1.0 is set for a pool, it is advised to not set
+  a target ratio.
+
+- **PG_NUM** is either the current number of PGs associated with the pool or,
+  if a ``pg_num`` change is in progress, the target value.
+
+- **NEW PG_NUM** (if present) is the value that the system recommends that the
+  ``pg_num`` of the pool should be. It is always a power of two, and it
+  is present only if the recommended value varies from the current value by
+  more than the scaling threshold. This threshold defaults to the configured
+  factor of ``3``. While scaling down uses only the configured factor, the
+  threshold is dynamically reduced when scaling up: it is set to 1.0 if the
+  recommended NEW PG_NUM is 512 or 1024, and to 2.0 if the recommended
+  NEW PG_NUM is 2048.
+  To adjust this multiple (in the following example, it is changed
+  to ``2``), run a command of the following form:
+
+  .. prompt:: bash #
+
+     ceph osd pool set threshold 2.0
+
+  To get the current ``threshold`` value, run the following command:
+
+  .. prompt:: bash #
+
+     ceph osd pool get threshold
+
+- **AUTOSCALE** is the pool's ``pg_autoscale_mode`` and is set to ``on``,
+  ``off``, or ``warn``.
+
+- **BULK** determines whether the pool is ``bulk``. It has a value of ``True``
+  or ``False``. A ``bulk`` pool is expected to be large and should initially
+  have a large number of PGs so that performance does not suffer. On the other
+  hand, a pool that is not ``bulk`` is expected to be small (for example, a
+  ``.mgr`` pool or a meta pool).
+
+.. note::
+
+   If the ``ceph osd pool autoscale-status`` command returns no output at all,
+   there is probably at least one pool that spans multiple CRUSH roots.  This
+   'spanning pool' issue can happen in scenarios like the following:
+   when a new deployment auto-creates the ``.mgr`` pool on the ``default``
+   CRUSH root, subsequent pools are created with rules that constrain them to a
+   specific shadow CRUSH tree. For example, if you create an RBD metadata pool
+   that is constrained to ``deviceclass = ssd`` and an RBD data pool that is
+   constrained to ``deviceclass = hdd``, you will encounter this issue. To
+   remedy this issue, constrain the spanning pool to only one device class. In
+   the above scenario, there is likely to be a ``replicated-ssd`` CRUSH rule in
+   effect, and the ``.mgr`` pool can be constrained to ``ssd`` devices by
+   running the following commands:
+
+   .. prompt:: bash #
+
+      ceph osd pool set .mgr crush_rule replicated-ssd
+
+   This intervention will result in a small amount of backfill, but
+   typically this is not disruptive and completes quickly.
+
+
+Automated scaling
+-----------------
+
+In the simplest approach to automated scaling, the cluster is allowed to
+automatically scale each pool's ``pg_num`` in accordance with usage. Ceph considers the
+total available storage, the target number of PG replicas for each OSD,
+and how much data is stored in each pool, then apportions PGs accordingly.
+The system is conservative with its approach, making changes to a pool only
+when the current number of PGs (``pg_num``) varies by more than the scaling threshold
+from the recommended number. When scaling down, only this configured factor is used.
+However, when scaling up, the threshold is dynamically reduced: it's automatically
+set to 1.0 when the recommended NEW PG_NUM is 512 or 1024, and to 2.0 when it is 2048.
+
+The target number of PGs per OSD is determined by the ``mon_target_pg_per_osd``
+parameter (default: 100), which can be adjusted by running the following
+command:
+
+.. prompt:: bash #
+
+   ceph config set global mon_target_pg_per_osd 100
+
+For all but the very smallest deployments a value of 200 is recommended.
+A value above 500 may result in excessive peering traffic and RAM usage.
+
+.. _overlapping_crush_roots:
+
+Overlapping CRUSH Roots PG Budget
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When OSDs are distributed across multiple CRUSH roots, each root receives a PG target based
+on its OSDs, with OSDs shared across multiple roots contributing proportionally less to each
+root's allocation. The budget assigned to each root is:
+
+.. math::
+
+   \sum_{\text{OSD}_i \in R} \frac{\text{mon_target_pg_per_osd}}{|\text{roots}(\text{OSD}_i)|}
+
+This ensures that the total PG budget is distributed proportionally across all roots.
+
+Consider a cluster with the following topology:
+
+.. prompt:: bash #
+
+   mon_target_pg_per_osd = 300
+
+- **rootid -1**: Contains OSDs {0, 1, 2, 3}
+- **rootid -2**: Contains OSDs {0, 1}
+- **rootid -3**: Contains OSDs {2, 3}
+
+OSD membership:
+
+- **OSD 0**: Belongs to roots {-1, -2}
+- **OSD 1**: Belongs to roots {-1, -2}
+- **OSD 2**: Belongs to roots {-1, -3}
+- **OSD 3**: Belongs to roots {-1, -3}
+
+The PG target allocation for each root is calculated as follows:
+
+- Root -1: pg_target = 600 = (300 / 2 roots for OSD 0) + (300 / 2 roots for OSD 1) + (300 / 2 roots for OSD 2) + (300 / 2 roots for OSD 3)
+- Root -2: pg_target = 300 = (300 / 2 roots for OSD 0) + (300 / 2 roots for OSD 1)
+- Root -3: pg_target = 300 = (300 / 2 roots for OSD 2) + (300 / 2 roots for OSD 3)
+
+.. _allocation_algorithm:
+
+Allocation Algorithm
+~~~~~~~~~~~~~~~~~~~~
+
+The autoscaler sets each pool's ``final_pool_pg_target`` to be rounded to the
+nearest power of two while ensuring that the number of PGs to be placed on each OSD
+will not cause its PG replicas to exceed ``mon_target_pg_per_osd``. Pools with the same
+configuration values (``pg_target``, replication size, bias, bulk, autoscale enabled) are
+treated as a group and rounded in the same direction, even if a subset of them
+could be rounded up for better utilization. This is to prefer fairness over
+greed. The allocation algorithm performs four passess
+
+First pass (Non-autoscale pools): Non-autoscale pools
+are not rounded to a power of two but their ``pg_num_target`` is subtracted
+from the budget.
+
+Second pass (Non-bulk pools):  Non-bulk pools have target PGs calculated
+from their ``capacity_ratio = max(acutal data, or target size)``.
+
+Third pass (Bulk Pools): For all bulk pools with ``capacity_ratio > even_ratio``
+where ``even_ratio = pg_left / # bulk pools``, calculate target PGs from the ``capacity ratio``
+
+Fourth pass (Leftover Bulk Pools): Distribute remaining PGs to even pools
+where final_ratio = 1 / (# pools remaining)
+
+
+For example:
+
+.. prompt:: bash #
+
+   ceph config set global mon_target_pg_per_osd 250
+
+   ceph osd pool create data1
+   ceph osd pool create data2
+   ceph osd pool create data3
+
+   ceph osd pool set data1 target_size_ratio 0.4
+   ceph osd pool set data2 target_size_ratio 0.3
+   ceph osd pool set data3 target_size_ratio 0.3
+
+4 OSDs with replication size 3. There are a total of 1000 PGs. 0.4 * 1000 = 400. 400 / 3 = 133.33.
+Rounded to the nearest power of two, this becomes 128. Pool ``data1`` ``final_pool_pg_target = 128``.
+1000 - (128 * 3) =  616. Since ``data2`` and ``data3`` both have ``pg_target = 0.3 * 1000 = 300`` and
+the same (``pg_target``, replication size, bias, is bulk, is autoscale enabled), they are
+treated as a group. 616 / 2 / 3 = 102.677. They must both be rounded down to 64 since rounding up
+to 128 would exceed the budget. This algorithm prefers fairness over greed since if it were greedy,
+one pool could be allocated 128 PGs and the other 64 PGs, which would still meet the budget  (64 * 3 + 128 * 3 = 576 < 616)
+
+
+.. _managing_bulk_flagged_pools:
+
+Managing pools that are flagged with ``bulk``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If a pool is flagged ``bulk``, then the autoscaler starts the pool with a full
+complement of PGs and then scales down the number of PGs only if the usage
+ratio across the pool is uneven.  However, if a pool is not flagged ``bulk``,
+then the autoscaler starts the pool with minimal PGs and creates additional PGs
+only if there is more usage in the pool. This flag should be used with care,
+as it may not have the results one would think.
+
+To create a pool that will be flagged ``bulk``, run the following command:
+
+.. prompt:: bash #
+
+   ceph osd pool create <pool-name> --bulk
+
+To set or unset the ``bulk`` flag of an existing pool, run the following
+command:
+
+.. prompt:: bash #
+
+   ceph osd pool set <pool-name> bulk <true/false/1/0>
+
+To get the ``bulk`` flag of an existing pool, run the following command:
+
+.. prompt:: bash #
+
+   ceph osd pool get <pool-name> bulk
+
+.. _specifying_pool_target_size:
+
+Specifying expected pool size
+-----------------------------
+
+When a cluster or pool is first created, it consumes only a small fraction of
+the total cluster capacity and appears to the system as if it should need only
+a small number of PGs. However, in some cases, cluster administrators know
+which pools are likely to consume most of the system capacity in the long run.
+When Ceph is provided with this information, a more appropriate number of PGs
+can be used from the beginning, obviating subsequent changes in ``pg_num`` and
+the associated overhead cost of relocating data. This also helps with performance
+and data uniformity by ensuring that PGs are placed on all available OSDs.
+
+The *target size* of a pool can be specified in two ways: either in relation to
+the absolute size (in bytes) of the pool, or as a weight relative to all other
+pools that have ``target_size_ratio`` set.
+
+For example, to tell the system that ``mypool`` is expected to consume 100 TB,
+run the following command:
+
+.. prompt:: bash #
+
+   ceph osd pool set mypool target_size_bytes 100T
+
+Alternatively, to tell the system that ``mypool`` is expected to consume a
+ratio of 1.0 relative to other pools that have ``target_size_ratio`` set,
+adjust the ``target_size_ratio`` setting of ``my pool`` by running the
+following command:
+
+.. prompt:: bash # 
+
+   ceph osd pool set mypool target_size_ratio 1.0
+
+If `mypool` is the only pool in the cluster, then it is expected to use 100% of
+the total cluster capacity. However, if the cluster contains a second pool that
+has ``target_size_ratio`` set to 1.0, then both pools are expected to use 50%
+of the total cluster capacity.
+
+The ``ceph osd pool create`` command has two command-line options that can be
+used to set the target size of a pool at creation time: ``--target-size-bytes
+<bytes>`` and ``--target-size-ratio <ratio>``.
+
+Note that if the target-size values that have been specified are impossible
+(for example, a capacity larger than the total cluster), then a health check
+(``POOL_TARGET_SIZE_BYTES_OVERCOMMITTED``) will be raised.
+
+If both ``target_size_ratio`` and ``target_size_bytes`` are specified for a
+pool, then the latter will be ignored, the former will be used in system
+calculations, and a health check (``POOL_HAS_TARGET_SIZE_BYTES_AND_RATIO``)
+will be raised.
+
+Note that in most cases it is advised to not set both a bias value other than 1.0
+and a target ratio on the same pool.  Use a higher bias value for metadata /
+omap-rich pools and a target ratio for RADOS data-heavy pools.
+
+
+Specifying bounds on a pool's PGs
+---------------------------------
+
+It is possible to specify both the minimum number and the maximum number of PGs
+for a pool. 
+
+Setting a Minimum Number of PGs or a Maximum Number of PGs
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If a minimum is set on a pool, then Ceph will not itself reduce (nor recommend that you
+reduce) the ``pg_num`` for that pool to a value below the configured value. Setting a
+minimum serves to establish a lower bound on the amount of parallelism enjoyed
+by a client during I/O, even if a pool is mostly empty. 
+
+If a maximum is set, then Ceph will not itself increase (or recommend that you
+increase) the number of PGs to a value above the configured value.
+
+To set the minimum number of PGs for a pool, run a command of the following
+form:
+
+.. prompt:: bash #
+
+   ceph osd pool set <pool-name> pg_num_min <num>
+
+To set the maximum number of PGs for a pool, run a command of the following
+form:
+
+.. prompt:: bash #
+
+   ceph osd pool set <pool-name> pg_num_max <num>
+
+In addition, the ``ceph osd pool create`` command has two command-line options
+that can be used to specify the minimum or maximum PG count of a pool at
+creation time: ``--pg-num-min <num>`` and ``--pg-num-max <num>``.
+
 .. _preselection:
 
-A preselection of pg_num
-========================
+Preselecting pg_num
+===================
 
-When creating a new pool with::
+When creating a pool with the following command, you have the option to
+preselect the value of the ``pg_num`` parameter:
 
-        ceph osd pool create {pool-name} pg_num
+.. prompt:: bash #
 
-it is mandatory to choose the value of ``pg_num`` because it cannot be
-calculated automatically. Here are a few values commonly used:
+   ceph osd pool create {pool-name} [pg_num]
 
-- Less than 5 OSDs set ``pg_num`` to 128
+If you opt not to specify ``pg_num`` in this command, the cluster uses the PG
+autoscaler to automatically configure the parameter in accordance with the
+amount of data that is stored in the pool (see :ref:`pg-autoscaler` above).
 
-- Between 5 and 10 OSDs set ``pg_num`` to 512
+However, your decision of whether or not to specify ``pg_num`` at creation time
+has no effect on whether the parameter will be automatically tuned by the
+cluster afterwards. As seen above, autoscaling of PGs is enabled or disabled by
+running a command of the following form:
+    
+.. prompt:: bash #
 
-- Between 10 and 50 OSDs set ``pg_num`` to 1024
+   ceph osd pool set {pool-name} pg_autoscale_mode (on|off|warn)
 
-- If you have more than 50 OSDs, you need to understand the tradeoffs
-  and how to calculate the ``pg_num`` value by yourself
+Without the balancer, the suggested (but not default) target for most clusters is
+200 PG replicas on each OSD. With the balancer on and default values, an initial
+result of roughly 50-70  PG replicas on each OSD is expected.  This is the value
+reported under the ``PGS`` column in the output of ``ceph df`` and is notably
+not the cluster's total number of PGs divided by the number of OSDs.
 
-- For calculating ``pg_num`` value by yourself please take help of `pgcalc`_ tool 
+The autoscaler attempts to satisfy the following conditions:
 
-As the number of OSDs increases, chosing the right value for pg_num
-becomes more important because it has a significant influence on the
-behavior of the cluster as well as the durability of the data when
-something goes wrong (i.e. the probability that a catastrophic event
-leads to data loss).
+- The number of PG replicas per OSD should be proportional to the amount of data in the
+  pool.
+- There should by default be 50-100 PGs per pool, taking into account the replication
+  overhead or erasure-coding fan-out of each PG's replicas across OSDs.
 
-How are Placement Groups used ?
-===============================
+Use of Placement Groups
+=======================
 
-A placement group (PG) aggregates objects within a pool because
-tracking object placement and object metadata on a per-object basis is
-computationally expensive--i.e., a system with millions of objects
-cannot realistically track placement on a per-object basis.
+A placement group aggregates objects within a pool. The tracking of RADOS
+object placement and object metadata on a per-object basis is computationally
+expensive. It would be infeasible for a system with millions of RADOS
+objects to efficiently track placement on a per-object basis.
 
 .. ditaa::
            /-----\  /-----\  /-----\  /-----\  /-----\
@@ -60,17 +510,16 @@ cannot realistically track placement on a per-object basis.
                   |                       |
                   +-----------------------+
 
-The Ceph client will calculate which placement group an object should
-be in. It does this by hashing the object ID and applying an operation
-based on the number of PGs in the defined pool and the ID of the pool.
-See `Mapping PGs to OSDs`_ for details.
+The Ceph client calculates which PG a RADOS object should be in. As part of
+this calculation, the client hashes the object ID and performs an operation
+involving both the number of PGs in the specified pool and the pool ID. For
+details, see `Mapping PGs to OSDs`_.
 
-The object's contents within a placement group are stored in a set of
-OSDs. For instance, in a replicated pool of size two, each placement
-group will store objects on two OSDs, as shown below.
+The contents of a RADOS object belonging to a PG are stored in a set of OSDs.
+For example, in a replicated pool of size two, each PG will store objects on
+two OSDs, as shown below:
 
 .. ditaa::
-
    +-----------------------+      +-----------------------+
    |  Placement Group #1   |      |  Placement Group #2   |
    |                       |      |                       |
@@ -84,259 +533,290 @@ group will store objects on two OSDs, as shown below.
    \----------/  \----------/    \----------/  \----------/
 
 
-Should OSD #2 fail, another will be assigned to Placement Group #1 and
-will be filled with copies of all objects in OSD #1. If the pool size
-is changed from two to three, an additional OSD will be assigned to
-the placement group and will receive copies of all objects in the
-placement group.
+If OSD #2 fails, another OSD will be assigned to Placement Group #1 and then
+filled with copies of all objects in OSD #1. If the pool size is changed from
+two to three, an additional OSD will be assigned to the PG and will receive
+copies of all objects in the PG.
 
-Placement groups do not own the OSD, they share it with other
-placement groups from the same pool or even other pools. If OSD #2
-fails, the Placement Group #2 will also have to restore copies of
-objects, using OSD #3.
+An OSD assigned to a PG is not owned exclusively by that PG; rather, the OSD is
+shared with other PGs either from the same pool or from other pools. In our
+example, OSD #2 is shared by Placement Group #1 and Placement Group #2. If OSD
+#2 fails, then Placement Group #2 must restore copies of objects (by making use
+of OSD #3).
 
-When the number of placement groups increases, the new placement
-groups will be assigned OSDs. The result of the CRUSH function will
-also change and some objects from the former placement groups will be
-copied over to the new Placement Groups and removed from the old ones.
+When the number of PGs increases, several consequences ensue. The new PGs are
+assigned OSDs. The result of the CRUSH function changes, which means that some
+objects from the already-existing PGs are copied to the new PGs and removed
+from the old ones.
 
-Placement Groups Tradeoffs
-==========================
+Factors Relevant To Specifying pg_num
+=====================================
 
-Data durability and even distribution among all OSDs call for more
-placement groups but their number should be reduced to the minimum to
-save CPU and memory.
+Performance and even data distribution across
+OSDs weigh in favor of a higher number of PGs. Conserving CPU resources and
+minimizing memory usage weigh in favor of a lower number of PGs.
+The latter was more of a concern before Filestore OSDs were deprecated, so
+most modern clusters with BlueStore OSDs can favor the former by
+configuring a value of 200-250 for ``mon_target_pg_per_osd`` and
+500 for ``mon_max_pg_per_osd``.  Note that the latter is only a failsafe
+and does not itself influence ``pg_num`` calculations.
 
 .. _data durability:
 
 Data durability
 ---------------
 
-After an OSD fails, the risk of data loss increases until the data it
-contained is fully recovered. Let's imagine a scenario that causes
-permanent data loss in a single placement group:
+When an OSD fails, the risk of data loss is increased until replication of the
+data it hosted is restored to the configured level. To illustrate this point,
+let's imagine a scenario that results in permanent data loss in a single PG:
 
-- The OSD fails and all copies of the object it contains are lost.
-  For all objects within the placement group the number of replica
-  suddently drops from three to two.
+#. The OSD fails and all copies of the object that it contains are lost.  For
+   each object within the PG, the number of its replicas suddenly drops from
+   three to two.
 
-- Ceph starts recovery for this placement group by chosing a new OSD
-  to re-create the third copy of all objects.
+#. Ceph starts recovery for this PG by choosing a new OSD on which to re-create
+   the third copy of each object.
 
-- Another OSD, within the same placement group, fails before the new
-  OSD is fully populated with the third copy. Some objects will then
-  only have one surviving copies.
+#. Another OSD within the same PG fails before the new OSD is fully populated
+   with the third copy. Some objects will then only have one surviving copy.
 
-- Ceph picks yet another OSD and keeps copying objects to restore the
-  desired number of copies.
+#. Ceph selects yet another OSD and continues copying objects in order to
+   restore the desired number of copies.
 
-- A third OSD, within the same placement group, fails before recovery
-  is complete. If this OSD contained the only remaining copy of an
-  object, it is permanently lost.
+#. A third OSD within the same PG fails before recovery is complete. If this
+   OSD happened to contain the only remaining copy of an object, the object is
+   permanently lost.
 
-In a cluster containing 10 OSDs with 512 placement groups in a three
-replica pool, CRUSH will give each placement groups three OSDs. In the
-end, each OSDs will end up hosting (512 * 3) / 10 = ~150 Placement
-Groups. When the first OSD fails, the above scenario will therefore
-start recovery for all 150 placement groups at the same time.
+This is one of the subtle reasons why replicated pools with ``size=2`` and
+EC pools with ``m=1`` are risky and generally not recommended.
 
-The 150 placement groups being recovered are likely to be
-homogeneously spread over the 9 remaining OSDs. Each remaining OSD is
-therefore likely to send copies of objects to all others and also
-receive some new objects to be stored because they became part of a
-new placement group.
+In a cluster containing 10 OSDs and 512 PGs in a three-replica pool, CRUSH
+will place each PG on three OSDs.  Ultimately, each OSD hosts :math:`\frac{(512 *
+3)}{10} = ~150` PGs. So when one OSD fails in the above scenario,
+recovery will be triggered for all ~150 PGs that were placed on that OSD.
 
-The amount of time it takes for this recovery to complete entirely
-depends on the architecture of the Ceph cluster. Let say each OSD is
-hosted by a 1TB SSD on a single machine and all of them are connected
-to a 10Gb/s switch and the recovery for a single OSD completes within
-M minutes. If there are two OSDs per machine using spinners with no
-SSD journal and a 1Gb/s switch, it will at least be an order of
+The 150 PGs to be recovered are likely to be evenly distributed
+across the 9 remaining OSDs. Each remaining OSD is therefore likely to send
+copies of objects to all other OSDs and also likely to receive some new objects
+to be stored because it has become part of a new PG.
+
+The amount of time it takes for this recovery to complete depends on the
+architecture of the Ceph cluster. Compare two setups: (1) Each OSD is hosted by
+a 1 TB SSD on a single machine, all of the OSDs are connected to a 10 Gb/s
+switch, and the recovery of a single OSD completes within a certain number of
+minutes. (2) There are two OSDs per machine using HDDs with no SSD WAL+DB and
+a 1 Gb/s switch. In the second setup, recovery will be at least one order of
 magnitude slower.
 
-In a cluster of this size, the number of placement groups has almost
-no influence on data durability. It could be 128 or 8192 and the
-recovery would not be slower or faster.
+In such a cluster, the number of PGs has almost no effect on data durability.
+Whether there are 128 PGs per OSD or 8192 PGs per OSD, the recovery will be no
+slower or faster.
 
-However, growing the same Ceph cluster to 20 OSDs instead of 10 OSDs
-is likely to speed up recovery and therefore improve data durability
-significantly. Each OSD now participates in only ~75 placement groups
-instead of ~150 when there were only 10 OSDs and it will still require
-all 19 remaining OSDs to perform the same amount of object copies in
-order to recover. But where 10 OSDs had to copy approximately 100GB
-each, they now have to copy 50GB each instead. If the network was the
-bottleneck, recovery will happen twice as fast. In other words,
-recovery goes faster when the number of OSDs increases.
+However, an increase in the number of OSDs can increase the speed of recovery.
+Suppose our Ceph cluster is expanded from 10 OSDs to 20 OSDs.  Each OSD now
+participates in only ~75 PGs rather than ~150 PGs. All 19 remaining OSDs will
+still be required to replicate the same number of objects in order to recover.
+But instead of there being only 10 OSDs that have to copy ~100 GB each, there
+are now 20 OSDs that have to copy only 50 GB each. If the network had
+previously been a bottleneck, recovery now happens twice as fast since the
+per-OSD limit on the number of parallel recovery operations is larger.
 
-If this cluster grows to 40 OSDs, each of them will only host ~35
-placement groups. If an OSD dies, recovery will keep going faster
-unless it is blocked by another bottleneck. However, if this cluster
-grows to 200 OSDs, each of them will only host ~7 placement groups. If
-an OSD dies, recovery will happen between at most of ~21 (7 * 3) OSDs
-in these placement groups: recovery will take longer than when there
-were 40 OSDs, meaning the number of placement groups should be
+Similarly, suppose that our cluster grows to 40 OSDs. Each OSD will host only
+~38 PGs. And if an OSD dies, recovery will take place faster than before unless
+it is blocked by another bottleneck. Now, however, suppose that our cluster
+grows to 200 OSDs. Each OSD will host only ~7 PGs. And if an OSD dies, recovery
+will happen across at most :math:`\approx 21 = (7 \times 3)` OSDs
+associated with these PGs. This means that recovery will take longer than when
+there were only 40 OSDs. For this reason, the number of PGs should be
 increased.
 
-No matter how short the recovery time is, there is a chance for a
-second OSD to fail while it is in progress. In the 10 OSDs cluster
-described above, if any of them fail, then ~17 placement groups
-(i.e. ~150 / 9 placement groups being recovered) will only have one
-surviving copy. And if any of the 8 remaining OSD fail, the last
-objects of two placement groups are likely to be lost (i.e. ~17 / 8
-placement groups with only one remaining copy being recovered).
+No matter how brief the recovery time is, there is always a chance that an
+additional OSD will fail while recovery is in progress.  Consider the cluster
+with 10 OSDs described above: if any of the OSDs fail, then :math:`\approx 17`
+(approximately 150 divided by 9) PGs will have only one remaining copy. And if
+any of the 8 remaining OSDs fail, then 2 (approximately 17 divided by 8) PGs
+are likely to lose their remaining objects. This is one reason why setting
+``size=2`` is risky.
 
-When the size of the cluster grows to 20 OSDs, the number of Placement
-Groups damaged by the loss of three OSDs drops. The second OSD lost
-will degrade ~4 (i.e. ~75 / 19 placement groups being recovered)
-instead of ~17 and the third OSD lost will only lose data if it is one
-of the four OSDs containing the surviving copy. In other words, if the
-probability of losing one OSD is 0.0001% during the recovery time
-frame, it goes from 17 * 10 * 0.0001% in the cluster with 10 OSDs to 4 * 20 * 
-0.0001% in the cluster with 20 OSDs.
+When the number of OSDs in the cluster increases to 20, the number of PGs that
+would be damaged by the loss of three OSDs significantly decreases. The loss of
+a second OSD degrades only approximately :math:`4` or (:math:`\frac{75}{19}`)
+PGs rather than :math:`\approx 17` PGs, and the loss of a third OSD results in
+data loss only if it is one of the 4 OSDs that contains the remaining copy.
+This means -- assuming that the probability of losing one OSD during recovery
+is 0.0001% -- that the probability of data loss when three OSDs are lost is
+:math:`\approx 17 \times 10 \times 0.0001%` in the cluster with 10 OSDs, and
+only :math:`\approx 4 \times 20 \times 0.0001%` in the cluster with 20 OSDs.
 
-In a nutshell, more OSDs mean faster recovery and a lower risk of
-cascading failures leading to the permanent loss of a Placement
-Group. Having 512 or 4096 Placement Groups is roughly equivalent in a
-cluster with less than 50 OSDs as far as data durability is concerned.
+In summary, the greater the number of OSDs, the faster the recovery and the
+lower the risk of permanently losing a PG due to cascading failures. As far as
+data durability is concerned, in a cluster with fewer than 50 OSDs, it doesn't
+much matter whether there are 512 or 4096 PGs.
 
-Note: It may take a long time for a new OSD added to the cluster to be
-populated with placement groups that were assigned to it. However
-there is no degradation of any object and it has no impact on the
-durability of the data contained in the Cluster.
+.. note::  It can take a long time for an OSD that has been recently added to
+   the cluster to be populated with the PGs assigned to it.  However, no object
+   degradation or impact on data durability will result from the slowness of
+   this process since Ceph populates data into the new PGs before removing it
+   from the old PGs.
 
 .. _object distribution:
 
 Object distribution within a pool
 ---------------------------------
 
-Ideally objects are evenly distributed in each placement group. Since
-CRUSH computes the placement group for each object, but does not
-actually know how much data is stored in each OSD within this
-placement group, the ratio between the number of placement groups and
-the number of OSDs may influence the distribution of the data
-significantly.
+Under ideal conditions, objects are evenly distributed across PGs. Because
+CRUSH computes the PG for each object but does not know how much data is stored
+in each OSD associated with the PG, the ratio between the number of PGs and the
+number of OSDs can have a significant influence on data distribution.
 
-For instance, if there was single a placement group for ten OSDs in a
-three replica pool, only three OSD would be used because CRUSH would
-have no other choice. When more placement groups are available,
-objects are more likely to be evenly spread among them. CRUSH also
-makes every effort to evenly spread OSDs among all existing Placement
-Groups.
+For example, suppose that there is only a single PG for ten OSDs in a
+three-replica pool. In that case, only three OSDs would be used because CRUSH
+would have no other option. However, if more PGs are available, RADOS objects are
+more likely to be evenly distributed across OSDs.  CRUSH makes every effort to
+distribute OSDs evenly across all existing PGs.
 
-As long as there are one or two orders of magnitude more Placement
-Groups than OSDs, the distribution should be even. For instance, 300
-placement groups for 3 OSDs, 1000 placement groups for 10 OSDs etc.
+As long as there are one or two orders of magnitude more PGs than OSDs, the
+distribution is likely to be even. For example: 256 PGs for 3 OSDs, 512 PGs for
+10 OSDs, or 1024 PGs for 10 OSDs.
 
-Uneven data distribution can be caused by factors other than the ratio
-between OSDs and placement groups. Since CRUSH does not take into
-account the size of the objects, a few very large objects may create
-an imbalance. Let say one million 4K objects totaling 4GB are evenly
-spread among 1000 placement groups on 10 OSDs. They will use 4GB / 10
-= 400MB on each OSD. If one 400MB object is added to the pool, the
-three OSDs supporting the placement group in which the object has been
-placed will be filled with 400MB + 400MB = 800MB while the seven
-others will remain occupied with only 400MB.
+However, uneven data distribution can emerge due to factors other than the
+ratio of PGs to OSDs. For example, since CRUSH does not take into account the
+size of the RADOS objects, the presence of a few very large RADOS objects can
+create an imbalance. Suppose that one million 4 KB RADOS objects totaling 4 GB
+are evenly distributed among 1024 PGs on 10 OSDs. These RADOS objects will
+consume 4 GB / 10 = 400 MB on each OSD. If a single 400 MB RADOS object is then
+added to the pool, the three OSDs supporting the PG in which the RADOS object
+has been placed will each be filled with 400 MB + 400 MB = 800 MB but the seven
+other OSDs will still contain only 400 MB.
 
 .. _resource usage:
 
 Memory, CPU and network usage
 -----------------------------
 
-For each placement group, OSDs and MONs need memory, network and CPU
-at all times and even more during recovery. Sharing this overhead by
-clustering objects within a placement group is one of the main reasons
-they exist.
+Every PG in the cluster imposes memory, network, and CPU demands upon OSDs and
+Monitors. These needs must be met at all times and are increased during recovery.
+Indeed, one of the main reasons PGs were developed was to decrease this overhead
+by aggregating RADOS objects into sets of a manageable size.
 
-Minimizing the number of placement groups saves significant amounts of
-resources.
+For this reason, limiting the number of PGs saves significant resources.
 
-Choosing the number of Placement Groups
-=======================================
+.. _choosing-number-of-placement-groups:
 
-If you have more than 50 OSDs, we recommend approximately 50-100
-placement groups per OSD to balance out resource usage, data
-durability and distribution. If you have less than 50 OSDs, chosing
-among the `preselection`_ above is best. For a single pool of objects,
-you can use the following formula to get a baseline::
+Choosing the Number of PGs
+==========================
 
-                (OSDs * 100)
-   Total PGs =  ------------
-                 pool size
+.. note:: It is rarely necessary to do the math in this section by hand.
+   Instead, use the ``ceph osd pool autoscale-status`` command in combination
+   with the ``target_size_bytes`` or ``target_size_ratio`` pool properties. For
+   more information, see :ref:`pg-autoscaler`.
 
-Where **pool size** is either the number of replicas for replicated
-pools or the K+M sum for erasure coded pools (as returned by **ceph
-osd erasure-code-profile get**).
+If you have more than 50 OSDs, we recommend approximately 100-250 PG replicas per OSD in
+order to balance resource usage, data durability, and data distribution. If you
+have fewer than 50 OSDs, follow the guidance in the `preselection`_ section.
+For a single pool, use the following formula to get a baseline value:
 
-You should then check if the result makes sense with the way you
-designed your Ceph cluster to maximize `data durability`_,
-`object distribution`_ and minimize `resource usage`_.
+  Total PGs = :math:`\frac{OSDs \times 100}{pool \: size}`
 
-The result should be **rounded up to the nearest power of two.**
-Rounding up is optional, but recommended for CRUSH to evenly balance
-the number of objects among placement groups.
+Here **pool size** is either the number of replicas for replicated pools or the
+K+M sum for erasure-coded pools. To retrieve this sum, run the command ``ceph
+osd erasure-code-profile get``.
 
-As an example, for a cluster with 200 OSDs and a pool size of 3
-replicas, you would estimate your number of PGs as follows::
+Next, check whether the resulting baseline value is consistent with the way you
+designed your Ceph cluster to maximize `data durability`_ and `object
+distribution`_ and to minimize `resource usage`_.
 
-   (200 * 100)
-   ----------- = 6667. Nearest power of 2: 8192
-        3
+This value should be **rounded up to the nearest power of two**.
 
-When using multiple data pools for storing objects, you need to ensure
-that you balance the number of placement groups per pool with the
-number of placement groups per OSD so that you arrive at a reasonable
-total number of placement groups that provides reasonably low variance
-per OSD without taxing system resources or making the peering process
-too slow.
+Each pool's ``pg_num`` should be a power of two. Other values are likely to
+result in uneven distribution of data across OSDs. It is best to increase
+``pg_num`` for a pool only when it is feasible and desirable to set the next
+highest power of two. Note that this power of two rule is per-pool; it is
+neither necessary nor easy to align the sum of all pools' ``pg_num`` to a power
+of two.
 
-For instance a cluster of 10 pools each with 512 placement groups on
-ten OSDs is a total of 5,120 placement groups spread over ten OSDs,
-that is 512 placement groups per OSD. That does not use too many
-resources. However, if 1,000 pools were created with 512 placement
-groups each, the OSDs will handle ~50,000 placement groups each and it
-would require significantly more resources and time for peering.
+For example, if you have a cluster with 200 OSDs and a single pool with a size
+of 3 replicas, estimate the number of PGs as follows:
+
+  :math:`\frac{200 \times 100}{3} = 6667`. Rounded up to the nearest power of 2: 8192.
+
+When using multiple data pools to store objects, make sure that you balance the
+number of PGs per pool against the number of PGs per OSD so that you arrive at
+a reasonable total number of PGs. It is important to find a number that
+provides reasonably low variance per OSD without taxing system resources or
+making the peering process too slow.
+
+For example, suppose you have a cluster of 10 pools, each with 512 PGs on 10
+OSDs. That amounts to 5,120 PGs distributed across 10 OSDs, or 512 PGs per OSD.
+This cluster will not use too many resources. However, in a cluster of 1,000
+pools, each with 512 PGs on 10 OSDs, the OSDs will have to handle ~50,000 PGs
+each. This cluster will require significantly more resources and significantly
+more time for peering.
+
 
 .. _setting the number of placement groups:
 
-Set the Number of Placement Groups
-==================================
+Setting the Number of PGs
+=========================
 
-To set the number of placement groups in a pool, you must specify the
-number of placement groups at the time you create the pool.
-See `Create a Pool`_ for details. Once you've set placement groups for a
-pool, you may increase the number of placement groups (but you cannot
-decrease the number of placement groups). To increase the number of
-placement groups, execute the following::
+:ref:`Placement Group Link <pgcalc>`
 
-        ceph osd pool set {pool-name} pg_num {pg_num}
+Setting the initial number of PGs in a pool is done implicitly or explicitly
+at the time a pool is created. See :ref:`createpool` for details.
 
-Once you increase the number of placement groups, you must also
-increase the number of placement groups for placement (``pgp_num``)
-before your cluster will rebalance. The ``pgp_num`` will be the number of
-placement groups that will be considered for placement by the CRUSH
-algorithm. Increasing ``pg_num`` splits the placement groups but data
-will not be migrated to the newer placement groups until placement
-groups for placement, ie. ``pgp_num`` is increased. The ``pgp_num``
-should be equal to the ``pg_num``.  To increase the number of
-placement groups for placement, execute the following::
+However, after a pool is created, if the ``pg_autoscaler`` is not being
+used to manage ``pg_num`` values, you can change the number of PGs by running a
+command of the following form:
 
-        ceph osd pool set {pool-name} pgp_num {pgp_num}
+.. prompt:: bash # 
 
+   ceph osd pool set {pool-name} pg_num {pg_num}
 
-Get the Number of Placement Groups
-==================================
+Since the Nautilus release, Ceph automatically and incrementally steps ``pgp_num`` for a pool
+whenever ``pg_num`` is changed, either by the PG autoscaler or manually. Admins
+generally do not need to touch ``pgp_num`` directly, but can monitor progress
+with ``watch ceph osd pool ls detail``. When ``pg_num`` is changed, the value
+of ``pgp_num`` is stepped slowly so that the cost of splitting or merging PGs
+is amortized over time to minimize performance impact.
 
-To get the number of placement groups in a pool, execute the following::
+Increasing ``pg_num`` for a pool splits some PGs in that pool, but data will not be
+migrated to the new PGs via backfill operations until the pool's ``pgp_num`` is increased. 
 
-        ceph osd pool get {pool-name} pg_num
+It is possible but rarely appropriate to manually set the ``pgp_num`` parameter. The ``pgp_num``
+parameter should be equal to the ``pg_num`` parameter. To increase the number
+of PGs for placement, run a command of the following form:
+
+.. prompt:: bash #
+
+   ceph osd pool set {pool-name} pgp_num {pgp_num}
+
+If you decrease or increase ``pg_num`` for a pool, then ``pgp_num`` is adjusted
+automatically. In releases of Ceph beginning with Nautilus,
+when the ``pg_autoscaler`` is not used, ``pgp_num`` is automatically stepped to
+match ``pg_num``. This process manifests as periods of remapping of PGs and of
+backfill, which is expected behavior.
+
+.. _rados_ops_pgs_get_pg_num:
+
+Get the Number of PGs
+=====================
+
+To get the number of PGs in a pool, run a command of the following form:
+
+.. prompt:: bash #
+
+   ceph osd pool get {pool-name} pg_num
 
 
 Get a Cluster's PG Statistics
 =============================
 
-To get the statistics for the placement groups in your cluster, execute the following::
+To see the details of the PGs in your cluster, run a command of the following
+form:
 
-        ceph pg dump [--format {format}]
+.. prompt:: bash #
+
+   ceph pg dump [--format {format}]
 
 Valid formats are ``plain`` (default) and ``json``.
 
@@ -344,84 +824,223 @@ Valid formats are ``plain`` (default) and ``json``.
 Get Statistics for Stuck PGs
 ============================
 
-To get the statistics for all placement groups stuck in a specified state,
-execute the following::
+To see the statistics for all PGs that are stuck in a specified state, run a
+command of the following form:
 
-        ceph pg dump_stuck inactive|unclean|stale|undersized|degraded [--format <format>] [-t|--threshold <seconds>]
+.. prompt:: bash #
 
-**Inactive** Placement groups cannot process reads or writes because they are waiting for an OSD
-with the most up-to-date data to come up and in.
+   ceph pg dump_stuck inactive|unclean|stale|undersized|degraded [--format <format>] [-t|--threshold <seconds>]
 
-**Unclean** Placement groups contain objects that are not replicated the desired number
-of times. They should be recovering.
+- **Inactive** PGs cannot process reads or writes because they are waiting for
+  enough OSDs with the most up-to-date data to come ``up`` and ``in``.
 
-**Stale** Placement groups are in an unknown state - the OSDs that host them have not
-reported to the monitor cluster in a while (configured by ``mon_osd_report_timeout``).
+- **Undersized** PGs contain objects that have not been replicated the desired
+  number of times. Under normal conditions, it can be assumed that these PGs
+  are recovering.
 
-Valid formats are ``plain`` (default) and ``json``. The threshold defines the minimum number
-of seconds the placement group is stuck before including it in the returned statistics
-(default 300 seconds).
+- **Stale** PGs are in an unknown state -- the OSDs that host them have not
+  reported to the monitor cluster for a certain period of time (determined by
+  ``mon_osd_report_timeout``).
+
+Valid formats are ``plain`` (default) and ``json``. The threshold defines the
+minimum number of seconds the PG is stuck before it is included in the returned
+statistics (default: 300).
 
 
 Get a PG Map
 ============
 
-To get the placement group map for a particular placement group, execute the following::
+To get the PG map for a particular PG, run a command of the following form:
 
-        ceph pg map {pg-id}
+.. prompt:: bash #
 
-For example::
+   ceph pg map {pg-id}
 
-        ceph pg map 1.6c
+For example: 
 
-Ceph will return the placement group map, the placement group, and the OSD status::
+.. prompt:: bash #
 
-        osdmap e13 pg 1.6c (1.6c) -> up [1,0] acting [1,0]
+   ceph pg map 1.6c
 
+Ceph will return the PG map, the PG, and the OSD status. The output resembles
+the following:
 
-Get a PGs Statistics
-====================
+.. prompt:: bash #
 
-To retrieve statistics for a particular placement group, execute the following::
-
-        ceph pg {pg-id} query
-
-
-Scrub a Placement Group
-=======================
-
-To scrub a placement group, execute the following::
-
-        ceph pg scrub {pg-id}
-
-Ceph checks the primary and any replica nodes, generates a catalog of all objects
-in the placement group and compares them to ensure that no objects are missing
-or mismatched, and their contents are consistent.  Assuming the replicas all
-match, a final semantic sweep ensures that all of the snapshot-related object
-metadata is consistent. Errors are reported via logs.
+   osdmap e13 pg 1.6c (1.6c) -> up [1,0] acting [1,0]
 
 
-Revert Lost
-===========
+Get a PG's Statistics
+=====================
 
-If the cluster has lost one or more objects, and you have decided to
+To see statistics for a particular PG, run a command of the following form:
+
+.. prompt:: bash #
+
+   ceph pg {pg-id} query
+
+Scrub a PG
+==========
+
+To force an immediate scrub of a PG, run a command of the following form:
+
+.. prompt:: bash #
+
+   ceph tell {pg-id} scrub
+
+or
+
+.. prompt:: bash #
+
+   ceph tell {pg-id} deep-scrub
+
+Ceph checks the primary and replica OSDs and generates a catalog of all objects in
+the PG. For each object, Ceph compares all instances of the object (in the primary
+and replica OSDs) to ensure that they are consistent. For shallow scrubs (initiated
+by the first command format), only object metadata is compared. Deep scrubs
+(initiated by the second command format) compare the contents of the objects as well.
+If the replicas all match, a final semantic sweep takes place to ensure that all
+snapshot-related object metadata is consistent.  Errors are reported in logs.
+
+Scrubs initiated using the command format above are deemed high priority, and
+are performed immediately. Such scrubs are not subject to any day-of-week or
+time-of-day restrictions that are in effect for regular, periodic, scrubs.
+They are not limited by 'osd_max_scrubs', and are not required to wait for
+their replicas' scrub resources.
+
+A second command format exists for initiating a scrub as-if it were a regular
+scrub. This command format is as follows:
+
+.. prompt:: bash #
+
+   ceph tell {pg-id} schedule-scrub
+
+or
+
+.. prompt:: bash #
+
+   ceph tell {pg-id} schedule-deep-scrub
+
+
+To scrub all PGs from a specific pool, run a command of the following form:
+
+.. prompt:: bash #
+
+   ceph osd pool scrub {pool-name}
+
+
+Prioritize backfill/recovery of PG(s)
+=====================================
+
+You might encounter a situation in which multiple PGs require recovery or
+backfill, but the data in some PGs is more important than the data in others
+(for example, some PGs hold data for images that are used by running machines
+and other PGs are used by inactive machines and hold data that is less
+relevant). In that case, you might want to prioritize recovery or backfill of
+the PGs with especially important data so that the performance of the cluster
+and the availability of their data are restored sooner. To designate specific
+PG(s) as prioritized during recovery, run a command of the following form:
+
+.. prompt:: bash #
+
+   ceph pg force-recovery {pg-id} [{pg-id #2}] [{pg-id #3} ...]
+
+To mark specific PG(s) as prioritized during backfill, run a command of the
+following form:
+
+.. prompt:: bash #
+
+   ceph pg force-backfill {pg-id} [{pg-id #2}] [{pg-id #3} ...]
+
+These commands instruct Ceph to perform recovery or backfill on the specified
+PGs before processing the other PGs. Prioritization does not interrupt current
+backfills or recovery, but places the specified PGs at the top of the queue so
+that they will be acted upon next.  If you change your mind or realize that you
+have prioritized the wrong PGs, run one or both of the following commands:
+
+.. prompt:: bash #
+
+   ceph pg cancel-force-recovery {pg-id} [{pg-id #2}] [{pg-id #3} ...]
+   ceph pg cancel-force-backfill {pg-id} [{pg-id #2}] [{pg-id #3} ...]
+
+These commands remove the ``force`` flag from the specified PGs, so that the
+PGs will be processed in their usual order. As in the case of adding the
+``force`` flag, this affects only those PGs that are still queued but does not
+affect PGs currently undergoing recovery.
+
+The ``force`` flag is cleared automatically after recovery or backfill of the
+PGs is complete.
+
+Similarly, to instruct Ceph to prioritize all PGs from a specified pool (that
+is, to perform recovery or backfill on those PGs first), run one or both of the
+following commands:
+
+.. prompt:: bash #
+
+   ceph osd pool force-recovery {pool-name}
+   ceph osd pool force-backfill {pool-name}
+
+These commands can also be cancelled. To revert to the default order, run one
+or both of the following commands:
+
+.. prompt:: bash #
+
+   ceph osd pool cancel-force-recovery {pool-name}
+   ceph osd pool cancel-force-backfill {pool-name}
+
+.. warning:: These commands can break the order of Ceph's internal priority
+   computations, so use them with caution! If you have multiple pools that are
+   currently sharing the same underlying OSDs, and if the data held by certain
+   pools is more important than the data held by other pools, then we recommend
+   that you run a command of the following form to arrange a custom
+   recovery/backfill priority for all pools:
+
+.. prompt:: bash #
+
+   ceph osd pool set {pool-name} recovery_priority {value}
+
+For example, if you have twenty pools, you could make the most important pool  
+priority ``20``, and the next most important pool priority ``19``, and so on.  
+
+Another option is to set the recovery/backfill priority for only a proper
+subset of pools. In such a scenario, three important pools might (all) be
+assigned priority ``1`` and all other pools would be left without an assigned
+recovery/backfill priority.  Another possibility is to select three important
+pools and set their recovery/backfill priorities to ``3``, ``2``, and ``1``
+respectively.
+
+.. important:: Numbers of greater value have higher priority than numbers of
+   lesser value when using ``ceph osd pool set {pool-name} recovery_priority
+   {value}`` to set their recovery/backfill priority. For example, a pool with
+   the recovery/backfill priority ``30`` has a higher priority than a pool with
+   the recovery/backfill priority ``15``.
+
+Reverting Lost RADOS Objects
+============================
+
+If the cluster has lost one or more RADOS objects and you have decided to
 abandon the search for the lost data, you must mark the unfound objects
-as ``lost``.
+``lost``.
 
-If all possible locations have been queried and objects are still
-lost, you may have to give up on the lost objects. This is
-possible given unusual combinations of failures that allow the cluster
-to learn about writes that were performed before the writes themselves
-are recovered.
+If every possible location has been queried and all OSDs are ``up`` and ``in``,
+but certain RADOS objects are still lost, you might have to give up on those
+objects. This situation can arise when rare and unusual combinations of
+failures allow the cluster to learn about writes that were performed before the
+writes themselves were recovered.
 
-Currently the only supported option is "revert", which will either roll back to
-a previous version of the object or (if it was a new object) forget about it
-entirely. To mark the "unfound" objects as "lost", execute the following::
+The command to mark a RADOS object ``lost`` has only one supported option:
+``revert``. The ``revert`` option will either roll back to a previous version
+of the RADOS object (if it is old enough to have a previous version) or forget
+about it entirely (if it is too new to have a previous version). To mark the
+"unfound" objects ``lost``, run a command of the following form:
 
-        ceph pg {pg-id} mark_unfound_lost revert|delete
 
-.. important:: Use this feature with caution, because it may confuse
-   applications that expect the object(s) to exist.
+.. prompt:: bash #
+
+   ceph pg {pg-id} mark_unfound_lost revert|delete
+
+.. important:: Use this feature with caution. It might confuse applications
+   that expect the object(s) to exist.
 
 
 .. toctree::
@@ -431,6 +1050,4 @@ entirely. To mark the "unfound" objects as "lost", execute the following::
         pg-concepts
 
 
-.. _Create a Pool: ../pools#createpool
-.. _Mapping PGs to OSDs: ../../../architecture#mapping-pgs-to-osds
-.. _pgcalc: http://ceph.com/pgcalc/
+.. _Mapping PGs to OSDs: ../../../architecture/dynamic-cluster-management#mapping-pgs-to-osds

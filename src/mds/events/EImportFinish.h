@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -32,7 +33,7 @@ class EImportFinish : public LogEvent {
 				     success(s) { }
   EImportFinish() : LogEvent(EVENT_IMPORTFINISH), base(), success(false) { }
   
-  void print(ostream& out) const {
+  void print(std::ostream& out) const override {
     out << "EImportFinish " << base;
     if (success)
       out << " success";
@@ -40,12 +41,12 @@ class EImportFinish : public LogEvent {
       out << " failed";
   }
 
-  void encode(bufferlist& bl, uint64_t features) const;
-  void decode(bufferlist::iterator &bl);
-  void dump(Formatter *f) const;
-  static void generate_test_instances(list<EImportFinish*>& ls);
+  void encode(bufferlist& bl, uint64_t features) const override;
+  void decode(bufferlist::const_iterator &bl) override;
+  void dump(Formatter *f) const override;
+  static std::list<EImportFinish> generate_test_instances();
   
-  void replay(MDSRank *mds);
+  void replay(MDSRank *mds) override;
 
 };
 WRITE_CLASS_ENCODER_FEATURES(EImportFinish)

@@ -1,3 +1,5 @@
+.. _radosgw admin ops:
+
 ==================
  Admin Operations
 ==================
@@ -8,10 +10,62 @@ mechanism. Some operations require that the user holds special administrative ca
 The response entity type (XML or JSON) may be specified as the 'format' option in the
 request and defaults to JSON if not specified.
 
+Info
+====
+
+Get RGW cluster/endpoint information.
+
+:caps: info=read
+
+
+Syntax
+~~~~~~
+
+::
+
+	GET /{admin}/info?format=json HTTP/1.1
+	Host: {fqdn}
+
+
+Request Parameters
+~~~~~~~~~~~~~~~~~~
+
+None.
+
+
+Response Entities
+~~~~~~~~~~~~~~~~~
+
+If successful, the response contains an ``info`` section.
+
+``info``
+
+:Description: A container for all returned information.
+:Type: Container
+
+``cluster_id``
+
+:Description: The (typically unique) identifier for the controlling
+	      backing store for the RGW cluster.  In the typical case,
+	      this is value returned from librados::rados::cluster_fsid().
+:Type: String
+:Parent: ``info``
+
+
+Special Error Responses
+~~~~~~~~~~~~~~~~~~~~~~~
+
+None.
+
+
 Get Usage
 =========
 
 Request bandwidth usage information.
+
+Note: this feature is disabled by default, can be enabled by setting ``rgw
+enable usage log = true`` in the appropriate section of ceph.conf. For changes
+in ceph.conf to take effect, radosgw process restart is needed.
 
 :caps: usage=read
 
@@ -54,7 +108,7 @@ Request Parameters
 
 :Description: Specifies whether data entries should be returned.
 :Type: Boolean
-:Example: True [False]
+:Example: True [True]
 :Required: No
 
 
@@ -62,7 +116,7 @@ Request Parameters
 
 :Description: Specifies whether data summary should be returned.
 :Type: Boolean
-:Example: True [False]
+:Example: True [True]
 :Required: No
 
 
@@ -163,6 +217,10 @@ Trim Usage
 Remove usage information. With no dates specified, removes all usage
 information.
 
+Note: this feature is disabled by default, can be enabled by setting ``rgw
+enable usage log = true`` in the appropriate section of ceph.conf. For changes
+in ceph.conf to take effect, radosgw process restart is needed.
+
 :caps: usage=write
 
 Syntax
@@ -194,7 +252,7 @@ Request Parameters
 
 ``end``
 
-:Description: Date and (optional) time that specifies the end time of the requested data (none inclusive).
+:Description: Date and (optional) time that specifies the end time of the requested data (non-inclusive).
 :Type: String
 :Example: ``2012-09-25 16:00:00``
 :Required: No
@@ -215,11 +273,14 @@ TBD.
 Get User Info
 =============
 
-Get user information. If no user is specified returns the list of all users along with suspension
-information.
+Get user information. Cap ``users`` or ``user-info-without-keys`` must be set to ``read`` to run this operation.
+If cap ``user-info-without-keys`` is set to ``read`` or ``*``, S3 keys and Swift keys will not be
+included in the response unless the user running this operation is the system user, an admin user, or the cap ``users`` is set to ``read``.
 
-:caps: users=read
+Either a ``uid`` or ``access-key`` must be supplied as a request parameter. We recommend supplying uid.
+If both are provided but correspond to different users, the info for the user specified with ``uid`` will be returned.
 
+:caps: users=read or user-info-without-keys=read
 
 Syntax
 ~~~~~~
@@ -239,6 +300,13 @@ Request Parameters
 :Type: String
 :Example: ``foo_user``
 :Required: Yes
+
+``access-key``
+
+:Description: The S3 access key of the user for which the information is requested.
+:Type: String
+:Example: ``ABCD0EF12GHIJ2K34LMN``
+:Required: No
 
 
 Response Entities
@@ -304,6 +372,692 @@ Special Error Responses
 
 None.
 
+Create Account
+==============
+.. versionadded:: Squid
+
+Create a new account.
+
+:caps: accounts=write
+
+Syntax
+~~~~~~
+
+::
+
+	POST /{admin}/account?format=json HTTP/1.1
+	Host: {fqdn}
+
+
+
+Request Parameters
+~~~~~~~~~~~~~~~~~~
+
+``id``
+
+:Description: The ID of the account to be created.
+:Type: String
+:Example: ``RGW00000000000000001``
+:Required: No
+
+An account ID must be 20 characters long, and in the format of the string "RGW" followed by 17 numeric characters. If not specified, a random unique one will be generated.
+
+``name``
+
+:Description: The name of the account to be created.
+:Type: String
+:Example: ``account_name``
+:Required: No
+
+``email``
+
+:Description: The email address associated with the account.
+:Type: String
+:Example: ``foo@bar.com``
+:Required: No
+
+``tenant``
+
+:Description: The Tenant under which the account exists.
+:Type: string
+:Example: tenant1
+:Required: No
+
+``max-users``
+
+:Description: Specifies the maximum number of users the account can own. The default is 1000.
+:Type: Integer
+:Example: 500 [1000]
+:Required: No
+
+``max-roles``
+
+:Description: Specifies the maximum number of roles the account can own. The default is 1000.
+:Type: Integer
+:Example: 500 [1000]
+:Required: No
+
+``max-groups``
+
+:Description: Specifies the maximum number of groups the account can own. The default is 1000.
+:Type: Integer
+:Example: 500 [1000]
+:Required: No
+
+``max-access-keys``
+
+:Description: Specifies the maximum number of access keys the account can own. The default is 4.
+:Type: Integer
+:Example: 1 [4]
+:Required: No
+
+``max-buckets``
+
+:Description: Specifies the maximum number of buckets the account can own. The default is 1000.
+:Type: Integer
+:Example: 500 [1000]
+:Required: No
+
+
+Response Entities
+~~~~~~~~~~~~~~~~~
+
+If successful, the response contains the following account information.
+
+``account``
+
+:Description: A container for the account information.
+:Type: Container
+
+``id``
+
+:Description: The ID of the account created.
+:Type: String
+:Parent: ``account``
+
+``tenant``
+
+:Description: The Tenant under which the account exists.
+:Type: String
+:Parent: ``account``
+
+``name``
+
+:Description: The name of the account created.
+:Type: String
+:Parent: ``account``
+
+``email``
+
+:Description: The email address associated with the account.
+:Type: String
+:Parent: ``account``
+
+``max_users``
+
+:Description: The maximum number of users the account can own.
+:Type: Integer
+:Parent: ``account``
+
+``max_roles``
+
+:Description: The maximum number of roles the account can own.
+:Type: Integer
+:Parent: ``account``
+
+``max_groups``
+
+:Description: The maximum number of groups the account can own.
+:Type: Integer
+:Parent: ``account``
+
+``max_buckets``
+
+:Description: The maximum number of buckets the account can own.
+:Type: Integer
+:Parent: ``account``
+
+``max_access_keys``
+
+:Description: The maximum number of access keys the account can own.
+:Type: Integer
+:Parent: ``account``
+
+``quota``
+
+:Description: A container for the account quota information.
+:Type: Container
+:Parent: ``account``
+
+``enabled``
+
+:Description: Whether quota is enabled at the account level.
+:Type: Bool
+:Parent: ``quota``
+
+``check_on_raw``
+
+:Description: Whether quota should be checked on raw usage instead of the 4 KiB rounded one.
+:Type: Bool
+:Parent: ``quota``
+
+``max_size``
+
+:Description: The max quota size in bytes.
+:Type: Integer
+:Parent: ``quota``
+
+``max_size_kb``
+
+:Description: The max quota size in kilobytes.
+:Type: Integer
+:Parent: ``quota``
+
+``max_objects``
+
+:Description: The max number of objects that an account can own.
+:Type: Integer
+:Parent: ``quota``
+
+``bucket_quota``
+
+:Description: A container for the account bucket-level quota information.
+:Type: Container
+:Parent: ``account``
+
+``enabled``
+
+:Description: Whether quota is enabled at the bucket level for the account.
+:Type: Bool
+:Parent: ``bucket_quota``
+
+``check_on_raw``
+
+:Description: Whether bucket quota for the account should be checked on raw usage instead of the 4 KiB rounded one.
+:Type: Bool
+:Parent: ``bucket_quota``
+
+``max_size``
+
+:Description: The max quota size in bytes for buckets under the account.
+:Type: Integer
+:Parent: ``bucket_quota``
+
+``max_size_kb``
+
+:Description: The max quota size in kilobytes for buckets under the account.
+:Type: Integer
+:Parent: ``bucket_quota``
+
+``max_objects``
+
+:Description: The max number of objects that a bucket under the account can have.
+:Type: Integer
+:Parent: ``bucket_quota``
+
+Special Error Responses
+~~~~~~~~~~~~~~~~~~~~~~~
+
+``AccountAlreadyExists``
+
+:Description: Attempt to create existing account. This can happen if the account ID or the email is already in use.
+:Code: 409 Conflict
+
+
+Modify Account
+==============
+.. versionadded:: Squid
+
+Modify an account. Either ``id``, ``name``, or ``email`` must be provided.
+
+:caps: accounts=write
+
+Syntax
+~~~~~~
+
+::
+
+	PUT /{admin}/account?format=json HTTP/1.1
+	Host: {fqdn}
+
+
+Request Parameters
+~~~~~~~~~~~~~~~~~~
+
+``id``
+
+:Description: The ID of the account to be modified.
+:Type: String
+:Example: ``RGW00000000000000001``
+:Required: No
+
+``name``
+
+:Description: The name of the account to be modified.
+:Type: String
+:Example: ``account_name``
+:Required: No
+
+``email``
+
+:Description: The email address of the account to be modified.
+:Type: String
+:Example: ``foo@bar.com``
+:Required: No
+
+``max-users``
+
+:Description: Specifies the maximum number of users the account can own. The default is 1000.
+:Type: Integer
+:Example: 500 [1000]
+:Required: No
+
+``max-roles``
+
+:Description: Specifies the maximum number of roles the account can own. The default is 1000.
+:Type: Integer
+:Example: 500 [1000]
+:Required: No
+
+``max-groups``
+
+:Description: Specifies the maximum number of groups the account can own. The default is 1000.
+:Type: Integer
+:Example: 500 [1000]
+:Required: No
+
+``max-access-keys``
+
+:Description: Specifies the maximum number of access keys the account can own. The default is 4.
+:Type: Integer
+:Example: 1 [4]
+:Required: No
+
+``max-buckets``
+
+:Description: Specifies the maximum number of buckets the account can own. The default is 1000.
+:Type: Integer
+:Example: 500 [1000]
+:Required: No
+
+Response Entities
+~~~~~~~~~~~~~~~~~
+
+If successful, the response contains the following account information.
+
+``account``
+
+:Description: A container for the account information.
+:Type: Container
+
+``id``
+
+:Description: The account ID.
+:Type: String
+:Parent: ``account``
+
+``tenant``
+
+:Description: The Tenant under which the account exists.
+:Type: String
+:Parent: ``account``
+
+``name``
+
+:Description: The name of the account created.
+:Type: String
+:Parent: ``account``
+
+``email``
+
+:Description: The email address associated with the account.
+:Type: String
+:Parent: ``account``
+
+``max_users``
+
+:Description: The maximum number of users the account can own.
+:Type: Integer
+:Parent: ``account``
+
+``max_roles``
+
+:Description: The maximum number of roles the account can own.
+:Type: Integer
+:Parent: ``account``
+
+``max_groups``
+
+:Description: The maximum number of groups the account can own.
+:Type: Integer
+:Parent: ``account``
+
+``max_buckets``
+
+:Description: The maximum number of buckets the account can own.
+:Type: Integer
+:Parent: ``account``
+
+``max_access_keys``
+
+:Description: The maximum number of access keys the account can own.
+:Type: Integer
+:Parent: ``account``
+
+``quota``
+
+:Description: A container for the account quota information.
+:Type: Container
+:Parent: ``account``
+
+``enabled``
+
+:Description: Whether quota is enabled at the account level.
+:Type: Bool
+:Parent: ``quota``
+
+``check_on_raw``
+
+:Description: Whether quota should be checked on raw usage instead of the 4 KiB rounded one.
+:Type: Bool
+:Parent: ``quota``
+
+``max_size``
+
+:Description: The max quota size in bytes.
+:Type: Integer
+:Parent: ``quota``
+
+``max_size_kb``
+
+:Description: The max quota size in kilobytes.
+:Type: Integer
+:Parent: ``quota``
+
+``max_objects``
+
+:Description: The max number of objects that an account can own.
+:Type: Integer
+:Parent: ``quota``
+
+``bucket_quota``
+
+:Description: A container for the account bucket-level quota information.
+:Type: Container
+:Parent: ``account``
+
+``enabled``
+
+:Description: Whether quota is enabled at the bucket level for the account.
+:Type: Bool
+:Parent: ``bucket_quota``
+
+``check_on_raw``
+
+:Description: Whether bucket quota for the account should be checked on raw usage instead of the 4 KiB rounded one.
+:Type: Bool
+:Parent: ``bucket_quota``
+
+``max_size``
+
+:Description: The max quota size in bytes for buckets under the account.
+:Type: Integer
+:Parent: ``bucket_quota``
+
+``max_size_kb``
+
+:Description: The max quota size in kilobytes for buckets under the account.
+:Type: Integer
+:Parent: ``bucket_quota``
+
+``max_objects``
+
+:Description: The max number of objects that a bucket under the account can have.
+:Type: Integer
+:Parent: ``bucket_quota``
+
+
+Special Error Responses
+~~~~~~~~~~~~~~~~~~~~~~~
+
+None.
+
+Get Account Info
+================
+.. versionadded:: Squid
+
+Get account info. Either an ``id`` or a ``name`` must be provided.
+
+:caps: accounts=write
+
+Syntax
+~~~~~~
+
+::
+
+	GET /{admin}/account?format=json HTTP/1.1
+	Host: {fqdn}
+
+
+Request Parameters
+~~~~~~~~~~~~~~~~~~
+
+``id``
+
+:Description: The ID of the account to get info for.
+:Type: String
+:Example: ``RGW00000000000000001``
+:Required: No
+
+``name``
+
+:Description: The name of the account to get info for.
+:Type: String
+:Example: ``account_name``
+:Required: No
+
+
+Response Entities
+~~~~~~~~~~~~~~~~~
+
+If successful, the response contains the following account information.
+
+``account``
+
+:Description: A container for the account information.
+:Type: Container
+
+``id``
+
+:Description: The account ID.
+:Type: String
+:Parent: ``account``
+
+``tenant``
+
+:Description: The Tenant under which the account exists.
+:Type: String
+:Parent: ``account``
+
+``name``
+
+:Description: The name of the account created.
+:Type: String
+:Parent: ``account``
+
+``email``
+
+:Description: The email address associated with the account.
+:Type: String
+:Parent: ``account``
+
+``max_users``
+
+:Description: The maximum number of users the account can own.
+:Type: Integer
+:Parent: ``account``
+
+``max_roles``
+
+:Description: The maximum number of roles the account can own.
+:Type: Integer
+:Parent: ``account``
+
+``max_groups``
+
+:Description: The maximum number of groups the account can own.
+:Type: Integer
+:Parent: ``account``
+
+``max_buckets``
+
+:Description: The maximum number of buckets the account can own.
+:Type: Integer
+:Parent: ``account``
+
+``max_access_keys``
+
+:Description: The maximum number of access keys the account can own.
+:Type: Integer
+:Parent: ``account``
+
+``quota``
+
+:Description: A container for the account quota information.
+:Type: Container
+:Parent: ``account``
+
+``enabled``
+
+:Description: Whether quota is enabled at the account level.
+:Type: Bool
+:Parent: ``quota``
+
+``check_on_raw``
+
+:Description: Whether quota should be checked on raw usage instead of the 4 KiB rounded one.
+:Type: Bool
+:Parent: ``quota``
+
+``max_size``
+
+:Description: The max quota size in bytes.
+:Type: Integer
+:Parent: ``quota``
+
+``max_size_kb``
+
+:Description: The max quota size in kilobytes.
+:Type: Integer
+:Parent: ``quota``
+
+``max_objects``
+
+:Description: The max number of objects that an account can own.
+:Type: Integer
+:Parent: ``quota``
+
+``bucket_quota``
+
+:Description: A container for the account bucket-level quota information.
+:Type: Container
+:Parent: ``account``
+
+``enabled``
+
+:Description: Whether quota is enabled at the bucket level for the account.
+:Type: Bool
+:Parent: ``bucket_quota``
+
+``check_on_raw``
+
+:Description: Whether bucket quota for the account should be checked on raw usage instead of the 4 KiB rounded one.
+:Type: Bool
+:Parent: ``bucket_quota``
+
+``max_size``
+
+:Description: The max quota size in bytes for buckets under the account.
+:Type: Integer
+:Parent: ``bucket_quota``
+
+``max_size_kb``
+
+:Description: The max quota size in kilobytes for buckets under the account.
+:Type: Integer
+:Parent: ``bucket_quota``
+
+``max_objects``
+
+:Description: The max number of objects that a bucket under the account can have.
+:Type: Integer
+:Parent: ``bucket_quota``
+
+
+Special Error Responses
+~~~~~~~~~~~~~~~~~~~~~~~
+
+None.
+
+Remove Account
+==============
+.. versionadded:: Squid
+
+Remove an existing account. Either ``id``, ``name``, or ``email`` must be provided.
+
+:caps: accounts=write
+
+Syntax
+~~~~~~
+
+::
+
+	DELETE /{admin}/account?format=json HTTP/1.1
+	Host: {fqdn}
+
+
+Request Parameters
+~~~~~~~~~~~~~~~~~~
+
+``id``
+
+:Description: The ID of the account to be removed.
+:Type: String
+:Example: ``RGW00000000000000001``
+:Required: No
+
+``tenant``
+
+:Description: The Tenant under which the account exists.
+:Type: String
+:Example: ``tenant``
+:Required: No
+
+``name``
+
+:Description: The name of the account to be removed.
+:Type: String
+:Example: ``account_name``
+:Required: No
+
+``email``
+
+:Description: The email address associated with the account to be removed.
+:Type: String
+:Example: ``foo@bar.com``
+:Required: No
+
+
+Response Entities
+~~~~~~~~~~~~~~~~~
+
+None
+
+Special Error Responses
+~~~~~~~~~~~~~~~~~~~~~~~
+
+None.
+
 Create User
 ===========
 
@@ -313,6 +1067,9 @@ is provided, the omitted key will be automatically generated. By default, a
 generated key is added to the keyring without replacing an existing key pair.
 If ``access-key`` is specified and refers to an existing key owned by the user
 then it will be modified.
+
+A ``tenant`` may either be specified as a part of uid or as an additional
+request param.
 
 :caps: users=write
 
@@ -335,6 +1092,9 @@ Request Parameters
 :Type: String
 :Example: ``foo_user``
 :Required: Yes
+
+A tenant name may also specified as a part of ``uid``, by following the syntax
+``tenant$user``, refer to :ref:`Multitenancy <rgw-multitenancy>` for more details.
 
 ``display-name``
 
@@ -401,6 +1161,43 @@ Request Parameters
 :Example: False [False]
 :Required: No
 
+``tenant``
+
+:Description: the Tenant under which a user is a part of.
+:Type: string
+:Example: tenant1
+:Required: No
+
+``default-placement``
+
+:Description: default placement for the user.
+:Type: string
+:Example: default-placement
+:Required: No
+
+``default-storage-class``
+
+:Description: default storage class for the user, default-placement must be defined when setting this option.
+:Type: string
+:Example: STANDARD-1A
+:Required: No
+
+.. versionadded:: Squid
+
+``account-id``
+
+:Description: The account under which a user should exist.
+:Type: string
+:Example: RGW00000000000000001
+:Required: No
+
+``account-root``
+
+:Description: Whether the user should be root for its account.
+:Type: Boolean
+:Example: False [False]
+:Required: No
+
 Response Entities
 ~~~~~~~~~~~~~~~~~
 
@@ -410,6 +1207,12 @@ If successful, the response contains the user information.
 
 :Description: A container for the user data information.
 :Type: Container
+
+``tenant``
+
+:Description: The tenant which user is a part of.
+:Type: String
+:Parent: ``user``
 
 ``user_id``
 
@@ -571,13 +1374,6 @@ Request Parameters
 :Example: ``s3``
 :Required: No
 
-``user-caps``
-
-:Description: User capabilities.
-:Type: String
-:Example: ``usage=read, write; users=read``
-:Required: No
-
 ``max-buckets``
 
 :Description: Specify the maximum number of buckets the user can own.
@@ -588,6 +1384,43 @@ Request Parameters
 ``suspended``
 
 :Description: Specify whether the user should be suspended.
+:Type: Boolean
+:Example: False [False]
+:Required: No
+
+``op-mask``
+
+:Description: The op-mask of the user to be modified.
+:Type: String
+:Example: ``read, write, delete, *``
+:Required: No
+
+``default-placement``
+
+:Description: default placement for the user.
+:Type: string
+:Example: default-placement
+:Required: No
+
+``default-storage-class``
+
+:Description: default storage class for the user, default-placement must be defined when setting this option.
+:Type: string
+:Example: STANDARD-1A
+:Required: No
+
+.. versionadded:: Squid
+
+``account-id``
+
+:Description: The account under which a user should exist. Cannot be changed or removed once set.
+:Type: string
+:Example: RGW00000000000000001
+:Required: No
+
+``account-root``
+
+:Description: Whether the user should be root for its account.
 :Type: Boolean
 :Example: False [False]
 :Required: No
@@ -738,9 +1571,8 @@ Create Subuser
 ==============
 
 Create a new subuser (primarily useful for clients using the Swift API).
-Note that either ``gen-subuser`` or ``subuser`` is required for a valid
-request. Note that in general for a subuser to be useful, it must be
-granted permissions by specifying ``access``. As with user creation if
+Note that in general for a subuser to be useful, it must be granted
+permissions by specifying ``access``. As with user creation if
 ``subuser`` is specified without ``secret``, then a secret key will
 be automatically generated.
 
@@ -752,7 +1584,7 @@ Syntax
 ::
 
 	PUT /{admin}/user?subuser&format=json HTTP/1.1
-	Host {fqdn}
+	Host: {fqdn}
 
 
 Request Parameters
@@ -760,7 +1592,7 @@ Request Parameters
 
 ``uid``
 
-:Description: The user ID under which a subuser is to  be created.
+:Description: The user ID under which a subuser is to be created.
 :Type: String
 :Example: ``foo_user``
 :Required: Yes
@@ -771,7 +1603,7 @@ Request Parameters
 :Description: Specify the subuser ID to be created.
 :Type: String
 :Example: ``sub_foo``
-:Required: No
+:Required: Yes
 
 ``secret-key``
 
@@ -861,7 +1693,7 @@ Syntax
 ::
 
 	POST /{admin}/user?subuser&format=json HTTP/1.1
-	Host {fqdn}
+	Host: {fqdn}
 
 
 Request Parameters
@@ -966,7 +1798,7 @@ Syntax
 ::
 
 	DELETE /{admin}/user?subuser&format=json HTTP/1.1
-	Host {fqdn}
+	Host: {fqdn}
 
 
 Request Parameters
@@ -1026,7 +1858,7 @@ Syntax
 ::
 
 	PUT /{admin}/user?key&format=json HTTP/1.1
-	Host {fqdn}
+	Host: {fqdn}
 
 
 Request Parameters
@@ -1071,7 +1903,14 @@ Request Parameters
 
 :Description: Generate a new key pair and add to the existing keyring.
 :Type: Boolean
-:Example: True [``True``]
+:Example: True [True]
+:Required: No
+
+``active``
+
+:Description: Activate or deactivate a key.
+:Type: Boolean
+:Example: True [True]
 :Required: No
 
 
@@ -1143,7 +1982,7 @@ Syntax
 ::
 
 	DELETE /{admin}/user?key&format=json HTTP/1.1
-	Host {fqdn}
+	Host: {fqdn}
 
 
 Request Parameters
@@ -1192,9 +2031,13 @@ Get Bucket Info
 ===============
 
 Get information about a subset of the existing buckets. If ``uid`` is specified
-without ``bucket`` then all buckets beloning to the user will be returned. If
+without ``bucket`` then all buckets belonging to the user will be returned. If
 ``bucket`` alone is specified, information for that particular bucket will be
 retrieved.
+
+If ``max-entries`` is specified to limit the number of buckets returned, the
+response body will change and contain the keys ``buckets``, ``count`` and
+``truncated``. If ``truncated`` is true the ``marker`` key will also be added.
 
 :caps: buckets=read
 
@@ -1204,7 +2047,7 @@ Syntax
 ::
 
 	GET /{admin}/bucket?format=json HTTP/1.1
-	Host {fqdn}
+	Host: {fqdn}
 
 
 Request Parameters
@@ -1229,6 +2072,20 @@ Request Parameters
 :Description: Return bucket statistics.
 :Type: Boolean
 :Example: True [False]
+:Required: No
+
+``max-entries``
+
+:Description: The number of bucket list entries to return.
+:Type: Integer
+:Example: 100
+:Required: No
+
+``marker``
+
+:Description: The marker to use when listing buckets.
+:Type: String (bucket name)
+:Example: my-bucket
 :Required: No
 
 Response Entities
@@ -1295,6 +2152,22 @@ the desired bucket information.
 :Type: String
 :Parent: ``bucket``
 
+``count``
+
+:Description: Number of returned buckets, only if ``max-entries`` is specified.
+:Type: Integer
+
+``truncated``
+
+:Description: Reported if the response is truncated when ``max-entries`` is specified.
+:Type: Boolean
+
+``marker``
+
+:Description: If ``truncated`` is true the ``marker`` key is returned with
+              the marker (bucket name) to use to continue pagination.
+:Type: String
+
 Special Error Responses
 ~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -1317,7 +2190,7 @@ Syntax
 ::
 
 	GET /{admin}/bucket?index&format=json HTTP/1.1
-	Host {fqdn}
+	Host: {fqdn}
 
 
 Request Parameters
@@ -1373,7 +2246,7 @@ Syntax
 ::
 
 	DELETE /{admin}/bucket?format=json HTTP/1.1
-	Host {fqdn}
+	Host: {fqdn}
 
 
 
@@ -1387,9 +2260,23 @@ Request Parameters
 :Example: ``foo_bucket``
 :Required: Yes
 
+``tenant``
+
+:Description: The tenant under which the bucket is to be removed.
+:Type: String
+:Example: ``tenant1``
+:Required: No
+
 ``purge-objects``
 
-:Description: Remove a buckets objects before deletion.
+:Description: Remove a bucket's objects before deletion.
+:Type: Boolean
+:Example: True [False]
+:Required: No
+
+``bypass-gc``
+
+:Description: Bypass garbage collection.
 :Type: Boolean
 :Example: True [False]
 :Required: No
@@ -1426,7 +2313,7 @@ Syntax
 ::
 
 	POST /{admin}/bucket?format=json HTTP/1.1
-	Host {fqdn}
+	Host: {fqdn}
 
 
 Request Parameters
@@ -1473,7 +2360,7 @@ Syntax
 ::
 
 	PUT /{admin}/bucket?format=json HTTP/1.1
-	Host {fqdn}
+	Host: {fqdn}
 
 
 Request Parameters
@@ -1481,10 +2368,17 @@ Request Parameters
 
 ``bucket``
 
-:Description: The bucket to unlink.
+:Description: The bucket name to unlink.
 :Type: String
 :Example: ``foo_bucket``
 :Required: Yes
+
+``bucket-id``
+
+:Description: The bucket id to unlink.
+:Type: String
+:Example: ``dev.6607669.420``
+:Required: No
 
 ``uid``
 
@@ -1569,7 +2463,7 @@ Syntax
 ::
 
 	DELETE /{admin}/bucket?object&format=json HTTP/1.1
-	Host {fqdn}
+	Host: {fqdn}
 
 Request Parameters
 ~~~~~~~~~~~~~~~~~~
@@ -1621,7 +2515,7 @@ Syntax
 ::
 
 	GET /{admin}/bucket?policy&format=json HTTP/1.1
-	Host {fqdn}
+	Host: {fqdn}
 
 
 Request Parameters
@@ -1673,7 +2567,7 @@ Syntax
 ::
 
 	PUT /{admin}/user?caps&format=json HTTP/1.1
-	Host {fqdn}
+	Host: {fqdn}
 
 Request Parameters
 ~~~~~~~~~~~~~~~~~~
@@ -1689,7 +2583,7 @@ Request Parameters
 
 :Description: The administrative capability to add to the user.
 :Type: String
-:Example: ``usage=read, write``
+:Example: ``usage=read,write;user=write``
 :Required: Yes
 
 Response Entities
@@ -1729,12 +2623,11 @@ Example Request
 
 ::
 
-	PUT /{admin}/user?caps&format=json HTTP/1.1
+	PUT /{admin}/user?caps&user-caps=usage=read,write;user=write&format=json HTTP/1.1
 	Host: {fqdn}
 	Content-Type: text/plain
 	Authorization: {your-authorization-token}
 
-	usage=read
 
 
 Remove A User Capability
@@ -1750,7 +2643,7 @@ Syntax
 ::
 
 	DELETE /{admin}/user?caps&format=json HTTP/1.1
-	Host {fqdn}
+	Host: {fqdn}
 
 Request Parameters
 ~~~~~~~~~~~~~~~~~~
@@ -1806,22 +2699,21 @@ Special Error Responses
 :Description: User does not possess specified capability.
 :Code: 404 Not Found
 
-Special Error Responses
-~~~~~~~~~~~~~~~~~~~~~~~
-
-None.
-
 
 Quotas
 ======
 
-The Admin Operations API enables you to set quotas on users and on bucket owned
-by users. See `Quota Management`_ for additional details. Quotas include the
-maximum number of objects in a bucket and the maximum storage size in megabytes.
+The Admin Operations API enables you to set quotas on users and on buckets owned
+by users, and on accounts and on buckets owned by accounts. See :ref:`radosgw-quota-management`
+for additional details. Quotas include the maximum number of objects in a bucket 
+and the maximum storage size in megabytes.
 
-To view quotas, the user must have a ``users=read`` capability. To set,
+To view quotas for users, the user must have a ``users=read`` capability. To set,
 modify or disable a quota, the user must have ``users=write`` capability.
-See the `Admin Guide`_ for details.
+
+To view quotas for accounts, the user must have a ``accounts=read`` capability. To set,
+modify or disable a quota, the user must have ``accounts=write`` capability.
+See the :ref:`radosgw-admin-guide` for details.
 
 Valid parameters for quotas include:
 
@@ -1830,19 +2722,22 @@ Valid parameters for quotas include:
 
 - **Maximum Objects:** The ``max-objects`` setting allows you to specify
   the maximum number of objects. A negative value disables this setting.
-  
+
 - **Maximum Size:** The ``max-size`` option allows you to specify a quota
-  for the maximum number of bytes. A negative value disables this setting.
-  
-- **Quota Scope:** The ``quota-scope`` option sets the scope for the quota.
-  The options are ``bucket`` and ``user``.
+  for the maximum number of bytes. The ``max-size-kb`` option allows you
+  to specify it in KiB. A negative value disables this setting.
 
+- **Quota Type:** The ``quota-type`` option sets the scope for the quota.
+  The options are ``bucket`` and ``user`` for user-level quota.
+  The options are ``bucket`` and ``account`` for account-level quota.
 
+- **Enable/Disable Quota:** The ``enabled`` option specifies whether the
+  quota should be enabled. The value should be either 'True' or 'False'.
 
 Get User Quota
 ~~~~~~~~~~~~~~
 
-To get a quota, the user must have ``users`` capability set with ``read`` 
+To get a quota, the user must have ``users`` capability set with ``read``
 permission. ::
 
 	GET /admin/user?quota&uid=<uid>&quota-type=user
@@ -1851,7 +2746,7 @@ permission. ::
 Set User Quota
 ~~~~~~~~~~~~~~
 
-To set a quota, the user must have ``users`` capability set with ``write`` 
+To set a quota, the user must have ``users`` capability set with ``write``
 permission. ::
 
 	PUT /admin/user?quota&uid=<uid>&quota-type=user
@@ -1864,7 +2759,7 @@ as encoded in the corresponding read operation.
 Get Bucket Quota
 ~~~~~~~~~~~~~~~~
 
-To get a quota, the user must have ``users`` capability set with ``read`` 
+To get a quota, the user must have ``users`` capability set with ``read``
 permission. ::
 
 	GET /admin/user?quota&uid=<uid>&quota-type=bucket
@@ -1873,7 +2768,7 @@ permission. ::
 Set Bucket Quota
 ~~~~~~~~~~~~~~~~
 
-To set a quota, the user must have ``users`` capability set with ``write`` 
+To set a quota, the user must have ``users`` capability set with ``write``
 permission. ::
 
 	PUT /admin/user?quota&uid=<uid>&quota-type=bucket
@@ -1881,6 +2776,330 @@ permission. ::
 The content must include a JSON representation of the quota settings
 as encoded in the corresponding read operation.
 
+
+Set Quota for an Individual Bucket
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To set a quota, the user must have ``buckets`` capability set with ``write``
+permission. ::
+
+	PUT /admin/bucket?quota&uid=<uid>&bucket=<bucket-name>
+
+The content must include a JSON representation of the quota settings
+as mentioned in Set Bucket Quota section above.
+
+
+Set Account Quota
+~~~~~~~~~~~~~~~~~
+
+To set a quota, the user must have ``accounts`` capability set with ``write``
+permission. ::
+
+	PUT /admin/account?quota&id=<account_id>&quota-type=account
+
+Set Bucket Quota under an Account
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To set a quota, the user must have ``accounts`` capability set with ``write``
+permission. ::
+
+	PUT /admin/account?quota&id=<account_id>&quota-type=bucket
+
+
+Rate Limit
+==========
+
+The Admin Operations API enables you to set and get ratelimit configurations on users and on buckets and global rate limit configurations. See :ref:`radosgw-rate-limit-management` for additional details.
+Rate Limit includes the maximum number of operations and/or bytes per accumulation interval, separated by read and/or write (Additionally list and get operations),
+to a bucket and/or by a user and the maximum storage size in megabytes.
+
+To view rate limit, the user must have a ``ratelimit=read`` capability. To set,
+modify or disable a ratelimit, the user must have ``ratelimit=write`` capability.
+See the :ref:`radosgw-admin-guide` for details.
+
+Valid parameters for quotas include:
+
+- **Bucket:** The ``bucket`` option allows you to specify a rate limit for
+  a bucket.
+
+- **User:** The ``uid`` option allows you to specify a rate limit for a user.
+
+- **Maximum Read Bytes:** The ``max-read-bytes`` setting allows you to specify
+  the maximum number of read bytes per accumulation interval. A 0 value disables this setting.
+
+- **Maximum Write Bytes:** The ``max-write-bytes`` setting allows you to specify
+  the maximum number of write bytes per accumulation interval. A 0 value disables this setting.
+
+- **Maximum Read Ops:** The ``max-read-ops`` setting allows you to specify
+  the maximum number of read ops per accumulation interval. A 0 value disables this setting.
+
+- **Maximum Write Ops:** The ``max-write-ops`` setting allows you to specify
+  the maximum number of write ops per accumulation interval. A 0 value disables this setting.
+
+- **Maximum List Ops:** The ``max-list-ops`` setting allows you to specify
+  the maximum number of bucket listing requests per accumulation interval. A 0 value disables this setting.
+
+- **Maximum Delete Ops:** The ``max-delete-ops`` setting allows you to specify
+  the maximum number of delete operations per accumulation interval. A 0 value disables throttling.
+
+- **Global:** The ``global`` option allows you to specify a global rate limit.
+  The value should be either 'True' or 'False'.
+
+- **Rate Limit Scope:** The ``ratelimit-scope`` option sets the scope for the rate limit.
+  The options are ``bucket`` , ``user`` and ``anonymous``.
+  ``anonymous`` is only valid for setting global configuration
+
+- **Enable/Disable Rate Limit:** The ``enabled`` option specifies whether the
+  rate limit should be enabled.  The value should be either 'True' or 'False'.
+
+Get User Rate Limit
+~~~~~~~~~~~~~~~~~~~
+
+To get a rate limit, the user must have ``ratelimit`` capability set with ``read``
+permission. ::
+
+	GET /{admin}/ratelimit?ratelimit-scope=user&uid=<uid>
+
+
+Set User Rate Limit
+~~~~~~~~~~~~~~~~~~~
+
+To set a rate limit, the user must have ``ratelimit`` capability set with ``write``
+permission. ::
+
+	POST /{admin}/ratelimit?ratelimit-scope=user&uid=<uid><[&max-read-bytes=<bytes>][&max-write-bytes=<bytes>][&max-read-ops=<ops>][&max-write-ops=<ops>][&max-list-ops=<ops>][&max-delete-ops=<ops>][&enabled=<True|False>]>
+
+
+
+Get Bucket Rate Limit
+~~~~~~~~~~~~~~~~~~~~~
+
+To get a rate limit, the user must have ``users`` capability set with ``read``
+permission. ::
+
+	GET /{admin}/ratelimit?bucket=<bucket>&ratelimit-scope=bucket
+
+
+
+Set Rate Limit for an Individual Bucket
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To set a rate limit, the user must have ``ratelimit`` capability set with ``write``
+permission. ::
+
+	POST /{admin}/ratelimit?bucket=<bucket-name>&ratelimit-scope=bucket<[&max-read-bytes=<bytes>][&max-write-bytes=<bytes>][&max-read-ops=<ops>][&max-write-ops=<ops>][&max-list-ops=<ops>][&max-delete-ops=<ops>][&enabled=<True|False>]>
+
+
+
+Get Global Rate Limit
+~~~~~~~~~~~~~~~~~~~~~
+
+To get a global rate limit, the user must have ``ratelimit`` capability set with ``read``
+permission. ::
+
+	GET /{admin}/ratelimit?global=<True|False>
+
+
+
+Set Global User Rate Limit
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To set a rate limit, the user must have ``ratelimit`` capability set with ``write``
+permission. ::
+
+	POST /{admin}/ratelimit?ratelimit-scope=user&global=<True|False><[&max-read-bytes=<bytes>][&max-write-bytes=<bytes>][&max-read-ops=<ops>][&max-write-ops=<ops>][&max-list-ops=<ops>][&max-delete-ops=<ops>][&enabled=<True|False>]>
+
+
+
+Set Global Rate Limit Bucket
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To set a rate limit, the user must have ``ratelimit`` capability set with ``write``
+permission. ::
+
+	POST /{admin}/ratelimit?ratelimit-scope=bucket&global=<True|False><[&max-read-bytes=<bytes>][&max-write-bytes=<bytes>][&max-read-ops=<ops>][&max-write-ops=<ops>][&max-list-ops=<ops>][&max-delete-ops=<ops>][&enabled=<True|False>]>
+
+
+
+Set Global Anonymous User Rate Limit
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To set a rate limit, the user must have ``ratelimit`` capability set with ``write``
+permission. ::
+
+	POST /{admin}/ratelimit?ratelimit-scope=anon&global=<True|False><[&max-read-bytes=<bytes>][&max-write-bytes=<bytes>][&max-read-ops=<ops>][&max-write-ops=<ops>][&max-list-ops=<ops>][&max-delete-ops=<ops>][&enabled=<True|False>]>
+
+.. _radosgw-adminops-dedup:
+
+Dedup
+=====
+
+The Admin Operations API can be used to manage RGW object deduplication.
+See :ref:`radosgw-s3-dedup` for additional details on the dedup feature and
+CLI commands.
+
+To view dedup status, the user must have ``dedup=read`` capability. To
+control dedup operations, the user must have ``dedup=write`` capability.
+See the :ref:`radosgw-admin-guide` for details.
+
+Get Dedup Stats
+~~~~~~~~~~~~~~~
+
+Collects and displays last dedup statistics.
+
+:caps: dedup=read
+
+Syntax
+^^^^^^
+
+::
+
+	GET /{admin}/dedup?op=stats HTTP/1.1
+	Host: {fqdn}
+
+
+Get Dedup Throttle
+~~~~~~~~~~~~~~~~~~
+
+Displays current dedup throttle settings.
+
+:caps: dedup=read
+
+Syntax
+^^^^^^
+
+::
+
+	GET /{admin}/dedup?op=throttle HTTP/1.1
+	Host: {fqdn}
+
+
+Start Dedup Estimate
+~~~~~~~~~~~~~~~~~~~~
+
+Starts a new dedup estimate session (aborting first any existing session).
+No changes are made to the existing system. Only statistics will be
+collected and reported.
+
+:caps: dedup=write
+
+Syntax
+^^^^^^
+
+::
+
+	POST /{admin}/dedup?op=estimate HTTP/1.1
+	Host: {fqdn}
+
+
+Start Dedup Exec
+~~~~~~~~~~~~~~~~
+
+Starts a new dedup session (aborting first any existing session).
+Performs a full dedup, finding duplicated tail objects and removing them.
+
+.. warning:: This operation can lead to data loss and should not be used on
+   production data.
+
+:caps: dedup=write
+
+Syntax
+^^^^^^
+
+::
+
+	POST /{admin}/dedup?op=exec&yes-i-really-mean-it HTTP/1.1
+	Host: {fqdn}
+
+Request Parameters
+^^^^^^^^^^^^^^^^^^
+
+``yes-i-really-mean-it``
+
+:Description: Confirmation flag required to execute full dedup.
+:Type: Boolean
+:Required: Yes
+
+
+Abort Dedup
+~~~~~~~~~~~
+
+Aborts an active dedup session, releasing all resources used by it.
+
+:caps: dedup=write
+
+Syntax
+^^^^^^
+
+::
+
+	POST /{admin}/dedup?op=abort HTTP/1.1
+	Host: {fqdn}
+
+
+Pause Dedup
+~~~~~~~~~~~
+
+Pauses an active dedup session (dedup resources are not released).
+
+:caps: dedup=write
+
+Syntax
+^^^^^^
+
+::
+
+	POST /{admin}/dedup?op=pause HTTP/1.1
+	Host: {fqdn}
+
+
+Resume Dedup
+~~~~~~~~~~~~
+
+Resumes a paused dedup session.
+
+:caps: dedup=write
+
+Syntax
+^^^^^^
+
+::
+
+	POST /{admin}/dedup?op=resume HTTP/1.1
+	Host: {fqdn}
+
+
+Set Dedup Throttle
+~~~~~~~~~~~~~~~~~~
+
+Specifies maximum allowed operations per second for a single RGW server
+during dedup. ``0`` means unlimited. At least one of ``max-bucket-index-ops``
+or ``max-metadata-ops`` must be specified.
+
+:caps: dedup=write
+
+Syntax
+^^^^^^
+
+::
+
+	POST /{admin}/dedup?op=throttle<[&max-bucket-index-ops=<count>][&max-metadata-ops=<count>]> HTTP/1.1
+	Host: {fqdn}
+
+Request Parameters
+^^^^^^^^^^^^^^^^^^
+
+``max-bucket-index-ops``
+
+:Description: Maximum bucket index read requests per second per RGW during dedup. ``0`` means unlimited.
+:Type: Integer
+:Required: No (but at least one of ``max-bucket-index-ops`` or ``max-metadata-ops`` is required)
+
+``max-metadata-ops``
+
+:Description: Maximum metadata requests per second per RGW during dedup. ``0`` means unlimited.
+:Type: Integer
+:Required: No (but at least one of ``max-bucket-index-ops`` or ``max-metadata-ops`` is required)
 
 
 
@@ -1914,5 +3133,37 @@ Standard Error Responses
 
 
 
-.. _Admin Guide: ../admin
-.. _Quota Management: ../admin#quota-management
+
+Binding libraries
+========================
+
+``Golang``
+
+ - `ceph/go-ceph`_
+ - `IrekFasikhov/go-rgwadmin`_
+ - `QuentinPerez/go-radosgw`_
+ 
+``Java``
+
+ - `twonote/radosgw-admin4j`_
+
+``PHP``
+
+ - `lbausch/php-ceph-radosgw-admin`_
+ - `myENA/php-rgw-api`_
+
+``Python``
+
+ - `UMIACS/rgwadmin`_
+ - `valerytschopp/python-radosgw-admin`_
+
+
+
+.. _ceph/go-ceph: https://github.com/ceph/go-ceph/
+.. _IrekFasikhov/go-rgwadmin: https://github.com/IrekFasikhov/go-rgwadmin
+.. _QuentinPerez/go-radosgw: https://github.com/QuentinPerez/go-radosgw
+.. _twonote/radosgw-admin4j: https://github.com/twonote/radosgw-admin4j
+.. _lbausch/php-ceph-radosgw-admin: https://github.com/lbausch/php-ceph-radosgw-admin
+.. _myENA/php-rgw-api: https://github.com/myENA/php-rgw-api
+.. _UMIACS/rgwadmin: https://github.com/UMIACS/rgwadmin
+.. _valerytschopp/python-radosgw-admin: https://github.com/valerytschopp/python-radosgw-admin

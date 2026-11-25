@@ -1,0 +1,333 @@
+#!/usr/bin/env python3
+
+import logging as log
+import json
+import uuid
+import botocore
+import time
+import threading
+from common import exec_cmd, create_user, boto_connect
+from botocore.config import Config
+
+"""
+Tests behavior of bucket versioning.
+"""
+# The test cases in this file have been annotated for inventory.
+# To extract the inventory (in csv format) use the command:
+#
+#   grep '^ *# TESTCASE' | sed 's/^ *# TESTCASE //'
+#
+#
+
+""" Constants """
+USER = 'versioning-tester'
+DISPLAY_NAME = 'Versioning Testing'
+ACCESS_KEY = 'LTA662PVVDTDWX6M2AB0'
+SECRET_KEY = 'pvtchqajgzqx5581t6qbddbkj0bgf3a69qdkjcea'
+BUCKET_NAME = 'versioning-bucket'
+DATA_POOL = 'default.rgw.buckets.data'
+CEPH_CFG_PROPAGATION_WAIT = 5  # seconds for 'ceph config set/rm' to reach radosgw
+
+def head_objects(key):
+    """ the key's head object in the data pool, if any (not its version instances) """
+    out = exec_cmd(f'rados -p {DATA_POOL} ls')
+    return [o for o in out.decode().split() if o.endswith(f'_{key}') and '__:' not in o]
+
+def main():
+    """
+    execute versioning tests
+    """
+    create_user(USER, DISPLAY_NAME, ACCESS_KEY, SECRET_KEY)
+
+    connection = boto_connect(ACCESS_KEY, SECRET_KEY, Config(retries = {
+        'total_max_attempts': 1,
+    }))
+
+    # pre-test cleanup
+    try:
+        bucket = connection.Bucket(BUCKET_NAME)
+        bucket.objects.all().delete()
+        bucket.object_versions.all().delete()
+        bucket.delete()
+    except botocore.exceptions.ClientError as e:
+        if not e.response['Error']['Code'] == 'NoSuchBucket':
+            raise
+
+    bucket = connection.create_bucket(Bucket=BUCKET_NAME)
+    connection.BucketVersioning(BUCKET_NAME).enable()
+
+    # reproducer for bug from https://tracker.ceph.com/issues/59663
+    # TESTCASE 'verify that index entries and OLH objects are cleaned up after redundant deletes'
+    log.debug('TEST: verify that index entries and OLH objects are cleaned up after redundant deletes\n')
+    key = str(uuid.uuid4())
+    resp = bucket.Object(key).delete()
+    assert 'DeleteMarker' in resp, 'DeleteMarker key not present in response'
+    assert resp['DeleteMarker'], 'DeleteMarker value not True in response'
+    assert 'VersionId' in resp, 'VersionId key not present in response'
+    version_id_1 = resp['VersionId']
+    log.info(f"first delete marker has version id {version_id_1}")
+
+    resp = bucket.Object(key).delete()
+    assert 'DeleteMarker' in resp, 'DeleteMarker key not present in response'
+    assert resp['DeleteMarker'], 'DeleteMarker value not True in response'
+    assert 'VersionId' in resp, 'VersionId key not present in response'
+    version_id_2 = resp['VersionId']
+    log.info(f"second delete marker has version id {version_id_2}")
+
+    connection.ObjectVersion(bucket.name, key, version_id_2).delete()
+    # bucket index should only contain entries for one version of one object
+    out = exec_cmd(f'radosgw-admin bi list --bucket {BUCKET_NAME}')
+    json_out = json.loads(out.replace(b'\x80', b'0x80'))
+    log.info(f"json_out has length of { len(json_out) }")
+    idx_list = list(map(lambda v: v['idx'], json_out))
+    log.info(f"json_out has idx's of { idx_list }")
+    assert len(json_out) == 4, "bucket index did not only contain entries for one version of one object; expecting two plain, one instance, and one OLH entry"
+
+    connection.ObjectVersion(bucket.name, key, version_id_1).delete()
+    # bucket index should now be empty
+    out = exec_cmd(f'radosgw-admin bi list --bucket {BUCKET_NAME}')
+    json_out = json.loads(out.replace(b'\x80', b'0x80'))
+    assert len(json_out) == 0, 'bucket index was not empty after all objects were deleted'
+
+    (_out, ret) = exec_cmd(f'rados -p {DATA_POOL} ls | grep {key}', check_retcode=False)
+    assert ret != 0, 'olh object was not cleaned up'
+
+    # TESTCASE 'verify that index entries and OLH objects are cleaned up after index linking error'
+    log.debug('TEST: verify that index entries and OLH objects are cleaned up after index linking error\n')
+    key = str(uuid.uuid4())
+    try:
+        exec_cmd('ceph config set client rgw_debug_inject_set_olh_err 2')
+        time.sleep(1)
+        bucket.Object(key).delete()
+    finally:
+        exec_cmd('ceph config rm client rgw_debug_inject_set_olh_err')
+    out = exec_cmd(f'radosgw-admin bi list --bucket {BUCKET_NAME}')
+    json_out = json.loads(out.replace(b'\x80', b'0x80'))
+    assert len(json_out) == 0, 'bucket index was not empty after op failed'
+    (_out, ret) = exec_cmd(f'rados -p {DATA_POOL} ls | grep {key}', check_retcode=False)
+    assert ret != 0, 'olh object was not cleaned up'
+
+    # TESTCASE 'verify that original null object version is intact after failed olh upgrade'
+    log.debug('TEST: verify that original null object version is intact after failed olh upgrade\n')
+    connection.BucketVersioning(BUCKET_NAME).suspend()
+    key = str(uuid.uuid4())
+    put_resp = bucket.put_object(Key=key, Body=b"data")
+    connection.BucketVersioning(BUCKET_NAME).enable()
+    try:
+        exec_cmd('ceph config set client rgw_debug_inject_set_olh_err 2')
+        time.sleep(1)
+        # expected to fail due to the above error injection
+        bucket.put_object(Key=key, Body=b"new data")
+    except Exception as e:
+        log.debug(e)
+    finally:
+        exec_cmd('ceph config rm client rgw_debug_inject_set_olh_err')
+    get_resp = bucket.Object(key).get()
+    assert put_resp.e_tag == get_resp['ETag'], 'get did not return null version with correct etag'
+    # the rollback of the failed olh upgrade must not change the null version's mtime
+    head_resp = connection.meta.client.head_object(Bucket=BUCKET_NAME, Key=key, VersionId='null')
+    list_resp = connection.meta.client.list_object_versions(Bucket=BUCKET_NAME, Prefix=key)
+    null_version = [v for v in list_resp['Versions'] if v['VersionId'] == 'null'][0]
+    assert head_resp['LastModified'] == null_version['LastModified'], \
+      'null version mtime changed after failed olh upgrade'
+
+    # TESTCASE 'verify that null object version mtime matches its index entry after a failed olh upgrade races with an overwrite'
+    log.debug('TEST: verify that null object version mtime matches its index entry after a failed olh upgrade races with an overwrite\n')
+    connection.BucketVersioning(BUCKET_NAME).suspend()
+    key = str(uuid.uuid4())
+    bucket.put_object(Key=key, Body=b"data")  # "null" version
+    connection.BucketVersioning(BUCKET_NAME).enable()
+
+    put_errors = []
+    def failed_put():
+        try:
+            bucket.put_object(Key=key, Body=b"versioned data")
+        except Exception as e:
+            log.debug(e)
+            put_errors.append(e)
+
+    try:
+        exec_cmd('ceph config set client rgw_debug_inject_set_olh_err 2')
+        # hold the rollback longer than the two waits and the overwrite below
+        exec_cmd(f'ceph config set client rgw_inject_delay_sec {6 * CEPH_CFG_PROPAGATION_WAIT}')
+        exec_cmd('ceph config set client rgw_inject_delay_pattern delay_olh_cancel_modification')
+        time.sleep(CEPH_CFG_PROPAGATION_WAIT)
+
+        # trigger rollback by failed put; the put doesn't return until its delayed
+        # rollback is done
+        t = threading.Thread(target=failed_put)
+        t.start()
+        time.sleep(CEPH_CFG_PROPAGATION_WAIT)
+
+        # overwrite the null version while the rollback is delayed
+        exec_cmd('ceph config rm client rgw_debug_inject_set_olh_err')
+        time.sleep(CEPH_CFG_PROPAGATION_WAIT)
+        connection.BucketVersioning(BUCKET_NAME).suspend()
+        put_resp = connection.meta.client.put_object(Bucket=BUCKET_NAME, Key=key, Body=b"new data")
+        assert t.is_alive(), 'rollback was not held during the overwrite'
+        t.join()
+        assert put_errors, 'versioned put did not fail as expected'
+    finally:
+        exec_cmd('ceph config rm client rgw_debug_inject_set_olh_err')
+        exec_cmd('ceph config rm client rgw_inject_delay_sec')
+        exec_cmd('ceph config rm client rgw_inject_delay_pattern')
+        time.sleep(CEPH_CFG_PROPAGATION_WAIT)
+
+    # the rollback must not leave its pending olh entry on the head
+    xattrs = exec_cmd(f'rados -p {DATA_POOL} listxattr {head_objects(key)[0]}')
+    assert b'user.rgw.olh.pending.' not in xattrs, 'pending olh entry left on the head after the rollback'
+    # the overwrite's mtime must survive the delayed rollback
+    get_resp = bucket.Object(key).get()
+    assert put_resp['ETag'] == get_resp['ETag'], 'get did not return the overwritten null version'
+    head_resp = connection.meta.client.head_object(Bucket=BUCKET_NAME, Key=key, VersionId='null')
+    list_resp = connection.meta.client.list_object_versions(Bucket=BUCKET_NAME, Prefix=key)
+    null_version = [v for v in list_resp['Versions'] if v['VersionId'] == 'null'][0]
+    assert head_resp['LastModified'] == null_version['LastModified'], \
+      'null version mtime changed after failed olh upgrade raced with an overwrite'
+
+    # TESTCASE 'verify that null object version mtime matches its index entry after a stale pending olh entry is removed'
+    log.debug('TEST: verify that null object version mtime matches its index entry after a stale pending olh entry is removed\n')
+    connection.BucketVersioning(BUCKET_NAME).suspend()
+    key = str(uuid.uuid4())
+    bucket.put_object(Key=key, Body=b"data")  # "null" version
+    connection.BucketVersioning(BUCKET_NAME).enable()
+    try:
+        # leave the pending olh entry on the head, as if the rollback never ran,
+        # and let it time out right away
+        exec_cmd('ceph config set client rgw_debug_inject_set_olh_err 2')
+        exec_cmd('ceph config set client rgw_debug_inject_olh_cancel_modification_err true')
+        exec_cmd('ceph config set client rgw_olh_pending_timeout_sec 1')
+        time.sleep(CEPH_CFG_PROPAGATION_WAIT)
+        try:
+            bucket.put_object(Key=key, Body=b"new data")
+        except Exception as e:
+            log.debug(e)
+        else:
+            raise AssertionError('versioned put did not fail as expected')
+        # wait past rgw_olh_pending_timeout_sec
+        time.sleep(2)
+        # reading the key removes the timed out pending entry from the head
+        bucket.Object(key).get()
+    finally:
+        exec_cmd('ceph config rm client rgw_debug_inject_set_olh_err')
+        exec_cmd('ceph config rm client rgw_debug_inject_olh_cancel_modification_err')
+        exec_cmd('ceph config rm client rgw_olh_pending_timeout_sec')
+        time.sleep(CEPH_CFG_PROPAGATION_WAIT)
+    # the read must have removed the timed out pending entry
+    xattrs = exec_cmd(f'rados -p {DATA_POOL} listxattr {head_objects(key)[0]}')
+    assert b'user.rgw.olh.pending.' not in xattrs, 'timed out pending olh entry was not removed'
+    # removing the timed out pending entry must not change the null version's mtime
+    head_resp = connection.meta.client.head_object(Bucket=BUCKET_NAME, Key=key, VersionId='null')
+    list_resp = connection.meta.client.list_object_versions(Bucket=BUCKET_NAME, Prefix=key)
+    null_version = [v for v in list_resp['Versions'] if v['VersionId'] == 'null'][0]
+    assert head_resp['LastModified'] == null_version['LastModified'], \
+      'null version mtime changed after a stale pending olh entry was removed'
+
+    # TESTCASE 'verify that the olh object is cleaned up after deleting the last version with a stale pending olh entry'
+    log.debug('TEST: verify that the olh object is cleaned up after deleting the last version with a stale pending olh entry\n')
+    connection.BucketVersioning(BUCKET_NAME).suspend()
+    key = str(uuid.uuid4())
+    bucket.put_object(Key=key, Body=b"data")  # "null" version
+    connection.BucketVersioning(BUCKET_NAME).enable()
+    try:
+        exec_cmd('ceph config set client rgw_debug_inject_set_olh_err 2')
+        exec_cmd('ceph config set client rgw_debug_inject_olh_cancel_modification_err true')
+        exec_cmd('ceph config set client rgw_olh_pending_timeout_sec 1')
+        time.sleep(CEPH_CFG_PROPAGATION_WAIT)
+        try:
+            bucket.put_object(Key=key, Body=b"new data")
+        except Exception as e:
+            log.debug(e)
+        else:
+            raise AssertionError('versioned put did not fail as expected')
+        # wait past rgw_olh_pending_timeout_sec
+        time.sleep(2)
+        # deleting the only linked version clears the olh, removing the timed out pending entry first
+        connection.ObjectVersion(bucket.name, key, 'null').delete()
+    finally:
+        exec_cmd('ceph config rm client rgw_debug_inject_set_olh_err')
+        exec_cmd('ceph config rm client rgw_debug_inject_olh_cancel_modification_err')
+        exec_cmd('ceph config rm client rgw_olh_pending_timeout_sec')
+        time.sleep(CEPH_CFG_PROPAGATION_WAIT)
+    assert not head_objects(key), 'olh object was not cleaned up'
+
+    # TESTCASE 'verify that concurrent delete requests do not leave behind olh entries'
+    log.debug('TEST: verify that concurrent delete requests do not leave behind olh entries\n')
+    bucket.object_versions.all().delete()
+    
+    key = 'concurrent-delete'
+    # create a delete marker
+    resp = bucket.Object(key).delete()
+    version_id = resp['ResponseMetadata']['HTTPHeaders']['x-amz-version-id']
+    try:
+        exec_cmd('ceph config set client rgw_debug_inject_latency_bi_unlink 2')
+        time.sleep(1)
+
+        def do_delete():
+            connection.ObjectVersion(bucket.name, key, version_id).delete()
+            
+        t2 = threading.Thread(target=do_delete)
+        t2.start()
+        do_delete()
+        t2.join()
+    finally:
+        exec_cmd('ceph config rm client rgw_debug_inject_latency_bi_unlink')
+    out = exec_cmd(f'radosgw-admin bucket check olh --bucket {bucket.name} --dump-keys')
+    num_leftover_olh_entries = len(json.loads(out))
+    assert num_leftover_olh_entries == 0, \
+      'Found leftover olh entries after concurrent deletes'
+
+    # TESTCASE 'verify that bucket radoslist names the olh object of a key starting with an underscore'
+    log.debug('TEST: verify that bucket radoslist names the olh object of a key starting with an underscore\n')
+    key = '_' + str(uuid.uuid4())
+    bucket.put_object(Key=key, Body=b"data")
+    out = exec_cmd(f'radosgw-admin bucket radoslist --bucket {BUCKET_NAME}')
+    listed = sorted(oid for oid in out.decode().splitlines() if key in oid)
+    out = exec_cmd(f'rados -p {DATA_POOL} ls')
+    # rados ls prints the locator after the oid
+    stored = sorted(line.split('\t')[0] for line in out.decode().splitlines() if key in line)
+    assert listed == stored, f'radoslist {listed} does not match rados objects {stored}'
+
+    # TESTCASE 'verify that reads recover after a canceled olh replay'
+    log.debug('TEST: verify that reads recover after a canceled olh replay\n')
+    key = 'olh-replay-race'
+    current_version = bucket.Object(key).put(Body=b'b')['VersionId']
+    marker = json.loads(exec_cmd(f'radosgw-admin bucket stats --bucket {BUCKET_NAME}'))['marker']
+    olh_oid = f'{marker}_{key}'
+    olh_ver = exec_cmd(f'rados -p {DATA_POOL} getxattr {olh_oid} user.rgw.olh.ver').decode()
+    try:
+        # force the replay's version check to fail
+        exec_cmd(f'rados -p {DATA_POOL} setxattr {olh_oid} user.rgw.olh.ver 9223372036854775807')
+        connection.ObjectVersion(bucket.name, key, current_version).delete()
+        assert 'Errors' not in bucket.delete_objects(Delete={'Objects': [{'Key': key}]})
+        new_version = bucket.Object(key).put(Body=b'c')['VersionId']
+        bucket.Object(key).get()
+        assert False, 'expected 503 while the olh replay is canceled'
+    except botocore.exceptions.ClientError as e:
+        assert e.operation_name == 'GetObject'
+        assert e.response['ResponseMetadata']['HTTPStatusCode'] == 503
+    finally:
+        exec_cmd(f'rados -p {DATA_POOL} setxattr {olh_oid} user.rgw.olh.ver {olh_ver}')
+    assert bucket.Object(key).get()['VersionId'] == new_version
+
+    # TESTCASE 'verify that a delete writes a delete marker after its olh replay removes the head'
+    log.debug('TEST: verify that a delete writes a delete marker after its olh replay removes the head\n')
+    key = 'olh-replay-remove'
+    version = bucket.Object(key).put(Body=b'a')['VersionId']
+    olh_oid = f'{marker}_{key}'
+    olh_ver = exec_cmd(f'rados -p {DATA_POOL} getxattr {olh_oid} user.rgw.olh.ver').decode()
+    try:
+        # leave the unlink pending in the olh log
+        exec_cmd(f'rados -p {DATA_POOL} setxattr {olh_oid} user.rgw.olh.ver 9223372036854775807')
+        connection.ObjectVersion(bucket.name, key, version).delete()
+    finally:
+        exec_cmd(f'rados -p {DATA_POOL} setxattr {olh_oid} user.rgw.olh.ver {olh_ver}')
+    assert bucket.Object(key).delete().get('DeleteMarker'), 'expected a delete marker'
+
+    # Clean up
+    log.debug("Deleting bucket {}".format(BUCKET_NAME))
+    bucket.object_versions.all().delete()
+    bucket.delete()
+
+main()
+log.info("Completed bucket versioning tests")

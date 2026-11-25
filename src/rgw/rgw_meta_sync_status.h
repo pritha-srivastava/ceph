@@ -1,5 +1,7 @@
-#ifndef RGW_META_SYNC_STATUS_H
-#define RGW_META_SYNC_STATUS_H
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
+
+#pragma once
 
 #include <string>
 
@@ -19,26 +21,27 @@ struct rgw_meta_sync_info {
 
   void encode(bufferlist& bl) const {
     ENCODE_START(2, 1, bl);
-    ::encode(state, bl);
-    ::encode(num_shards, bl);
-    ::encode(period, bl);
-    ::encode(realm_epoch, bl);
+    encode(state, bl);
+    encode(num_shards, bl);
+    encode(period, bl);
+    encode(realm_epoch, bl);
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::iterator& bl) {
-    DECODE_START(1, bl);
-    ::decode(state, bl);
-    ::decode(num_shards, bl);
+  void decode(bufferlist::const_iterator& bl) {
+    DECODE_START(2, bl);
+    decode(state, bl);
+    decode(num_shards, bl);
     if (struct_v >= 2) {
-      ::decode(period, bl);
-      ::decode(realm_epoch, bl);
+      decode(period, bl);
+      decode(realm_epoch, bl);
     }
     DECODE_FINISH(bl);
   }
 
   void decode_json(JSONObj *obj);
   void dump(Formatter *f) const;
+  static std::list<rgw_meta_sync_info> generate_test_instances();
 
   rgw_meta_sync_info() : state((int)StateInit), num_shards(0) {}
 };
@@ -50,64 +53,69 @@ struct rgw_meta_sync_marker {
     IncrementalSync = 1,
   };
   uint16_t state;
-  string marker;
-  string next_step_marker;
+  std::string marker;
+  std::string next_step_marker;
   uint64_t total_entries;
   uint64_t pos;
   real_time timestamp;
+  epoch_t realm_epoch{0}; //< realm_epoch of period marker
 
   rgw_meta_sync_marker() : state(FullSync), total_entries(0), pos(0) {}
 
   void encode(bufferlist& bl) const {
-    ENCODE_START(1, 1, bl);
-    ::encode(state, bl);
-    ::encode(marker, bl);
-    ::encode(next_step_marker, bl);
-    ::encode(total_entries, bl);
-    ::encode(pos, bl);
-    ::encode(timestamp, bl);
+    ENCODE_START(2, 1, bl);
+    encode(state, bl);
+    encode(marker, bl);
+    encode(next_step_marker, bl);
+    encode(total_entries, bl);
+    encode(pos, bl);
+    encode(timestamp, bl);
+    encode(realm_epoch, bl);
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::iterator& bl) {
-    DECODE_START(1, bl);
-    ::decode(state, bl);
-    ::decode(marker, bl);
-    ::decode(next_step_marker, bl);
-    ::decode(total_entries, bl);
-    ::decode(pos, bl);
-    ::decode(timestamp, bl);
+  void decode(bufferlist::const_iterator& bl) {
+    DECODE_START(2, bl);
+    decode(state, bl);
+    decode(marker, bl);
+    decode(next_step_marker, bl);
+    decode(total_entries, bl);
+    decode(pos, bl);
+    decode(timestamp, bl);
+    if (struct_v >= 2) {
+      decode(realm_epoch, bl);
+    }
     DECODE_FINISH(bl);
   }
 
   void decode_json(JSONObj *obj);
   void dump(Formatter *f) const;
+  static std::list<rgw_meta_sync_marker> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(rgw_meta_sync_marker)
 
 struct rgw_meta_sync_status {
   rgw_meta_sync_info sync_info;
-  map<uint32_t, rgw_meta_sync_marker> sync_markers;
+  std::map<uint32_t, rgw_meta_sync_marker> sync_markers;
 
   rgw_meta_sync_status() {}
 
   void encode(bufferlist& bl) const {
     ENCODE_START(1, 1, bl);
-    ::encode(sync_info, bl);
-    ::encode(sync_markers, bl);
+    encode(sync_info, bl);
+    encode(sync_markers, bl);
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::iterator& bl) {
+  void decode(bufferlist::const_iterator& bl) {
      DECODE_START(1, bl);
-    ::decode(sync_info, bl);
-    ::decode(sync_markers, bl);
+     decode(sync_info, bl);
+     decode(sync_markers, bl);
      DECODE_FINISH(bl);
   }
 
   void dump(Formatter *f) const;
   void decode_json(JSONObj *obj);
+  static std::list<rgw_meta_sync_status> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(rgw_meta_sync_status)
-
-#endif

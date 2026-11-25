@@ -1,15 +1,15 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_MANAGED_LOCK_GET_LOCKER_REQUEST_H
 #define CEPH_LIBRBD_MANAGED_LOCK_GET_LOCKER_REQUEST_H
 
 #include "include/int_types.h"
 #include "include/buffer.h"
+#include "include/rados/librados_fwd.hpp"
+#include <string>
 
 class Context;
-
-namespace librados { class IoCtx; }
 
 namespace librbd {
 

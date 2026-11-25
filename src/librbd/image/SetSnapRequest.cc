@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/image/SetSnapRequest.h"
 #include "common/dout.h"
@@ -9,7 +9,9 @@
 #include "librbd/ObjectMap.h"
 #include "librbd/Utils.h"
 #include "librbd/image/RefreshParentRequest.h"
-#include "librbd/io/ImageRequestWQ.h"
+#include "librbd/io/ImageDispatcherInterface.h"
+
+#include <shared_mutex> // for std::shared_lock
 
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
@@ -21,24 +23,28 @@ namespace image {
 using util::create_context_callback;
 
 template <typename I>
-SetSnapRequest<I>::SetSnapRequest(I &image_ctx, const std::string &snap_name,
+SetSnapRequest<I>::SetSnapRequest(I &image_ctx, uint64_t snap_id,
                                   Context *on_finish)
-  : m_image_ctx(image_ctx), m_snap_name(snap_name), m_on_finish(on_finish),
-    m_snap_id(CEPH_NOSNAP), m_exclusive_lock(nullptr), m_object_map(nullptr),
-    m_refresh_parent(nullptr), m_writes_blocked(false) {
+  : m_image_ctx(image_ctx), m_snap_id(snap_id), m_on_finish(on_finish),
+    m_exclusive_lock(nullptr), m_object_map(nullptr), m_refresh_parent(nullptr),
+    m_writes_blocked(false) {
 }
 
 template <typename I>
 SetSnapRequest<I>::~SetSnapRequest() {
-  assert(!m_writes_blocked);
+  ceph_assert(!m_writes_blocked);
   delete m_refresh_parent;
-  delete m_object_map;
-  delete m_exclusive_lock;
+  if (m_object_map) {
+    m_object_map->put();
+  }
+  if (m_exclusive_lock) {
+    m_exclusive_lock->put();
+  }
 }
 
 template <typename I>
 void SetSnapRequest<I>::send() {
-  if (m_snap_name.empty()) {
+  if (m_snap_id == CEPH_NOSNAP) {
     send_init_exclusive_lock();
   } else {
     send_block_writes();
@@ -48,9 +54,9 @@ void SetSnapRequest<I>::send() {
 template <typename I>
 void SetSnapRequest<I>::send_init_exclusive_lock() {
   {
-    RWLock::RLocker snap_locker(m_image_ctx.snap_lock);
+    std::shared_lock image_locker{m_image_ctx.image_lock};
     if (m_image_ctx.exclusive_lock != nullptr) {
-      assert(m_image_ctx.snap_id == CEPH_NOSNAP);
+      ceph_assert(m_image_ctx.snap_id == CEPH_NOSNAP);
       send_complete();
       return;
     }
@@ -74,7 +80,7 @@ void SetSnapRequest<I>::send_init_exclusive_lock() {
   Context *ctx = create_context_callback<
     klass, &klass::handle_init_exclusive_lock>(this);
 
-  RWLock::RLocker owner_locker(m_image_ctx.owner_lock);
+  std::shared_lock owner_locker{m_image_ctx.owner_lock};
   m_exclusive_lock->init(m_image_ctx.features, ctx);
 }
 
@@ -103,8 +109,8 @@ void SetSnapRequest<I>::send_block_writes() {
   Context *ctx = create_context_callback<
     klass, &klass::handle_block_writes>(this);
 
-  RWLock::RLocker owner_locker(m_image_ctx.owner_lock);
-  m_image_ctx.io_work_queue->block_writes(ctx);
+  std::shared_lock owner_locker{m_image_ctx.owner_lock};
+  m_image_ctx.io_image_dispatcher->block_writes(ctx);
 }
 
 template <typename I>
@@ -120,10 +126,10 @@ Context *SetSnapRequest<I>::handle_block_writes(int *result) {
   }
 
   {
-    RWLock::RLocker snap_locker(m_image_ctx.snap_lock);
-    m_snap_id = m_image_ctx.get_snap_id(m_snap_name);
-    if (m_snap_id == CEPH_NOSNAP) {
-      ldout(cct, 5) << "failed to locate snapshot '" << m_snap_name << "'"
+    std::shared_lock image_locker{m_image_ctx.image_lock};
+    auto it = m_image_ctx.snap_info.find(m_snap_id);
+    if (it == m_image_ctx.snap_info.end()) {
+      ldout(cct, 5) << "failed to locate snapshot '" << m_snap_id << "'"
                     << dendl;
 
       *result = -ENOENT;
@@ -138,7 +144,7 @@ Context *SetSnapRequest<I>::handle_block_writes(int *result) {
 template <typename I>
 Context *SetSnapRequest<I>::send_shut_down_exclusive_lock(int *result) {
   {
-    RWLock::RLocker snap_locker(m_image_ctx.snap_lock);
+    std::shared_lock image_locker{m_image_ctx.image_lock};
     m_exclusive_lock = m_image_ctx.exclusive_lock;
   }
 
@@ -175,13 +181,12 @@ template <typename I>
 Context *SetSnapRequest<I>::send_refresh_parent(int *result) {
   CephContext *cct = m_image_ctx.cct;
 
-  parent_info parent_md;
+  ParentImageInfo parent_md;
   bool refresh_parent;
   {
-    RWLock::RLocker snap_locker(m_image_ctx.snap_lock);
-    RWLock::RLocker parent_locker(m_image_ctx.parent_lock);
+    std::shared_lock image_locker{m_image_ctx.image_lock};
 
-    const parent_info *parent_info = m_image_ctx.get_parent_info(m_snap_id);
+    const auto parent_info = m_image_ctx.get_parent_info(m_snap_id);
     if (parent_info == nullptr) {
       *result = -ENOENT;
       lderr(cct) << "failed to retrieve snapshot parent info" << dendl;
@@ -190,8 +195,8 @@ Context *SetSnapRequest<I>::send_refresh_parent(int *result) {
     }
 
     parent_md = *parent_info;
-    refresh_parent = RefreshParentRequest<I>::is_refresh_required(m_image_ctx,
-                                                                  parent_md);
+    refresh_parent = RefreshParentRequest<I>::is_refresh_required(
+        m_image_ctx, parent_md, m_image_ctx.migration_info);
   }
 
   if (!refresh_parent) {
@@ -212,6 +217,7 @@ Context *SetSnapRequest<I>::send_refresh_parent(int *result) {
   Context *ctx = create_context_callback<
     klass, &klass::handle_refresh_parent>(this);
   m_refresh_parent = RefreshParentRequest<I>::create(m_image_ctx, parent_md,
+                                                     m_image_ctx.migration_info,
                                                      ctx);
   m_refresh_parent->send();
   return nullptr;
@@ -275,7 +281,7 @@ Context *SetSnapRequest<I>::handle_open_object_map(int *result) {
   if (*result < 0) {
     lderr(cct) << "failed to open object map: " << cpp_strerror(*result)
                << dendl;
-    delete m_object_map;
+    m_object_map->put();
     m_object_map = nullptr;
   }
 
@@ -323,12 +329,10 @@ int SetSnapRequest<I>::apply() {
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 10) << __func__ << dendl;
 
-  RWLock::WLocker owner_locker(m_image_ctx.owner_lock);
-  RWLock::WLocker snap_locker(m_image_ctx.snap_lock);
-  RWLock::WLocker parent_locker(m_image_ctx.parent_lock);
+  std::scoped_lock locker{m_image_ctx.owner_lock, m_image_ctx.image_lock};
   if (m_snap_id != CEPH_NOSNAP) {
-    assert(m_image_ctx.exclusive_lock == nullptr);
-    int r = m_image_ctx.snap_set(m_snap_name);
+    ceph_assert(m_image_ctx.exclusive_lock == nullptr);
+    int r = m_image_ctx.snap_set(m_snap_id);
     if (r < 0) {
       return r;
     }
@@ -348,7 +352,7 @@ int SetSnapRequest<I>::apply() {
 template <typename I>
 void SetSnapRequest<I>::finalize() {
   if (m_writes_blocked) {
-    m_image_ctx.io_work_queue->unblock_writes();
+    m_image_ctx.io_image_dispatcher->unblock_writes();
     m_writes_blocked = false;
   }
 }

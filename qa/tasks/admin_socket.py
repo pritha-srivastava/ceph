@@ -1,17 +1,16 @@
 """
 Admin Socket task -- used in rados, powercycle, and smoke testing
 """
-from cStringIO import StringIO
 
 import json
 import logging
 import os
 import time
 
+from teuthology.exceptions import CommandFailedError
 from teuthology.orchestra import run
 from teuthology import misc as teuthology
 from teuthology.parallel import parallel
-from teuthology.config import config as teuth_config
 
 log = logging.getLogger(__name__)
 
@@ -68,7 +67,7 @@ def task(ctx, config):
     teuthology.replace_all_with_clients(ctx.cluster, config)
 
     with parallel() as ptask:
-        for client, tests in config.iteritems():
+        for client, tests in config.items():
             ptask.spawn(_run_tests, ctx, client, tests)
 
 
@@ -84,33 +83,38 @@ def _socket_command(ctx, remote, socket_path, command, args):
 
     :returns: output of command in json format
     """
-    json_fp = StringIO()
     testdir = teuthology.get_testdir(ctx)
     max_tries = 120
-    while True:
-        proc = remote.run(
-            args=[
-                'sudo',
-                'adjust-ulimits',
-                'ceph-coverage',
-                '{tdir}/archive/coverage'.format(tdir=testdir),
-                'ceph',
-                '--admin-daemon', socket_path,
-                ] + command.split(' ') + args,
-            stdout=json_fp,
-            check_status=False,
-            )
-        if proc.exitstatus == 0:
-            break
-        assert max_tries > 0
-        max_tries -= 1
-        log.info('ceph cli returned an error, command not registered yet?')
-        log.info('sleeping and retrying ...')
-        time.sleep(1)
-    out = json_fp.getvalue()
-    json_fp.close()
-    log.debug('admin socket command %s returned %s', command, out)
-    return json.loads(out)
+    sub_commands = [c.strip() for c in command.split('||')]
+    ex = None
+    for _ in range(max_tries):
+        for sub_command in sub_commands:
+            try:
+                out = remote.sh([
+                    'sudo',
+                    'adjust-ulimits',
+                    'ceph-coverage',
+                    '{tdir}/archive/coverage'.format(tdir=testdir),
+                    'ceph',
+                    '--admin-daemon', socket_path,
+                    ] + sub_command.split(' ') + args)
+            except CommandFailedError as e:
+                ex = e
+                log.info('ceph cli "%s" returned an error %s, '
+                         'command not registered yet?', sub_command, e)
+            else:
+                log.debug('admin socket command %s returned %s',
+                          sub_command, out)
+                return json.loads(out)
+        else:
+            # exhausted all commands
+            log.info('sleeping and retrying ...')
+            time.sleep(1)
+    else:
+        # i tried max_tries times..
+        assert ex is not None
+        raise ex
+
 
 def _run_tests(ctx, client, tests):
     """
@@ -124,7 +128,7 @@ def _run_tests(ctx, client, tests):
     """
     testdir = teuthology.get_testdir(ctx)
     log.debug('Running admin socket tests on %s', client)
-    (remote,) = ctx.cluster.only(client).remotes.iterkeys()
+    (remote,) = ctx.cluster.only(client).remotes.keys()
     socket_path = '/var/run/ceph/ceph-{name}.asok'.format(name=client)
     overrides = ctx.config.get('overrides', {}).get('admin_socket', {})
 
@@ -145,7 +149,7 @@ def _run_tests(ctx, client, tests):
                 ],
             )
 
-        for command, config in tests.iteritems():
+        for command, config in tests.items():
             if config is None:
                 config = {}
             teuthology.deep_merge(config, overrides)
@@ -153,31 +157,19 @@ def _run_tests(ctx, client, tests):
 
             test_path = None
             if 'test' in config:
-                # hack: the git_url is always ceph-ci or ceph
-                git_url = teuth_config.get_ceph_git_url()
-                repo_name = 'ceph.git'
-                if git_url.count('ceph-ci'):
-                    repo_name = 'ceph-ci.git'
-                url = config['test'].format(
-                    branch=config.get('branch', 'master'),
-                    repo=repo_name,
-                    )
+                suite_path = ctx.config.get('suite_path')
+                repo_root = os.path.dirname(suite_path)
+                local_test_path = os.path.join(repo_root, config['test'])
                 test_path = os.path.join(tmp_dir, command)
+                remote.put_file(local_test_path, test_path)
                 remote.run(
                     args=[
-                        'wget',
-                        '-q',
-                        '-O',
-                        test_path,
-                        '--',
-                        url,
-                        run.Raw('&&'),
                         'chmod',
                         'u=rx',
                         '--',
                         test_path,
-                        ],
-                    )
+                    ],
+                )
 
             args = config.get('args', [])
             assert isinstance(args, list), \

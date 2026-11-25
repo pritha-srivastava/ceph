@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -19,15 +20,16 @@
 #include <map>
 #include <random>
 
-#include "rgw/rgw_ldap.h"
-#include "rgw/rgw_token.h"
+#include "rgw_ldap.h"
+#include "rgw_token.h"
 
 #include "gtest/gtest.h"
 #include "common/ceph_argparse.h"
 #include "common/debug.h"
-#include "global/global_init.h"
 
 #define dout_subsys ceph_subsys_rgw
+
+using namespace std;
 
 namespace {
 
@@ -85,12 +87,10 @@ TEST(RGW_LDAP, SHUTDOWN) {
 
 int main(int argc, char *argv[])
 {
-  string val;
-  vector<const char*> args;
-
-  argv_to_vec(argc, const_cast<const char**>(argv), args);
+  auto args = argv_to_vec(argc, argv);
   env_to_vec(args);
 
+  string val;
   for (auto arg_iter = args.begin(); arg_iter != args.end();) {
     if (ceph_argparse_witharg(args, arg_iter, &val, "--access",
 			      (char*) nullptr)) {
@@ -103,7 +103,7 @@ int main(int argc, char *argv[])
     }
   }
 
-  /* dont accidentally run as anonymous */
+  /* don't accidentally run as anonymous */
   if (access_key == "") {
     std::cout << argv[0] << " no AWS credentials, exiting" << std::endl;
     return EPERM;

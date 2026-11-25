@@ -1,0 +1,45 @@
+<cd-prometheus-tabs></cd-prometheus-tabs>
+
+@if (!isAlertmanagerConfigured) {
+  <cd-alert-panel
+    type="info"
+    i18n
+    >To enable Silences, please provide the URL to the API of the Prometheus' Alertmanager as
+    described in the&nbsp; <cd-doc section="prometheus"></cd-doc>.</cd-alert-panel
+  >
+}
+
+@if (isAlertmanagerConfigured) {
+  <cd-table
+    [data]="silences"
+    [columns]="columns"
+    [forceIdentifier]="true"
+    [customCss]="customCss"
+    [sorts]="sorts"
+    selectionType="single"
+    [hasDetails]="true"
+    (setExpandedRow)="setExpandedRow($event)"
+    (fetchData)="refresh()"
+    (updateSelection)="updateSelection($event)"
+  >
+    <cd-table-actions
+      class="table-actions"
+      [permission]="permission"
+      [selection]="selection"
+      [tableActions]="tableActions"
+    >
+    </cd-table-actions>
+    @if (expandedRow) {
+      <cd-table-key-value
+        *cdTableDetail
+        [renderObjects]="true"
+        [hideEmpty]="true"
+        [appendParentKey]="false"
+        [data]="expandedRow"
+        [customCss]="customCss"
+        [autoReload]="false"
+      >
+      </cd-table-key-value>
+    }
+  </cd-table>
+}

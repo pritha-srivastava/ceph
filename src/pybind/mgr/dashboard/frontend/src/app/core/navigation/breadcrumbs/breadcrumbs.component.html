@@ -1,0 +1,16 @@
+@if (crumbs.length) {
+  <cds-breadcrumb [noTrailingSlash]="true">
+    @for (crumb of crumbs; track crumb; let last = $last) {
+      @if (!last && crumb.path !== null) {
+        <cds-breadcrumb-item href="#/{{ crumb.path }}">
+          {{ crumb.text }}
+        </cds-breadcrumb-item>
+      }
+      @if (last || crumb.path === null) {
+        <cds-breadcrumb-item data-testid="active-breadcrumb-item">
+          {{ crumb.text }}
+        </cds-breadcrumb-item>
+      }
+    }
+  </cds-breadcrumb>
+}

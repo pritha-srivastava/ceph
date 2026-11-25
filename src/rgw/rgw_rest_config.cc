@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -11,55 +12,54 @@
  * Foundation. See file COPYING.
  *
  */
+
 #include "common/ceph_json.h"
 #include "common/strtol.h"
 #include "rgw_rest.h"
 #include "rgw_op.h"
-#include "rgw_rados.h"
 #include "rgw_rest_s3.h"
 #include "rgw_rest_config.h"
 #include "rgw_client_io.h"
+#ifdef WITH_RADOSGW_RADOS
+#include "driver/rados/rgw_sal_rados.h"
+#endif
 #include "common/errno.h"
-#include "include/assert.h"
+#include "include/ceph_assert.h"
+
+#include "services/svc_zone.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
 
-void RGWOp_ZoneGroupMap_Get::execute() {
-  http_ret = zonegroup_map.read(g_ceph_context, store);
-  if (http_ret < 0) {
-    dout(5) << "failed to read zone_group map" << dendl;
-  }
-}
+using namespace std;
 
-void RGWOp_ZoneGroupMap_Get::send_response() {
-  set_req_state_err(s, http_ret);
+void RGWOp_ZoneConfig_Get::send_response() {
+#ifdef WITH_RADOSGW_RADOS
+  const RGWZoneParams& zone_params = static_cast<rgw::sal::RadosStore*>(driver)->svc()->zone->get_zone_params();
+
+  set_req_state_err(s, op_ret);
   dump_errno(s);
   end_header(s);
 
-  if (http_ret < 0)
+  if (op_ret < 0)
     return;
 
-  if (old_format) {
-    RGWRegionMap region_map;
-    region_map.regions = zonegroup_map.zonegroups;
-    region_map.master_region = zonegroup_map.master_zonegroup;
-    region_map.bucket_quota = zonegroup_map.bucket_quota;
-    region_map.user_quota = zonegroup_map.user_quota;    
-    encode_json("region-map", region_map, s->formatter);
-  } else {
-    encode_json("zonegroup-map", zonegroup_map, s->formatter);
-  }
+  encode_json("zone_params", zone_params, s->formatter);
   flusher.flush();
+#else
+  // zone params live in the RADOS zone service; not available standalone
+  set_req_state_err(s, -ENOTSUP);
+  dump_errno(s);
+  end_header(s);
+#endif
 }
 
 RGWOp* RGWHandler_Config::op_get() {
   bool exists;
   string type = s->info.args.get("type", &exists);
 
-  if (type.compare("zonegroup-map") == 0) {
-    return new RGWOp_ZoneGroupMap_Get(false);
-  } else {
-    return new RGWOp_ZoneGroupMap_Get(true);
+  if (type.compare("zone") == 0) {
+    return new RGWOp_ZoneConfig_Get();
   }
+  return nullptr;
 }

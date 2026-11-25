@@ -1,35 +1,29 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef RBD_MIRROR_IMAGE_REPLAYER_UTILS_H
 #define RBD_MIRROR_IMAGE_REPLAYER_UTILS_H
 
-#include "include/int_types.h"
-#include "include/rados/librados.hpp"
-#include "include/rbd/librbd.hpp"
-#include "librbd/internal.h"
+#include "include/rados/librados_fwd.hpp"
 #include <string>
+
+namespace cls { namespace journal { struct Client; } }
+namespace librbd { namespace journal { struct MirrorPeerClientMeta; } }
 
 namespace rbd {
 namespace mirror {
 namespace image_replayer {
-namespace utils {
+namespace util {
 
-// TODO: free-functions used for mocking until create/clone
-//       converted to async state machines
-template <typename I>
-int clone_image(I *p_imctx, librados::IoCtx& c_ioctx, const char *c_name,
-                librbd::ImageOptions& c_opts,
-                const std::string &non_primary_global_image_id,
-                const std::string &primary_mirror_uuid) {
-  return librbd::clone(p_imctx, c_ioctx, c_name, c_opts,
-                       non_primary_global_image_id, primary_mirror_uuid);
-}
+std::string compute_image_spec(librados::IoCtx& io_ctx,
+                               const std::string& image_name);
 
-} // namespace utils
+bool decode_client_meta(const cls::journal::Client& client,
+                        librbd::journal::MirrorPeerClientMeta* client_meta);
+
+} // namespace util
 } // namespace image_replayer
 } // namespace mirror
 } // namespace rbd
 
 #endif // RBD_MIRROR_IMAGE_REPLAYER_UTILS_H
-

@@ -1,0 +1,86 @@
+<div
+  class="form-group"
+  [formGroup]="settingsForm"
+>
+  <label
+    class="col-form-label"
+    for="{{ setting }}"
+    >{{ setting }}</label
+  >
+  @if (limits['type'] === 'enum') {
+    <select
+      id="{{ setting }}"
+      name="{{ setting }}"
+      class="form-control"
+      [formControlName]="setting"
+    >
+      <option [ngValue]="null"></option>
+      @for (opt of limits['values']; track opt) {
+        <option [ngValue]="opt">
+          {{ opt }}
+        </option>
+      }
+    </select>
+  }
+
+  @if (limits['type'] !== 'enum') {
+    <span>
+      @if (limits['type'] === 'int') {
+        <input
+          type="number"
+          class="form-control"
+          [formControlName]="setting"
+        />
+      }
+      @if (limits['type'] === 'str') {
+        <input
+          type="text"
+          class="form-control"
+          [formControlName]="setting"
+        />
+      }
+      @if (limits['type'] === 'bool') {
+        <br />
+        <div class="custom-control custom-radio custom-control-inline">
+          <input
+            type="radio"
+            [id]="setting + 'True'"
+            [value]="true"
+            [formControlName]="setting"
+            class="custom-control-input"
+          />
+          <label
+            class="custom-control-label"
+            [for]="setting + 'True'"
+            >Yes</label
+          >
+        </div>
+        <div class="custom-control custom-radio custom-control-inline">
+          <input
+            type="radio"
+            [id]="setting + 'False'"
+            [value]="false"
+            class="custom-control-input"
+            [formControlName]="setting"
+          />
+          <label
+            class="custom-control-label"
+            [for]="setting + 'False'"
+            >No</label
+          >
+        </div>
+      }
+    </span>
+  }
+
+  @if (settingsForm.showError(setting, formDir, 'min')) {
+    <span class="invalid-feedback">
+      <ng-container i18n>Must be greater than or equal to {{ limits['min'] }}.</ng-container>
+    </span>
+  }
+  @if (settingsForm.showError(setting, formDir, 'max')) {
+    <span class="invalid-feedback">
+      <ng-container i18n>Must be less than or equal to {{ limits['max'] }}.</ng-container>
+    </span>
+  }
+</div>

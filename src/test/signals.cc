@@ -2,6 +2,8 @@
 #include "common/signal.h"
 #include "global/signal_handler.h"
 #include "common/debug.h"
+#include "include/coredumpctl.h"
+#include "log/Log.h"
 
 #include "gtest/gtest.h"
 
@@ -10,7 +12,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#include "include/assert.h"
+#include "include/ceph_assert.h"
 
 #define dout_context g_ceph_context
 static volatile sig_atomic_t got_sigusr1 = 0;
@@ -69,7 +71,7 @@ void testhandler(int signal)
     usr2 = true;
     break;
   default:
-    assert(0 == "unexpected signal");
+    ceph_abort_msg("unexpected signal");
   }
 }
 
@@ -118,7 +120,10 @@ TEST(SignalHandler, Multiple)
 TEST(SignalHandler, LogInternal)
 {
   g_ceph_context->_log->inject_segv();
-  ASSERT_DEATH(derr << "foo" << dendl, ".*");
+  {
+    PrCtl unset_dumpable;
+    ASSERT_DEATH(derr << "foo" << dendl, ".*");
+  }
   g_ceph_context->_log->reset_segv();
 }
 

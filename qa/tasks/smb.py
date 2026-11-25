@@ -1,0 +1,660 @@
+"""
+Ceph teuthology task for managed smb features.
+"""
+from io import StringIO
+import contextlib
+import copy
+import json
+import logging
+import shlex
+import time
+import threading
+
+from teuthology.exceptions import ConfigError, CommandFailedError
+from teuthology.task import ssh_keys
+
+
+log = logging.getLogger(__name__)
+
+
+def _disable_systemd_resolved(ctx, remote):
+    r = remote.run(args=['ss', '-lunH'], stdout=StringIO())
+    # this heuristic tries to detect if systemd-resolved is running
+    if '%lo:53' not in r.stdout.getvalue():
+        return
+    log.info('Disabling systemd-resolved on %s', remote.shortname)
+    # Samba AD DC container DNS support conflicts with resolved stub
+    # resolver when using host networking. And we want host networking
+    # because it is the simplest thing to set up.  We therefore will turn
+    # off the stub resolver.
+    r = remote.run(
+        args=['sudo', 'cat', '/etc/systemd/resolved.conf'],
+        stdout=StringIO(),
+    )
+    resolved_conf = r.stdout.getvalue()
+    setattr(ctx, 'orig_resolved_conf', resolved_conf)
+    new_resolved_conf = (
+        resolved_conf + '\n# EDITED BY TEUTHOLOGY: deploy_samba_ad_dc\n'
+    )
+    if '[Resolve]' not in new_resolved_conf.splitlines():
+        new_resolved_conf += '[Resolve]\n'
+    new_resolved_conf += 'DNSStubListener=no\n'
+    remote.write_file(
+        path='/etc/systemd/resolved.conf',
+        data=new_resolved_conf,
+        sudo=True,
+    )
+    remote.run(args=['sudo', 'systemctl', 'restart', 'systemd-resolved'])
+    r = remote.run(args=['ss', '-lunH'], stdout=StringIO())
+    assert '%lo:53' not in r.stdout.getvalue()
+    # because docker is a big fat persistent deamon, we need to bounce it
+    # after resolved is restarted
+    remote.run(args=['sudo', 'systemctl', 'restart', 'docker'])
+
+
+def _reset_systemd_resolved(ctx, remote):
+    orig_resolved_conf = getattr(ctx, 'orig_resolved_conf', None)
+    if not orig_resolved_conf:
+        return  # no orig_resolved_conf means nothing to reset
+    log.info('Resetting systemd-resolved state on %s', remote.shortname)
+    remote.write_file(
+        path='/etc/systemd/resolved.conf',
+        data=orig_resolved_conf,
+        sudo=True,
+    )
+    remote.run(args=['sudo', 'systemctl', 'restart', 'systemd-resolved'])
+    setattr(ctx, 'orig_resolved_conf', None)
+
+
+def _samba_ad_dc_conf(ctx, remote, cengine):
+    # this config has not been tested outside of smithi nodes. it's possible
+    # that this will break when used elsewhere because we have to list
+    # interfaces explicitly. Later I may add a feature to sambacc to exclude
+    # known-unwanted interfaces that having to specify known good interfaces.
+    cf = {
+        "samba-container-config": "v0",
+        "configs": {
+            "demo": {
+                "instance_features": ["addc"],
+                "domain_settings": "sink",
+                "instance_name": "dc1",
+            }
+        },
+        "domain_settings": {
+            "sink": {
+                "realm": "DOMAIN1.SINK.TEST",
+                "short_domain": "DOMAIN1",
+                "admin_password": "Passw0rd",
+                "interfaces": {
+                    "exclude_pattern": "^docker[0-9]+$",
+                },
+            }
+        },
+        "domain_groups": {
+            "sink": [
+                {"name": "supervisors"},
+                {"name": "employees"},
+                {"name": "characters"},
+                {"name": "bulk"},
+            ]
+        },
+        "domain_users": {
+            "sink": [
+                {
+                    "name": "bwayne",
+                    "password": "1115Rose.",
+                    "given_name": "Bruce",
+                    "surname": "Wayne",
+                    "member_of": ["supervisors", "characters", "employees"],
+                },
+                {
+                    "name": "ckent",
+                    "password": "1115Rose.",
+                    "given_name": "Clark",
+                    "surname": "Kent",
+                    "member_of": ["characters", "employees"],
+                },
+                {
+                    "name": "user0",
+                    "password": "1115Rose.",
+                    "given_name": "George0",
+                    "surname": "Hue-Sir",
+                    "member_of": ["bulk"],
+                },
+                {
+                    "name": "user1",
+                    "password": "1115Rose.",
+                    "given_name": "George1",
+                    "surname": "Hue-Sir",
+                    "member_of": ["bulk"],
+                },
+                {
+                    "name": "user2",
+                    "password": "1115Rose.",
+                    "given_name": "George2",
+                    "surname": "Hue-Sir",
+                    "member_of": ["bulk"],
+                },
+                {
+                    "name": "user3",
+                    "password": "1115Rose.",
+                    "given_name": "George3",
+                    "surname": "Hue-Sir",
+                    "member_of": ["bulk"],
+                },
+            ]
+        },
+    }
+    cf_json = json.dumps(cf)
+    remote.run(args=['sudo', 'mkdir', '-p', '/var/tmp/samba'])
+    remote.write_file(
+        path='/var/tmp/samba/container.json', data=cf_json, sudo=True
+    )
+    return [
+        '--volume=/var/tmp/samba:/etc/samba-container:ro',
+        '-eSAMBACC_CONFIG=/etc/samba-container/container.json',
+    ]
+
+
+@contextlib.contextmanager
+def configure_samba_client_container(ctx, config):
+    # TODO: deduplicate logic between this task and deploy_samba_ad_dc
+    role = config.get('role')
+    samba_client_image = config.get(
+        'samba_client_image', 'quay.io/samba.org/samba-client:latest'
+    )
+    if not role:
+        raise ConfigError(
+            "you must specify a role to discover container engine / pull image"
+        )
+    (remote,) = ctx.cluster.only(role).remotes.keys()
+    cengine = _cengine(ctx, config, remote)
+
+    remote.run(args=['sudo', cengine, 'pull', samba_client_image])
+    samba_client_container_cmd = [
+        'sudo',
+        cengine,
+        'run',
+        '--rm',
+        '--net=host',
+        '-eKRB5_CONFIG=/dev/null',
+        samba_client_image,
+    ]
+
+    setattr(ctx, 'samba_client_container_cmd', samba_client_container_cmd)
+    try:
+        yield
+    finally:
+        setattr(ctx, 'samba_client_container_cmd', None)
+
+
+def _cengine(ctx, config, remote):
+    cengine = config.get('container_engine', 'podman')
+    try:
+        log.info("Testing if %s is available", cengine)
+        remote.run(args=['sudo', cengine, '--help'])
+    except CommandFailedError:
+        log.info("Failed to find %s. Using docker", cengine)
+        cengine = 'docker'
+    return cengine
+
+
+@contextlib.contextmanager
+def deploy_samba_ad_dc(ctx, config):
+    role = config.get('role')
+    ad_dc_image = config.get(
+        'ad_dc_image', 'quay.io/samba.org/samba-ad-server:latest'
+    )
+    samba_client_image = config.get(
+        'samba_client_image', 'quay.io/samba.org/samba-client:latest'
+    )
+    test_user_pass = config.get('test_user_pass', 'DOMAIN1\\ckent%1115Rose.')
+    if not role:
+        raise ConfigError(
+            "you must specify a role to allocate a host for the AD DC"
+        )
+    (remote,) = ctx.cluster.only(role).remotes.keys()
+    ip = remote.ssh.get_transport().getpeername()[0]
+    cengine = _cengine(ctx, config, remote)
+    remote.run(args=['sudo', cengine, 'pull', ad_dc_image])
+    remote.run(args=['sudo', cengine, 'pull', samba_client_image])
+    _disable_systemd_resolved(ctx, remote)
+    remote.run(
+        args=[
+            'sudo',
+            'mkdir',
+            '-p',
+            '/var/lib/samba/container/logs',
+            '/var/lib/samba/container/data',
+        ]
+    )
+    remote.run(
+        args=[
+            'sudo',
+            cengine,
+            'run',
+            '-d',
+            '--name=samba-ad',
+            '--network=host',
+            '--privileged',
+        ]
+        + _samba_ad_dc_conf(ctx, remote, cengine)
+        + [ad_dc_image]
+    )
+
+    # test that the ad dc is running and basically works
+    connected = False
+    samba_client_container_cmd = [
+        'sudo',
+        cengine,
+        'run',
+        '--rm',
+        '--net=host',
+        f'--dns={ip}',
+        '-eKRB5_CONFIG=/dev/null',
+        samba_client_image,
+    ]
+    for idx in range(10):
+        time.sleep((2 ** (1 + idx)) / 8)
+        log.info("Probing SMB status of DC %s, idx=%s", ip, idx)
+        cmd = samba_client_container_cmd + [
+            'smbclient',
+            '-U',
+            test_user_pass,
+            '//domain1.sink.test/sysvol',
+            '-c',
+            'ls',
+        ]
+        try:
+            remote.run(args=cmd)
+            connected = True
+            log.info("SMB status probe succeeded")
+            break
+        except CommandFailedError:
+            pass
+    if not connected:
+        raise RuntimeError('failed to connect to AD DC SMB share')
+
+    setattr(ctx, 'samba_ad_dc_ip', ip)
+    setattr(ctx, 'samba_client_container_cmd', samba_client_container_cmd)
+    try:
+        yield
+    finally:
+        try:
+            remote.run(args=['sudo', cengine, 'stop', 'samba-ad'])
+        except CommandFailedError:
+            log.error("Failed to stop samba-ad container")
+        try:
+            remote.run(args=['sudo', cengine, 'rm', 'samba-ad'])
+        except CommandFailedError:
+            log.error("Failed to remove samba-ad container")
+        remote.run(
+            args=[
+                'sudo',
+                'rm',
+                '-rf',
+                '/var/lib/samba/container/logs',
+                '/var/lib/samba/container/data',
+            ]
+        )
+        _reset_systemd_resolved(ctx, remote)
+        setattr(ctx, 'samba_ad_dc_ip', None)
+        setattr(ctx, 'samba_client_container_cmd', None)
+
+
+@contextlib.contextmanager
+def deploy_kmip_container(ctx, config):
+    role = config.get('role')
+    image = config.get(
+        'image', 'quay.io/phlogistonjohn/pykmip:test'
+    )
+    if not role:
+        raise ConfigError(
+            "you must specify a role to allocate a host for the KMIP server"
+        )
+    (remote,) = ctx.cluster.only(role).remotes.keys()
+    ip = remote.ssh.get_transport().getpeername()[0]
+
+    cengine = _cengine(ctx, config, remote)
+    remote.run(args=['sudo', cengine, 'pull', image])
+
+    remote.run(
+        args=[
+            'sudo',
+            'rm',
+            '-rf',
+            '/var/lib/pykmip'
+        ]
+    )
+    remote.run(
+        args=[
+            'sudo',
+            'mkdir',
+            '-p',
+            '/var/lib/pykmip/tls',
+            '/var/lib/pykmip/data',
+            '/var/lib/pykmip/data/policy',
+        ]
+    )
+    _configure_kmip_server(
+        ctx,
+        config,
+        remote,
+        tls_dir='/var/lib/pykmip/tls',
+        policy_dir='/var/lib/pykmip/data/policy',
+    )
+    remote.run(
+        args=[
+            'sudo',
+            cengine,
+            'run',
+            '-d',
+            '--name=kmip',
+            '--publish=5696:5696',
+            '--volume=/var/lib/pykmip/data:/var/lib/kmip:z',
+            '--volume=/var/lib/pykmip/tls:/etc/kmip/tls:ro,z',
+            image,
+        ]
+    )
+
+    # let the kmip server start & settle. Sleeping less than 1s causes
+    # consistent errors. Sleep 10s to give server plenty of time to init and
+    # avoid flakes.
+    time.sleep(10)
+
+    setattr(ctx, 'kmip_server_ip', ip)
+    try:
+        _init_kmip(ctx, config, remote, image, cengine=cengine)
+        yield
+    finally:
+        try:
+            remote.run(args=['sudo', cengine, 'stop', 'kmip'])
+        except CommandFailedError:
+            log.error("Failed to stop kmip container")
+        try:
+            remote.run(args=['sudo', cengine, 'rm', 'kmip'])
+        except CommandFailedError:
+            log.error("Failed to remove kmip container")
+        remote.run(
+            args=[
+                'sudo',
+                'rm',
+                '-rf',
+                '/var/lib/pykmip'
+            ]
+        )
+        setattr(ctx, 'kmip_server_ip', None)
+
+
+def _configure_kmip_server(
+    ctx,
+    config,
+    remote,
+    tls_dir=None,
+    policy_dir=None,
+    kmip_cert='kmip-server',
+    kmip_ca='kbroot',
+):
+    default_policy = {
+        "teuthology": {
+            "preset": {
+                "CERTIFICATE": {"GET": "ALLOW_ALL"},
+                "OPAQUE_DATA": {"GET": "ALLOW_ALL"},
+                "PRIVATE_KEY": {"GET": "ALLOW_ALL"},
+                "PUBLIC_KEY": {"GET": "ALLOW_ALL"},
+                "SECRET_DATA": {"GET": "ALLOW_ALL"},
+                "SPLIT_KEY": {"GET": "ALLOW_ALL"},
+                "SYMMETRIC_KEY": {
+                    "GET": "ALLOW_ALL",
+                    "LOCATE": "ALLOW_ALL",
+                },
+            }
+        }
+    }
+    ssl_certificates = getattr(ctx, 'ssl_certificates', None)
+    cert_name = config.get('cert_name', kmip_cert)
+    ca_name = config.get('ca_name', kmip_ca)
+    if tls_dir and ssl_certificates:
+        cert_obj = ssl_certificates[cert_name]
+        ca_obj = ssl_certificates[ca_name]
+        cert_path = f'{tls_dir}/kmip.crt'
+        key_path = f'{tls_dir}/kmip.key'
+        ca_path = f'{tls_dir}/ca.crt'
+        _cfg = [
+            (cert_obj, cert_obj.certificate, cert_path),
+            (cert_obj, cert_obj.key, key_path),
+            (ca_obj, ca_obj.certificate, ca_path),
+        ]
+        for _src, _srcpath, _dest in _cfg:
+            _content = _src.remote.read_file(_srcpath)
+            remote.write_file(path=_dest, data=_content, sudo=True)
+    if tls_dir and not ssl_certificates:
+        log.warning('tls_dir provided but no ssl_certificates found')
+    if policy_dir:
+        policy = config.get('policy_config', default_policy)
+        path = f'{policy_dir}/policy.json'
+        remote.write_file(
+            path=path,
+            data=json.dumps(policy),
+            sudo=True,
+        )
+
+
+def _init_kmip(ctx, config, remote, image, cengine=None):
+    if 'generate' not in config:
+        return
+    if not cengine:
+        cengine = _cengine(ctx, config, remote)
+    ip = remote.ssh.get_transport().getpeername()[0]
+    for gsrc in config['generate']:
+        # symmetric is all we support right now
+        assert gsrc.get('what') == 'symmetric'
+        policy = gsrc.get('policy', 'teuthology')
+        bits = gsrc.get('bits', 256)
+        # NOTE: the key 'name' is reserved for future use if/when we need to
+        # support the kmip *locate* API
+        ktc_args = []
+        if policy:
+            ktc_args.append(f'--policy={policy}')
+        ktc_args.append(f'--create-symmetric-key={bits}')
+        ktc_args.append('--get=.')  # for debugging
+
+        common_args = [
+            'sudo',
+            cengine,
+            'run',
+            '--rm',
+            '--net=host',
+            '--volume=/var/lib/pykmip/tls:/etc/kmip/tls:ro,z',
+            '--entrypoint=python3',
+            image,
+            '/usr/local/bin/ktc.py',
+            '--tls-cert=/etc/kmip/tls/kmip.crt',
+            '--tls-key=/etc/kmip/tls/kmip.key',
+            '--tls-ca-cert=/etc/kmip/tls/ca.crt',
+            f'--host={ip}',
+            '--json',
+        ]
+        remote.run(args=(common_args + ktc_args))
+
+
+def _marks(marks_value):
+    if not marks_value:
+        return ''
+    if isinstance(marks_value, str):
+        return marks_value
+    if isinstance(marks_value, list):
+        return ' or '.join(marks_value)
+    raise ValueError(f'unexpected type: {marks_value!r}')
+
+
+def _workunit_commands(
+    key, values, *, default_script='smb/smb_tests.sh', default_target='tests'
+):
+    commands = []
+    if isinstance(values, str):
+        values = values.split()
+    for value in values:
+        script = default_script
+        target = default_target
+        custom_args = []
+        if isinstance(value, str):
+            # direct marks expression
+            marks = _marks(value)
+        elif isinstance(value, list):
+            # just a list of marks to include
+            marks = _marks(value)
+        elif isinstance(value, dict):
+            # full control
+            opts = value
+            script = opts.get('script', script)
+            target = opts.get('target', target)
+            marks = _marks(opts.get('marks', []))
+            custom_args = [str(v) for v in (opts.get('custom_args') or [])]
+
+        cmd = [script]
+        if marks:
+            cmd.append('-m')
+            cmd.append(marks)
+        cmd += custom_args
+        cmd.append(target)
+        commands.append(shlex.join(cmd))
+    return commands
+
+
+def workunit(ctx, config):
+    """Workunit wrapper with special behaviors for smb."""
+    from . import workunit
+    from teuthology import misc
+
+    _config = copy.deepcopy(config)
+    clients = _config.get('clients') or {}
+    env = _config.get('env') or {}
+
+    clients = {k: _workunit_commands(k, v) for k, v in clients.items()}
+    mfile = _config.get('metadata_file_path', _DEFAULT_META_FILE)
+    env['SMB'] = 'yes'
+    env['SMB_TEST_META'] = mfile
+
+    _config['clients'] = clients
+    _config['env'] = env
+    # annoyingly the stock workunit helper script command uses a tool (from the
+    # ceph/teuthology repo) called adjust-ulimits *and* a tool (from packages)
+    # called ceph-coverage. They're glued together under the
+    # no_coverage_and_limits option that defaults to false for the stock
+    # workunit task. Since, for SMB on Ceph, we are using containers and NOT
+    # using packages the latter tool is not available even if we invoke other
+    # teuthology tasks that installs adjust-ulimits. Just skip the whole thing
+    # for now and we can set ulimits via pytest if we really want to set
+    # ulimits. Allow the yaml to override our default, however unlikely.
+    _config['no_coverage_and_limits'] = config.get(
+        'no_coverage_and_limits', True
+    )
+    _ssh_keys_config = config.get('ssh_keys', {})
+    _config['enable_ssh_keys'] = _ssh_keys_config not in (False, None)
+    _config['testdir'] = misc.get_testdir(ctx)
+    _config['params'] = config.get('params', {})  # freeform test parameters
+    log.info('Passing workunit config: %r', _config)
+    with contextlib.ExitStack() as estack:
+        estack.enter_context(_workunit_background_keepalive(ctx))
+        if _config['enable_ssh_keys']:
+            estack.enter_context(ssh_keys.task(ctx, _ssh_keys_config))
+        estack.enter_context(write_metadata_file(ctx, _config))
+        return workunit.task(ctx, _config)
+
+
+@contextlib.contextmanager
+def _workunit_background_keepalive(ctx):
+    ctx._smb_workunit_done = False
+    try:
+        t = threading.Thread(target=_workunit_keepalive, args=(ctx,))
+        t.start()
+        try:
+            yield
+        finally:
+            ctx._smb_workunit_done = True
+            t.join()
+    finally:
+        delattr(ctx, '_smb_workunit_done')
+
+
+def _workunit_keepalive(ctx, echo_sec=5 * 60):
+    t = 0
+    while not ctx._smb_workunit_done:
+        time.sleep(1)
+        t += 1
+        if t < echo_sec:
+            continue
+        t = 0
+        for remote in ctx.cluster.remotes:
+            remote.run(
+                args=['echo', '(ping) waiting for workunit to complete'],
+            )
+
+
+def _node_info(ctx, role_name, **kwargs):
+    (remote,) = ctx.cluster.only(role_name).remotes.keys()
+    info = dict(remote.inventory_info)
+    info['_role_name'] = role_name
+    info['shortname'] = remote.shortname
+    info['ip_address'] = remote.ip_address
+    info.update(kwargs)
+    return info
+
+
+@contextlib.contextmanager
+def write_metadata_file(ctx, config, *, roles=None):
+    obj = {
+        'samba_client_container_cmd': getattr(
+            ctx, 'samba_client_container_cmd', ''
+        ),
+        'samba_ad_dc_ip': getattr(ctx, 'samba_ad_dc_ip', ''),
+        'smb_users': config.get('smb_users') or [],
+        'smb_shares': config.get('smb_shares') or [],
+    }
+    if config.get('admin_node'):
+        role = config.get('admin_node')
+        obj['admin_node'] = _node_info(ctx, role)
+    if config.get('smb_nodes'):
+        obj['smb_nodes'] = [
+            _node_info(ctx, node) for node in config.get('smb_nodes')
+        ]
+    if config.get('clients'):
+        obj['client_nodes'] = [
+            _node_info(ctx, node, client_name=node)
+            for node in config.get('clients')
+        ]
+    if config.get('testdir'):
+        obj['testdir'] = config['testdir']
+    if config.get('params'):
+        obj['params'] = config['params']
+    data = json.dumps(obj)
+    log.debug('smb metadata: %r', obj)
+
+    mfile = config.get('metadata_file_path', _DEFAULT_META_FILE)
+    if not roles:
+        roles = list(config.get('clients') or [])
+    remotes = []
+    for role in roles:
+        (remote,) = ctx.cluster.only(role).remotes.keys()
+        remotes.append(remote)
+        remote.write_file(
+            path=mfile,
+            data=data,
+            sudo=True,
+            mode='0644',
+        )
+    yield
+    for remote in remotes:
+        remote.run(
+            args=[
+                'sudo',
+                'rm',
+                '-rf',
+                '--',
+                mfile,
+            ],
+        )
+
+
+_DEFAULT_META_FILE = '/var/tmp/ceph-smb-test-meta.json'

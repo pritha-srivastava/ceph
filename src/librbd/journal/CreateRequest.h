@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_JOURNAL_CREATE_REQUEST_H
 #define CEPH_LIBRBD_JOURNAL_CREATE_REQUEST_H
@@ -8,7 +8,8 @@
 #include "include/buffer.h"
 #include "include/rados/librados.hpp"
 #include "include/rbd/librbd.hpp"
-#include "common/Mutex.h"
+#include "common/ceph_mutex.h"
+#include "common/Timer.h"
 #include "librbd/ImageCtx.h"
 #include "journal/Journaler.h"
 #include "librbd/journal/Types.h"
@@ -20,7 +21,6 @@ using journal::Journaler;
 
 class Context;
 class ContextWQ;
-class SafeTimer;
 
 namespace journal {
   class Journaler;
@@ -57,7 +57,7 @@ private:
                        const std::string &client_id, ContextWQ *op_work_queue,
                        Context *on_finish);
 
-  IoCtx m_ioctx;
+  IoCtx &m_ioctx;
   std::string m_image_id;
   uint8_t m_order;
   uint8_t m_splay_width;
@@ -73,7 +73,7 @@ private:
   bufferlist m_bl;
   Journaler *m_journaler;
   SafeTimer *m_timer;
-  Mutex *m_timer_lock;
+  ceph::mutex *m_timer_lock;
   int m_r_saved;
 
   int64_t m_pool_id = -1;

@@ -1,0 +1,49 @@
+<ng-template #labelTemplate>
+  <div class="d-flex align-items-center">
+    @if (props.label && props.hideLabel !== true) {
+      <label
+        [attr.for]="id"
+        class="form-label"
+      >
+        {{ props.label }}
+        @if (props.required && props.hideRequiredMarker !== true) {
+          <span aria-hidden="true">*</span>
+        }
+        @if (helper) {
+          <cd-helper>
+            <span [innerHTML]="helper"></span>
+          </cd-helper>
+        }
+      </label>
+    }
+  </div>
+</ng-template>
+
+<div
+  class="mb-3"
+  [class.form-floating]="props.labelPosition === 'floating'"
+  [class.has-error]="showError"
+>
+  @if (props.labelPosition !== 'floating') {
+    <ng-container [ngTemplateOutlet]="labelTemplate"></ng-container>
+  }
+
+  <ng-container #fieldComponent></ng-container>
+
+  @if (props.labelPosition === 'floating') {
+    <ng-container [ngTemplateOutlet]="labelTemplate"></ng-container>
+  }
+
+  @if (showError) {
+    <div
+      class="invalid-feedback"
+      [style.display]="'block'"
+    >
+      <formly-validation-message [field]="field"></formly-validation-message>
+    </div>
+  }
+
+  @if (props.description) {
+    <small class="form-text text-muted">{{ props.description }}</small>
+  }
+</div>

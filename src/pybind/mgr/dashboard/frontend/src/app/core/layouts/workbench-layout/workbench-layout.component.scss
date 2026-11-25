@@ -1,0 +1,42 @@
+@use './src/styles/vendor/variables' as vv;
+
+.overview,
+.rgw-dashboard {
+  margin: 0;
+  padding: 0;
+
+  .breadcrumbs--padding {
+    padding-left: var(--cds-spacing-07);
+  }
+}
+
+.container-fluid {
+  overflow: auto;
+  padding-top: var(--cds-spacing-09);
+  padding-bottom: var(--cds-spacing-09);
+  background-color: var(--cds-background);
+
+  &:has(.tearsheet--full) {
+    padding-left: 0;
+    padding-right: 0;
+    overflow: hidden;
+
+    .breadcrumbs--padding {
+      padding-left: var(--cds-spacing-07);
+    }
+  }
+
+  &:has(.sidebar-layout--full) {
+    padding-left: 0;
+    padding-right: 0;
+
+    .breadcrumbs--padding {
+      padding-left: var(--cds-spacing-05);
+    }
+  }
+}
+
+.cd-alert-container {
+  display: flex;
+  flex-direction: column;
+}

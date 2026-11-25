@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
 #
 # Script to mirror Ceph locally
@@ -13,12 +13,10 @@ declare -A SOURCES
 SOURCES[eu]="eu.ceph.com"
 SOURCES[de]="de.ceph.com"
 SOURCES[se]="se.ceph.com"
-SOURCES[cz]="cz.ceph.com"
 SOURCES[au]="au.ceph.com"
 SOURCES[us]="download.ceph.com"
-SOURCES[hk]="hk.ceph.com"
 SOURCES[fr]="fr.ceph.com"
-SOURCES[us-east]="us-east.ceph.com"
+SOURCES[ca]="ca.ceph.com"
 SOURCES[us-west]="us-west.ceph.com"
 SOURCES[global]="download.ceph.com"
 

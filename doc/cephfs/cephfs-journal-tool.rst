@@ -6,7 +6,7 @@ Purpose
 -------
 
 If a CephFS journal has become damaged, expert intervention may be required
-to restore the filesystem to a working state.
+to restore the file system to a working state.
 
 The ``cephfs-journal-tool`` utility provides functionality to aid experts in
 examining, modifying, and extracting data from journals.
@@ -14,17 +14,19 @@ examining, modifying, and extracting data from journals.
 .. warning::
 
     This tool is **dangerous** because it directly modifies internal
-    data structures of the filesystem.  Make backups, be careful, and
-    seek expert advice.  If you are unsure, do not run this tool.
+    data structures of the file system.  Make backups, be careful, and
+    seek expert advice.  If you are unsure, do not run this tool. As a
+    precaution, cephfs-journal-tool doesn't work on an active filesystem.
 
 Syntax
 ------
 
-::
+.. parsed-literal::
 
-    cephfs-journal-tool journal <inspect|import|export|reset>
-    cephfs-journal-tool header <get|set>
-    cephfs-journal-tool event <get|splice|apply> [filter] <list|json|summary>
+    cephfs-journal-tool [:ref:`options<cephfs_journal_tool_options>`] journal <inspect|import|export|reset>
+    cephfs-journal-tool [:ref:`options<cephfs_journal_tool_options>`] header <get|set> <trimmed_pos|expire_pos|write_pos|pool_id> <value>
+    cephfs-journal-tool [:ref:`options<cephfs_journal_tool_options>`] header recover [--force]
+    cephfs-journal-tool [:ref:`options<cephfs_journal_tool_options>`] event <get|splice|recover_dentries> [filter] <list|json|summary|binary>
 
 
 The tool operates in three modes: ``journal``, ``header`` and ``event``,
@@ -42,11 +44,13 @@ This should be your starting point to assess the state of a journal.
   present and can be decoded.
 
 * ``import`` and ``export`` read and write binary dumps of the journal
-  in a sparse file format.  Pass the filename as the last argument.  The
-  export operation may not work reliably for journals which are damaged (missing
+  in a sparse file format. Pass the filename as the last argument. The import operation checks
+  if the imported journal FSID matches with the online cluster FSID. Using ``--force`` skips
+  the FSID check. The export operation may not work reliably for journals which are damaged (missing
   objects).
 
-* ``reset`` truncates a journal, discarding any information within it.
+* ``reset`` truncates a journal, discarding any information within it. Using ``--force`` does a
+  hard reset without trying to recover from on-disk.
 
 
 Example: journal inspect
@@ -92,10 +96,40 @@ Header mode
 * ``get`` outputs the current content of the journal header
 
 * ``set`` modifies an attribute of the header.  Allowed attributes are
-  ``trimmed_pos``, ``expire_pos`` and ``write_pos``.
+  ``trimmed_pos``, ``expire_pos``,  ``write_pos`` and ``pool_id``.
 
-Example: header get/set
-~~~~~~~~~~~~~~~~~~~~~~~
+* ``recover``  recover corrupted journal pointers within the ``mdlog``.
+  It enumerates the journal events and determines safe fallback offsets:
+
+  * ``trimmed_pos``: Set to the first event discovered in the log segment.
+  * ``expire_pos``: Set to the first major segment event.
+  * ``read_pos``: Set to the first major segment event.
+  * ``write_pos``: Set to the first position immediately following the last valid event.
+
+.. note::
+
+   The scope of this command is limited to scenarios where it is reasonably certain that the
+   journal's starting position (``expire_pos``) is sane. It trusts this starting anchor to
+   determine the beginning of the scan and recalculate the remaining boundary pointers.
+   Before using this command, administrators should manually inspect the journal header
+   to verify that this pointer makes logical sense. For catastrophic scenarios where the
+   header object is completely lost or the starting pointers are irreparably damaged,
+   this tool may not be able to recover uncommitted metadata.
+
+   This command requires the journal header to be present and have a valid magic number.
+   If the header is missing or entirely unrecognized, the tool will abort.
+
+By default, running this command performs a **dry run**. It emits a log to the
+console listing the proposed changes to the header offsets but does not modify the
+disk.
+
+.. warning::
+
+   The proposed header fields will only be committed to disk if the ``--force``
+   argument is explicitly passed. Use this flag with caution on corrupted file systems.
+
+Example: header get/set/recover
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ::
 
@@ -104,17 +138,34 @@ Example: header get/set
       "write_pos": 4274947,
       "expire_pos": 4194304,
       "trimmed_pos": 4194303,
+      "stream_format": 1,
       "layout": { "stripe_unit": 4194304,
-          "stripe_count": 4194304,
+          "stripe_count": 1,
           "object_size": 4194304,
-          "cas_hash": 4194304,
-          "object_stripe_unit": 4194304,
-          "pg_pool": 4194304}}
+          "pool_id": 2,
+          "pool_ns": ""}}
 
     # cephfs-journal-tool header set trimmed_pos 4194303
     Updating trimmed_pos 0x400000 -> 0x3fffff
     Successfully updated header.
 
+    # cephfs-journal-tool --rank a:0 header recover
+    Proposed Journal Header Updates:
+      trimmed_pos: 0x400000 -> 0x400000
+      expire_pos:  0x415f74 -> 0x415f74
+      read_pos:    0x415f74 -> 0x415f74
+      write_pos:   0x41576c -> 0x41676c
+      Target event type at proposed read_pos: EVENT_SUBTREEMAP
+    Dry-run mode enabled. Header modifications skipped.
+
+    # cephfs-journal-tool --rank a:0 header recover --force
+    Proposed Journal Header Updates:
+      trimmed_pos: 0x400000 -> 0x400000
+      expire_pos:  0x415f74 -> 0x415f74
+      read_pos:    0x415f74 -> 0x415f74
+      write_pos:   0x41576c -> 0x41676c
+      Target event type at proposed read_pos: EVENT_SUBTREEMAP
+    Successfully recovered journal header.
 
 Event mode
 ----------
@@ -133,27 +184,31 @@ Actions:
 
 * ``get`` read the events from the log
 * ``splice`` erase events or regions in the journal
-* ``apply`` extract filesystem metadata from events and attempt to apply it to the metadata store.
+* ``recover_dentries`` recover the dentries from the journal. It does a selective offline replay
+  which only reads out dentries and writes them to the backing store if their version is greater
+  than what is currently in the backing store.
 
 Filtering:
 
 * ``--range <int begin>..[int end]`` only include events within the range begin (inclusive) to end (exclusive)
 * ``--path <path substring>`` only include events referring to metadata containing the specified string
-* ``--inode <int>`` only include events referring to metadata containing the specified string
+* ``--inode <int>`` only include events referring to metadata containing the specified inode
 * ``--type <type string>`` only include events of this type
 * ``--frag <ino>[.frag id]`` only include events referring to this directory fragment
 * ``--dname <string>`` only include events referring to this named dentry within a directory
-  fragment (may only be used in conjunction with ``--frag``
+  fragment (may only be used in conjunction with ``--frag``)
 * ``--client <int>`` only include events from this client session ID
+* ``--max-rss <bytes>`` (works only with ``recover_dentries`` for now) limits the RSS of the cephfs-journal-tool
+  by scanning and flushing journal events in batches
 
 Filters may be combined on an AND basis (i.e. only the intersection of events from each filter).
 
 Output modes:
 
 * ``binary``: write each event as a binary file, within a folder whose name is controlled by ``--path``
-* ``json``: write all events to a single file, as a JSON serialized list of objects
-* ``summary``: write a human readable summary of the events read to standard out
-* ``list``: write a human readable terse listing of the type of each event, and
+* ``json``: write all events to a single file specified by ``--path``, as a JSON serialized list of objects.
+* ``summary``: write a human-readable summary of the events read to stdout
+* ``list``: write a human-readable terse listing of the type of each event, and
   which file paths the event affects.
 
 
@@ -197,7 +252,7 @@ Example: event mode
     0x404032 UPDATE:  (openc)
       dirbravo/.filebravo1.swpx
 
-    # cephfs-journal-tool event get --path /filebravo1 list
+    # cephfs-journal-tool event get --path filebravo1 list
     0x40785a UPDATE:  (openc)
       dirbravo/filebravo1
     0x4103ee UPDATE:  (cap update)
@@ -208,11 +263,11 @@ Example: event mode
       OPEN: 1
       UPDATE: 2
 
-    # cephfs-journal-tool event apply --range 0x410bf1.. summary
+    # cephfs-journal-tool event recover_dentries summary
     Events by type:
-      NOOP: 1
-      SESSION: 1
-      UPDATE: 9
+      LID: 1
+      SUBTREEMAP: 1
+    Errors: 0
 
     # cephfs-journal-tool event get --inode=1099511627776 list
     0x40068b UPDATE:  (mkdir)
@@ -236,3 +291,12 @@ Example: event mode
     # cephfs-journal-tool event get binary --path bin_events
     Wrote output to binary files in directory 'bin_events'
 
+.. _cephfs_journal_tool_options:
+
+Options
+~~~~~~~
+
+* ``--rank=<filesystem>:{mds-rank|all}`` Used to specify the filesystem, the MDS rank or all ranks.
+* ``--journal=<mdlog|purge_queue>`` The journal type. The default value is ``mdlog``, which is the
+  only option that supports event mode. When ``purge_queue`` is used, the journal scanner creates
+  a PurgeItem object and adds it to EventMap for processing.

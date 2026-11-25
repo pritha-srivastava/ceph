@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,7 +17,7 @@
 
 #include <memory>
 
-#include "common/ceph_json.h"
+#include "common/Cond.h"
 #include "mon/MonClient.h"
 
 class Command
@@ -24,7 +25,7 @@ class Command
 protected:
   C_SaferCond cond;
 public:
-  bufferlist outbl;
+  ceph::buffer::list outbl;
   std::string outs;
   int r;
 
@@ -34,32 +35,18 @@ public:
         &outbl, &outs, &cond);
   }
 
+  void run(MonClient *monc, const std::string &command, ceph::buffer::list &&inbl)
+  {
+    monc->start_mon_command({command}, std::move(inbl),
+        &outbl, &outs, &cond);
+  }
+
   virtual void wait()
   {
     r = cond.wait();
   }
 
   virtual ~Command() {}
-};
-
-
-class JSONCommand : public Command
-{
-public:
-  json_spirit::mValue json_result;
-
-  void wait()
-  {
-    Command::wait();
-
-    if (r == 0) {
-      bool read_ok = json_spirit::read(
-          outbl.to_str(), json_result);
-      if (!read_ok) {
-        r = -EINVAL;
-      }
-    }
-  }
 };
 
 #endif

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #ifndef CEPH_LIBRBD_OPERATION_REBUILD_OBJECT_MAP_REQUEST_H
 #define CEPH_LIBRBD_OPERATION_REBUILD_OBJECT_MAP_REQUEST_H
 
@@ -24,10 +25,10 @@ public:
   {
   }
 
-  virtual void send();
+  void send() override;
 
 protected:
-  virtual bool should_complete(int r);
+  bool should_complete(int r) override;
 
 private:
   /**
@@ -63,7 +64,7 @@ private:
 
   ImageCtxT &m_image_ctx;
   ProgressContext &m_prog_ctx;
-  State m_state;
+  State m_state = STATE_RESIZE_OBJECT_MAP;
   bool m_attempted_trim;
 
   void send_resize_object_map();

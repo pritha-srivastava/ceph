@@ -1,0 +1,163 @@
+import { Component, HostBinding, OnDestroy, OnInit } from '@angular/core';
+import { ActivatedRouteSnapshot, NavigationEnd, Router } from '@angular/router';
+
+import { Observable, Subscription } from 'rxjs';
+import { filter } from 'rxjs/operators';
+import { MultiClusterService } from '~/app/shared/api/multi-cluster.service';
+import { Permissions } from '~/app/shared/models/permissions';
+import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
+
+import { FaviconService } from '~/app/shared/services/favicon.service';
+import { SummaryService } from '~/app/shared/services/summary.service';
+import { TaskManagerService } from '~/app/shared/services/task-manager.service';
+import { TelemetryNotificationService } from '../../../shared/services/telemetry-notification.service';
+import { MotdNotificationService } from '~/app/shared/services/motd-notification.service';
+import {
+  FeatureTogglesMap,
+  FeatureTogglesService
+} from '~/app/shared/services/feature-toggles.service';
+import _ from 'lodash';
+
+@Component({
+  selector: 'cd-workbench-layout',
+  templateUrl: './workbench-layout.component.html',
+  styleUrls: ['./workbench-layout.component.scss'],
+  providers: [FaviconService],
+  standalone: false
+})
+export class WorkbenchLayoutComponent implements OnInit, OnDestroy {
+  notifications: string[] = [];
+  private subs = new Subscription();
+  permissions: Permissions;
+  pageHeaderTitle: string | null = null;
+  pageHeaderSubtitle: string | null = null;
+  pageHeaderDescription: string | null = null;
+  showBreadcrumbsLayout = true;
+  pageHeaderHidden = false;
+  enabledFeature$: Observable<FeatureTogglesMap>;
+
+  @HostBinding('class') get class(): string {
+    return 'top-notification-' + this.notifications.length;
+  }
+
+  constructor(
+    public router: Router,
+    private summaryService: SummaryService,
+    private taskManagerService: TaskManagerService,
+    private multiClusterService: MultiClusterService,
+    private faviconService: FaviconService,
+    private authStorageService: AuthStorageService,
+    private telemetryNotificationService: TelemetryNotificationService,
+    private motdNotificationService: MotdNotificationService,
+    private featureTogglesService: FeatureTogglesService
+  ) {
+    this.permissions = this.authStorageService.getPermissions();
+    this.enabledFeature$ = this.featureTogglesService.get();
+  }
+
+  ngOnInit() {
+    if (this.permissions.configOpt.read) {
+      this.subs.add(this.multiClusterService.startPolling());
+      this.subs.add(this.multiClusterService.startClusterTokenStatusPolling());
+    }
+    this.subs.add(this.summaryService.startPolling());
+    this.subs.add(this.taskManagerService.init(this.summaryService));
+
+    this.subs.add(
+      this.authStorageService.isPwdDisplayed$.subscribe((isDisplayed) => {
+        this.showTopNotification('isPwdDisplayed', isDisplayed);
+      })
+    );
+    this.subs.add(
+      this.telemetryNotificationService.update.subscribe((visible: boolean) => {
+        this.showTopNotification('telemetryNotificationEnabled', visible);
+      })
+    );
+    this.subs.add(
+      this.motdNotificationService.motd$.subscribe((motd: any) => {
+        this.showTopNotification('motdNotificationEnabled', _.isPlainObject(motd));
+      })
+    );
+    this.faviconService.init();
+
+    this.updatePageHeaderFromRoute();
+    this.subs.add(
+      this.router.events
+        .pipe(filter((e) => e instanceof NavigationEnd))
+        .subscribe(() => this.updatePageHeaderFromRoute())
+    );
+  }
+
+  private updatePageHeaderFromRoute(): void {
+    let route: ActivatedRouteSnapshot | null = this.router.routerState.snapshot.root;
+    while (route?.firstChild) {
+      route = route.firstChild;
+    }
+    this.showBreadcrumbsLayout = !route?.pathFromRoot.some(
+      (snapshot) => snapshot.routeConfig?.data?.['showBreadcrumbsLayout'] === false
+    );
+
+    const hiddenRoute = this.findRouteWithData(route, 'pageHeaderHidden');
+    if (hiddenRoute?.routeConfig?.data?.['pageHeaderHidden']) {
+      this.pageHeaderHidden = true;
+      this.pageHeaderTitle = null;
+      this.pageHeaderSubtitle = null;
+      this.pageHeaderDescription = null;
+      return;
+    }
+
+    this.pageHeaderHidden = false;
+
+    const titleFromParamRoute = this.findRouteWithData(route, 'pageHeaderTitleFromParam');
+    const titleFromParam = titleFromParamRoute?.routeConfig?.data?.['pageHeaderTitleFromParam'] as
+      string | undefined;
+
+    if (titleFromParam && titleFromParamRoute?.params[titleFromParam]) {
+      try {
+        this.pageHeaderTitle = decodeURIComponent(titleFromParamRoute.params[titleFromParam]);
+      } catch {
+        this.pageHeaderTitle = titleFromParamRoute.params[titleFromParam];
+      }
+      this.pageHeaderSubtitle = null;
+      this.pageHeaderDescription = null;
+      return;
+    }
+
+    const pageHeader = route?.routeConfig?.data?.['pageHeader'] as
+      { title?: string; subtitle?: string; description?: string } | undefined;
+    this.pageHeaderTitle = pageHeader?.title ?? null;
+    this.pageHeaderSubtitle = pageHeader?.subtitle ?? null;
+    this.pageHeaderDescription = pageHeader?.description ?? null;
+  }
+
+  private findRouteWithData(
+    route: ActivatedRouteSnapshot | null,
+    key: string
+  ): ActivatedRouteSnapshot | null {
+    let current = route;
+    while (current) {
+      if (current.routeConfig?.data?.[key]) {
+        return current;
+      }
+      current = current.parent;
+    }
+    return null;
+  }
+
+  showTopNotification(name: string, isDisplayed: boolean) {
+    if (isDisplayed) {
+      if (!this.notifications.includes(name)) {
+        this.notifications.push(name);
+      }
+    } else {
+      const index = this.notifications.indexOf(name);
+      if (index >= 0) {
+        this.notifications.splice(index, 1);
+      }
+    }
+  }
+
+  ngOnDestroy() {
+    this.subs.unsubscribe();
+  }
+}

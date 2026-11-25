@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -13,19 +14,16 @@
  */
 
 #include "MDSTable.h"
-
+#include "MDSContext.h"
 #include "MDSRank.h"
-#include "MDLog.h"
 
-#include "osdc/Filer.h"
+#include "osdc/Objecter.h"
 
-#include "include/types.h"
-
-#include "common/config.h"
-#include "common/errno.h"
+#include "common/debug.h"
+#include "common/errno.h" // for cpp_strerror()
 #include "common/Finisher.h"
 
-#include "include/assert.h"
+#include "include/ceph_assert.h"
 
 
 #define dout_context g_ceph_context
@@ -33,6 +31,7 @@
 #undef dout_prefix
 #define dout_prefix *_dout << "mds." << rank << "." << table_name << ": "
 
+using namespace std;
 
 class MDSTableIOContext : public MDSIOContextBase
 {
@@ -41,7 +40,7 @@ class MDSTableIOContext : public MDSIOContextBase
     MDSRank *get_mds() override {return ida->mds;}
   public:
     explicit MDSTableIOContext(MDSTable *ida_) : ida(ida_) {
-      assert(ida != NULL);
+      ceph_assert(ida != NULL);
     }
 };
 
@@ -53,22 +52,26 @@ public:
   void finish(int r) override {
     ida->save_2(r, version);
   }
+  void print(ostream& out) const override {
+    out << "table_save(" << ida->table_name << ")";
+  }
 };
 
-void MDSTable::save(MDSInternalContextBase *onfinish, version_t v)
+void MDSTable::save(MDSContext *onfinish, version_t v)
 {
   if (v > 0 && v <= committing_version) {
     dout(10) << "save v " << version << " - already saving "
 	     << committing_version << " >= needed " << v << dendl;
-    waitfor_save[v].push_back(onfinish);
+    if (onfinish)
+      waitfor_save[v].push_back(onfinish);
     return;
   }
   
   dout(10) << "save v " << version << dendl;
-  assert(is_active());
+  ceph_assert(is_active());
   
   bufferlist bl;
-  ::encode(version, bl);
+  encode(version, bl);
   encode_state(bl);
 
   committing_version = version;
@@ -79,7 +82,7 @@ void MDSTable::save(MDSInternalContextBase *onfinish, version_t v)
   // write (async)
   SnapContext snapc;
   object_t oid = get_object_name();
-  object_locator_t oloc(mds->mdsmap->get_metadata_pool());
+  object_locator_t oloc(mds->get_metadata_pool());
   mds->objecter->write_full(oid, oloc,
 			    snapc,
 			    bl, ceph::real_clock::now(), 0,
@@ -92,7 +95,7 @@ void MDSTable::save_2(int r, version_t v)
   if (r < 0) {
     dout(1) << "save error " << r << " v " << v << dendl;
     mds->clog->error() << "failed to store table " << table_name << " object,"
-		       << " errno " << r << "\n";
+		       << " errno " << r;
     mds->handle_write_error(r);
     return;
   }
@@ -100,19 +103,22 @@ void MDSTable::save_2(int r, version_t v)
   dout(10) << "save_2 v " << v << dendl;
   committed_version = v;
   
-  list<MDSInternalContextBase*> ls;
+  MDSContext::vec ls;
   while (!waitfor_save.empty()) {
-    if (waitfor_save.begin()->first > v) break;
-    ls.splice(ls.end(), waitfor_save.begin()->second);
-    waitfor_save.erase(waitfor_save.begin());
+    auto it = waitfor_save.begin();
+    if (it->first > v) break;
+    auto& v = it->second;
+    ls.insert(ls.end(), v.begin(), v.end());
+    waitfor_save.erase(it);
   }
-  finish_contexts(g_ceph_context, ls,0);
+  finish_contexts(g_ceph_context, ls, 0);
 }
 
 
 void MDSTable::reset()
 {
   reset_state();
+  projected_version = version;
   state = STATE_ACTIVE;
 }
 
@@ -128,37 +134,40 @@ public:
   void finish(int r) override {
     ida->load_2(r, bl, onfinish);
   }
+  void print(ostream& out) const override {
+    out << "table_load(" << ida->table_name << ")";
+  }
 };
 
 object_t MDSTable::get_object_name() const
 {
   char n[50];
   if (per_mds)
-    snprintf(n, sizeof(n), "mds%d_%s", int(mds->get_nodeid()), table_name);
+    snprintf(n, sizeof(n), "mds%d_%s", int(rank), table_name.c_str());
   else
-    snprintf(n, sizeof(n), "mds_%s", table_name);
+    snprintf(n, sizeof(n), "mds_%s", table_name.c_str());
   return object_t(n);
 }
 
-void MDSTable::load(MDSInternalContextBase *onfinish)
+void MDSTable::load(MDSContext *onfinish)
 { 
   dout(10) << "load" << dendl;
 
-  assert(is_undef());
+  ceph_assert(is_undef());
   state = STATE_OPENING;
 
   C_IO_MT_Load *c = new C_IO_MT_Load(this, onfinish);
   object_t oid = get_object_name();
-  object_locator_t oloc(mds->mdsmap->get_metadata_pool());
+  object_locator_t oloc(mds->get_metadata_pool());
   mds->objecter->read_full(oid, oloc, CEPH_NOSNAP, &c->bl, 0,
 			   new C_OnFinisher(c, mds->finisher));
 }
 
 void MDSTable::load_2(int r, bufferlist& bl, Context *onfinish)
 {
-  assert(is_opening());
+  ceph_assert(is_opening());
   state = STATE_ACTIVE;
-  if (r == -EBLACKLISTED) {
+  if (r == -EBLOCKLISTED) {
     mds->respawn();
     return;
   }
@@ -167,14 +176,14 @@ void MDSTable::load_2(int r, bufferlist& bl, Context *onfinish)
     mds->clog->error() << "error reading table object '" << get_object_name()
                        << "' " << r << " (" << cpp_strerror(r) << ")";
     mds->damaged();
-    assert(r >= 0);  // Should be unreachable because damaged() calls respawn()
+    ceph_assert(r >= 0);  // Should be unreachable because damaged() calls respawn()
   }
 
   dout(10) << "load_2 got " << bl.length() << " bytes" << dendl;
-  bufferlist::iterator p = bl.begin();
+  auto p = bl.cbegin();
 
   try {
-    ::decode(version, p);
+    decode(version, p);
     projected_version = committed_version = version;
     dout(10) << "load_2 loaded v" << version << dendl;
     decode_state(p);
@@ -182,7 +191,7 @@ void MDSTable::load_2(int r, bufferlist& bl, Context *onfinish)
     mds->clog->error() << "error decoding table object '" << get_object_name()
                        << "': " << e.what();
     mds->damaged();
-    assert(r >= 0);  // Should be unreachable because damaged() calls respawn()
+    ceph_assert(r >= 0);  // Should be unreachable because damaged() calls respawn()
   }
 
   if (onfinish) {

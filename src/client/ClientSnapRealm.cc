@@ -1,8 +1,43 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "ClientSnapRealm.h"
 #include "common/Formatter.h"
+#include "include/container_ios.h"
+
+using std::set;
+using std::vector;
+
+void SnapRealm::build_snap_context()
+{
+  set<snapid_t> snaps;
+  snapid_t max_seq = seq;
+
+  // start with prior_parents?
+  for (unsigned i=0; i<prior_parent_snaps.size(); i++)
+    snaps.insert(prior_parent_snaps[i]);
+
+  // current parent's snaps
+  if (pparent) {
+    const SnapContext& psnapc = pparent->get_snap_context();
+    for (unsigned i=0; i<psnapc.snaps.size(); i++)
+      if (psnapc.snaps[i] >= parent_since)
+	snaps.insert(psnapc.snaps[i]);
+    if (psnapc.seq > max_seq)
+      max_seq = psnapc.seq;
+  }
+
+  // my snaps
+  for (unsigned i=0; i<my_snaps.size(); i++)
+    snaps.insert(my_snaps[i]);
+
+  // ok!
+  cached_snap_context.seq = max_seq;
+  cached_snap_context.snaps.resize(0);
+  cached_snap_context.snaps.reserve(snaps.size());
+  for (set<snapid_t>::reverse_iterator p = snaps.rbegin(); p != snaps.rend(); ++p)
+    cached_snap_context.snaps.push_back(*p);
+}
 
 void SnapRealm::dump(Formatter *f) const
 {

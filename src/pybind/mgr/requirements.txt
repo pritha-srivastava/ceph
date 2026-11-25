@@ -1,0 +1,7 @@
+-rrequirements-required.txt
+asyncssh==2.9
+kubernetes
+urllib3==1.26.15
+pytest<10.0
+pytest-xdist
+pytest-timeout

@@ -1,0 +1,87 @@
+<cd-table
+  #table
+  [autoReload]="false"
+  [data]="buckets"
+  [columns]="columns"
+  columnMode="flex"
+  selectionType="single"
+  (updateSelection)="updateSelection($event)"
+  identifier="bid"
+  (fetchData)="getBucketList($event)"
+  [status]="tableStatus"
+>
+  <cd-table-actions
+    class="table-actions"
+    [permission]="permission"
+    [selection]="selection"
+    [tableActions]="tableActions"
+  >
+  </cd-table-actions>
+</cd-table>
+
+<ng-template
+  #bucketNameTpl
+  let-row="data.row"
+>
+  <span data-testid="bucket-name">
+    <a
+      cdsLink
+      [routerLink]="[viewUrl, row.bid, row.owner]"
+      (click)="$event.stopPropagation()"
+    >
+      {{ row.bid }}
+    </a>
+  </span>
+</ng-template>
+
+<ng-template
+  #bucketSizeTpl
+  let-row="data.row"
+>
+  @if (row.bucket_quota.max_size > 0 && row.bucket_quota.enabled) {
+    <cd-usage-bar
+      [total]="row.bucket_quota.max_size"
+      [used]="row.bucket_size"
+    >
+    </cd-usage-bar>
+  } @else {
+    <ng-container i18n>No Limit</ng-container>
+  }
+
+  <ng-template
+    #noSizeQuota
+    i18n
+    >No Limit</ng-template
+  >
+</ng-template>
+
+<ng-template
+  #bucketObjectTpl
+  let-row="data.row"
+>
+  @if (row.bucket_quota.max_objects > 0 && row.bucket_quota.enabled) {
+    <cd-usage-bar
+      [total]="row.bucket_quota.max_objects"
+      [used]="row.num_objects"
+      [isBinary]="false"
+    >
+    </cd-usage-bar>
+  } @else {
+    <ng-container i18n>No Limit</ng-container>
+  }
+
+  <ng-template
+    #noObjectQuota
+    i18n
+    >No Limit</ng-template
+  >
+</ng-template>
+
+<ng-template #deleteTpl>
+  <cd-alert-panel
+    type="danger"
+    i18n
+  >
+    Buckets might still have underlying data depending on your bucket configuration
+  </cd-alert-panel>
+</ng-template>

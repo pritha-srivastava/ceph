@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -18,12 +19,25 @@
 #include <string>
 
 // Return a string describing the Ceph version
-const char *ceph_version_to_str(void);
+const char *ceph_version_to_str();
+
+// Return a string with the Ceph release
+const char *ceph_release_to_str(void);
 
 // Return a string describing the git version
 const char *git_version_to_str(void);
 
 // Return a formatted string describing the ceph and git versions
 std::string const pretty_version_to_str(void);
+
+// Release type ("dev", "rc", or "stable")
+const char *ceph_release_type(void);
+
+/* Optional vendor release suffix. Default is empty, can be overridden at build
+ * time by users to specify their specific version of ceph
+ */
+#ifndef CEPH_VENDOR_RELEASE
+#define CEPH_VENDOR_RELEASE ""
+#endif
 
 #endif

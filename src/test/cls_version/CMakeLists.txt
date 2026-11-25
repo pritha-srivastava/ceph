@@ -2,8 +2,6 @@
 add_executable(ceph_test_cls_version
   test_cls_version.cc
   )
-set_target_properties(ceph_test_cls_version PROPERTIES COMPILE_FLAGS
-  ${UNITTEST_CXX_FLAGS})
 target_link_libraries(ceph_test_cls_version
   librados
   cls_version_client
@@ -13,6 +11,22 @@ target_link_libraries(ceph_test_cls_version
   ${CMAKE_DL_LIBS}
   ${CRYPTO_LIBS}
   ${EXTRALIBS}
-  radostest
+  radostest-cxx
   )
 
+
+add_executable(ceph_test_neocls_version
+  test_neocls_version.cc
+  )
+target_link_libraries(ceph_test_neocls_version
+  libneorados
+  ${BLKID_LIBRARIES}
+  ${CMAKE_DL_LIBS}
+  ${CRYPTO_LIBS}
+  ${EXTRALIBS}
+  neoradostest-support
+  ${UNITTEST_LIBS}
+  )
+install(TARGETS
+  ceph_test_neocls_version
+  DESTINATION ${CMAKE_INSTALL_BINDIR})

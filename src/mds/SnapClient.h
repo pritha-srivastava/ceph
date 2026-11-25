@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,59 +16,73 @@
 #ifndef CEPH_SNAPCLIENT_H
 #define CEPH_SNAPCLIENT_H
 
+#include <map>
+#include <set>
+#include <string_view>
+#include <vector>
+
 #include "MDSTableClient.h"
+#include "mds_table_types.h" // for TABLE_SNAP
 #include "snap.h"
 
-class MDSInternalContextBase;
+class MDSContext;
 class MDSRank;
 class LogSegment;
 
 class SnapClient : public MDSTableClient {
 public:
-  explicit SnapClient(MDSRank *m) : MDSTableClient(m, TABLE_SNAP) {}
+  explicit SnapClient(MDSRank *m) :
+    MDSTableClient(m, TABLE_SNAP) {}
 
-  void resend_queries() {}
-  void handle_query_result(MMDSTableRequest *m) {}
+  void resend_queries() override;
+  void handle_query_result(const cref_t<MMDSTableRequest> &m) override;
+  void handle_notify_prep(const cref_t<MMDSTableRequest> &m) override;
+  void notify_commit(version_t tid) override;
 
-  void prepare_create(inodeno_t dirino, const string& name, utime_t stamp,
-		      version_t *pstid, bufferlist *pbl, MDSInternalContextBase *onfinish) {
-    bufferlist bl;
-    __u32 op = TABLE_OP_CREATE;
-    ::encode(op, bl);
-    ::encode(dirino, bl);
-    ::encode(name, bl);
-    ::encode(stamp, bl);
-    _prepare(bl, pstid, pbl, onfinish);
+  void prepare_create(inodeno_t dirino, std::string_view name, utime_t stamp,
+		      version_t *pstid, bufferlist *pbl, MDSContext *onfinish);
+
+  void prepare_create_realm(inodeno_t ino, version_t *pstid, bufferlist *pbl, MDSContext *onfinish);
+
+  void prepare_destroy(inodeno_t ino, snapid_t snapid, version_t *pstid, bufferlist *pbl, MDSContext *onfinish);
+
+  void prepare_update(inodeno_t ino, snapid_t snapid, std::string_view name, utime_t stamp,
+		      version_t *pstid, MDSContext *onfinish);
+
+  version_t get_cached_version() const { return cached_version; }
+  void refresh(version_t want, MDSContext *onfinish);
+
+  void sync(MDSContext *onfinish);
+
+  bool is_synced() const { return synced; }
+  void wait_for_sync(MDSContext *c) {
+    ceph_assert(!synced);
+    waiting_for_version[std::max<version_t>(cached_version, 1)].push_back(c);
   }
 
-  void prepare_create_realm(inodeno_t ino, version_t *pstid, bufferlist *pbl, MDSInternalContextBase *onfinish) {
-    bufferlist bl;
-    __u32 op = TABLE_OP_CREATE;
-    ::encode(op, bl);
-    ::encode(ino, bl);
-    _prepare(bl, pstid, pbl, onfinish);
-  }
+  snapid_t get_last_created() const { return cached_last_created; }
+  snapid_t get_last_destroyed() const { return cached_last_destroyed; }
+  snapid_t get_last_seq() const { return std::max(cached_last_destroyed, cached_last_created); }
 
-  void prepare_destroy(inodeno_t ino, snapid_t snapid, version_t *pstid, bufferlist *pbl, MDSInternalContextBase *onfinish) {
-    bufferlist bl;
-    __u32 op = TABLE_OP_DESTROY;
-    ::encode(op, bl);
-    ::encode(ino, bl);
-    ::encode(snapid, bl);
-    _prepare(bl, pstid, pbl, onfinish);
-  }
+  void get_snaps(std::set<snapid_t>& snaps) const;
+  std::set<snapid_t> filter(const std::set<snapid_t>& snaps) const;
+  const SnapInfo* get_snap_info(snapid_t snapid) const;
+  void get_snap_infos(std::map<snapid_t, const SnapInfo*>& infomap, const std::set<snapid_t>& snaps) const;
 
-  void prepare_update(inodeno_t ino, snapid_t snapid, const string& name, utime_t stamp,
-		      version_t *pstid, bufferlist *pbl, MDSInternalContextBase *onfinish) {
-    bufferlist bl;
-    __u32 op = TABLE_OP_UPDATE;
-    ::encode(op, bl);
-    ::encode(ino, bl);
-    ::encode(snapid, bl);
-    ::encode(name, bl);
-    ::encode(stamp, bl);
-    _prepare(bl, pstid, pbl, onfinish);
-  }
+  int dump_cache(Formatter *f) const;
+
+private:
+  version_t cached_version = 0;
+  snapid_t cached_last_created = 0, cached_last_destroyed = 0;
+  std::map<snapid_t, SnapInfo> cached_snaps;
+  std::map<version_t, SnapInfo> cached_pending_update;
+  std::map<version_t, std::pair<snapid_t,snapid_t> > cached_pending_destroy;
+
+  std::set<version_t> committing_tids;
+
+  std::map<version_t, std::vector<MDSContext*> > waiting_for_version;
+
+  uint64_t sync_reqid = 0;
+  bool synced = false;
 };
-
 #endif

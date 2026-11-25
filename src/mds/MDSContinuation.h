@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -13,13 +14,16 @@
  */
  
 #include "common/Continuation.h"
+#include "mds/MDSContext.h" // for MDSIOContextWrapper
 #include "mds/Mutation.h"
 #include "mds/Server.h"
+
+#include "MDSContext.h"
  
 class MDSContinuation : public Continuation {
 protected:
   Server *server;
-  MDSInternalContextBase *get_internal_callback(int stage) {
+  MDSInternalContext *get_internal_callback(int stage) {
     return new MDSInternalContextWrapper(server->mds, get_callback(stage));
   }
   MDSIOContextBase *get_io_callback(int stage) {

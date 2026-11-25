@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  *
  * Copyright (C) 2012 CohortFS, LLC.
@@ -18,14 +19,12 @@
 #include <boost/intrusive/list.hpp>
 #define BOOST_ICL_USE_STATIC_BOUNDED_INTERVALS
 #include <boost/icl/interval_set.hpp>
-#include "common/Mutex.h"
-#include "common/Cond.h"
+#include "common/ceph_mutex.h"
 
 class Client;
 
 typedef boost::icl::interval<uint64_t>::type barrier_interval;
 
-using namespace std;
 
 /*
  * we keep count of uncommitted writes on the inode, so that
@@ -47,6 +46,7 @@ class BarrierContext;
 class C_Block_Sync;
 
 typedef boost::intrusive::list< C_Block_Sync,
+				boost::intrusive::constant_time_size<false>,
 				boost::intrusive::member_hook<
 				  C_Block_Sync,
 				  boost::intrusive::list_member_hook<>,
@@ -56,7 +56,7 @@ typedef boost::intrusive::list< C_Block_Sync,
 class Barrier
 {
 private:
-  Cond cond;
+  ceph::condition_variable cond;
   boost::icl::interval_set<uint64_t> span;
   BlockSyncList write_list;
 
@@ -70,6 +70,7 @@ public:
 };
 
 typedef boost::intrusive::list< Barrier,
+				boost::intrusive::constant_time_size<false>,
 				boost::intrusive::member_hook<
 				  Barrier,
 				  boost::intrusive::list_member_hook<>,
@@ -81,7 +82,7 @@ class BarrierContext
 private:
   Client *cl;
   uint64_t ino;
-  Mutex lock;
+  ceph::mutex lock = ceph::make_mutex("BarrierContext");
 
   // writes not claimed by a commit
   BlockSyncList outstanding_writes;

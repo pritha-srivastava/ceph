@@ -1,5 +1,5 @@
-// -*- mode:C; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/object_map/UnlockRequest.h"
 #include "cls/lock/cls_lock_client.h"
@@ -16,7 +16,7 @@
 namespace librbd {
 namespace object_map {
 
-using util::create_rados_safe_callback;
+using util::create_rados_callback;
 
 template <typename I>
 UnlockRequest<I>::UnlockRequest(I &image_ctx, Context *on_finish)
@@ -39,9 +39,9 @@ void UnlockRequest<I>::send_unlock() {
 
   using klass = UnlockRequest<I>;
   librados::AioCompletion *rados_completion =
-    create_rados_safe_callback<klass, &klass::handle_unlock>(this);
+    create_rados_callback<klass, &klass::handle_unlock>(this);
   int r = m_image_ctx.md_ctx.aio_operate(oid, rados_completion, &op);
-  assert(r == 0);
+  ceph_assert(r == 0);
   rados_completion->release();
 }
 

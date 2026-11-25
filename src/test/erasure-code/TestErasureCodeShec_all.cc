@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -31,6 +32,8 @@
 #include "global/global_context.h"
 #include "gtest/gtest.h"
 
+using namespace std;
+
 struct Param_d {
   char* k;
   char* m;
@@ -48,8 +51,8 @@ struct Recover_d {
   int k;
   int m;
   int c;
-  set<int> want;
-  set<int> avail;
+  shard_id_set want;
+  shard_id_set avail;
 };
 struct std::vector<Recover_d> cannot_recover;
 
@@ -57,6 +60,7 @@ class ParameterTest : public ::testing::TestWithParam<struct Param_d> {
 
 };
 
+IGNORE_DEPRECATED
 TEST_P(ParameterTest, parameter_all)
 {
   int result;
@@ -77,7 +81,7 @@ TEST_P(ParameterTest, parameter_all)
   ErasureCodeProfile *profile = new ErasureCodeProfile();
   (*profile)["plugin"] = "shec";
   (*profile)["technique"] = "";
-  (*profile)["ruleset-failure-domain"] = "osd";
+  (*profile)["crush-failure-domain"] = "osd";
   (*profile)["k"] = k;
   (*profile)["m"] = m;
   (*profile)["c"] = c;
@@ -90,14 +94,14 @@ TEST_P(ParameterTest, parameter_all)
   EXPECT_EQ(i_c, shec->c);
   EXPECT_EQ(8, shec->w);
   EXPECT_EQ(ErasureCodeShec::MULTIPLE, shec->technique);
-  EXPECT_STREQ("default", shec->ruleset_root.c_str());
-  EXPECT_STREQ("osd", shec->ruleset_failure_domain.c_str());
+  EXPECT_STREQ("default", shec->rule_root.c_str());
+  EXPECT_STREQ("osd", shec->rule_failure_domain.c_str());
   EXPECT_TRUE(shec->matrix != NULL);
   EXPECT_EQ(0, result);
 
   //minimum_to_decode
   //want_to_decode will be a combination that chooses 1~c from k+m
-  set<int> want_to_decode, available_chunks, minimum_chunks;
+  shard_id_set want_to_decode, available_chunks, minimum_chunks;
   int array_want_to_decode[shec->get_chunk_count()];
   struct Recover_d comb;
 
@@ -113,17 +117,17 @@ TEST_P(ParameterTest, parameter_all)
 
     do {
       for (unsigned int i = 0; i < shec->get_chunk_count(); i++) {
-	available_chunks.insert(i);
+	available_chunks.insert(shard_id_t(i));
       }
       for (unsigned int i = 0; i < shec->get_chunk_count(); i++) {
 	if (array_want_to_decode[i]) {
-	  want_to_decode.insert(i);
-	  available_chunks.erase(i);
+	  want_to_decode.insert(shard_id_t(i));
+	  available_chunks.erase(shard_id_t(i));
 	}
       }
 
-      result = shec->minimum_to_decode(want_to_decode, available_chunks,
-				       &minimum_chunks);
+      result = shec->_minimum_to_decode(want_to_decode, available_chunks,
+					&minimum_chunks);
 
       if (result == 0){
 	EXPECT_EQ(0, result);
@@ -150,14 +154,14 @@ TEST_P(ParameterTest, parameter_all)
   }
 
   //minimum_to_decode_with_cost
-  set<int> want_to_decode_with_cost, minimum_chunks_with_cost;
-  map<int, int> available_chunks_with_cost;
+  shard_id_set want_to_decode_with_cost, minimum_chunks_with_cost;
+  shard_id_map<int> available_chunks_with_cost(shec->get_chunk_count());
 
   for (unsigned int i = 0; i < 1; i++) {
-    want_to_decode_with_cost.insert(i);
+    want_to_decode_with_cost.insert(shard_id_t(i));
   }
   for (unsigned int i = 0; i < shec->get_chunk_count(); i++) {
-    available_chunks_with_cost[i] = i;
+    available_chunks_with_cost[shard_id_t(i)] = i;
   }
 
   result = shec->minimum_to_decode_with_cost(
@@ -194,8 +198,8 @@ TEST_P(ParameterTest, parameter_all)
     want_to_decode2[i] = i;
   }
 
-  result = shec->decode(set<int>(want_to_decode2, want_to_decode2 + 2),
-			encoded, &decoded);
+  result = shec->_decode(set<int>(want_to_decode2, want_to_decode2 + 2),
+			 encoded, &decoded);
   EXPECT_EQ(0, result);
   EXPECT_EQ(2u, decoded.size());
   EXPECT_EQ(c_size, decoded[0].length());
@@ -215,7 +219,7 @@ TEST_P(ParameterTest, parameter_all)
   EXPECT_FALSE(out1 == in);
   EXPECT_TRUE(usable == in);
 
-  //create_ruleset
+  //create_rule
   stringstream ss;
   CrushWrapper *crush = new CrushWrapper;
   crush->create();
@@ -242,7 +246,7 @@ TEST_P(ParameterTest, parameter_all)
     }
   }
 
-  result = shec->create_ruleset("myrule", *crush, &ss);
+  result = shec->create_rule("myrule", *crush, &ss);
   EXPECT_EQ(0, result);
   EXPECT_STREQ("myrule", crush->rule_name_map[0].c_str());
 
@@ -259,8 +263,9 @@ TEST_P(ParameterTest, parameter_all)
   delete profile;
   delete crush;
 }
+END_IGNORE_DEPRECATED
 
-INSTANTIATE_TEST_CASE_P(Test, ParameterTest, ::testing::ValuesIn(param));
+INSTANTIATE_TEST_SUITE_P(Test, ParameterTest, ::testing::ValuesIn(param));
 
 int main(int argc, char **argv)
 {
@@ -291,16 +296,12 @@ int main(int argc, char **argv)
     }
   }
 
-  vector<const char*> args;
-  argv_to_vec(argc, (const char **) argv, args);
+  auto args = argv_to_vec(argc, argv);
 
   auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
-			 CODE_ENVIRONMENT_UTILITY, 0);
+			 CODE_ENVIRONMENT_UTILITY,
+			 CINIT_FLAG_NO_MON_CONFIG);
   common_init_finish(g_ceph_context);
-
-  const char* env = getenv("CEPH_LIB");
-  string directory(env ? env : ".libs");
-  g_conf->set_val("erasure_code_dir", directory, false, false);
 
   ::testing::InitGoogleTest(&argc, argv);
 

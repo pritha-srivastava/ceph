@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -13,11 +14,9 @@
 #ifndef CEPH_HISTOGRAM_H
 #define CEPH_HISTOGRAM_H
 
-#include <vector>
 #include <list>
-
-#include "include/intarith.h"
 #include "include/encoding.h"
+#include "include/intarith.h"
 
 namespace ceph {
   class Formatter;
@@ -52,6 +51,9 @@ private:
 public:
   void clear() {
     h.clear();
+  }
+  bool empty() const {
+    return h.empty();
   }
   void set_bin(int bin, int32_t count) {
     _expand_to(bin + 1);
@@ -117,10 +119,10 @@ public:
   /// decay histogram by N bits (default 1, for a halflife)
   void decay(int bits = 1);
 
-  void dump(Formatter *f) const;
-  void encode(bufferlist &bl) const;
-  void decode(bufferlist::iterator &bl);
-  static void generate_test_instances(std::list<pow2_hist_t*>& o);
+  void dump(ceph::Formatter *f) const;
+  void encode(ceph::buffer::list &bl) const;
+  void decode(ceph::buffer::list::const_iterator &bl);
+  static std::list<pow2_hist_t> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(pow2_hist_t)
 

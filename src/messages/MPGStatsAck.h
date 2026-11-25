@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,30 +16,37 @@
 #ifndef CEPH_MPGSTATSACK_H
 #define CEPH_MPGSTATSACK_H
 
-#include "osd/osd_types.h"
+#include "include/types.h" // for epoch_t, version_t
+#include "msg/Message.h"
+#include "osd/osd_types.h" // for pg_t
 
-class MPGStatsAck : public Message {
+class MPGStatsAck final : public Message {
 public:
-  map<pg_t,pair<version_t,epoch_t> > pg_stat;
-  
-  MPGStatsAck() : Message(MSG_PGSTATSACK) {}
+  std::map<pg_t,std::pair<version_t,epoch_t> > pg_stat;
+
+  MPGStatsAck() : Message{MSG_PGSTATSACK} {}
 
 private:
-  ~MPGStatsAck() {}
+  ~MPGStatsAck() final {}
 
 public:
-  const char *get_type_name() const { return "pg_stats_ack"; }
-  void print(ostream& out) const {
+  std::string_view get_type_name() const override { return "pg_stats_ack"; }
+  void print(std::ostream& out) const override {
     out << "pg_stats_ack(" << pg_stat.size() << " pgs tid " << get_tid() << ")";
   }
 
-  void encode_payload(uint64_t features) {
-    ::encode(pg_stat, payload);
+  void encode_payload(uint64_t features) override {
+    using ceph::encode;
+    encode(pg_stat, payload);
   }
-  void decode_payload() {
-    bufferlist::iterator p = payload.begin();
-    ::decode(pg_stat, p);
+  void decode_payload() override {
+    using ceph::decode;
+    auto p = payload.cbegin();
+    decode(pg_stat, p);
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

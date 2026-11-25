@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 from __future__ import print_function
 
@@ -7,16 +7,6 @@ import json
 import os
 import time
 import sys
-
-if sys.version_info[0] == 2:
-    from cStringIO import StringIO
-
-    range = xrange
-
-elif sys.version_info[0] == 3:
-    from io import StringIO
-
-    range = range
 
 import rados as rados
 import cephfs as cephfs
@@ -47,8 +37,6 @@ def set_mds_config_param(ceph, param):
         if r != 0:
             raise Exception
 
-import ConfigParser
-import contextlib
 
 class _TrimIndentFile(object):
     def __init__(self, fp):
@@ -73,7 +61,7 @@ def conf_set_kill_mds(location, killnum):
 
 def flush(ceph, testnum):
     print('flushing {t}'.format(t=testnum), file=sys.stderr)
-    set_mds_config_param(ceph, '--mds_log_max_segments 1')
+    set_mds_config_param(ceph, '--mds_log_max_segments 8')
 
     for i in range(1, 500):
         f = '{p}.{pid}.{t}.{i}'.format(p=prefix, pid=os.getpid(), t=testnum, i=i)
@@ -150,10 +138,10 @@ def verify(rados_ioctx, ino, values, pool):
 
     bt = decode(binbt)
 
+    ind = 0
     if bt['ino'] != ino:
         raise VerifyFailure('inode mismatch: {bi} != {ino}\n\tbacktrace:\n\t\t{bt}\n\tfailed verify against:\n\t\t{i}, {v}'.format(
                     bi=bt['ancestors'][ind]['dname'], ino=ino, bt=bt, i=ino, v=values))
-    ind = 0
     for (n, i) in values:
         if bt['ancestors'][ind]['dirino'] != i:
             raise VerifyFailure('ancestor dirino mismatch: {b} != {ind}\n\tbacktrace:\n\t\t{bt}\n\tfailed verify against:\n\t\t{i}, {v}'.format(

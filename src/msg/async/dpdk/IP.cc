@@ -1,4 +1,4 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
 /*
  * This file is open source software, licensed to you under the terms
  * of the Apache License, Version 2.0 (the "License").  See the NOTICE file
@@ -38,17 +38,16 @@
 
 #include "capture.h"
 #include "IP.h"
-#include "shared_ptr.h"
 #include "toeplitz.h"
 
 #include "common/dout.h"
-#include "include/assert.h"
+#include "include/ceph_assert.h"
 
 #define dout_subsys ceph_subsys_dpdk
 #undef dout_prefix
 #define dout_prefix *_dout << "dpdk "
 
-std::ostream& operator<<(std::ostream& os, ipv4_address a) {
+std::ostream& operator<<(std::ostream& os, const ipv4_address& a) {
   auto ip = a.ip;
   return os << ((ip >> 24) & 0xff) << "." << ((ip >> 16) & 0xff)
             << "." << ((ip >> 8) & 0xff) << "." << ((ip >> 0) & 0xff);
@@ -63,7 +62,7 @@ class C_handle_frag_timeout : public EventCallback {
 
  public:
   C_handle_frag_timeout(ipv4 *i): _ipv4(i) {}
-  void do_request(int fd_or_id) {
+  void do_request(uint64_t fd_or_id) {
     _ipv4->frag_timeout();
   }
 };
@@ -73,6 +72,17 @@ enum {
   l_dpdk_total_linearize_operations,
   l_dpdk_qp_last
 };
+
+struct icmp_hdr {
+  enum class msg_type : uint8_t {
+    echo_reply = 0,
+    echo_request = 8,
+  };
+  msg_type type;
+  uint8_t code;
+  uint16_t csum;
+  uint32_t rest;
+} __attribute__((packed));
 
 ipv4::ipv4(CephContext *c, EventCenter *cen, interface* netif)
   : cct(c), center(cen), _netif(netif), _global_arp(netif),
@@ -323,7 +333,7 @@ void ipv4::send(ipv4_address to, ip_protocol_num proto_num,
   }
 }
 
-Tub<l3_protocol::l3packet> ipv4::get_packet() {
+std::optional<l3_protocol::l3packet> ipv4::get_packet() {
   // _packetq will be mostly empty here unless it hold remnants of previously
   // fragmented packet
   if (_packetq.empty()) {
@@ -340,7 +350,7 @@ Tub<l3_protocol::l3packet> ipv4::get_packet() {
     }
   }
 
-  Tub<l3_protocol::l3packet> p;
+  std::optional<l3_protocol::l3packet> p;
   if (!_packetq.empty()) {
     p = std::move(_packetq.front());
     _packetq.pop_front();

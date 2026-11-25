@@ -1,0 +1,91 @@
+roles:
+# Test is for basic smb deployment & functionality. one node cluster is OK
+- - host.a
+  - mon.a
+  - mgr.x
+  - osd.0
+  - osd.1
+  - client.0
+- - host.b
+  - mon.b
+  - osd.2
+  - osd.3
+- - host.c
+  - mon.c
+  - osd.4
+  - osd.5
+# Reserve a host for acting as a domain controller and smb client
+- - host.d
+  - cephadm.exclude
+overrides:
+  ceph:
+    log-only-match:
+      - CEPHADM_
+tasks:
+- smb.configure_samba_client_container:
+    role: host.d
+- pexec:
+    all:
+      - sudo setsebool -P virt_sandbox_use_netlink 1 || true
+- cephadm:
+
+- cephadm.shell:
+    host.a:
+      - ceph fs volume create cephfs
+- cephadm.wait_for_service:
+    service: mds.cephfs
+
+- cephadm.shell:
+    host.a:
+      # add subvolgroup & subvolumes for test
+      - cmd: ceph fs subvolumegroup create cephfs smb
+      - cmd: ceph fs subvolume create cephfs sv1 --group-name=smb --protocols=smb
+      # set up smb cluster and shares
+      - cmd: ceph mgr module enable smb
+      - cmd: sleep 30
+      - cmd: >
+          ceph smb cluster create modusr1 user
+          --define-user-pass=user1%t3stP4ss1
+          --placement=count:3
+          --clustering=default
+      - cmd: ceph smb share create modusr1 share1 cephfs / --subvolume=smb/sv1
+# Wait for the smb service to start
+- cephadm.wait_for_service:
+    service: smb.modusr1
+
+# verify CTDB is healthy, cluster well formed
+- smb.workunit:
+    admin_node: host.a
+    timeout: 15m
+    clients:
+      client.0:
+        - [ctdb_healthy]
+
+# Modify the placement to remove a node
+- cephadm.shell:
+    host.a:
+      - |
+        ceph orch ls --service-name smb.modusr1 --export --format json > /tmp/smb_json
+        jq '.[0] | .placement.count = 2' /tmp/smb_json > /tmp/smb_json_new
+        ceph orch apply -i /tmp/smb_json_new
+        rm -f /tmp/smb_json /tmp/smb_json_new
+
+# Wait for the smb service to restart
+- cephadm.wait_for_service:
+    service: smb.modusr1
+
+# verify CTDB status shows the removed node as deleted (may lag after orch 2/2)
+- smb.workunit:
+    admin_node: host.a
+    timeout: 15m
+    clients:
+      client.0:
+        - [ctdb_node_gone]
+
+- cephadm.shell:
+    host.a:
+      - cmd: ceph smb share rm modusr1 share1
+      - cmd: ceph smb cluster rm modusr1
+# Wait for the smb service to be removed
+- cephadm.wait_for_service_not_present:
+    service: smb.modusr1
