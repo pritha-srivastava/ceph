@@ -78,6 +78,11 @@ class RGWInstance:
         """Value of a config option in the running RGW, as a string."""
         return str(self._admin_socket('config', 'get', option)[option])
 
+    def config_set(self, option, value):
+        """Sets a config option in the running RGW (only options that are read at runtime take
+        effect without a restart)."""
+        self._admin_socket('config', 'set', option, str(value))
+
     def perf_counter(self, name):
         """Sum of a perf counter over all sections of the RGW's perf dump (0 if absent)."""
         dump = self._admin_socket('perf', 'dump')
