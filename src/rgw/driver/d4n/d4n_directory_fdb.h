@@ -201,7 +201,6 @@ public:
                        const std::string& obj_name,
                        const std::string& version,
                        std::optional<Transaction> txn) override;
-
     virtual int remove_version_by_creation_time(const DoutPrefixProvider* dpp, optional_yield y,
                                         const std::string& bucket_id,
                                         const std::string& obj_name,

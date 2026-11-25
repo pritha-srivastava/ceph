@@ -508,6 +508,7 @@ class BlockDirectory: virtual public Directory {
     BlockDirectory() = default;
     virtual ~BlockDirectory() = default;
     
+    std::string build_index(const CacheBlock& block);
     virtual int exist_key(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, std::optional<Transaction> txn) = 0;
 
     virtual int set(const DoutPrefixProvider* dpp, optional_yield y, std::vector<CacheBlock>& blocks, std::optional<Transaction> txn) = 0;
@@ -532,8 +533,6 @@ class BlockDirectory: virtual public Directory {
 	
   protected:
     static std::map<std::string, std::string> encode_fields(const CacheBlock& block);
-
-    std::string build_index(const CacheBlock* block);
 };
 
 } // namespace rgw::d4n

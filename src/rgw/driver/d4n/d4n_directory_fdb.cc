@@ -795,6 +795,37 @@ TransactionResult FDBBackend::execute(const DoutPrefixProvider *dpp, optional_yi
   return TransactionResult(std::move(result), exhausted);
 }
 
+TransactionResult FDBBackend::execute_with_transaction(const DoutPrefixProvider *dpp, optional_yield y,
+    const boost::compat::function_ref<int(Transaction&)> fn, std::optional<Transaction> txn,
+    const bool auto_commit, const unsigned max_attempts)
+{
+  // Case 1: Pre-existing transaction provided; use it without committing
+  // (auto_commit flag is ignored when transaction is provided)
+  if (txn.has_value()) {
+    const auto *view = std::get_if<fdb_txn_ref>(&*txn);
+    if (!view || !view->get()) {
+      return TransactionResult(errno_result {std::unexpected(-EINVAL)}, false);
+    }
+
+    // Execute function with borrowed transaction (no commit)
+    Transaction txn_ref = *txn;
+    if (const auto ret = fn(txn_ref); 0 > ret) {
+      return TransactionResult(errno_result {std::unexpected(ret)}, false);
+    }
+    return TransactionResult(errno_result {std::expected<void, int>{}}, false);
+  }
+
+  // Case 2: No transaction provided and auto_commit = true; use managed transactor
+  if (auto_commit) {
+    return execute(dpp, y, fn, max_attempts);
+  }
+
+  // Case 3: No transaction and auto_commit = false
+  /* This case is not supported because the transaction would go out of scope
+     before the caller can commit it. */
+  return TransactionResult(errno_result {std::unexpected(-EINVAL)}, false);
+}
+
 int FDBDirectory::get_kv(const DoutPrefixProvider* dpp,
                          optional_yield y,
                          const std::string& key,
@@ -1279,7 +1310,7 @@ int FDBObjectDirectory::list_versions(const DoutPrefixProvider* dpp, optional_yi
 int FDBBlockDirectory::exist_key(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, std::optional<Transaction> txn)
 {
   return fdb_invoke(FDBdb, dpp, txn, [&](auto& tr) {
-    std::string key = build_index(block);
+    std::string key = build_index(*block);
     ldpp_dout(dpp, 20) << "FDBBlockDirectory::" << __func__ << " key: " << key << dendl;
     return lfdb::key_exists(tr, key);
   });
@@ -1295,7 +1326,7 @@ try
   }
 
   const auto write_block = [&](auto& tr) {
-    std::string key = build_index(block);
+    std::string key = build_index(*block);
     ldpp_dout(dpp, 10) << "FDBBlockDirectory::" << __func__ << "(): index is: " << key << dendl;
 
     const auto fdbValues = encode_fields(*block);
@@ -1315,7 +1346,7 @@ int FDBBlockDirectory::set(const DoutPrefixProvider* dpp, optional_yield y, std:
 {
   return fdb_invoke(FDBdb, dpp, txn, [&](auto& tr) {
     for (auto& block : blocks) {
-      std::string key = build_index(&block);
+      std::string key = build_index(block);
       ldpp_dout(dpp, 10) << "FDBBlockDirectory::" << __func__ << "(): index is: " << key << dendl;
       const auto fdbValues = encode_fields(block);
 
@@ -1384,7 +1415,7 @@ FDBBlockDirectory::find(const DoutPrefixProvider *dpp, optional_yield y, const C
                         std::optional<Transaction> txn)
 try
  {
-  const auto key = build_index(&block);
+  const auto key = build_index(block);
   std::optional<CacheBlock> found;
   const auto find_block = [this, &key](auto& tr) { return read_block(tr, key); };
   if (const int ret = fdb_invoke(FDBdb, dpp, txn, key, std::source_location::current(),
@@ -1411,7 +1442,7 @@ try
     std::vector<std::optional<CacheBlock>> values;
     values.reserve(blocks.size());
     for (const auto& block : blocks) {
-      values.push_back(read_block(tr, build_index(&block)));
+      values.push_back(read_block(tr, build_index(block)));
     }
 
     return values;
@@ -1474,11 +1505,10 @@ int FDBBlockDirectory::del(const DoutPrefixProvider* dpp, optional_yield y, Cach
   }
 
   return fdb_invoke(FDBdb, dpp, txn, [&](auto& tr) {
-    std::string key = build_index(block);
+    std::string key = build_index(*block);
     lfdb::erase(tr, key);
   });
 }
-
 
 int FDBBlockDirectory::update_field(const DoutPrefixProvider* dpp, optional_yield y, CacheBlock* block, const std::string& field, std::string& value, std::optional<Transaction> txn)
 {

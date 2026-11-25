@@ -51,6 +51,8 @@ namespace rgw::sal {
 
 using namespace rgw::d4n;
 
+namespace lfdb = ceph::libfdb;
+
 namespace {
 
 auto make_redis_connection(boost::asio::io_context& io)
@@ -265,6 +267,20 @@ int D4NFilterDriver::execute_transaction(const DoutPrefixProvider *dpp, optional
   return handle_transaction_result(dpp, retry_transaction(dpp, y, body, max_attempts), whence);
 }
 
+TransactionResult D4NFilterDriver::execute_with_transaction(const DoutPrefixProvider *dpp, optional_yield y,
+    const boost::compat::function_ref<int(Transaction&)> fn,
+    std::optional<Transaction> txn, const bool auto_commit, const unsigned max_attempts)
+{
+  // Retain every resource used by an operation, including while it yields.
+  const auto resources = backend;
+  if (!resources) {
+    return TransactionResult(errno_result {std::unexpected(-EINVAL)});
+  }
+  return std::visit([&](auto& active) {
+    return active.execute_with_transaction(dpp, y, fn, txn, auto_commit, max_attempts);
+  }, *resources);
+}
+
 int D4NFilterDriver::populate_listing_metadata(const DoutPrefixProvider *dpp,
     const std::string& bucket_id, std::vector<rgw_bucket_dir_entry>& entries, optional_yield y)
 {
@@ -293,6 +309,39 @@ bool D4NFilterDriver::uses_fdb() const noexcept
 bool D4NFilterDriver::uses_redis() const noexcept
 {
   return backend && std::holds_alternative<RedisBackend>(*backend);
+}
+
+lfdb::database_handle D4NFilterDriver::get_fdb_database() const
+{
+  if (!backend) {
+    throw std::runtime_error("D4NFilterDriver: No backend available");
+  }
+
+  auto* fdb = std::get_if<FDBBackend>(backend.get());
+  if (!fdb) {
+    throw std::runtime_error("D4NFilterDriver: Not using FDB backend");
+  }
+
+  return fdb->objects.FDBdb;
+}
+
+std::unique_ptr<RedisTransaction> D4NFilterDriver::create_redis_transaction(const DoutPrefixProvider* dpp) const
+{
+  if (!backend) {
+    throw std::runtime_error("D4NFilterDriver: No backend available");
+  }
+
+  auto* redis = std::get_if<RedisBackend>(backend.get());
+  if (!redis) {
+    throw std::runtime_error("D4NFilterDriver: Not using Redis backend");
+  }
+
+  auto conn = redis->pool ? redis->pool->acquire(dpp) : redis->conn;
+  if (!conn) {
+    throw std::runtime_error("D4NFilterDriver: Failed to acquire Redis connection");
+  }
+
+  return std::make_unique<RedisTransaction>(std::move(conn), redis->pool);
 }
 
 Pipeline *D4NFilterDriver::make_pipeline(std::optional<Pipeline>& pipeline)
@@ -472,6 +521,7 @@ int D4NFilterBucket::build_versioned_entries(const DoutPrefixProvider* dpp, cons
                               std::string& last_version, int& num_objs, bool& object_exhausted, int max,
                               std::optional<rgw::d4n::Transaction> txn, optional_yield y) {
   std::vector<rgw::d4n::CacheObjectVersion> versions;
+  std::vector<std::string> dir_obj_versions;
   const auto objName = get_latest_head_block_name(obj.objName);
   if (params.list_versions) {
     uint64_t count = (max > num_objs) ? static_cast<uint64_t>(max - num_objs) : 0;
@@ -503,10 +553,12 @@ int D4NFilterBucket::build_versioned_entries(const DoutPrefixProvider* dpp, cons
       ldpp_dout(dpp, 20) << "version.user_id: " << version.user_id << dendl;
       ldpp_dout(dpp, 20) << "version.display_name: " << version.display_name << dendl;
       ldpp_dout(dpp, 20) << "version.deleteMarker: " << version.deleteMarker << dendl;
+      dir_obj_versions.push_back(version.version);
     }
   }
 
   if (!versions.empty()) {
+    bkt_remove_objects.emplace(std::make_pair(objName, dir_obj_versions));
     for (size_t i = 0; i < versions.size(); i++) {
       rgw_bucket_dir_entry entry;
       entry.key.name = objName;
@@ -882,12 +934,11 @@ int D4NFilterBucket::list(const DoutPrefixProvider* dpp, ListParams& params, int
   return 0;
 }
 
-
 constexpr int OBJECT_LIST_VAL = 1000;
 constexpr int PIPELINE_MAX = 10000;
-int D4NFilterBucket::remove(const DoutPrefixProvider* dpp,
-			    bool delete_children,
-			    optional_yield y)
+int D4NFilterBucket::process_remove_objects(const DoutPrefixProvider* dpp, 
+                                            bool delete_children,
+                                            optional_yield y)
 {
   ListParams params;
   params.list_versions = true;
@@ -897,8 +948,8 @@ int D4NFilterBucket::remove(const DoutPrefixProvider* dpp,
   return_blocks = true; 
   auto blockDir = this->filter->get_block_dir();
   auto objDir = this->filter->get_obj_dir();
+  auto bucketDir = this->filter->get_bucket_dir();
   std::vector<rgw::d4n::CacheBlock> blocks; 
-  std::vector<rgw::d4n::CacheObj> objects; 
 
   do {
     results.objs.clear();
@@ -913,25 +964,66 @@ int D4NFilterBucket::remove(const DoutPrefixProvider* dpp,
       return -ENOTEMPTY;
     }
 
-    
-
     for (const auto& obj : results.objs) { 
-      if (((PIPELINE_MAX - blocks.size()) <= OBJECT_LIST_VAL) || (blocks.size() > (PIPELINE_MAX - 1000))) {
-	for (auto& block : blocks) {
-          if ((ret = blockDir->del(dpp, y, &block, std::nullopt)) < 0) {
-            ldpp_dout(dpp, 10)
-              << "D4NFilterBucket::" << __func__
-              << "(): Failed to delete cached object in block directory, ret="
-              << ret << dendl;
+      std::unique_ptr<rgw::sal::Object> c_obj = this->get_object(obj.key);
+      ldpp_dout(dpp, 20) << "D4NFilterBucket::" << __func__ << "(): handling object=" << obj.key << dendl;
+
+      auto bucket_id = this->get_bucket_id();
+      std::string prev_obj = bkt_remove_txn.object_name;
+      if (!prev_obj.empty() && prev_obj != c_obj->get_name()) {
+        /* The transaction from the previous page can now be committed because
+         * the new listing has moved onto the next object, indicating there are
+         * no more versions for the previous objects to include. */
+        if (!bkt_remove_txn.has_transaction()) {
+          ldpp_dout(dpp, 1) << "ERROR: " << __func__ << "(): bkt_remove_txn has object name but no transaction" << dendl;
+          return -EIO;
+        }
+
+        // Create Transaction variant reference from the stored backend transaction
+        rgw::d4n::Transaction txn_ref = bkt_remove_txn.is_fdb_transaction()
+          ? rgw::d4n::Transaction(std::ref(bkt_remove_txn.get_fdb_transaction()))
+          : rgw::d4n::Transaction(std::ref(bkt_remove_txn.get_redis_transaction()));
+
+        // Add the final remove_object operation to the transaction
+        auto result = filter->execute_with_transaction(dpp, y,
+          [&](rgw::d4n::Transaction& t) {
+            int ret = bucketDir->remove_object(dpp, y, bucket_id, prev_obj, t);
+            if (ret < 0) {
+              ldpp_dout(dpp, 10) << "D4NFilterBucket::" << __func__ << "(): Failed to delete object in bucket directory, ret=" << ret << dendl;
+            }
+            return ret;
+          },
+          txn_ref,
+          false
+        );
+
+        if (!result) {
+          bkt_remove_txn.reset();
+          return -EIO;
+        }
+
+        // Commit/execute the transaction based on backend type
+        if (bkt_remove_txn.is_fdb_transaction()) {
+          const auto committed = lfdb::commit(bkt_remove_txn.get_fdb_transaction());
+          if (!committed) {
+            const auto& failure = committed.error();
+            ldpp_dout(dpp, 1) << "ERROR: " << __func__ << "(): Failed to commit FDB transaction for object=" << prev_obj
+                             << " may_finish_later=" << failure.status.may_commit_later() << dendl;
+            bkt_remove_txn.reset();
+            return -EIO;
+          }
+        } else {
+          int ret = bkt_remove_txn.get_redis_transaction().execute_request(dpp, y);
+          if (ret < 0) {
+            ldpp_dout(dpp, 1) << "ERROR: " << __func__ << "(): Failed to execute Redis pipeline for object=" << prev_obj
+                             << " ret=" << ret << dendl;
+            bkt_remove_txn.reset();
             return ret;
           }
         }
-        blocks.clear();
-      }
 
-      // Handle head objects
-      std::unique_ptr<rgw::sal::Object> c_obj = this->get_object(obj.key);
-      ldpp_dout(dpp, 20) << "D4NFilterBucket::" << __func__ << "(): handling object=" << obj.key << dendl;
+        bkt_remove_txn.reset();
+      }
 
       rgw::d4n::CacheObj object = rgw::d4n::CacheObj{
         .objName = c_obj->get_name(),
@@ -945,8 +1037,10 @@ int D4NFilterBucket::remove(const DoutPrefixProvider* dpp,
       };
       block.cacheObj.objName = get_latest_head_block_name(c_obj->get_name());
       
+      /* Tombstone head blocks from directory first so parallel read requests do not get serviced. */
+      // Unversioned head object
+      block.invalid = true;
       blocks.push_back(block);
-      objects.push_back(object);
 
       std::string oid_version;
       if (c_obj->have_instance()) {
@@ -954,86 +1048,209 @@ int D4NFilterBucket::remove(const DoutPrefixProvider* dpp,
       } else {
         oid_version = "null";
       }
-      off_t lst = obj.meta.size;
-      ldpp_dout(dpp, 20) << "D4NFilterBucket::" << __func__ << "(): Obj size=" << lst << dendl;
-      block.cacheObj.objName = get_versioned_head_block_name(oid_version, c_obj->get_name());
-      auto it = dir_blocks.find(block.cacheObj.objName);
-      if (it != dir_blocks.end() && it->second.cacheObj.dirty) {
-	    if (!this->filter->get_policy_driver()->get_cache_policy()->invalidate_dirty_object(dpp, get_cache_block_prefix(c_obj.get(), it->second.version))) {
-	      ldpp_dout(dpp, 10) << "D4NFilterBucket::" << __func__ << "(): Failed to invalidate obj=" << c_obj->get_name() << " in cache" << dendl;
-	      return -EINVAL;
-	    }
-      /* For clean objects in the cache, inline deletes are avoided in favor of lazy deletes that occur through
-       * later eviction calls. */
+      auto versioned_block = block; 
+      versioned_block.cacheObj.objName = get_versioned_head_block_name(oid_version, block.cacheObj.objName);
+      // Versioned head object
+      blocks.push_back(versioned_block);
+
+      if (auto it = bkt_remove_blocks.find(versioned_block.cacheObj.objName); it != bkt_remove_blocks.end()) {
+        /* Retrieve the latest null instance. For each upload while versioning is suspended on a bucket, a unique version is assigned
+         * to the object internally. These are maintained in the directory but are overwritten when a new version is uploaded and
+         * deleted during a cleaning cycle. As a result, we only delete the latest unique null versioned block. */ 
+        if (oid_version == "null") {
+          auto null_block = block; 
+          null_block.cacheObj.objName = get_versioned_head_block_name(it->second.version, block.cacheObj.objName);
+          // Unique null versioned head object
+          blocks.push_back(null_block);
+        }
+
+        /* For clean objects in the cache, inline deletes are avoided in favor of lazy deletes that occur through
+         * later eviction calls. Similarly, dirty objects are invalidated and then lazily deleted during cleaning. */
+        if (it->second.cacheObj.dirty) {
+          if (!this->filter->get_policy_driver()->get_cache_policy()->invalidate_dirty_object(dpp, get_cache_block_prefix(c_obj.get(), it->second.version))) {
+            ldpp_dout(dpp, 10) << "D4NFilterBucket::" << __func__ << "(): Failed to invalidate obj=" << c_obj->get_name() << " in cache" << dendl;
+            // Ignore return value - do_delete/do_writeback will handle cleanup
+          }
+        }
       } else {
-        ldpp_dout(dpp, 20) << "D4NFilterBucket::" << __func__ << "(): Listing retrieved from backend for object " << c_obj->get_name() << dendl;
+        ldpp_dout(dpp, 10) << "D4NFilterBucket::" << __func__ << "(): Failed to retrieve obj=" << c_obj->get_name() << " metadata" << dendl;
+        return -ENOENT;
       }
 
-      // Handle versioned head objects
-      ldpp_dout(dpp, 20) << "D4NFilterBucket::" << __func__ << "(): versioned oid: " << block.cacheObj.objName << dendl;
-      blocks.push_back(block);
+      /* Use pipelining for batches of ~10k commands since that is the max suggested
+       * in Redis docs */ // TODO: how about fdb?
+      if (((PIPELINE_MAX - blocks.size()) <= OBJECT_LIST_VAL) || (blocks.size() > (PIPELINE_MAX - 1000))) {
+        if (filter->uses_fdb()) {
+          auto fdb_txn = lfdb::make_transaction(filter->get_fdb_database());
+          rgw::d4n::Transaction txn_ref(std::ref(fdb_txn));
 
-      // Handle data blocks
-      ldpp_dout(dpp, 20) << "D4NFilterBucket::" << __func__ << "(): Object size=" << lst << dendl;
-      off_t fst = 0;
-      do {
-        /* The addition of data blocks to the blocks structure may push its size over PIPELINE_MAX, so
-	     * pipelined calls must also made during this loop. */
-	if (((PIPELINE_MAX - blocks.size()) <= OBJECT_LIST_VAL) || (blocks.size() > (PIPELINE_MAX - 1000))) { 
-	  for (auto& block : blocks) {
-            if ((ret = blockDir->del(dpp, y, &block, std::nullopt)) < 0) {
-              ldpp_dout(dpp, 10)
-                << "D4NFilterBucket::" << __func__
-                << "(): Failed to delete cached object in block directory, ret="
-                << ret << dendl;
+          for (auto& blk : blocks) {
+            auto result = filter->execute_with_transaction(dpp, y,
+              [&](rgw::d4n::Transaction& t) {
+                return blockDir->del(dpp, y, &blk, t);
+              },
+              txn_ref,
+              false
+            );
+
+            if (!result) {
+              return -EIO;
+            }
+          }
+
+          // Commit all FDB operations at once
+          const auto committed = lfdb::commit(fdb_txn);
+          if (!committed) {
+            ldpp_dout(dpp, 1) << "Failed to commit FDB transaction" << dendl;
+            return -EIO;
+          }
+
+        } else if (filter->uses_redis()) {
+          // Redis: Create transaction (pipeline), batch operations, execute once
+          auto redis_txn = filter->create_redis_transaction(dpp);
+          rgw::d4n::Transaction txn_ref(std::ref(*redis_txn));
+
+          for (auto& blk : blocks) {
+            auto result = filter->execute_with_transaction(dpp, y,
+              [&](rgw::d4n::Transaction& t) {
+                return blockDir->del(dpp, y, &blk, t);
+              },
+              txn_ref,
+              false
+            );
+
+            if (!result) {
+              return -EIO;
+            }
+          }
+
+          // Execute the pipeline once
+          int ret = redis_txn->execute_request(dpp, y);
+          if (ret < 0) {
+            ldpp_dout(dpp, 1) << "Failed to execute Redis pipeline" << dendl;
+            return ret;
+          }
+        }
+        blocks.clear();
+      }
+      /* Batch deletes aren't used for objects because all versions belonging to an object,
+       * as well as the object itself, must all be deleted with one transaction, irregardless
+       * of optimal batch sizes. */
+      if (auto it = bkt_remove_objects.find(object.objName); it != bkt_remove_objects.end()) {
+        /* If the results are truncated, there is a possibility that
+         * the versions for the current object continue onto the next page(s). In this case,
+         * the transaction must not be committed but, rather, re-used until the listing has
+         * been exhausted for that object. */
+
+        // Determine if we need to create a new transaction or reuse existing one
+        bool reuse_txn = (!prev_obj.empty() && prev_obj == c_obj->get_name() && bkt_remove_txn.has_transaction());
+
+        if (!reuse_txn) {
+          // Create new backend-specific transaction for this object
+          if (filter->uses_fdb()) {
+            try {
+              bkt_remove_txn.backend_txn = lfdb::make_transaction(filter->get_fdb_database());
+              bkt_remove_txn.object_name = c_obj->get_name();
+            } catch (const std::runtime_error& e) {
+              ldpp_dout(dpp, 1) << "ERROR: " << __func__ << "(): " << e.what() << dendl;
+              return -ENOTSUP;
+            }
+          } else if (filter->uses_redis()) {
+            try {
+              bkt_remove_txn.backend_txn = filter->create_redis_transaction(dpp);
+              bkt_remove_txn.object_name = c_obj->get_name();
+            } catch (const std::runtime_error& e) {
+              ldpp_dout(dpp, 1) << "ERROR: " << __func__ << "(): " << e.what() << dendl;
+              return -ENOTSUP;
+            }
+          } else {
+            ldpp_dout(dpp, 1) << "ERROR: " << __func__ << "(): Unknown backend type" << dendl;
+            return -EINVAL;
+          }
+        }
+
+        // Create Transaction variant reference from the backend transaction
+        rgw::d4n::Transaction txn_ref = bkt_remove_txn.is_fdb_transaction()
+          ? rgw::d4n::Transaction(std::ref(bkt_remove_txn.get_fdb_transaction()))
+          : rgw::d4n::Transaction(std::ref(bkt_remove_txn.get_redis_transaction()));
+
+        // Remove all versions for this object
+        auto result = filter->execute_with_transaction(dpp, y, [&](rgw::d4n::Transaction& t) {
+          for (const auto& version : it->second) {
+            int ret = objDir->remove_version(dpp, y, bucket_id, it->first, version, t);
+            if (ret < 0) {
+              ldpp_dout(dpp, 10) << "D4NFilterBucket::" << __func__
+                                << "(): Failed to remove version " << version
+                                << " in object directory, ret=" << ret << dendl;
               return ret;
             }
           }
-          blocks.clear();
-	}
+          return 0;
+        }, txn_ref, false);  // Don't auto-commit/execute
 
-        ldpp_dout(dpp, 20) << "D4NFilterBucket::" << __func__ << "(): handling object=" << obj.key << dendl;
-        rgw::d4n::CacheBlock data_block;
-        if (fst >= lst) {
-          break;
+        if (!result) {
+          bkt_remove_txn.reset();
+          return -EIO;
         }
-        off_t cur_size = std::min<off_t>(fst + dpp->get_cct()->_conf->rgw_max_chunk_size, lst);
-        off_t cur_len = cur_size - fst;
-        data_block.cacheObj.bucketName = this->get_bucket_id();
-        data_block.cacheObj.objName = c_obj->get_name();
-        data_block.version = (it != dir_blocks.end()) ? it->second.version : oid_version;
-        ldpp_dout(dpp, 20) << "D4NFilterBucket::" << __func__ << "(): data_block=" << data_block.cacheObj.objName << dendl;
-        data_block.size = cur_len;
-        data_block.blockID = fst;
 
-        fst += cur_len;
-        blocks.push_back(data_block);
+        /* If the current object isn't versioned, then there is no need to worry
+         * about the current listing not being exhaustive of its versions. */
+        if (!c_obj->have_instance() || (c_obj->have_instance() && !results.is_truncated)) {
+          // All versions processed - add remove_object and commit/execute
+          result = filter->execute_with_transaction(dpp, y, [&](rgw::d4n::Transaction& t) {
+            return bucketDir->remove_object(dpp, y, bucket_id, it->first, t);
+          }, txn_ref, false);  // Don't auto-commit/execute
 
-      } while (fst < lst); // end - do
-    }
+          if (!result) {
+            bkt_remove_txn.reset();
+            return -EIO;
+          }
 
-    /* Use pipelining for batches of ~10k commands since that is the max suggested
-     * in redis docs */
-    if (((PIPELINE_MAX - blocks.size()) <= OBJECT_LIST_VAL) || (blocks.size() > (PIPELINE_MAX - 1000))) { 
-      for (auto& block : blocks) {
-        if ((ret = blockDir->del(dpp, y, &block, std::nullopt)) < 0) {
-          ldpp_dout(dpp, 10)
-            << "D4NFilterBucket::" << __func__
-            << "(): Failed to delete cached object in block directory, ret="
-            << ret << dendl;
-          return ret;
+          // Commit/execute the transaction based on backend type
+          if (bkt_remove_txn.is_fdb_transaction()) {
+            const auto committed = lfdb::commit(bkt_remove_txn.get_fdb_transaction());
+            if (!committed) {
+              const auto& failure = committed.error();
+              ldpp_dout(dpp, 1) << "ERROR: " << __func__ << "(): Failed to commit FDB transaction for object=" << it->first
+                               << " may_finish_later=" << failure.status.may_commit_later() << dendl;
+              bkt_remove_txn.reset();
+              return -EIO;
+            }
+          } else {
+            int ret = bkt_remove_txn.get_redis_transaction().execute_request(dpp, y);
+            if (ret < 0) {
+              ldpp_dout(dpp, 1) << "ERROR: " << __func__ << "(): Failed to execute Redis pipeline for object=" << it->first
+                               << " ret=" << ret << dendl;
+              bkt_remove_txn.reset();
+              return ret;
+            }
+          }
+
+          bkt_remove_txn.reset();
+        } else {
+          if (!prev_obj.empty() && prev_obj == c_obj->get_name()) {
+            /* Previously listed object matches current object, and versions may continue
+             * on for another page since results are still truncated. Update continuation
+             * token so it excludes the last handled version and maintain transaction state. */
+          } else {
+            /* Either the current object has started on this page and may continue onto
+             * the next with its versions, or the previously listed object doesn't match
+             * the current object, which indicates that there is a new potential case of
+             * additional versions existing in the next page(s). The transaction state
+             * was already set above when we created a new transaction. */
+          }
+          results.next_marker = it->second.back();
         }
       }
-      blocks.clear();
     }
-    if ((PIPELINE_MAX - objects.size()) <= OBJECT_LIST_VAL) {
-      for (auto& object : objects) {
-        if ((ret = objDir->del(dpp, y, &object, std::nullopt)) < 0) {
-          ldpp_dout(dpp, 10) << "D4NFilterBucket::" << __func__ << "(): Failed to delete bucket in bucket directory, ret=" << ret << dendl;
-          return ret;
-        }
-      }
-      objects.clear();
+    if (bkt_remove_txn.object_name.empty()) {
+      /* No pending transaction - normal pagination */
+      params.marker = results.next_marker;
+    } else {
+      /* The listing's continuation marker is now the last handled version belonging
+       * to the current object. Relist to continue adding to the transaction, if
+       * more versions are available. */
+      params.marker = results.next_marker;
     }
   } while (results.is_truncated);
 
@@ -1049,21 +1266,41 @@ int D4NFilterBucket::remove(const DoutPrefixProvider* dpp,
       }
     }
   }
-  if (objects.size()) {
-    for (auto& object : objects) {
-      if ((ret = objDir->del(dpp, y, &object, std::nullopt)) < 0) {
-        ldpp_dout(dpp, 10) << "D4NFilterBucket::" << __func__ << "(): Failed to delete bucket in bucket directory, ret=" << ret << dendl;
-        return ret;
-      }
+  if (dpp->get_cct()->_conf->rgw_d4n_directory_type == "redis") {
+    if ((ret = bucketDir->del(dpp, y, this->get_bucket_id(), std::nullopt)) < 0 && (ret != -ENOENT)) {
+      ldpp_dout(dpp, 10)
+        << "D4NFilterBucket::" << __func__
+        << "(): Failed to delete bucket in bucket directory, ret="
+        << ret << dendl;
+      return ret;
     }
   }
-  if ((ret = this->filter->get_bucket_dir()->del(dpp, y, this->get_bucket_id(), std::nullopt)) < 0 && (ret != -ENOENT)) {
-    ldpp_dout(dpp, 10) << "D4NFilterBucket::" << __func__ << "(): Failed to delete bucket in bucket directory, ret=" << ret << dendl;
+  return 0;
+}
+
+int D4NFilterBucket::remove(const DoutPrefixProvider* dpp,
+                            bool delete_children,
+                            optional_yield y)
+{
+  /* 1. Begin processing of current cache state */
+  int ret = process_remove_objects(dpp, delete_children, y);
+  if (ret < 0) {
     return ret;
   }
 
   ldpp_dout(dpp, 20) << "D4NFilterBucket::" << __func__ << "(): calling next->remove" << dendl;
-  return next->remove(dpp, delete_children, y);
+  if (ret = next->remove(dpp, delete_children, y); ret < 0 && ret != -ENOENT) {
+    ldpp_dout(dpp, 10) << "D4NFilterBucket::" << __func__ << "(): ERROR: next->remove failed, ret = " << ret << dendl;
+  }
+
+  /* 2. Repeat logic to handle parallel cache writes that were issued before the bucket removal was
+   *    propagated to the backend. */
+  set_cache_request(); // We're only interested in cache objects this time
+  ret = process_remove_objects(dpp, delete_children, y);
+  if (ret < 0) {
+    return ret;
+  }
+  return 0;
 }
 
 int D4NFilterBucket::check_empty(const DoutPrefixProvider* dpp, optional_yield y)
@@ -2897,7 +3134,6 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
       ldpp_dout(dpp, 20) << "D4NFilterObject::iterate:: " << __func__ <<  " " << __LINE__ << "(): READ FROM CACHE: oid=" << oid_in_cache << " length to read is: " << len_to_read << " part num: " << start_part_num << 
       " read_ofs: " << read_ofs << " part len: " << part_len << dendl;
 
-      int ret;
       auto policy = source->driver->get_policy_driver()->get_cache_policy();
       auto cache_driver = source->driver->get_cache_driver();
       auto block_dir = source->driver->get_block_dir();
@@ -2915,7 +3151,6 @@ int D4NFilterObject::D4NFilterReadOp::iterate(const DoutPrefixProvider* dpp, int
           return r;
         }
       } else { // else - if update_refcount_if_key_exists
-        int r = -1;
         size_t hostsListSize = 0;
         bool has_remote_copy = false;
 

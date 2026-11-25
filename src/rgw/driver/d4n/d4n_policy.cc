@@ -67,6 +67,14 @@ int LFUDAPolicy::age_sync(const DoutPrefixProvider* dpp, optional_yield y)
   return 0;
 }
 
+/* Minimum local weight describes the global average minimum local weight across all participating caches
+ * in the D4N cluster. This value is compared to the local weight of the victim block (to be evicted) to 
+ * decide if it should be remotely pushed to that cache. minLocalWeights is posted in three parts: sum, 
+ * size, and the address of the cache the title belongs to. This is so the average minimum local weight 
+ * can easily be calculated for use within the LFUDA logic without complicating its global maintenance 
+ * when updates are necessary. Similarly, avgLocalWeight is kept in the directory for each cache (with 
+ * the unique cache address acting as the key) for situations where closer caches with comparably low 
+ * average local weights are preferred as the target for remote evictions. */
 int LFUDAPolicy::local_weight_sync(const DoutPrefixProvider* dpp, optional_yield y)
 {
   float synced_weight_sum = weightSum;
@@ -676,8 +684,8 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
 	}
 
 	bufferlist bl = obj_attrs[RGW_CACHE_ATTR_INVALID];
+
 	if (!bl.length()) {
-	  // we use nullptr for transaction since we don't want to do all operations in one transaction
 	  if ((ret = blockDir.get(dpp, y, &block, std::nullopt)) < 0) {
 		ldpp_dout(dpp, 10) << "LFUDAPolicy::" << __func__ << "(): Unable to retrieve victim block's hostsList." << dendl;
 		return ret;
@@ -712,53 +720,53 @@ int LFUDAPolicy::eviction(const DoutPrefixProvider* dpp, uint64_t size, optional
 			  ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << ": Sending to remote has failed: " << remoteCacheAddress << dendl;
 			  return ret;
 			}
-			ldpp_dout(dpp, 20) << __func__ << "(): " << __LINE__ << ": Sending to remote is done." << dendl;
-                        remote_copy_written = true;
 		  }
+		  ldpp_dout(dpp, 20) << __func__ << "(): " << __LINE__ << ": Sending to remote is done." << dendl;
+					  remote_copy_written = true;
 		}
 	  }
-    }
+	}
 
-    // Re-read ownership on every attempt; preserve replicas and metadata added during remote I/O.
-    const auto update_ownership = [&](const std::optional<rgw::d4n::Transaction> txn) -> int {
-      auto found = blockDir.find(dpp, y, lookup_key, txn);
-      if (!found) {
-        return found.error();
-      }
-      if (!*found) {
-        return 0;
-      }
+	// Re-read ownership on every attempt; preserve replicas and metadata added during remote I/O.
+	const auto update_ownership = [&](const std::optional<rgw::d4n::Transaction> txn) -> int {
+	  auto found = blockDir.find(dpp, y, lookup_key, txn);
+	  if (!found) {
+		return found.error();
+	  }
+	  if (!*found) {
+		return 0;
+	  }
 
-      auto& current = **found;
-      const bool owned_locally = 0 != current.cacheObj.hostsList.erase(local_addr);
-      if (remote_copy_written) {
-        current.cacheObj.hostsList.insert(remoteCacheAddress);
-      }
-      if (!owned_locally && !remote_copy_written) {
-        return 0;
-      }
-      if (current.cacheObj.hostsList.empty()) {
-        return blockDir.del(dpp, y, &current, txn);
-      }
-      if (owned_locally) {
-        current.globalWeight += local_weight;
-      }
-      return blockDir.set(dpp, y, &current, txn);
-    };
+	  auto& current = **found;
+	  const bool owned_locally = 0 != current.cacheObj.hostsList.erase(local_addr);
+	  if (remote_copy_written) {
+		current.cacheObj.hostsList.insert(remoteCacheAddress);
+	  }
+	  if (!owned_locally && !remote_copy_written) {
+		return 0;
+	  }
+	  if (current.cacheObj.hostsList.empty()) {
+		return blockDir.del(dpp, y, &current, txn);
+	  }
+	  if (owned_locally) {
+		current.globalWeight += local_weight;
+	  }
+	  return blockDir.set(dpp, y, &current, txn);
+	};
 
-    const int update_ret = [&] {
-      // Redis reads execute immediately; avoid holding a second pool checkout around them.
-      if (!driver->uses_fdb()) {
-        return update_ownership(std::nullopt);
-      }
-      // Handle FoundationDB unknown_commit: retain local data until directory completion is confirmed.
-      return driver->execute_transaction(dpp, y, [&](rgw::d4n::Transaction& txn) {
-        return update_ownership(txn);
-      });
-    }();
-    if (0 > update_ret) {
-      return update_ret;
-    }
+	const int update_ret = [&] {
+	  // Redis reads execute immediately; avoid holding a second pool checkout around them.
+	  if (!driver->uses_fdb()) {
+		return update_ownership(std::nullopt);
+	  }
+	  // Handle FoundationDB unknown_commit: retain local data until directory completion is confirmed.
+	  return driver->execute_transaction(dpp, y, [&](rgw::d4n::Transaction& txn) {
+		return update_ownership(txn);
+	  });
+	}();
+	if (0 > update_ret) {
+	  return update_ret;
+	}
 
     if ((ret = cacheDriver->delete_data(dpp, entry.key, y)) < 0) {
       ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): " << __LINE__ << ": Failed to delete victim block from cache." << dendl;
@@ -1063,7 +1071,7 @@ int LFUDAPolicy::do_delete(const DoutPrefixProvider* dpp, LFUDAObjEntry* e, int 
   auto delete_head_blocks = [&](rgw::d4n::Transaction& txn) -> int {
     rgw::d4n::CacheBlock head_block {
       .cacheObj = {
-        .objName = e->obj_key.get_oid(),
+        .objName = e->obj_key.name,
         .bucketName = e->bucket_id,
       },
       .blockID = 0,

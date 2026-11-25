@@ -51,6 +51,23 @@ struct FDBBackend final
                            boost::compat::function_ref<int(Transaction&)> fn,
                            unsigned max_attempts = 5);
 
+ /* FDB Usage patterns:
+    1. With pre-existing transaction (manual commit):
+       auto fdb_txn = lfdb::make_transaction(driver->get_fdb_database());
+       Transaction txn(std::ref(fdb_txn));
+       execute_with_transaction(dpp, y, fn, txn, false);  // adds to transaction
+       lfdb::commit(fdb_txn);  // caller commits when ready
+   
+    2. Without transaction (auto-commit):
+       execute_with_transaction(dpp, y, fn, std::nullopt, true);  // auto-commits
+ 
+    3. Without transaction (manual commit): not supported; returns -EINVAL */
+ TransactionResult execute_with_transaction(const DoutPrefixProvider *dpp, optional_yield y,
+                                            boost::compat::function_ref<int(Transaction&)> fn,
+                                            std::optional<Transaction> txn = std::nullopt,
+                                            bool auto_commit = true,
+                                            unsigned max_attempts = 5);
+
 };
 
 struct RedisBackend final
@@ -80,6 +97,28 @@ struct RedisBackend final
  TransactionResult execute(const DoutPrefixProvider *dpp, optional_yield y,
                            boost::compat::function_ref<int(Transaction&)> fn,
                            unsigned max_attempts = 5);
+
+ /* Redis Usage patterns:
+    1. With pre-existing transaction (manual pipeline execution):
+       auto redis_txn = driver->create_redis_transaction(dpp);
+       Transaction txn(std::ref(*redis_txn));
+       execute_with_transaction(dpp, y, fn, txn, false); // adds to pipeline
+       redis_txn->execute_request(dpp, y); // execute pipeline when ready
+   
+    2. With pre-existing transaction (immediate execution):
+       auto redis_txn = driver->create_redis_transaction(dpp);
+       Transaction txn(std::ref(*redis_txn));
+       execute_with_transaction(dpp, y, fn, txn, true); // adds and executes
+   
+    3. Without transaction (auto-commit):
+       execute_with_transaction(dpp, y, fn, std::nullopt, true); // auto-executes
+   
+    4. Without transaction (manual): not supported; returns -EINVAL */
+ TransactionResult execute_with_transaction(const DoutPrefixProvider *dpp, optional_yield y,
+                                            boost::compat::function_ref<int(Transaction&)> fn,
+                                            std::optional<Transaction> txn = std::nullopt,
+                                            bool auto_commit = true,
+                                            unsigned max_attempts = 5);
 
  void stop()
  {
